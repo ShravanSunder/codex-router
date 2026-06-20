@@ -1,0 +1,6 @@
+/target/
+/.nextest/
+/tmp/smoke/
+*.log
+.DS_Store
+
