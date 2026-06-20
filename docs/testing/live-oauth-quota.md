@@ -1,7 +1,7 @@
 # Live OAuth And Quota Proof Runbook
 
 Date: 2026-06-20
-Status: not-run: approval required
+Status: implemented and run after explicit approval
 
 ## Purpose
 
@@ -22,7 +22,17 @@ tokens, or the local router bearer token.
 
 ## Current Executable State
 
-No live OAuth or live quota command exists in this revision.
+This revision has a narrow live quota proof command:
+
+```shell
+cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label>
+cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
+```
+
+The command reads Codex/Prodex-style OAuth `auth.json`, calls the ChatGPT usage
+endpoint, and prints only redacted quota window summaries. It rejects API-key
+auth for quota because the ChatGPT quota endpoint requires Codex OAuth access
+tokens.
 
 The implemented CLI surface is intentionally limited to:
 
@@ -32,14 +42,17 @@ cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
 cargo run -p codex-router-cli -- token export --router-root <router-secret-root> --shell posix
 cargo run -p codex-router-cli -- serve --state-db <state.sqlite> --secret-root <router-secret-root> --upstream-base-url <url>
+cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label>
+cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
 ```
 
-These commands are not live OAuth proof by themselves. They prove local profile,
-token export, and router/proxy behavior only.
+The profile, token, and serve commands are not live OAuth proof by themselves.
+They prove local profile, token export, and router/proxy behavior only. The
+`live quota` command is live OAuth quota proof.
 
-Do not invent or run a `codex-router live-proof`, `codex-router login`,
-`codex-router quota`, or similar command unless that CLI surface has first been
-designed, implemented, tested, and added to this runbook.
+Do not invent or run additional live commands such as `codex-router login`,
+`codex-router live-proof`, or model-traffic live proof commands unless that CLI
+surface has first been designed, implemented, tested, and added to this runbook.
 
 ## Approval Boundary
 
@@ -55,17 +68,21 @@ tests does not authorize this live gate.
 
 ## Exact Commands For This Revision
 
-There are no approved live commands for this revision.
+Approved live quota proof command:
 
-If live proof is requested before a tested live CLI exists, stop and replan.
-The replan must add a narrow live-proof surface with:
+```shell
+cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root>
+```
 
-- a command that never prints tokens or raw account labels
-- an explicit dry-run or preview mode
-- redacted account handles only
-- isolated router root and temp `CODEX_HOME`
-- no writes to `~/.codex` unless separately approved
-- tests proving redaction and approval gating before any live execution
+Required properties:
+
+- never prints OAuth refresh tokens, access tokens, auth headers, or raw JSON
+- skips transient `.login-*` profile directories
+- reports only profile label, status, quota remaining percentage, reset presence,
+  window size, and additional-window count
+- performs no writes to `~/.codex`, `~/.prodex`, or router state
+- API-key auth is reported as quota-incompatible rather than sent to the quota
+  endpoint
 
 ## Safe Local Evidence Already Covered Elsewhere
 
@@ -110,7 +127,9 @@ Future approved live evidence must exclude:
 ## Current Gate Result
 
 ```text
-live_oauth_quota_gate: not-run
-reason: approval required; no tested live OAuth/quota CLI exists in this revision
-next_step_if_required: replan and implement a redacted approval-gated live-proof command before running real accounts
+live_oauth_quota_gate: run
+approval: explicit user approval in transcript on 2026-06-20
+command: cargo run -q -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root>
+result: 3 OAuth profiles returned status ok from the ChatGPT usage endpoint
+redaction: no tokens, auth headers, emails, or raw response bodies printed
 ```

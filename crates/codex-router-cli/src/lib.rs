@@ -23,9 +23,11 @@ use codex_router_proxy::upstream::UpstreamEndpointError;
 use codex_router_secret_store::file_backend::FileSecretStore;
 
 pub mod doctor;
+mod live;
 pub mod profile;
 pub mod token;
 
+use live::LiveCommand;
 use profile::CodexRouterProfile;
 use profile::CodexRouterProfileWriter;
 use profile::ProfileWriteError;
@@ -157,6 +159,7 @@ where
                 writeln!(stdout, "wrote: {}", written_path.display()).map_err(CliError::Stdout)?;
             }
         }
+        CliCommand::Live(command) => live::run_live_command(stdout, command)?,
         CliCommand::Help => {
             stdout
                 .write_all(HELP_TEXT.as_bytes())
@@ -312,6 +315,7 @@ enum CliCommand {
     Serve(ServeCommand),
     Token(TokenCommand),
     Profile(ProfileCommand),
+    Live(LiveCommand),
     Help,
 }
 
@@ -324,7 +328,7 @@ impl CliCommand {
         let Some(command) = parser.next_string()? else {
             return Ok(Self::Help);
         };
-        if command == "codex-router" {
+        if is_binary_name(&command) {
             let Some(command_after_binary_name) = parser.next_string()? else {
                 return Ok(Self::Help);
             };
@@ -339,12 +343,20 @@ impl CliCommand {
             "serve" => Ok(Self::Serve(ServeCommand::parse(parser)?)),
             "profile" => Ok(Self::Profile(ProfileCommand::parse(parser)?)),
             "token" => Ok(Self::Token(TokenCommand::parse(parser)?)),
+            "live" => Ok(Self::Live(LiveCommand::parse(parser)?)),
             "--help" | "-h" | "help" => Ok(Self::Help),
             unknown => Err(CliError::UnknownCommand {
                 command: unknown.to_owned(),
             }),
         }
     }
+}
+
+fn is_binary_name(command: &str) -> bool {
+    std::path::Path::new(command)
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        == Some("codex-router")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -865,6 +877,21 @@ pub enum CliError {
     /// Token command failed.
     #[error(transparent)]
     Token(#[from] TokenCommandError),
+    /// Live quota command needs exactly one source.
+    #[error("live quota requires exactly one of --auth-json or --profiles-root")]
+    LiveQuotaSourceRequired,
+    /// Live quota profile discovery failed.
+    #[error("failed to read live quota profiles: {message}")]
+    LiveQuotaProfileRead {
+        /// Redacted message.
+        message: String,
+    },
+    /// Live quota command found no profiles.
+    #[error("no live quota profiles found")]
+    NoLiveQuotaProfiles,
+    /// Live quota request failed.
+    #[error(transparent)]
+    LiveQuota(#[from] codex_router_auth::live_quota::LiveQuotaError),
 
     /// Loopback bind failed.
     #[error(transparent)]
@@ -899,6 +926,8 @@ commands:
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
   profile write --codex-home <path> --approve-codex-home-write --preview-token <token>
+  live quota --auth-json <path> [--profile-label <label>] [--base-url <url>]
+  live quota --profiles-root <path> [--base-url <url>]
 ";
 
 #[cfg(test)]
@@ -997,6 +1026,17 @@ mod tests {
     #[test]
     fn reports_package_name() {
         assert_eq!(package_name(), "codex-router-cli");
+    }
+
+    #[test]
+    fn process_binary_path_is_skipped_before_command_parse() {
+        let output = run_cli(
+            ["/tmp/build/target/debug/codex-router", "--help"],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("live quota --auth-json <path>"));
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -1457,6 +1497,125 @@ mod tests {
             CodexRouterProfile::new(8787).render()
         );
         assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn live_quota_command_rejects_api_key_auth_without_printing_key() {
+        let test_root = TestRoot::new("live-quota-api-key");
+        must_ok(fs::create_dir(test_root.path()));
+        let auth_json = test_root.path().join("auth.json");
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"api-key","OPENAI_API_KEY":"sk-local-secret-canary"}"#,
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "live",
+                "quota",
+                "--auth-json",
+                path_to_str(&auth_json),
+                "--profile-label",
+                "api-key-profile",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("profile: api-key-profile\n"));
+        assert!(output.stdout.contains("status: error\n"));
+        assert!(
+            output
+                .stdout
+                .contains("error: api_key_auth_not_quota_compatible\n")
+        );
+        assert!(!output.stdout.contains("sk-local-secret-canary"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn live_quota_profiles_root_fetches_oauth_usage_without_printing_token() {
+        let test_root = TestRoot::new("live-quota-profiles");
+        must_ok(fs::create_dir(test_root.path()));
+        let profiles_root = test_root.path().join("profiles");
+        let profile_root = profiles_root.join("main");
+        must_ok(fs::create_dir_all(&profile_root));
+        let auth_json = profile_root.join("auth.json");
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"oauth-secret-canary"}}"#,
+        ));
+        let login_root = profiles_root.join(".login-ephemeral");
+        must_ok(fs::create_dir_all(&login_root));
+        must_ok(fs::write(
+            login_root.join("auth.json"),
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"ignored-token-canary"}}"#,
+        ));
+
+        let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+        let address = must_ok(listener.local_addr());
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _peer_address) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("quota mock should accept: {error}"),
+            };
+            if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(2))) {
+                panic!("quota mock should set read timeout: {error}");
+            }
+            let mut buffer = [0_u8; 4096];
+            let bytes_read = match stream.read(&mut buffer) {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => panic!("quota mock should read request: {error}"),
+            };
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+            assert!(request.starts_with("GET /api/codex/usage HTTP/1.1\r\n"));
+            assert!(request.contains("authorization: Bearer oauth-secret-canary\r\n"));
+            let body = r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}},"additional_rate_limits":[{}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            if let Err(error) = stream.write_all(response.as_bytes()) {
+                panic!("quota mock should write response: {error}");
+            }
+        });
+        let base_url = format!("http://{address}");
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "live",
+                "quota",
+                "--profiles-root",
+                path_to_str(&profiles_root),
+                "--base-url",
+                base_url.as_str(),
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("profile: main\n"));
+        assert!(output.stdout.contains("status: ok\n"));
+        assert!(
+            output
+                .stdout
+                .contains("rate_limit.primary: remaining_percent=75")
+        );
+        assert!(
+            output
+                .stdout
+                .contains("rate_limit.secondary: remaining_percent=20")
+        );
+        assert!(output.stdout.contains("additional_rate_limit_count: 1\n"));
+        assert!(!output.stdout.contains("oauth-secret-canary"));
+        assert!(!output.stdout.contains("ignored-token-canary"));
+        assert!(!output.stdout.contains(".login-ephemeral"));
+        assert!(output.stderr.is_empty());
+
+        match server_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("quota mock thread panicked: {error:?}"),
+        }
     }
 
     #[test]
