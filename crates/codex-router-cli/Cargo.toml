@@ -13,6 +13,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.0" }
 codex-router-core.workspace = true
 codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.0" }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.0" }

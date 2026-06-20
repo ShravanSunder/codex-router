@@ -1,5 +1,6 @@
 //! OpenAI account authentication boundaries for codex-router.
 
+pub mod live_quota;
 pub mod oauth;
 pub mod quota_client;
 pub mod refresh_worker;
