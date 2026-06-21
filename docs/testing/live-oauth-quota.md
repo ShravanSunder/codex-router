@@ -29,10 +29,11 @@ cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
 ```
 
-The command reads Codex/Prodex-style OAuth `auth.json`, calls the ChatGPT usage
-endpoint, and prints only redacted quota window summaries. It rejects API-key
-auth for quota because the ChatGPT quota endpoint requires Codex OAuth access
-tokens.
+The command reads Codex/Prodex-style OAuth `auth.json` as a compatibility
+input, calls the ChatGPT usage endpoint, and prints only redacted quota window
+summaries. It does not copy the file into router state, does not make
+`auth.json` the router runtime source of truth, and rejects API-key auth for
+quota because the ChatGPT quota endpoint requires Codex OAuth access tokens.
 
 The implemented CLI surface is intentionally limited to:
 
@@ -81,6 +82,8 @@ Required properties:
 - reports only profile label, status, quota remaining percentage, reset presence,
   window size, and additional-window count
 - performs no writes to `~/.codex`, `~/.prodex`, or router state
+- treats `auth.json` as read-only compatibility input, not durable router
+  credential storage
 - API-key auth is reported as quota-incompatible rather than sent to the quota
   endpoint
 
