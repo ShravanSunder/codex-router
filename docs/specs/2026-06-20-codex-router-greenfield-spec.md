@@ -183,11 +183,13 @@ The secret-store boundary must support:
 - account-scoped credential updates
 - explicit account login, enable, disable, and logout operations
 
-Preferred real backend: OS keychain or 1Password-backed adapter.
+Required default real backend: OS keyring, which maps to macOS Keychain on the user's Mac. OAuth refresh tokens, access tokens, and account auth material must be stored through this backend by default for normal local use.
+
+Allowed future backend: 1Password-backed adapter, useful for explicit vault-managed workflows or cross-machine account provisioning. It is not the first default unless the user chooses that deployment mode.
 
 Allowed deterministic backend: hardened file store behind the same trait, with private router root permissions, private file permissions, atomic temp-write plus rename, symlink protection, and parent-directory validation.
 
-The hardened file backend is plaintext-at-rest under user-private filesystem permissions. It is acceptable for deterministic development, CI, and an explicitly chosen local fallback, but it must not be described as encrypted storage. If production use requires at-rest encryption, the selected backend must be OS keychain or 1Password-backed storage.
+The hardened file backend is plaintext-at-rest under user-private filesystem permissions. It is acceptable only for deterministic development, CI, tests, emergency recovery, or an explicitly selected local fallback. It must not be the default for normal multi-account OAuth storage and must not be described as encrypted storage.
 
 The local router bearer token is a secret. It must be generated, stored, rotated, and redacted like OAuth-adjacent material. Loopback binding is not authentication.
 
@@ -448,7 +450,6 @@ Explicitly out of scope for v1:
 ## Open Spec Questions
 
 1. Should v1 ship with WebSocket enabled immediately, or should the first implementation prove HTTP/SSE request-scoped routing before enabling WebSocket?
-2. Which real secret backend is preferred first: macOS Keychain, 1Password developer environment, or hardened file store with a migration path?
-3. Should `/v1/responses/compact` be hard-required from day one, or required once an installed-Codex smoke proves the custom-provider path uses it?
-4. Should local auth stay on `env_http_headers`, or should a later version use Codex command-backed provider auth with a different local-auth header contract?
-5. What explicit user approval language is required before live multi-account quota pooling tests?
+2. Should `/v1/responses/compact` be hard-required from day one, or required once an installed-Codex smoke proves the custom-provider path uses it?
+3. Should local auth stay on `env_http_headers`, or should a later version use Codex command-backed provider auth with a different local-auth header contract?
+4. What explicit user approval language is required before live multi-account quota pooling tests?
