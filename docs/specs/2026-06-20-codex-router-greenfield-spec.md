@@ -173,6 +173,8 @@ The router is allowed to parse only bounded routing/error metadata required by t
 
 The router owns OAuth credentials. It must not depend on Codex `auth.json` as its runtime source of truth.
 
+Codex/Prodex-style `auth.json` is a compatibility input, not the router's credential database. The router may read an `auth.json` file only for explicit import, migration, or gated live-proof commands. Normal serving, background quota refresh, account selection, and token refresh must read credentials through the router secret-store boundary.
+
 The secret-store boundary must support:
 
 - storing refresh tokens and access tokens without accidental `Debug`, JSON, or log exposure
@@ -184,6 +186,8 @@ The secret-store boundary must support:
 Preferred real backend: OS keychain or 1Password-backed adapter.
 
 Allowed deterministic backend: hardened file store behind the same trait, with private router root permissions, private file permissions, atomic temp-write plus rename, symlink protection, and parent-directory validation.
+
+The hardened file backend is plaintext-at-rest under user-private filesystem permissions. It is acceptable for deterministic development, CI, and an explicitly chosen local fallback, but it must not be described as encrypted storage. If production use requires at-rest encryption, the selected backend must be OS keychain or 1Password-backed storage.
 
 The local router bearer token is a secret. It must be generated, stored, rotated, and redacted like OAuth-adjacent material. Loopback binding is not authentication.
 
