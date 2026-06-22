@@ -942,6 +942,7 @@ commands:
   token init --router-root <path>
   token rotate --router-root <path>
   token export --router-root <path> [--shell posix]
+  account login --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account import-codex-auth --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account list --router-root <path>
   quota status --router-root <path> [--format table|plain] [--all-limits]
@@ -1743,6 +1744,63 @@ mod tests {
         ));
         assert!(!output.contains("sk-"));
         assert!(!output.contains("oauth"));
+    }
+
+    #[test]
+    fn account_login_auth_json_writes_router_owned_state_and_guides_next_steps() {
+        let test_root = TestRoot::new("account-login-auth-json");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        let auth_json = test_root.path().join("auth.json");
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"access-token-canary","refresh_token":"refresh-token-canary"}}"#,
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "account",
+                "login",
+                "--router-root",
+                path_to_str(&router_root),
+                "--label",
+                "primary",
+                "--auth-json",
+                path_to_str(&auth_json),
+                "--allow-plaintext-file-secrets",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let account_id = account_id("acct_primary");
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("logged-in account metadata should exist"));
+        assert_eq!(account.label(), "primary");
+        assert_eq!(account.status(), AccountStatus::Enabled);
+        assert_eq!(account.active_credential_generation(), Some(1));
+
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
+            secrets.read_secret(&bundle_key),
+        )));
+        assert_eq!(bundle.access_token().expose_secret(), "access-token-canary");
+        assert_eq!(
+            bundle.refresh_token().map(SecretString::expose_secret),
+            Some("refresh-token-canary")
+        );
+        assert!(output.stdout.contains("logged in account: primary\n"));
+        assert!(output.stdout.contains("account_id: acct_primary\n"));
+        assert!(
+            output
+                .stdout
+                .contains("next: codex-router quota refresh --router-root ")
+        );
+        assert!(!output.stdout.contains("access-token-canary"));
+        assert!(!output.stdout.contains("refresh-token-canary"));
+        assert!(output.stderr.is_empty());
     }
 
     #[test]

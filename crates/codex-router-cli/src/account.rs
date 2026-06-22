@@ -23,6 +23,17 @@ use crate::CliError;
 /// Account CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccountCommand {
+    /// Logs in from an existing Codex OAuth auth.json into router-owned storage.
+    LoginAuthJson {
+        /// Router-owned root.
+        router_root: PathBuf,
+        /// Display label.
+        label: String,
+        /// Source auth.json path.
+        auth_json: PathBuf,
+        /// Explicit plaintext file-backend acknowledgement.
+        allow_plaintext_file_secrets: bool,
+    },
     /// Imports an existing Codex OAuth auth.json into router-owned storage.
     ImportCodexAuth {
         /// Router-owned root.
@@ -50,6 +61,15 @@ impl AccountCommand {
         };
 
         match command.as_str() {
+            "login" => {
+                let options = AccountImportOptions::parse(parser)?;
+                Ok(Self::LoginAuthJson {
+                    router_root: options.router_root()?,
+                    label: options.label()?,
+                    auth_json: options.auth_json()?,
+                    allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
+                })
+            }
             "import-codex-auth" => {
                 let options = AccountImportOptions::parse(parser)?;
                 Ok(Self::ImportCodexAuth {
@@ -76,7 +96,7 @@ impl AccountCommand {
 #[derive(Debug, Error)]
 pub enum AccountCommandError {
     /// Plaintext file-backed import needs explicit acknowledgement.
-    #[error("account import-codex-auth requires --allow-plaintext-file-secrets")]
+    #[error("account login/import requires --allow-plaintext-file-secrets")]
     PlaintextFileSecretsNotAllowed,
     /// Router root creation failed.
     #[error("failed to create router root {path}: {source}")]
@@ -125,6 +145,19 @@ pub fn run_account_command(
     command: AccountCommand,
 ) -> Result<(), AccountCommandError> {
     match command {
+        AccountCommand::LoginAuthJson {
+            router_root,
+            label,
+            auth_json,
+            allow_plaintext_file_secrets,
+        } => import_codex_auth(
+            stdout,
+            router_root,
+            label,
+            auth_json,
+            allow_plaintext_file_secrets,
+            AccountImportOutputMode::Login,
+        ),
         AccountCommand::ImportCodexAuth {
             router_root,
             label,
@@ -136,9 +169,16 @@ pub fn run_account_command(
             label,
             auth_json,
             allow_plaintext_file_secrets,
+            AccountImportOutputMode::Import,
         ),
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccountImportOutputMode {
+    Import,
+    Login,
 }
 
 fn import_codex_auth(
@@ -147,6 +187,7 @@ fn import_codex_auth(
     label: String,
     auth_json: PathBuf,
     allow_plaintext_file_secrets: bool,
+    output_mode: AccountImportOutputMode,
 ) -> Result<(), AccountCommandError> {
     if !allow_plaintext_file_secrets {
         return Err(AccountCommandError::PlaintextFileSecretsNotAllowed);
@@ -172,8 +213,27 @@ fn import_codex_auth(
     .with_optional_refresh_token(imported_auth.refresh_token);
     import_codex_auth_from_request(&state, &secrets, request)?;
 
-    writeln!(stdout, "imported account: {trimmed_label}").map_err(AccountCommandError::Stdout)?;
-    writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)
+    match output_mode {
+        AccountImportOutputMode::Import => {
+            writeln!(stdout, "imported account: {trimmed_label}")
+                .map_err(AccountCommandError::Stdout)?;
+        }
+        AccountImportOutputMode::Login => {
+            writeln!(stdout, "logged in account: {trimmed_label}")
+                .map_err(AccountCommandError::Stdout)?;
+        }
+    }
+    writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)?;
+    if output_mode == AccountImportOutputMode::Login {
+        writeln!(
+            stdout,
+            "next: codex-router quota refresh --router-root {}",
+            router_root.display()
+        )
+        .map_err(AccountCommandError::Stdout)?;
+    }
+
+    Ok(())
 }
 
 /// Parsed import request used by CLI and failure-injection tests.
