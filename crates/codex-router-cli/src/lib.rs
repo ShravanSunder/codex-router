@@ -2265,11 +2265,12 @@ exit 42
 
         assert!(output.stdout.contains("account"));
         assert!(output.stdout.contains("primary"));
-        assert!(output.stdout.contains("acct_primary"));
-        assert!(output.stdout.contains("responses"));
-        assert!(output.stdout.contains("72"));
-        assert!(output.stdout.contains("models"));
-        assert!(output.stdout.contains("44"));
+        assert!(output.stdout.contains("72%"));
+        assert!(output.stdout.contains("ready"));
+        assert!(!output.stdout.contains("acct_primary"));
+        assert!(!output.stdout.contains("responses"));
+        assert!(!output.stdout.contains("models"));
+        assert!(!output.stdout.contains("44%"));
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));
         assert!(output.stderr.is_empty());
@@ -2321,18 +2322,22 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\taccount_id\tstatus\troute_band\twindow\tremaining\treset\tpace\trunout\tstale\tsource"
+            "account\tstatus\twindow\tquota_left\tresets\tpace\trunout\tnote"
         );
         assert_eq!(
             lines[1],
-            "snapshot\tacct_snapshot_pace\tenabled\tresponses\teffective\t75\t20000\t-\t-\tfalse\tmock_endpoint"
+            "snapshot\tenabled\t5h\t75%\tin 2h 46m\t19pp under\tin 6h 40m\tready"
         );
-        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[2],
+            "snapshot\tenabled\tweekly\t-\t-\t-\t-\tneeds refresh"
+        );
+        assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
     }
 
     #[test]
-    fn quota_status_all_limits_shows_effective_provider_windows_pace_and_runout() {
+    fn quota_status_shows_two_user_quota_windows_per_account() {
         let test_root = TestRoot::new("quota-status-all-limits");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
@@ -2394,16 +2399,19 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\taccount_id\tstatus\troute_band\twindow\tremaining\treset\tpace\trunout\tstale\tsource"
+            "account\tstatus\twindow\tquota_left\tresets\tpace\trunout\tnote"
         );
-        assert!(
-            lines[1].contains("\tresponses\teffective\t25\t20000\t+25pp\t3000s\tfalse\tselector")
+        assert_eq!(
+            lines[1],
+            "primary\tenabled\t5h\t25%\tin 2h 30m\t25pp over\tin 50m\tready"
         );
-        assert!(lines[2].contains("\tresponses\t5h\t25\t20000\t+25pp\t3000s\tfalse\tselector"));
-        assert!(
-            lines[3].contains("\tresponses\tweekly\t80\t614800\t+20pp\t4000s\tfalse\tselector")
+        assert_eq!(
+            lines[2],
+            "primary\tenabled\tweekly\t80%\tin 6d 23h\t20pp over\tin 1h 6m\tready"
         );
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
+        assert!(!output.stdout.contains("acct_primary"));
+        assert!(!output.stdout.contains("responses"));
         assert!(output.stderr.is_empty());
     }
 

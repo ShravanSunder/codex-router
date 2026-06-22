@@ -42,14 +42,8 @@ use crate::credential_runtime::CliCredentialResolver;
 use crate::credential_runtime::CliCredentialResolverOpenError;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
-
-const ALL_ROUTE_BANDS: &[&str] = &[
-    "responses",
-    "models",
-    "memories_trace_summarize",
-    "responses_compact",
-    "code_review",
-];
+const USER_QUOTA_ROUTE_BAND: &str = "responses";
+const USER_QUOTA_WINDOWS: [u64; 2] = [18_000, 604_800];
 
 /// Quota CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -777,61 +771,54 @@ fn render_quota_status(
 fn quota_status_rows(
     state: &SqliteStateStore,
     accounts: &[AccountRecord],
-    all_limits: bool,
+    _all_limits: bool,
     now_unix_seconds: u64,
 ) -> Result<Vec<QuotaStatusRow>, QuotaCommandError> {
-    if all_limits {
-        return quota_status_selector_rows(state, now_unix_seconds);
-    }
-
-    let route_bands = if all_limits {
-        ALL_ROUTE_BANDS
-    } else {
-        DEFAULT_ROUTE_BANDS
-    };
     let mut rows = Vec::new();
+    let selector_inputs =
+        SelectorQuotaRepository::selector_inputs_for_route_band(state, USER_QUOTA_ROUTE_BAND)?;
     for account in accounts {
-        for route_band in route_bands {
-            if let Some(snapshot) = QuotaSnapshotRepository::load_snapshot_for_route_band(
-                state,
-                account.account_id(),
-                route_band,
-            )? {
-                rows.push(QuotaStatusRow::from_snapshot(
-                    account,
-                    &snapshot,
-                    now_unix_seconds,
-                ));
+        let selector_input = selector_inputs
+            .iter()
+            .find(|input| input.account_id() == account.account_id());
+        if let Some(selector_input) = selector_input {
+            for window_seconds in USER_QUOTA_WINDOWS {
+                let window = selector_input
+                    .windows()
+                    .iter()
+                    .find(|window| window.limit_window_seconds() == window_seconds);
+                rows.push(match window {
+                    Some(window) => QuotaStatusRow::from_selector_window(
+                        selector_input,
+                        window,
+                        now_unix_seconds,
+                    ),
+                    None => QuotaStatusRow::missing_selector_window(account, window_seconds),
+                });
             }
+            continue;
         }
-    }
 
-    Ok(rows)
-}
-
-fn quota_status_selector_rows(
-    state: &SqliteStateStore,
-    now_unix_seconds: u64,
-) -> Result<Vec<QuotaStatusRow>, QuotaCommandError> {
-    let mut rows = Vec::new();
-    for route_band in ALL_ROUTE_BANDS {
-        let inputs = SelectorQuotaRepository::selector_inputs_for_route_band(state, route_band)?;
-        for input in inputs {
-            if let Some(effective_window) = input.windows().iter().find(|window| window.effective())
-            {
-                rows.push(QuotaStatusRow::from_selector_window(
-                    &input,
-                    effective_window,
-                    "effective",
-                    now_unix_seconds,
-                ));
-            }
-            for window in input.windows() {
-                rows.push(QuotaStatusRow::from_selector_window(
-                    &input,
-                    window,
-                    quota_window_label(window.limit_window_seconds()),
-                    now_unix_seconds,
+        if let Some(snapshot) = QuotaSnapshotRepository::load_snapshot_for_route_band(
+            state,
+            account.account_id(),
+            USER_QUOTA_ROUTE_BAND,
+        )? {
+            rows.push(QuotaStatusRow::from_snapshot(
+                account,
+                &snapshot,
+                USER_QUOTA_WINDOWS[0],
+                now_unix_seconds,
+            ));
+            rows.push(QuotaStatusRow::missing_selector_window(
+                account,
+                USER_QUOTA_WINDOWS[1],
+            ));
+        } else {
+            for window_seconds in USER_QUOTA_WINDOWS {
+                rows.push(QuotaStatusRow::missing_selector_window(
+                    account,
+                    window_seconds,
                 ));
             }
         }
@@ -848,30 +835,24 @@ fn write_quota_table(
     table.load_preset(UTF8_FULL);
     table.set_header([
         "account",
-        "account_id",
         "status",
-        "route_band",
         "window",
-        "remaining",
-        "reset",
+        "quota_left",
+        "resets",
         "pace",
         "runout",
-        "stale",
-        "source",
+        "note",
     ]);
     for row in rows {
         table.add_row([
             row.account_label.as_str(),
-            row.account_id.as_str(),
             row.account_status.as_str(),
-            row.route_band.as_str(),
             row.window.as_str(),
-            row.remaining_headroom.as_str(),
+            row.quota_left.as_str(),
             row.reset.as_str(),
             row.pace.as_str(),
             row.runout.as_str(),
-            row.stale.as_str(),
-            row.source.as_str(),
+            row.note.as_str(),
         ]);
     }
 
@@ -884,24 +865,21 @@ fn write_quota_plain(
 ) -> Result<(), QuotaCommandError> {
     writeln!(
         stdout,
-        "account\taccount_id\tstatus\troute_band\twindow\tremaining\treset\tpace\trunout\tstale\tsource"
+        "account\tstatus\twindow\tquota_left\tresets\tpace\trunout\tnote"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
-            row.account_id,
             row.account_status,
-            row.route_band,
             row.window,
-            row.remaining_headroom,
+            row.quota_left,
             row.reset,
             row.pace,
             row.runout,
-            row.stale,
-            row.source,
+            row.note,
         )
         .map_err(QuotaCommandError::Stdout)?;
     }
@@ -912,52 +890,52 @@ fn write_quota_plain(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QuotaStatusRow {
     account_label: String,
-    account_id: String,
     account_status: String,
-    route_band: String,
     window: String,
-    remaining_headroom: String,
+    quota_left: String,
     reset: String,
     pace: String,
     runout: String,
-    stale: String,
-    source: String,
+    note: String,
 }
 
 impl QuotaStatusRow {
     fn from_snapshot(
         account: &AccountRecord,
         snapshot: &PersistedQuotaSnapshot,
-        _now_unix_seconds: u64,
+        window_seconds: u64,
+        now_unix_seconds: u64,
     ) -> Self {
-        let reset = snapshot
-            .reset_unix_seconds()
-            .map_or_else(|| "-".to_owned(), |reset| reset.to_string());
+        let reset = snapshot.reset_unix_seconds().map_or_else(
+            || "-".to_owned(),
+            |reset| format_relative_time(reset, now_unix_seconds),
+        );
         let math = QuotaStatusMath::unknown();
         Self {
             account_label: account.label().to_owned(),
-            account_id: account.account_id().as_str().to_owned(),
             account_status: account.status().as_str().to_owned(),
-            route_band: snapshot.route_band().to_owned(),
-            window: "effective".to_owned(),
-            remaining_headroom: snapshot.remaining_headroom().to_string(),
+            window: quota_window_label(window_seconds).to_owned(),
+            quota_left: format_percent(snapshot.remaining_headroom()),
             reset,
             pace: math.pace,
             runout: math.runout,
-            stale: snapshot.stale_penalty().to_string(),
-            source: snapshot.source().as_str().to_owned(),
+            note: if snapshot.stale_penalty() {
+                "needs refresh".to_owned()
+            } else {
+                "snapshot only".to_owned()
+            },
         }
     }
 
     fn from_selector_window(
         input: &SelectorQuotaInput,
         window: &PersistedSelectorQuotaWindow,
-        window_label: impl Into<String>,
         now_unix_seconds: u64,
     ) -> Self {
-        let reset = window
-            .reset_unix_seconds()
-            .map_or_else(|| "-".to_owned(), |reset| reset.to_string());
+        let reset = window.reset_unix_seconds().map_or_else(
+            || "-".to_owned(),
+            |reset| format_relative_time(reset, now_unix_seconds),
+        );
         let math = window.reset_unix_seconds().map_or_else(
             QuotaStatusMath::unknown,
             |reset_unix_seconds| {
@@ -971,16 +949,27 @@ impl QuotaStatusRow {
         );
         Self {
             account_label: input.account_label().to_owned(),
-            account_id: input.account_id().as_str().to_owned(),
             account_status: input.account_status().as_str().to_owned(),
-            route_band: input.route_band().to_owned(),
-            window: window_label.into(),
-            remaining_headroom: window.remaining_headroom().to_string(),
+            window: quota_window_label(window.limit_window_seconds()).to_owned(),
+            quota_left: format_percent(window.remaining_headroom()),
             reset,
             pace: math.pace,
             runout: math.runout,
-            stale: (window.status() != SelectorQuotaWindowStatus::Eligible).to_string(),
-            source: "selector".to_owned(),
+            note: quota_window_note(window).to_owned(),
+        }
+    }
+
+    fn missing_selector_window(account: &AccountRecord, window_seconds: u64) -> Self {
+        let math = QuotaStatusMath::unknown();
+        Self {
+            account_label: account.label().to_owned(),
+            account_status: account.status().as_str().to_owned(),
+            window: quota_window_label(window_seconds).to_owned(),
+            quota_left: "-".to_owned(),
+            reset: "-".to_owned(),
+            pace: math.pace,
+            runout: math.runout,
+            note: "needs refresh".to_owned(),
         }
     }
 }
@@ -1017,11 +1006,7 @@ impl QuotaStatusMath {
         let expected_used_percent = (elapsed_seconds.saturating_mul(100) / window_seconds).min(100);
         let pace_points =
             i64::from(used_percent) - i64::try_from(expected_used_percent).unwrap_or(0);
-        let pace = if pace_points > 0 {
-            format!("+{pace_points}pp")
-        } else {
-            format!("{pace_points}pp")
-        };
+        let pace = format_pace(pace_points);
         let runout = projected_runout_duration(used_percent, remaining_headroom, elapsed_seconds);
 
         Self { pace, runout }
@@ -1038,7 +1023,79 @@ fn projected_runout_duration(
     }
     let seconds =
         u64::from(remaining_headroom).saturating_mul(elapsed_seconds) / u64::from(used_percent);
-    format!("{seconds}s")
+    format!("in {}", format_duration(seconds))
+}
+
+fn format_percent(value: u32) -> String {
+    format!("{}%", value.min(100))
+}
+
+fn format_relative_time(target_unix_seconds: u64, now_unix_seconds: u64) -> String {
+    if target_unix_seconds >= now_unix_seconds {
+        format!(
+            "in {}",
+            format_duration(target_unix_seconds.saturating_sub(now_unix_seconds))
+        )
+    } else {
+        format!(
+            "{} ago",
+            format_duration(now_unix_seconds.saturating_sub(target_unix_seconds))
+        )
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    if seconds >= DAY {
+        let days = seconds / DAY;
+        let hours = (seconds % DAY) / HOUR;
+        if hours == 0 {
+            format!("{days}d")
+        } else {
+            format!("{days}d {hours}h")
+        }
+    } else if seconds >= HOUR {
+        let hours = seconds / HOUR;
+        let minutes = (seconds % HOUR) / MINUTE;
+        if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {minutes}m")
+        }
+    } else if seconds >= MINUTE {
+        let minutes = seconds / MINUTE;
+        let remaining_seconds = seconds % MINUTE;
+        if remaining_seconds == 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{minutes}m {remaining_seconds}s")
+        }
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn format_pace(pace_points: i64) -> String {
+    match pace_points.cmp(&0) {
+        std::cmp::Ordering::Greater => format!("{pace_points}pp over"),
+        std::cmp::Ordering::Equal => "on pace".to_owned(),
+        std::cmp::Ordering::Less => format!("{}pp under", pace_points.abs()),
+    }
+}
+
+fn quota_window_note(window: &PersistedSelectorQuotaWindow) -> &'static str {
+    if window.observed_unix_seconds() == 0 {
+        "needs refresh"
+    } else if window.status() == SelectorQuotaWindowStatus::Eligible {
+        "ready"
+    } else if window.remaining_headroom() == 0 {
+        "empty"
+    } else {
+        "unusable"
+    }
 }
 
 fn quota_window_label(limit_window_seconds: u64) -> &'static str {
