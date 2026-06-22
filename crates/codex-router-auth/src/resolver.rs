@@ -1,20 +1,33 @@
 //! Router-owned provider credential resolution.
 
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
+use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-use codex_router_secret_store::file_backend::SecretStore;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
+
+use crate::oauth::OAuthRefreshClassification;
+use crate::oauth::classify_refresh_response;
+
+const DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+const DEFAULT_OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const REFRESH_TOKEN_URL_OVERRIDE_ENV: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
+const LOGIN_CLIENT_ID_OVERRIDE_ENV: &str = "CODEX_APP_SERVER_LOGIN_CLIENT_ID";
 
 /// Credential resolver failure.
 #[derive(Debug, Error)]
@@ -129,6 +142,127 @@ impl CredentialRefreshClient for NoopCredentialRefreshClient {
     ) -> Result<AccountCredentialBundle, CredentialResolverError> {
         Err(CredentialResolverError::RefreshUnavailable)
     }
+}
+
+/// OpenAI OAuth refresh client compatible with Codex auth.json credentials.
+#[derive(Clone, Debug)]
+pub struct OpenAiOAuthRefreshClient {
+    client: reqwest::blocking::Client,
+    token_endpoint: String,
+    client_id: String,
+}
+
+impl OpenAiOAuthRefreshClient {
+    /// Creates a refresh client using Codex-compatible defaults and env overrides.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::blocking::Client::new(),
+            token_endpoint: env::var(REFRESH_TOKEN_URL_OVERRIDE_ENV)
+                .unwrap_or_else(|_error| DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT.to_owned()),
+            client_id: env::var(LOGIN_CLIENT_ID_OVERRIDE_ENV)
+                .unwrap_or_else(|_error| DEFAULT_OPENAI_OAUTH_CLIENT_ID.to_owned()),
+        }
+    }
+
+    /// Creates a refresh client with explicit endpoint/client id for tests.
+    #[must_use]
+    pub fn new_with_endpoint(
+        token_endpoint: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            client: reqwest::blocking::Client::new(),
+            token_endpoint: token_endpoint.into(),
+            client_id: client_id.into(),
+        }
+    }
+}
+
+impl Default for OpenAiOAuthRefreshClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CredentialRefreshClient for OpenAiOAuthRefreshClient {
+    fn refresh_credentials(
+        &self,
+        _account_id: &AccountId,
+        refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+        let request = RefreshTokenRequest {
+            client_id: &self.client_id,
+            grant_type: "refresh_token",
+            refresh_token: refresh_token.expose_secret(),
+        };
+        let body = serde_json::to_string(&request)
+            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+        let response = self
+            .client
+            .post(&self.token_endpoint)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+
+        if !status.is_success() {
+            let oauth_error = serde_json::from_str::<RefreshTokenErrorResponse>(&body)
+                .ok()
+                .and_then(|error| error.error);
+            return match classify_refresh_response(status.as_u16(), oauth_error.as_deref()) {
+                OAuthRefreshClassification::Succeeded
+                | OAuthRefreshClassification::RefreshTokenRejected
+                | OAuthRefreshClassification::RateLimited
+                | OAuthRefreshClassification::TransientProviderFailure
+                | OAuthRefreshClassification::UnexpectedProviderResponse { .. } => {
+                    Err(CredentialResolverError::RefreshUnavailable)
+                }
+            };
+        }
+
+        let refresh_response = serde_json::from_str::<RefreshTokenResponse>(&body)
+            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+        let mut refreshed = AccountCredentialBundle::imported_codex_auth(
+            refresh_response.access_token,
+            Some(
+                refresh_response
+                    .refresh_token
+                    .unwrap_or_else(|| refresh_token.expose_secret().to_owned()),
+            ),
+        );
+        if let Some(expires_in_seconds) = refresh_response.expires_in {
+            let expires_unix_seconds = current_unix_seconds()
+                .unwrap_or(0)
+                .saturating_add(expires_in_seconds);
+            refreshed = refreshed.with_expires_unix_seconds(expires_unix_seconds);
+        }
+
+        Ok(refreshed)
+    }
+}
+
+#[derive(Serialize)]
+struct RefreshTokenRequest<'a> {
+    client_id: &'a str,
+    grant_type: &'a str,
+    refresh_token: &'a str,
+}
+
+#[derive(Deserialize)]
+struct RefreshTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct RefreshTokenErrorResponse {
+    error: Option<String>,
 }
 
 /// Shared per-account refresh leases for resolver single-flight behavior.
@@ -318,4 +452,9 @@ fn map_state_error(_error: StateStoreError) -> CredentialResolverError {
 
 fn map_secret_error(_error: SecretStoreError) -> CredentialResolverError {
     CredentialResolverError::SecretUnavailable
+}
+
+/// Returns the current Unix second for runtime credential freshness checks.
+pub fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }

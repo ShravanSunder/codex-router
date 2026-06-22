@@ -1,5 +1,6 @@
 //! Token-free account-selection boundary.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -20,6 +21,9 @@ use crate::http_sse::HttpProxyRequest;
 use crate::routes::RouteClass;
 use crate::routes::RouteKind;
 use crate::routes::classify_route;
+
+/// Process-lifetime weighted state partitioned by route band.
+pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitSelector>>>;
 
 /// Selected account material needed by the proxy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,7 +148,7 @@ where
     R: SelectorQuotaRepository,
 {
     state_repository: &'a R,
-    weighted_selector: Arc<Mutex<WeightedDeficitSelector>>,
+    weighted_selectors: RouteBandWeightedSelectors,
 }
 
 impl<'a, R> RepositoryBackedAccountSelector<'a, R>
@@ -156,7 +160,7 @@ where
     pub fn new(state_repository: &'a R) -> Self {
         Self {
             state_repository,
-            weighted_selector: Arc::new(Mutex::new(WeightedDeficitSelector::default())),
+            weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -164,11 +168,11 @@ where
     #[must_use]
     pub fn new_with_weighted_selector(
         state_repository: &'a R,
-        weighted_selector: Arc<Mutex<WeightedDeficitSelector>>,
+        weighted_selectors: RouteBandWeightedSelectors,
     ) -> Self {
         Self {
             state_repository,
-            weighted_selector,
+            weighted_selectors,
         }
     }
 }
@@ -194,13 +198,35 @@ where
             .filter_map(account_state_from_selector_input)
             .collect::<Vec<_>>();
 
-        select_from_account_states(&selector_accounts, self.weighted_selector.as_ref())
+        let mut weighted_selectors =
+            self.weighted_selectors
+                .lock()
+                .map_err(|_error| HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+                })?;
+        let weighted_selector = weighted_selectors
+            .entry(route_band.to_owned())
+            .or_insert_with(WeightedDeficitSelector::default);
+        select_from_account_states_with_selector(&selector_accounts, weighted_selector)
     }
 }
 
 fn select_from_account_states(
     accounts: &[QuotaAwareAccountState],
     weighted_selector: &Mutex<WeightedDeficitSelector>,
+) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let mut weighted_selector =
+        weighted_selector
+            .lock()
+            .map_err(|_error| HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+            })?;
+    select_from_account_states_with_selector(accounts, &mut weighted_selector)
+}
+
+fn select_from_account_states_with_selector(
+    accounts: &[QuotaAwareAccountState],
+    weighted_selector: &mut WeightedDeficitSelector,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
     let known_fresh_account_exists = accounts.iter().any(|account| {
         account.remaining_headroom > 0
@@ -214,12 +240,6 @@ fn select_from_account_states(
         .iter()
         .map(|candidate| (candidate.account_id.clone(), candidate.effective_headroom))
         .collect::<Vec<_>>();
-    let mut weighted_selector =
-        weighted_selector
-            .lock()
-            .map_err(|_error| HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
-            })?;
     let selected_account_id =
         weighted_selector
             .select(&selector_input, 1)

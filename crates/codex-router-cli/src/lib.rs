@@ -28,6 +28,7 @@ pub mod doctor;
 mod live;
 pub mod profile;
 pub mod quota;
+mod secret_store_factory;
 pub mod token;
 
 use account::AccountCommand;
@@ -986,11 +987,11 @@ mod tests {
     use codex_router_auth::resolver::RouterCredentialResolver;
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
+    use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::account_tokens::upstream_access_token_key;
     use codex_router_secret_store::file_backend::FileSecretStore;
-    use codex_router_secret_store::file_backend::SecretStore;
     use codex_router_secret_store::model::SecretKey;
     use codex_router_secret_store::model::SecretStoreError;
     use codex_router_state::account::AccountRecord;
@@ -2193,6 +2194,60 @@ mod tests {
         );
         assert!(provider.take_recorded().is_empty());
         assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn quota_refresh_writes_selector_windows_for_runtime_selection() {
+        let test_root = TestRoot::new("quota-refresh-selector-windows");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account_id = account_id("acct_quota_selector");
+        let account = AccountRecord::new(account_id.clone(), "selector", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "quota-selector-access-token",
+                        Some("quota-selector-refresh-token".to_owned()),
+                    )
+                    .with_expires_unix_seconds(2_000)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let provider = RecordingQuotaRefreshProvider::new(37);
+        let mut stdout = Vec::new();
+
+        must_ok(refresh_quota_with_dependencies(
+            &mut stdout,
+            router_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        ));
+
+        let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
+            &state,
+            "responses",
+        ));
+        assert_eq!(selector_inputs.len(), 1);
+        let windows = selector_inputs[0].windows();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].status(), SelectorQuotaWindowStatus::Eligible);
+        assert_eq!(windows[0].remaining_headroom(), 37);
+        assert_eq!(windows[0].observed_unix_seconds(), 1_100);
+        assert!(windows[0].effective());
+        assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
     }
 
     #[test]

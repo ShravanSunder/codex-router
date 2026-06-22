@@ -17,6 +17,9 @@ pub const fn package_name() -> &'static str {
 mod tests {
     use std::env;
     use std::fs;
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::TcpListener;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -27,11 +30,11 @@ mod tests {
 
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
+    use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::account_tokens::upstream_access_token_key;
     use codex_router_secret_store::file_backend::FileSecretStore;
-    use codex_router_secret_store::file_backend::SecretStore;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::repositories::AccountStateRepository;
@@ -52,6 +55,7 @@ mod tests {
     use crate::resolver::CredentialRefreshClient;
     use crate::resolver::CredentialResolverError;
     use crate::resolver::NoopCredentialRefreshClient;
+    use crate::resolver::OpenAiOAuthRefreshClient;
     use crate::resolver::ProviderCredentialResolver;
     use crate::resolver::RefreshLeaseRegistry;
     use crate::resolver::RouterCredentialResolver;
@@ -103,6 +107,46 @@ mod tests {
             classify_refresh_response(418, Some("teapot")),
             OAuthRefreshClassification::UnexpectedProviderResponse { status: 418 }
         );
+    }
+
+    #[test]
+    fn openai_oauth_refresh_client_posts_codex_compatible_refresh_request() {
+        let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+        let server_address = must_ok(listener.local_addr());
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _peer_address) = must_ok(listener.accept());
+            let mut buffer = [0_u8; 4096];
+            let bytes_read = must_ok(stream.read(&mut buffer));
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+            assert!(request.contains("POST /oauth/token HTTP/1.1"));
+            assert!(request.contains("content-type: application/json"));
+            assert!(request.contains(
+                r#""client_id":"test-client","grant_type":"refresh_token","refresh_token":"refresh-token-canary""#
+            ));
+            must_ok(stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 73\r\n\r\n{\"access_token\":\"new-access-token\",\"expires_in\":60,\"token_type\":\"Bearer\"}",
+            ));
+        });
+        let client = OpenAiOAuthRefreshClient::new_with_endpoint(
+            format!("http://{server_address}/oauth/token"),
+            "test-client",
+        );
+
+        let refreshed = must_ok(client.refresh_credentials(
+            &account_id("acct_refresh_http"),
+            &SecretString::new("refresh-token-canary"),
+        ));
+
+        assert_eq!(refreshed.access_token().expose_secret(), "new-access-token");
+        assert_eq!(
+            refreshed.refresh_token().map(SecretString::expose_secret),
+            Some("refresh-token-canary")
+        );
+        assert!(refreshed.expires_unix_seconds().is_some());
+        match server_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock refresh server panicked: {error:?}"),
+        }
     }
 
     #[test]

@@ -501,12 +501,21 @@ where
         };
         let selected = self
             .selector
-            .select_upstream_account(&request, token_generation)?;
+            .select_upstream_account(&request, token_generation)
+            .inspect_err(|_error| {
+                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
+            })?;
         let account_hash = redacted_account_hash(selected.account_id());
         let resolved = self
             .credential_resolver
             .resolve_provider_credentials(selected.account_id())
-            .map_err(|reason| HttpProxyError::ProviderCredential { reason })?;
+            .map_err(|reason| {
+                self.emit_audit_event(http_credential_rejection_audit_event(
+                    audit_route_kind,
+                    account_hash.clone(),
+                ));
+                HttpProxyError::ProviderCredential { reason }
+            })?;
 
         let response = self
             .proxy
@@ -548,12 +557,21 @@ where
         };
         let selected = self
             .selector
-            .select_upstream_account(&request, token_generation)?;
+            .select_upstream_account(&request, token_generation)
+            .inspect_err(|_error| {
+                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
+            })?;
         let account_hash = redacted_account_hash(selected.account_id());
         let resolved = self
             .credential_resolver
             .resolve_provider_credentials(selected.account_id())
-            .map_err(|reason| HttpProxyError::ProviderCredential { reason })?;
+            .map_err(|reason| {
+                self.emit_audit_event(http_credential_rejection_audit_event(
+                    audit_route_kind,
+                    account_hash.clone(),
+                ));
+                HttpProxyError::ProviderCredential { reason }
+            })?;
 
         let response = self
             .proxy
@@ -626,6 +644,37 @@ pub(crate) fn allowed_audit_event(
         response_commit_state: ResponseCommitState::Committed,
         account_hash: Some(account_hash),
         error_class: None,
+    })
+}
+
+fn http_selection_rejection_audit_event(route_kind: AuditRouteKind) -> AuditEvent {
+    AuditEvent::proxy_decision(AuditEventFields {
+        request_id: RequestId::new("local_proxy_request"),
+        route_kind,
+        transport_kind: TransportKind::Http,
+        local_auth_result: LocalAuthAuditResult::Valid,
+        outcome: AuditOutcome::Rejected,
+        decision_reason: "selection_rejected",
+        response_commit_state: ResponseCommitState::NotCommitted,
+        account_hash: None,
+        error_class: Some("selection"),
+    })
+}
+
+fn http_credential_rejection_audit_event(
+    route_kind: AuditRouteKind,
+    account_hash: String,
+) -> AuditEvent {
+    AuditEvent::proxy_decision(AuditEventFields {
+        request_id: RequestId::new("local_proxy_request"),
+        route_kind,
+        transport_kind: TransportKind::Http,
+        local_auth_result: LocalAuthAuditResult::Valid,
+        outcome: AuditOutcome::Rejected,
+        decision_reason: "credential_rejected",
+        response_commit_state: ResponseCommitState::NotCommitted,
+        account_hash: Some(account_hash),
+        error_class: Some("provider_credential"),
     })
 }
 

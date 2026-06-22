@@ -10,18 +10,17 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
-use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
 use crate::account_selection::RepositoryBackedAccountSelector;
+use crate::account_selection::RouteBandWeightedSelectors;
 use crate::credential_runtime::ProxyCredentialResolver;
 use crate::credential_runtime::ProxyCredentialResolverOpenError;
 use crate::headers::Header;
@@ -211,7 +210,7 @@ pub struct LoopbackRouterRuntime {
     max_websocket_upstream_messages: usize,
     websocket_revocations: WebSocketRevocationRegistry,
     audit_sink: Option<AuditFileSink>,
-    weighted_selector: Arc<Mutex<WeightedDeficitSelector>>,
+    weighted_selectors: RouteBandWeightedSelectors,
 }
 
 impl LoopbackRouterRuntime {
@@ -242,7 +241,7 @@ impl LoopbackRouterRuntime {
             max_websocket_upstream_messages: config.max_websocket_upstream_messages,
             websocket_revocations: WebSocketRevocationRegistry::new(),
             audit_sink,
-            weighted_selector: Arc::new(Mutex::new(WeightedDeficitSelector::default())),
+            weighted_selectors: Default::default(),
         })
     }
 
@@ -283,7 +282,7 @@ impl LoopbackRouterRuntime {
             .map_err(LoopbackRouterRuntimeError::ListenerClone)?;
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
-            Arc::clone(&self.weighted_selector),
+            Arc::clone(&self.weighted_selectors),
         );
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
@@ -357,7 +356,7 @@ impl LoopbackRouterRuntime {
 
             let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
                 &self.state_store,
-                Arc::clone(&self.weighted_selector),
+                Arc::clone(&self.weighted_selectors),
             );
             let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
             let tunnel = if let Some(audit_sink) = &self.audit_sink {
@@ -394,7 +393,7 @@ impl LoopbackRouterRuntime {
 
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
-            Arc::clone(&self.weighted_selector),
+            Arc::clone(&self.weighted_selectors),
         );
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
@@ -590,6 +589,14 @@ impl LoopbackHttpAdapter {
                 write_http_error_response(&mut stream, 401, "Unauthorized")?;
                 return Ok(());
             }
+            Err(HttpProxyError::Selection { .. }) => {
+                write_http_error_response(&mut stream, 503, "Service Unavailable")?;
+                return Ok(());
+            }
+            Err(HttpProxyError::ProviderCredential { .. }) => {
+                write_http_error_response(&mut stream, 502, "Bad Gateway")?;
+                return Ok(());
+            }
             Err(error) => return Err(ServerConnectionError::Proxy(error)),
         };
         write_http_response(&mut stream, response)?;
@@ -610,6 +617,14 @@ impl LoopbackHttpAdapter {
             Ok(response) => response,
             Err(HttpProxyError::LocalAuth { .. }) => {
                 write_http_error_response(&mut stream, 401, "Unauthorized")?;
+                return Ok(());
+            }
+            Err(HttpProxyError::Selection { .. }) => {
+                write_http_error_response(&mut stream, 503, "Service Unavailable")?;
+                return Ok(());
+            }
+            Err(HttpProxyError::ProviderCredential { .. }) => {
+                write_http_error_response(&mut stream, 502, "Bad Gateway")?;
                 return Ok(());
             }
             Err(error) => return Err(ServerConnectionError::Proxy(error)),

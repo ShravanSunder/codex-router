@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use serde::Deserialize;
@@ -29,10 +31,12 @@ impl AccountCredentialBundle {
         access_token: impl Into<String>,
         refresh_token: Option<String>,
     ) -> Self {
+        let access_token = access_token.into();
+        let expires_unix_seconds = access_token_exp_unix_seconds(&access_token);
         Self {
             access_token: SecretString::new(access_token),
             refresh_token: refresh_token.map(SecretString::new),
-            expires_unix_seconds: None,
+            expires_unix_seconds,
             source: "codex_auth_json".to_owned(),
         }
     }
@@ -101,12 +105,14 @@ impl AccountCredentialBundle {
         }
 
         Ok(Self {
+            expires_unix_seconds: payload
+                .expires_unix_seconds
+                .or_else(|| access_token_exp_unix_seconds(&payload.access_token)),
             access_token: SecretString::new(payload.access_token),
             refresh_token: payload
                 .refresh_token
                 .filter(|token| !token.trim().is_empty())
                 .map(SecretString::new),
-            expires_unix_seconds: payload.expires_unix_seconds,
             source: payload.source,
         })
     }
@@ -171,4 +177,11 @@ fn secret_payload_error(error: impl std::fmt::Display) -> SecretStoreError {
     SecretStoreError::InvalidSecretPayload {
         message: error.to_string(),
     }
+}
+
+fn access_token_exp_unix_seconds(access_token: &str) -> Option<u64> {
+    let payload_segment = access_token.split('.').nth(1)?;
+    let payload = URL_SAFE_NO_PAD.decode(payload_segment).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    value.get("exp").and_then(serde_json::Value::as_u64)
 }

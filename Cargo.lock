@@ -130,6 +130,7 @@ dependencies = [
 name = "codex-router-secret-store"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "codex-router-core",
  "serde",
  "serde_json",

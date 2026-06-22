@@ -24,6 +24,7 @@ use crate::repositories::QuotaSnapshotRepository;
 use crate::repositories::SelectorQuotaRepository;
 
 const CURRENT_SCHEMA_VERSION: i64 = 3;
+const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
     "models",
@@ -259,6 +260,28 @@ impl SqliteStateStore {
                     ],
                 )
                 .map_err(sqlite_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO selector_quota_windows (
+                       account_id, route_band, limit_window_seconds, status,
+                       remaining_headroom, reset_unix_seconds, effective,
+                       observed_unix_seconds
+                     )
+                     VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, 0)
+                     ON CONFLICT(account_id, route_band, limit_window_seconds) DO UPDATE SET
+                       status = excluded.status,
+                       remaining_headroom = excluded.remaining_headroom,
+                       reset_unix_seconds = excluded.reset_unix_seconds,
+                       effective = excluded.effective,
+                       observed_unix_seconds = excluded.observed_unix_seconds",
+                    params![
+                        account_id.as_str(),
+                        route_band,
+                        u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?,
+                        SelectorQuotaWindowStatus::Ineligible.as_str(),
+                    ],
+                )
+                .map_err(sqlite_error)?;
         }
         transaction.commit().map_err(sqlite_error)?;
 
@@ -303,6 +326,7 @@ impl SqliteStateStore {
                 ],
             )
             .map_err(sqlite_error)?;
+        self.upsert_selector_quota_window(&selector_window_from_snapshot(snapshot))?;
 
         Ok(())
     }
@@ -687,6 +711,48 @@ impl SqliteStateStore {
                 ",
             )
             .map_err(sqlite_error)?;
+        self.backfill_selector_quota_windows_from_snapshots()?;
+
+        Ok(())
+    }
+
+    fn backfill_selector_quota_windows_from_snapshots(&self) -> Result<(), StateStoreError> {
+        self.connection
+            .execute(
+                "INSERT INTO selector_quota_windows (
+                   account_id, route_band, limit_window_seconds, status,
+                   remaining_headroom, reset_unix_seconds, effective,
+                   observed_unix_seconds
+                 )
+                 SELECT
+                   account_id,
+                   route_band,
+                   ?1,
+                   CASE
+                     WHEN remaining_headroom <= 0 THEN ?2
+                     WHEN stale_penalty = 1 THEN ?3
+                     ELSE ?4
+                   END,
+                   remaining_headroom,
+                   reset_unix_seconds,
+                   1,
+                   observed_unix_seconds
+                 FROM quota_snapshots
+                 WHERE true
+                 ON CONFLICT(account_id, route_band, limit_window_seconds) DO UPDATE SET
+                   status = excluded.status,
+                   remaining_headroom = excluded.remaining_headroom,
+                   reset_unix_seconds = excluded.reset_unix_seconds,
+                   effective = excluded.effective,
+                   observed_unix_seconds = excluded.observed_unix_seconds",
+                params![
+                    u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?,
+                    SelectorQuotaWindowStatus::Ineligible.as_str(),
+                    SelectorQuotaWindowStatus::Stale.as_str(),
+                    SelectorQuotaWindowStatus::Eligible.as_str(),
+                ],
+            )
+            .map_err(sqlite_error)?;
 
         Ok(())
     }
@@ -823,6 +889,32 @@ fn parse_account_row(
     }
 
     Ok(account)
+}
+
+fn selector_window_from_snapshot(
+    snapshot: &PersistedQuotaSnapshot,
+) -> PersistedSelectorQuotaWindow {
+    let status = if snapshot.remaining_headroom() == 0 {
+        SelectorQuotaWindowStatus::Ineligible
+    } else if snapshot.stale_penalty() {
+        SelectorQuotaWindowStatus::Stale
+    } else {
+        SelectorQuotaWindowStatus::Eligible
+    };
+    let mut window = PersistedSelectorQuotaWindow::new(
+        snapshot.account_id().clone(),
+        snapshot.route_band(),
+        DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS,
+        status,
+    )
+    .with_remaining_headroom(snapshot.remaining_headroom())
+    .with_effective(true)
+    .with_observed_unix_seconds(snapshot.observed_unix_seconds());
+    if let Some(reset_unix_seconds) = snapshot.reset_unix_seconds() {
+        window = window.with_reset_unix_seconds(reset_unix_seconds);
+    }
+
+    window
 }
 
 fn u64_to_i64(value: u64) -> Result<i64, StateStoreError> {

@@ -6,6 +6,7 @@ pub mod headers;
 pub mod http_sse;
 pub mod local_auth;
 pub mod routes;
+mod secret_store_factory;
 pub mod server;
 pub mod upstream;
 pub mod websocket;
@@ -81,10 +82,10 @@ mod tests {
     use codex_router_core::local_auth::LocalRouterTokenRecord;
     use codex_router_core::redaction::SecretString;
     use codex_router_quota::snapshot::SnapshotFreshness;
+    use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::file_backend::FileSecretStore;
-    use codex_router_secret_store::file_backend::SecretStore;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
@@ -565,6 +566,93 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_http_proxy_audits_selection_rejection_after_local_auth() {
+        let temp_dir = ProxyTestTempDir::new("http_selection_rejection_audit");
+        let audit_path = temp_dir.path().join("audit").join("events.jsonl");
+        let audit_sink = AuditFileSink::new(audit_path.clone());
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"should-not-send".to_vec(),
+        ));
+        let selector = RejectingSelector::new(QuotaAwareAccountSelectorError::NoEligibleAccounts);
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_audit_sink(&audit_sink);
+
+        let error = match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+        ) {
+            Ok(response) => panic!("selection rejection should fail closed: {response:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+            }
+        );
+        assert!(resolver.take_recorded().is_empty());
+        assert!(upstream.take_recorded().is_empty());
+        let audit_contents = must_ok(fs::read_to_string(&audit_path));
+        assert!(audit_contents.contains("\"transport_kind\":\"http\""));
+        assert!(audit_contents.contains("\"decision_reason\":\"selection_rejected\""));
+        assert!(audit_contents.contains("\"error_class\":\"selection\""));
+        assert!(audit_contents.contains("\"response_commit_state\":\"not_committed\""));
+        assert!(!audit_contents.contains("current-token"));
+    }
+
+    #[test]
+    fn authenticated_http_proxy_audits_provider_credential_rejection_after_selection() {
+        let temp_dir = ProxyTestTempDir::new("http_credential_rejection_audit");
+        let audit_path = temp_dir.path().join("audit").join("events.jsonl");
+        let audit_sink = AuditFileSink::new(audit_path.clone());
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"should-not-send".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver =
+            RejectingProviderCredentialResolver::new(CredentialResolverError::RefreshUnavailable);
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_audit_sink(&audit_sink);
+
+        let error = match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+        ) {
+            Ok(response) => panic!("credential rejection should fail closed: {response:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            HttpProxyError::ProviderCredential {
+                reason: CredentialResolverError::RefreshUnavailable
+            }
+        );
+        assert_eq!(resolver.take_recorded(), vec!["acct_selected".to_owned()]);
+        assert!(upstream.take_recorded().is_empty());
+        let audit_contents = must_ok(fs::read_to_string(&audit_path));
+        assert!(audit_contents.contains("\"transport_kind\":\"http\""));
+        assert!(audit_contents.contains("\"decision_reason\":\"credential_rejected\""));
+        assert!(audit_contents.contains("\"error_class\":\"provider_credential\""));
+        assert!(audit_contents.contains("\"account_hash\""));
+        assert!(audit_contents.contains("\"response_commit_state\":\"not_committed\""));
+        assert!(!audit_contents.contains("current-token"));
+        assert!(!audit_contents.contains("acct_selected"));
+    }
+
+    #[test]
     fn quota_aware_selector_prefers_fresh_headroom_over_penalized_stale_account() {
         let fresh_account = quota_account(
             "acct_fresh",
@@ -757,6 +845,39 @@ mod tests {
     }
 
     #[test]
+    fn repository_backed_selector_partitions_weighted_state_by_route_band() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_weighted_route_band");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_windows(&state, &alpha, &["models", "responses"], 10);
+        persist_account_with_selector_windows(&state, &beta, &["models", "responses"], 10);
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected_models = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Get, "/v1/models"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("models request should select account: {error}"),
+        };
+        let selected_responses = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("responses request should select account: {error}"),
+        };
+
+        assert_eq!(selected_models.account_id().as_str(), "acct_alpha");
+        assert_eq!(selected_responses.account_id().as_str(), "acct_alpha");
+    }
+
+    #[test]
     fn loopback_server_binds_ephemeral_tcp_listener_on_loopback() {
         let address = match LoopbackBindAddress::new("127.0.0.1", 0) {
             Ok(address) => address,
@@ -898,6 +1019,42 @@ mod tests {
             Ok(()) => {}
             Err(error) => panic!("server thread panicked: {error:?}"),
         }
+    }
+
+    #[test]
+    fn loopback_http_adapter_returns_status_for_post_auth_proxy_rejections() {
+        let selection_response = http_response_from_one_connection(|stream| {
+            let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+                200,
+                HeaderCollection::default(),
+                b"should-not-send".to_vec(),
+            ));
+            let selector =
+                RejectingSelector::new(QuotaAwareAccountSelectorError::NoEligibleAccounts);
+            let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+            let auth_gate = local_auth_gate();
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            must_ok(LoopbackHttpAdapter::handle_connection(stream, &service));
+        });
+        assert!(selection_response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+
+        let credential_response = http_response_from_one_connection(|stream| {
+            let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+                200,
+                HeaderCollection::default(),
+                b"should-not-send".to_vec(),
+            ));
+            let selector = RecordingSelector::new();
+            let resolver = RejectingProviderCredentialResolver::new(
+                CredentialResolverError::RefreshUnavailable,
+            );
+            let auth_gate = local_auth_gate();
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            must_ok(LoopbackHttpAdapter::handle_connection(stream, &service));
+        });
+        assert!(credential_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
     }
 
     #[test]
@@ -2445,6 +2602,35 @@ mod tests {
         }
     }
 
+    fn persist_account_with_selector_windows(
+        state: &SqliteStateStore,
+        account: &AccountRecord,
+        route_bands: &[&str],
+        remaining_headroom: u32,
+    ) {
+        let account_with_generation = account.clone().with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(state, &account_with_generation)
+        {
+            panic!("account should persist: {error}");
+        }
+        for route_band in route_bands {
+            let selector_window = PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                *route_band,
+                18_000,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(remaining_headroom)
+            .with_effective(true)
+            .with_observed_unix_seconds(1_000);
+            if let Err(error) =
+                SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
+            {
+                panic!("selector quota window should persist: {error}");
+            }
+        }
+    }
+
     fn account_id(value: &str) -> codex_router_core::ids::AccountId {
         match codex_router_core::ids::AccountId::new(value) {
             Ok(account_id) => account_id,
@@ -2494,6 +2680,51 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("expected Ok, got error: {error}"),
         }
+    }
+
+    fn http_response_from_one_connection(
+        handle_stream: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> String {
+        let address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("loopback address should validate: {error}"),
+        };
+        let runtime = match LoopbackServerRuntime::bind(address) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("loopback bind should succeed: {error}"),
+        };
+        let listener = match runtime.listener().try_clone() {
+            Ok(listener) => listener,
+            Err(error) => panic!("listener clone should succeed: {error}"),
+        };
+        let server_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) => panic!("server should accept one client: {error}"),
+            };
+            handle_stream(stream);
+        });
+        let mut client = match TcpStream::connect(runtime.local_addr()) {
+            Ok(client) => client,
+            Err(error) => panic!("client should connect to loopback listener: {error}"),
+        };
+        let request = concat!(
+            "POST /v1/responses HTTP/1.1\r\n",
+            "Host: 127.0.0.1\r\n",
+            "X-Codex-Router-Token: current-token\r\n",
+            "Content-Length: 17\r\n",
+            "\r\n",
+            "{\"model\":\"gpt-5\"}"
+        );
+        must_ok(client.write_all(request.as_bytes()));
+        must_ok(client.shutdown(Shutdown::Write));
+        let mut response = String::new();
+        must_ok(client.read_to_string(&mut response));
+        match server_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("server thread panicked: {error:?}"),
+        }
+        response
     }
 
     fn remove_dir_all(path: &Path) {
@@ -2564,6 +2795,35 @@ mod tests {
                 }
             };
             Ok(SelectedAccountDecision::new(account_id, "test_selection"))
+        }
+    }
+
+    struct RejectingSelector {
+        reason: QuotaAwareAccountSelectorError,
+        recorded: RefCell<Vec<(String, TokenGeneration)>>,
+    }
+
+    impl RejectingSelector {
+        fn new(reason: QuotaAwareAccountSelectorError) -> Self {
+            Self {
+                reason,
+                recorded: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AccountDecisionSelector for RejectingSelector {
+        fn select_upstream_account(
+            &self,
+            request: &HttpProxyRequest,
+            token_generation: TokenGeneration,
+        ) -> Result<SelectedAccountDecision, HttpProxyError> {
+            self.recorded
+                .borrow_mut()
+                .push((request.path().to_owned(), token_generation));
+            Err(HttpProxyError::Selection {
+                reason: self.reason,
+            })
         }
     }
 

@@ -22,6 +22,7 @@ mod tests {
 
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::AffinityKey;
+    use rusqlite::Connection;
 
     use super::package_name;
     use crate::account::AccountRecord;
@@ -180,6 +181,36 @@ mod tests {
     }
 
     #[test]
+    fn v2_migration_backfills_selector_windows_from_existing_quota_snapshots() {
+        let temp_dir = TestTempDir::new("v2_selector_backfill");
+        let database_path = temp_dir.path().join("state.sqlite");
+        create_v2_database_with_quota_snapshot(&database_path);
+
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("v2 state store should migrate to v3: {error}"),
+        };
+
+        assert_eq!(store.schema_version(), 3);
+        let selector_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "responses") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("selector input should load after migration: {error}"),
+            };
+        assert_eq!(selector_inputs.len(), 1);
+        let input = &selector_inputs[0];
+        assert_eq!(input.account_id(), &account_id("acct_v2_backfill"));
+        assert_eq!(input.active_credential_generation(), Some(1));
+        assert_eq!(input.windows().len(), 1);
+        let window = &input.windows()[0];
+        assert_eq!(window.status(), SelectorQuotaWindowStatus::Eligible);
+        assert_eq!(window.remaining_headroom(), 64);
+        assert_eq!(window.reset_unix_seconds(), Some(2_000));
+        assert_eq!(window.limit_window_seconds(), 18_000);
+        assert!(window.effective());
+    }
+
+    #[test]
     fn credential_mutation_invalidates_response_backed_alias_family_atomically() {
         let temp_dir = TestTempDir::new("credential_mutation_invalidates_aliases");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -245,7 +276,75 @@ mod tests {
             assert_eq!(snapshot.observed_unix_seconds(), 0);
             assert_eq!(snapshot.reset_unix_seconds(), None);
             assert!(snapshot.stale_penalty());
+            let selector_inputs =
+                match SelectorQuotaRepository::selector_inputs_for_route_band(&store, route_band) {
+                    Ok(inputs) => inputs,
+                    Err(error) => {
+                        panic!("{route_band} selector input should load after mutation: {error}")
+                    }
+                };
+            assert_eq!(selector_inputs.len(), 1);
+            let windows = selector_inputs[0].windows();
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].status(), SelectorQuotaWindowStatus::Ineligible);
+            assert_eq!(windows[0].remaining_headroom(), 0);
+            assert_eq!(windows[0].observed_unix_seconds(), 0);
+            assert!(windows[0].effective());
         }
+    }
+
+    #[test]
+    fn credential_mutation_invalidates_selector_windows_atomically() {
+        let temp_dir = TestTempDir::new("credential_mutation_invalidates_selector_windows");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_selector_mutation");
+        let account = AccountRecord::new(
+            account_id.clone(),
+            "selector-mutation",
+            AccountStatus::Disabled,
+        );
+        if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
+            panic!("account should persist: {error}");
+        }
+        let selector_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(50)
+        .with_effective(true)
+        .with_observed_unix_seconds(9_000);
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&store, &selector_window)
+        {
+            panic!("selector window should persist: {error}");
+        }
+
+        if let Err(error) = store.activate_account_credential_generation_and_invalidate_quota(
+            &account_id,
+            2,
+            AccountStatus::Enabled,
+        ) {
+            panic!("credential mutation should invalidate selector windows: {error}");
+        }
+
+        let selector_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "responses") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("selector input should load: {error}"),
+            };
+        assert_eq!(selector_inputs.len(), 1);
+        let windows = selector_inputs[0].windows();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].status(), SelectorQuotaWindowStatus::Ineligible);
+        assert_eq!(windows[0].remaining_headroom(), 0);
+        assert_eq!(windows[0].observed_unix_seconds(), 0);
+        assert!(windows[0].effective());
     }
 
     #[test]
@@ -438,6 +537,57 @@ mod tests {
         match AccountId::new(value) {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
+        }
+    }
+
+    fn create_v2_database_with_quota_snapshot(database_path: &Path) {
+        let connection = match Connection::open(database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("raw v2 database should open: {error}"),
+        };
+        if let Err(error) = connection.execute_batch(
+            "
+            CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                active_credential_generation INTEGER
+            );
+
+            CREATE TABLE quota_snapshots (
+                account_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                route_band TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                stale_penalty INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE affinity_pins (
+                affinity_key TEXT PRIMARY KEY NOT NULL,
+                account_id TEXT NOT NULL
+            );
+
+            INSERT INTO accounts (
+                account_id, label, status, active_credential_generation
+            ) VALUES (
+                'acct_v2_backfill', 'v2-backfill', 'enabled', 1
+            );
+
+            INSERT INTO quota_snapshots (
+                account_id, source, observed_unix_seconds, route_band,
+                remaining_headroom, reset_unix_seconds, stale_penalty
+            ) VALUES (
+                'acct_v2_backfill', 'mock_endpoint', 1000, 'responses',
+                64, 2000, 0
+            );
+
+            PRAGMA user_version = 2;
+            ",
+        ) {
+            panic!("raw v2 database should initialize: {error}");
         }
     }
 }
