@@ -265,6 +265,19 @@ fn account_state_from_selector_input(input: &SelectorQuotaInput) -> Option<Quota
     }
     input.active_credential_generation()?;
     let effective_window = input.windows().iter().find(|window| window.effective())?;
+    if input
+        .windows()
+        .iter()
+        .any(|window| window.status() == SelectorQuotaWindowStatus::Ineligible)
+    {
+        return None;
+    }
+    let bottleneck_headroom = input
+        .windows()
+        .iter()
+        .map(|window| window.remaining_headroom())
+        .min()
+        .unwrap_or_else(|| effective_window.remaining_headroom());
     let freshness = match effective_window.status() {
         SelectorQuotaWindowStatus::Eligible => SnapshotFreshness::Fresh { age_seconds: 0 },
         SelectorQuotaWindowStatus::Stale => SnapshotFreshness::StaleWithPenalty { age_seconds: 0 },
@@ -274,7 +287,7 @@ fn account_state_from_selector_input(input: &SelectorQuotaInput) -> Option<Quota
 
     Some(QuotaAwareAccountState::new(
         input.account_id().clone(),
-        effective_window.remaining_headroom(),
+        bottleneck_headroom,
         freshness,
     ))
 }
