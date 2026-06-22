@@ -225,7 +225,7 @@ pub(crate) struct QuotaRefreshProviderRequest {
 }
 
 impl QuotaRefreshProviderRequest {
-    fn new(
+    pub(crate) fn new(
         account_id: AccountId,
         account_label: impl Into<String>,
         route_band: impl Into<String>,
@@ -275,8 +275,25 @@ impl QuotaRefreshProviderRequest {
 /// Quota provider response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaRefreshProviderResponse {
+    pub(crate) windows: Vec<QuotaRefreshProviderWindow>,
+}
+
+impl QuotaRefreshProviderResponse {
+    fn effective_window(&self) -> Option<&QuotaRefreshProviderWindow> {
+        self.windows
+            .iter()
+            .find(|window| window.effective)
+            .or_else(|| self.windows.first())
+    }
+}
+
+/// Quota provider response for one limit window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QuotaRefreshProviderWindow {
+    pub(crate) limit_window_seconds: u64,
     pub(crate) remaining_headroom: u32,
     pub(crate) reset_unix_seconds: Option<u64>,
+    pub(crate) effective: bool,
 }
 
 /// Provider egress dependency for quota refresh.
@@ -297,8 +314,14 @@ pub(crate) struct HttpQuotaRefreshProvider {
 impl HttpQuotaRefreshProvider {
     /// Creates an HTTP quota refresh provider.
     pub(crate) fn new() -> Result<Self, QuotaCommandError> {
+        Self::new_with_timeout(Duration::from_secs(30))
+    }
+
+    /// Creates an HTTP quota refresh provider with a bounded request timeout.
+    pub(crate) fn new_with_timeout(timeout: Duration) -> Result<Self, QuotaCommandError> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("codex-router-quota-refresh")
+            .timeout(timeout)
             .build()
             .map_err(|error| QuotaCommandError::ProviderRequest {
                 message: error.to_string(),
@@ -380,44 +403,127 @@ where
     let state = SqliteStateStore::open(state_db)?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
     let mut refreshed_count = 0_u64;
+    let mut failed_count = 0_u64;
     for account in accounts
         .iter()
         .filter(|account| account.status() == AccountStatus::Enabled)
         .filter(|account| account.active_credential_generation().is_some())
     {
-        let resolved = credential_resolver.resolve_provider_credentials(account.account_id())?;
+        let resolved = match credential_resolver.resolve_provider_credentials(account.account_id())
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                failed_count = failed_count.saturating_add(DEFAULT_ROUTE_BANDS.len() as u64);
+                writeln!(
+                    stdout,
+                    "refresh failed: account={} route_band=* error={error}",
+                    account.label()
+                )
+                .map_err(QuotaCommandError::Stdout)?;
+                continue;
+            }
+        };
         for route_band in DEFAULT_ROUTE_BANDS {
-            let response = quota_provider.fetch_quota(QuotaRefreshProviderRequest::new(
+            let response = match quota_provider.fetch_quota(QuotaRefreshProviderRequest::new(
                 account.account_id().clone(),
                 account.label(),
                 *route_band,
                 base_url.clone(),
                 resolved.access_token().clone(),
-            ))?;
+            )) {
+                Ok(response) => response,
+                Err(error) => {
+                    failed_count = failed_count.saturating_add(1);
+                    writeln!(
+                        stdout,
+                        "refresh failed: account={} route_band={} error={error}",
+                        account.label(),
+                        route_band
+                    )
+                    .map_err(QuotaCommandError::Stdout)?;
+                    continue;
+                }
+            };
+            let effective_window =
+                response
+                    .effective_window()
+                    .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                        message: format!(
+                            "missing provider quota windows for route band {route_band}"
+                        ),
+                    })?;
             let snapshot = PersistedQuotaSnapshot::new(
                 account.account_id().clone(),
                 QuotaSnapshotSource::OpenAiEndpoint,
             )
             .with_observed_unix_seconds(observed_unix_seconds)
-            .with_route_band(*route_band, response.remaining_headroom)
+            .with_route_band(*route_band, effective_window.remaining_headroom)
             .with_stale_penalty(false);
-            let snapshot = if let Some(reset_unix_seconds) = response.reset_unix_seconds {
+            let snapshot = if let Some(reset_unix_seconds) = effective_window.reset_unix_seconds {
                 snapshot.with_reset_unix_seconds(reset_unix_seconds)
             } else {
                 snapshot
             };
             QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot)?;
+            for window in &response.windows {
+                let status = if window.remaining_headroom == 0 {
+                    SelectorQuotaWindowStatus::Ineligible
+                } else {
+                    SelectorQuotaWindowStatus::Eligible
+                };
+                let selector_window = PersistedSelectorQuotaWindow::new(
+                    account.account_id().clone(),
+                    *route_band,
+                    window.limit_window_seconds,
+                    status,
+                )
+                .with_remaining_headroom(window.remaining_headroom)
+                .with_effective(window.effective)
+                .with_observed_unix_seconds(observed_unix_seconds);
+                let selector_window = if let Some(reset_unix_seconds) = window.reset_unix_seconds {
+                    selector_window.with_reset_unix_seconds(reset_unix_seconds)
+                } else {
+                    selector_window
+                };
+                SelectorQuotaRepository::upsert_selector_window(&state, &selector_window)?;
+            }
             refreshed_count = refreshed_count.saturating_add(1);
         }
     }
 
-    writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)
+    writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)?;
+    if failed_count > 0 {
+        writeln!(stdout, "failed: {failed_count}").map_err(QuotaCommandError::Stdout)?;
+    }
+    if refreshed_count == 0 && failed_count > 0 {
+        return Err(QuotaCommandError::ProviderResponse {
+            message: "quota refresh failed for all eligible route bands".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Stoppable background quota refresh worker.
 pub(crate) struct BackgroundQuotaRefreshWorker {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+}
+
+pub(crate) struct BackgroundQuotaRefreshRuntime<C, D> {
+    observed_clock: C,
+    diagnostic_reporter: D,
+    interval: Duration,
+}
+
+impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {
+    pub(crate) const fn new(observed_clock: C, diagnostic_reporter: D, interval: Duration) -> Self {
+        Self {
+            observed_clock,
+            diagnostic_reporter,
+            interval,
+        }
+    }
 }
 
 impl Drop for BackgroundQuotaRefreshWorker {
@@ -429,25 +535,81 @@ impl Drop for BackgroundQuotaRefreshWorker {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn start_background_quota_refresh_worker_with_dependencies<R, P>(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
     credential_resolver: R,
     quota_provider: P,
-    observed_unix_seconds: u64,
     interval: Duration,
 ) -> BackgroundQuotaRefreshWorker
 where
     R: ProviderCredentialResolver + Send + 'static,
     P: QuotaRefreshProvider + Send + 'static,
 {
+    start_background_quota_refresh_worker_with_clock(
+        state_db,
+        secret_root,
+        base_url,
+        credential_resolver,
+        quota_provider,
+        current_unix_seconds,
+        interval,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn start_background_quota_refresh_worker_with_clock<R, P, C>(
+    state_db: PathBuf,
+    secret_root: PathBuf,
+    base_url: String,
+    credential_resolver: R,
+    quota_provider: P,
+    observed_clock: C,
+    interval: Duration,
+) -> BackgroundQuotaRefreshWorker
+where
+    R: ProviderCredentialResolver + Send + 'static,
+    P: QuotaRefreshProvider + Send + 'static,
+    C: FnMut() -> u64 + Send + 'static,
+{
+    start_background_quota_refresh_worker_with_reporter(
+        state_db,
+        secret_root,
+        base_url,
+        credential_resolver,
+        quota_provider,
+        BackgroundQuotaRefreshRuntime::new(observed_clock, |_diagnostic| {}, interval),
+    )
+}
+
+pub(crate) fn start_background_quota_refresh_worker_with_reporter<R, P, C, D>(
+    state_db: PathBuf,
+    secret_root: PathBuf,
+    base_url: String,
+    credential_resolver: R,
+    quota_provider: P,
+    runtime: BackgroundQuotaRefreshRuntime<C, D>,
+) -> BackgroundQuotaRefreshWorker
+where
+    R: ProviderCredentialResolver + Send + 'static,
+    P: QuotaRefreshProvider + Send + 'static,
+    C: FnMut() -> u64 + Send + 'static,
+    D: FnMut(String) + Send + 'static,
+{
+    let BackgroundQuotaRefreshRuntime {
+        mut observed_clock,
+        mut diagnostic_reporter,
+        interval,
+    } = runtime;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_thread = Arc::clone(&stop);
     let thread = thread::spawn(move || {
         loop {
             let mut sink = Vec::new();
-            let _result = refresh_quota_store_paths_with_dependencies(
+            let observed_unix_seconds = observed_clock();
+            let result = refresh_quota_store_paths_with_dependencies(
                 &mut sink,
                 &state_db,
                 &secret_root,
@@ -456,6 +618,16 @@ where
                 &quota_provider,
                 observed_unix_seconds,
             );
+            let diagnostic_output = String::from_utf8_lossy(&sink).into_owned();
+            if diagnostic_output
+                .lines()
+                .any(|line| line.starts_with("refresh failed:") || line.starts_with("failed:"))
+            {
+                diagnostic_reporter(diagnostic_output.trim_end().to_owned());
+            }
+            if let Err(error) = result {
+                diagnostic_reporter(format!("background quota refresh failed: {error}"));
+            }
             if interval.is_zero() || !sleep_interruptibly(&stop_for_thread, interval) {
                 break;
             }
@@ -472,19 +644,21 @@ pub(crate) fn start_background_quota_refresh_worker(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
-    observed_unix_seconds: u64,
     interval: Duration,
 ) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
-    let resolver = CliCredentialResolver::open(&state_db, &secret_root, observed_unix_seconds)?;
+    let resolver = CliCredentialResolver::open(&state_db, &secret_root, current_unix_seconds())?;
     let provider = HttpQuotaRefreshProvider::new()?;
-    Ok(start_background_quota_refresh_worker_with_dependencies(
+    Ok(start_background_quota_refresh_worker_with_reporter(
         state_db,
         secret_root,
         base_url,
         resolver,
         provider,
-        observed_unix_seconds,
-        interval,
+        BackgroundQuotaRefreshRuntime::new(
+            current_unix_seconds,
+            |diagnostic| eprintln!("{diagnostic}"),
+            interval,
+        ),
     ))
 }
 
@@ -520,13 +694,35 @@ fn quota_response_from_window_pair(
     window_pair: &WindowPair,
     route_band: &str,
 ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
-    let window = window_pair
-        .primary_window
-        .as_ref()
-        .or(window_pair.secondary_window.as_ref())
-        .ok_or_else(|| QuotaCommandError::ProviderResponse {
+    let mut windows = Vec::new();
+    if let Some(primary_window) = window_pair.primary_window.as_ref() {
+        windows.push(quota_provider_window_from_usage_window(
+            primary_window,
+            route_band,
+            true,
+        )?);
+    }
+    if let Some(secondary_window) = window_pair.secondary_window.as_ref() {
+        windows.push(quota_provider_window_from_usage_window(
+            secondary_window,
+            route_band,
+            window_pair.primary_window.is_none(),
+        )?);
+    }
+    if windows.is_empty() {
+        return Err(QuotaCommandError::ProviderResponse {
             message: format!("missing provider quota windows for route band {route_band}"),
-        })?;
+        });
+    }
+
+    Ok(QuotaRefreshProviderResponse { windows })
+}
+
+fn quota_provider_window_from_usage_window(
+    window: &codex_router_auth::live_quota::UsageWindow,
+    route_band: &str,
+    effective: bool,
+) -> Result<QuotaRefreshProviderWindow, QuotaCommandError> {
     let used_percent = window
         .used_percent
         .ok_or_else(|| QuotaCommandError::ProviderResponse {
@@ -538,13 +734,21 @@ fn quota_response_from_window_pair(
             message: format!("invalid used_percent for route band {route_band}"),
         }
     })?;
+    let limit_window_seconds = window
+        .limit_window_seconds
+        .and_then(|limit_window_seconds| u64::try_from(limit_window_seconds).ok())
+        .ok_or_else(|| QuotaCommandError::ProviderResponse {
+            message: format!("missing limit_window_seconds for route band {route_band}"),
+        })?;
     let reset_unix_seconds = window
         .reset_at
         .and_then(|reset_at| u64::try_from(reset_at).ok());
 
-    Ok(QuotaRefreshProviderResponse {
+    Ok(QuotaRefreshProviderWindow {
+        limit_window_seconds,
         remaining_headroom,
         reset_unix_seconds,
+        effective,
     })
 }
 
@@ -724,22 +928,12 @@ impl QuotaStatusRow {
     fn from_snapshot(
         account: &AccountRecord,
         snapshot: &PersistedQuotaSnapshot,
-        now_unix_seconds: u64,
+        _now_unix_seconds: u64,
     ) -> Self {
         let reset = snapshot
             .reset_unix_seconds()
             .map_or_else(|| "-".to_owned(), |reset| reset.to_string());
-        let math = snapshot.reset_unix_seconds().map_or_else(
-            QuotaStatusMath::unknown,
-            |reset_unix_seconds| {
-                QuotaStatusMath::from_window(
-                    snapshot.remaining_headroom(),
-                    now_unix_seconds,
-                    snapshot.observed_unix_seconds(),
-                    reset_unix_seconds,
-                )
-            },
-        );
+        let math = QuotaStatusMath::unknown();
         Self {
             account_label: account.label().to_owned(),
             account_id: account.account_id().as_str().to_owned(),

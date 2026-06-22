@@ -936,6 +936,56 @@ mod tests {
     }
 
     #[test]
+    fn repository_backed_selector_skips_account_with_ineligible_secondary_window() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_secondary_ineligible");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let weekly_exhausted = AccountRecord::new(
+            account_id("acct_weekly_exhausted"),
+            "weekly-exhausted",
+            AccountStatus::Enabled,
+        );
+        let eligible = AccountRecord::new(
+            account_id("acct_weekly_eligible"),
+            "weekly-eligible",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_status_specs(
+            &state,
+            &weekly_exhausted,
+            "responses",
+            &[
+                (18_000, 80, true, SelectorQuotaWindowStatus::Eligible),
+                (604_800, 0, false, SelectorQuotaWindowStatus::Ineligible),
+            ],
+        );
+        persist_account_with_selector_window_status_specs(
+            &state,
+            &eligible,
+            "responses",
+            &[
+                (18_000, 42, true, SelectorQuotaWindowStatus::Eligible),
+                (604_800, 42, false, SelectorQuotaWindowStatus::Eligible),
+            ],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("next normal request should select eligible account: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), eligible.account_id());
+        assert_eq!(selected.selection_reason(), "fresh_quota");
+    }
+
+    #[test]
     fn repository_backed_selector_partitions_weighted_state_by_route_band() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_weighted_route_band");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -2779,6 +2829,35 @@ mod tests {
                 route_band,
                 *limit_window_seconds,
                 SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(*remaining_headroom)
+            .with_effective(*effective)
+            .with_observed_unix_seconds(1_000);
+            if let Err(error) =
+                SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
+            {
+                panic!("selector quota window should persist: {error}");
+            }
+        }
+    }
+
+    fn persist_account_with_selector_window_status_specs(
+        state: &SqliteStateStore,
+        account: &AccountRecord,
+        route_band: &str,
+        windows: &[(u64, u32, bool, SelectorQuotaWindowStatus)],
+    ) {
+        let account_with_generation = account.clone().with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(state, &account_with_generation)
+        {
+            panic!("account should persist: {error}");
+        }
+        for (limit_window_seconds, remaining_headroom, effective, status) in windows {
+            let selector_window = PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                route_band,
+                *limit_window_seconds,
+                *status,
             )
             .with_remaining_headroom(*remaining_headroom)
             .with_effective(*effective)

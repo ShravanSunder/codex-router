@@ -1,6 +1,7 @@
 //! Account command glue for router-owned account state.
 
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -334,32 +335,46 @@ fn login_with_codex_device_auth(
             source,
         }
     })?;
-    let status = Command::new(&codex_bin)
+    let permissions = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(&temporary_codex_home, permissions).map_err(|source| {
+        AccountCommandError::CreateTemporaryCodexHome {
+            path: temporary_codex_home.clone(),
+            source,
+        }
+    })?;
+    let status = match Command::new(&codex_bin)
         .arg("login")
         .arg("--device-auth")
         .env("CODEX_HOME", &temporary_codex_home)
         .status()
-        .map_err(|source| AccountCommandError::DeviceAuthLaunch {
-            path: codex_bin.clone(),
-            source,
-        })?;
+    {
+        Ok(status) => status,
+        Err(source) => {
+            remove_temporary_codex_home(&temporary_codex_home)?;
+            return Err(AccountCommandError::DeviceAuthLaunch {
+                path: codex_bin,
+                source,
+            });
+        }
+    };
     if !status.success() {
+        remove_temporary_codex_home(&temporary_codex_home)?;
         return Err(AccountCommandError::DeviceAuthFailed {
             status: status.to_string(),
         });
     }
 
     let auth_json = temporary_codex_home.join("auth.json");
-    let auth_text =
-        std::fs::read_to_string(&auth_json).map_err(|error| AccountCommandError::ReadAuthJson {
-            message: error.to_string(),
-        })?;
-    std::fs::remove_dir_all(&temporary_codex_home).map_err(|source| {
-        AccountCommandError::RemoveTemporaryCodexHome {
-            path: temporary_codex_home,
-            source,
+    let auth_text = match std::fs::read_to_string(&auth_json) {
+        Ok(auth_text) => auth_text,
+        Err(error) => {
+            remove_temporary_codex_home(&temporary_codex_home)?;
+            return Err(AccountCommandError::ReadAuthJson {
+                message: error.to_string(),
+            });
         }
-    })?;
+    };
+    remove_temporary_codex_home(&temporary_codex_home)?;
     import_codex_auth_text(
         stdout,
         router_root,
@@ -377,6 +392,15 @@ fn temporary_codex_home_path() -> PathBuf {
         "codex-router-device-auth-{}-{nanos}",
         std::process::id()
     ))
+}
+
+fn remove_temporary_codex_home(temporary_codex_home: &Path) -> Result<(), AccountCommandError> {
+    std::fs::remove_dir_all(temporary_codex_home).map_err(|source| {
+        AccountCommandError::RemoveTemporaryCodexHome {
+            path: temporary_codex_home.to_path_buf(),
+            source,
+        }
+    })
 }
 
 /// Parsed import request used by CLI and failure-injection tests.

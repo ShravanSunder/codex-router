@@ -107,7 +107,6 @@ where
                     state_db,
                     secret_root,
                     DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-                    command.now_unix_seconds,
                     Duration::from_secs(command.quota_refresh_interval_seconds),
                 )?)
             } else {
@@ -970,15 +969,16 @@ const HELP_TEXT: &str = "\
 codex-router
 
 commands:
-  serve --state-db <path> --secret-root <path> --upstream-base-url <url> [--disable-background-quota-refresh]
+  serve --state-db <path> --secret-root <path> --upstream-base-url <url> [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]
   token init --router-root <path>
   token rotate --router-root <path>
   token export --router-root <path> [--shell posix]
   account login --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-  account login --router-root <path> --label <label> --device-auth --allow-plaintext-file-secrets
+  account login --router-root <path> --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets
   account import-codex-auth --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account list --router-root <path>
-  quota status --router-root <path> [--format table|plain] [--all-limits]
+  quota refresh --router-root <path> [--base-url <url>]
+  quota status --router-root <path> [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -1001,6 +1001,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
@@ -1054,13 +1055,17 @@ mod tests {
     use crate::profile::CodexRouterProfile;
     use crate::profile::CodexRouterProfileWriter;
     use crate::profile::ProfileWriteError;
+    use crate::quota::BackgroundQuotaRefreshRuntime;
     use crate::quota::HttpQuotaRefreshProvider;
     use crate::quota::QuotaRefreshProvider;
     use crate::quota::QuotaRefreshProviderRequest;
     use crate::quota::QuotaRefreshProviderResponse;
+    use crate::quota::QuotaRefreshProviderWindow;
     use crate::quota::refresh_quota_store_paths_with_dependencies;
     use crate::quota::refresh_quota_with_dependencies;
+    use crate::quota::start_background_quota_refresh_worker_with_clock;
     use crate::quota::start_background_quota_refresh_worker_with_dependencies;
+    use crate::quota::start_background_quota_refresh_worker_with_reporter;
     use crate::token::LocalRouterTokenService;
     use crate::token::Shell;
     use crate::token::export_token_assignment;
@@ -1155,7 +1160,20 @@ mod tests {
             CliContext::new(Vec::new()),
         );
 
-        assert!(output.stdout.contains("live quota --auth-json <path>"));
+        for expected_line in [
+            "serve --state-db <path> --secret-root <path> --upstream-base-url <url> [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]",
+            "account login --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets",
+            "account login --router-root <path> --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
+            "quota refresh --router-root <path> [--base-url <url>]",
+            "quota status --router-root <path> [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]",
+            "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>]",
+        ] {
+            assert!(
+                output.stdout.contains(expected_line),
+                "help output missing expected line: {expected_line}\n{}",
+                output.stdout
+            );
+        }
         assert!(output.stderr.is_empty());
     }
 
@@ -1846,12 +1864,18 @@ mod tests {
         let router_root = test_root.path().join("router");
         let codex_bin = test_root.path().join("fake-codex");
         let invocation_log = test_root.path().join("codex-invocation.log");
+        let codex_home_mode_log = test_root.path().join("codex-home-mode.log");
         must_ok(fs::write(
             &codex_bin,
             format!(
                 r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" > "{}"
+if stat -f %Lp "$CODEX_HOME" > /dev/null 2>&1; then
+  stat -f %Lp "$CODEX_HOME" > "{}"
+else
+  stat -c %a "$CODEX_HOME" > "{}"
+fi
 test "$1" = "login"
 test "$2" = "--device-auth"
 test -n "${{CODEX_HOME:-}}"
@@ -1859,7 +1883,9 @@ cat > "$CODEX_HOME/auth.json" <<'JSON'
 {{"auth_mode":"chatgpt","tokens":{{"access_token":"device-access-canary","refresh_token":"device-refresh-canary"}}}}
 JSON
 "#,
-                invocation_log.display()
+                invocation_log.display(),
+                codex_home_mode_log.display(),
+                codex_home_mode_log.display()
             ),
         ));
         let mut permissions = must_ok(fs::metadata(&codex_bin)).permissions();
@@ -1908,6 +1934,7 @@ JSON
             must_ok(fs::read_to_string(invocation_log)),
             "login --device-auth\n"
         );
+        assert_eq!(must_ok(fs::read_to_string(codex_home_mode_log)), "700\n");
         assert!(
             output
                 .stdout
@@ -1917,6 +1944,60 @@ JSON
         assert!(!output.stdout.contains("device-access-canary"));
         assert!(!output.stdout.contains("device-refresh-canary"));
         assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn account_login_device_auth_cleans_temporary_codex_home_on_failure() {
+        let test_root = TestRoot::new("account-login-device-auth-failure");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        let codex_bin = test_root.path().join("failing-codex");
+        let codex_home_log = test_root.path().join("codex-home.log");
+        must_ok(fs::write(
+            &codex_bin,
+            format!(
+                r#"#!/bin/sh
+set -eu
+printf '%s\n' "$CODEX_HOME" > "{}"
+exit 42
+"#,
+                codex_home_log.display()
+            ),
+        ));
+        let mut permissions = must_ok(fs::metadata(&codex_bin)).permissions();
+        permissions.set_mode(0o700);
+        must_ok(fs::set_permissions(&codex_bin, permissions));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = match run_with_io(
+            vec![
+                "codex-router".into(),
+                "account".into(),
+                "login".into(),
+                "--router-root".into(),
+                router_root.as_os_str().to_owned(),
+                "--label".into(),
+                "device primary".into(),
+                "--device-auth".into(),
+                "--codex-bin".into(),
+                codex_bin.as_os_str().to_owned(),
+                "--allow-plaintext-file-secrets".into(),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("device-auth failure should surface"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("codex device-auth login failed"));
+        let temporary_codex_home =
+            PathBuf::from(must_ok(fs::read_to_string(codex_home_log)).trim());
+        assert!(!temporary_codex_home.exists());
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -2191,6 +2272,62 @@ JSON
         assert!(output.stdout.contains("44"));
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists() {
+        let test_root = TestRoot::new("quota-status-snapshot-unknown-pace");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let primary_account = AccountRecord::new(
+            account_id("acct_snapshot_pace"),
+            "snapshot",
+            AccountStatus::Enabled,
+        );
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_snapshot_pace"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(9_900)
+            .with_route_band("responses", 75)
+            .with_reset_unix_seconds(20_000)
+            .with_stale_penalty(false),
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "plain",
+                "--now-unix-seconds",
+                "10000",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let lines = output.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines[0],
+            "account\taccount_id\tstatus\troute_band\twindow\tremaining\treset\tpace\trunout\tstale\tsource"
+        );
+        assert_eq!(
+            lines[1],
+            "snapshot\tacct_snapshot_pace\tenabled\tresponses\teffective\t75\t20000\t-\t-\tfalse\tmock_endpoint"
+        );
+        assert_eq!(lines.len(), 2);
         assert!(output.stderr.is_empty());
     }
 
@@ -2493,7 +2630,6 @@ JSON
             "https://chatgpt.com/backend-api".to_owned(),
             resolver,
             provider,
-            1_300,
             Duration::from_secs(3_600),
         );
 
@@ -2510,7 +2646,140 @@ JSON
         ))
         .unwrap_or_else(|| panic!("background refresh should persist snapshot"));
         assert_eq!(snapshot.remaining_headroom(), 58);
-        assert_eq!(snapshot.observed_unix_seconds(), 1_300);
+        assert!(snapshot.observed_unix_seconds() > 0);
+    }
+
+    #[test]
+    fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
+        let test_root = TestRoot::new("background-quota-refresh-fresh-time");
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("acct_background_refresh_fresh_time");
+        let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "background-fresh-access-token",
+                        Some("background-fresh-refresh-token".to_owned()),
+                    )
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            &secret_root,
+            1_000,
+            NoopCredentialRefreshClient,
+        ));
+        let (refresh_sender, refresh_receiver) = mpsc::channel();
+        let provider = SignalingQuotaRefreshProvider::new(64, refresh_sender);
+        let clock = Arc::new(AtomicU64::new(1_300));
+        let worker_clock = Arc::clone(&clock);
+
+        let worker = start_background_quota_refresh_worker_with_clock(
+            state_path,
+            secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            resolver,
+            provider,
+            move || worker_clock.fetch_add(5, Ordering::SeqCst),
+            Duration::from_millis(1),
+        );
+
+        for _call_index in 0..4 {
+            if let Err(error) = refresh_receiver.recv_timeout(Duration::from_secs(2)) {
+                panic!("background refresh should run multiple cycles: {error}");
+            }
+        }
+        drop(worker);
+        let snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &state,
+            &account_id,
+            "responses",
+        ))
+        .unwrap_or_else(|| panic!("background refresh should persist snapshot"));
+        assert_eq!(snapshot.remaining_headroom(), 64);
+        assert!(snapshot.observed_unix_seconds() > 1_300);
+    }
+
+    #[test]
+    fn background_quota_refresh_worker_reports_refresh_failures() {
+        let test_root = TestRoot::new("background-quota-refresh-diagnostics");
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("acct_background_refresh_diagnostics");
+        let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "background-diagnostic-token-canary",
+                        Some("background-diagnostic-refresh-token".to_owned()),
+                    )
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            &secret_root,
+            1_000,
+            NoopCredentialRefreshClient,
+        ));
+        let provider = AccountFailingQuotaRefreshProvider::new("background", 0);
+        let (diagnostic_sender, diagnostic_receiver) = mpsc::channel();
+
+        let worker = start_background_quota_refresh_worker_with_reporter(
+            state_path,
+            secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            resolver,
+            provider,
+            BackgroundQuotaRefreshRuntime::new(
+                || 1_300,
+                move |diagnostic| {
+                    if let Err(error) = diagnostic_sender.send(diagnostic) {
+                        panic!("background diagnostic should send: {error}");
+                    }
+                },
+                Duration::from_secs(0),
+            ),
+        );
+
+        let first_diagnostic = match diagnostic_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(diagnostic) => diagnostic,
+            Err(error) => panic!("background refresh should report route failures: {error}"),
+        };
+        let second_diagnostic = match diagnostic_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(diagnostic) => diagnostic,
+            Err(error) => panic!("background refresh should report command failure: {error}"),
+        };
+        drop(worker);
+        let diagnostics = format!("{first_diagnostic}\n{second_diagnostic}");
+        assert!(diagnostics.contains(
+            "refresh failed: account=background route_band=responses error=quota refresh provider returned HTTP 429"
+        ));
+        assert!(diagnostics.contains("failed: 2"));
+        assert!(diagnostics.contains(
+            "background quota refresh failed: quota refresh provider response was unusable: quota refresh failed for all eligible route bands"
+        ));
+        assert!(!diagnostics.contains("background-diagnostic-token-canary"));
     }
 
     #[test]
@@ -2613,10 +2882,108 @@ JSON
 
         assert_eq!(
             error.to_string(),
-            CredentialResolverError::RefreshUnavailable.to_string()
+            "quota refresh provider response was unusable: quota refresh failed for all eligible route bands"
         );
         assert!(provider.take_recorded().is_empty());
-        assert!(stdout.is_empty());
+        let rendered_stdout = must_ok(String::from_utf8(stdout));
+        assert!(rendered_stdout.contains(&format!(
+            "refresh failed: account=missing route_band=* error={}\n",
+            CredentialResolverError::RefreshUnavailable
+        )));
+        assert!(rendered_stdout.contains("refreshed: 0\n"));
+        assert!(rendered_stdout.contains("failed: 2\n"));
+        assert!(!rendered_stdout.contains("expired-quota-access-token-canary"));
+    }
+
+    #[test]
+    fn quota_refresh_continues_after_one_account_provider_failure() {
+        let test_root = TestRoot::new("quota-refresh-partial-provider-failure");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let failing_account_id = account_id("acct_quota_provider_failing");
+        let healthy_account_id = account_id("acct_quota_provider_healthy");
+        let failing_account = AccountRecord::new(
+            failing_account_id.clone(),
+            "failing",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        let healthy_account = AccountRecord::new(
+            healthy_account_id.clone(),
+            "healthy",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &failing_account,
+        ));
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &healthy_account,
+        ));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        for (account_id, access_token) in [
+            (&failing_account_id, "failing-provider-token-canary"),
+            (&healthy_account_id, "healthy-provider-token-canary"),
+        ] {
+            let bundle_key = must_ok(account_credential_bundle_key(account_id, 1));
+            must_ok(
+                secrets.write_secret(
+                    &bundle_key,
+                    &must_ok(
+                        AccountCredentialBundle::imported_codex_auth(
+                            access_token,
+                            Some(format!("{access_token}-refresh")),
+                        )
+                        .with_expires_unix_seconds(2_000)
+                        .to_secret_string(),
+                    ),
+                ),
+            );
+        }
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let provider = AccountFailingQuotaRefreshProvider::new("failing", 69);
+        let mut stdout = Vec::new();
+
+        must_ok(refresh_quota_with_dependencies(
+            &mut stdout,
+            router_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        ));
+
+        assert!(
+            must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+                &state,
+                &failing_account_id,
+                "responses",
+            ))
+            .is_none()
+        );
+        let healthy_snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &state,
+            &healthy_account_id,
+            "responses",
+        ))
+        .unwrap_or_else(|| panic!("healthy account quota snapshot should be persisted"));
+        assert_eq!(healthy_snapshot.remaining_headroom(), 69);
+        let rendered_stdout = must_ok(String::from_utf8(stdout));
+        assert!(rendered_stdout.contains(
+            "refresh failed: account=failing route_band=responses error=quota refresh provider returned HTTP 429\n"
+        ));
+        assert!(rendered_stdout.contains(
+            "refresh failed: account=failing route_band=models error=quota refresh provider returned HTTP 429\n"
+        ));
+        assert!(rendered_stdout.contains("refreshed: 2\n"));
+        assert!(rendered_stdout.contains("failed: 2\n"));
+        assert!(!rendered_stdout.contains("failing-provider-token-canary"));
+        assert!(!rendered_stdout.contains("healthy-provider-token-canary"));
     }
 
     #[test]
@@ -2666,6 +3033,7 @@ JSON
         assert_eq!(selector_inputs.len(), 1);
         let windows = selector_inputs[0].windows();
         assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].limit_window_seconds(), 18_000);
         assert_eq!(windows[0].status(), SelectorQuotaWindowStatus::Eligible);
         assert_eq!(windows[0].remaining_headroom(), 37);
         assert_eq!(windows[0].observed_unix_seconds(), 1_100);
@@ -2760,11 +3128,53 @@ JSON
         ));
         assert_eq!(selector_inputs.len(), 1);
         let windows = selector_inputs[0].windows();
-        assert_eq!(windows.len(), 1);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].limit_window_seconds(), 18_000);
         assert_eq!(windows[0].remaining_headroom(), 75);
         assert_eq!(windows[0].reset_unix_seconds(), Some(2_000));
+        assert!(windows[0].effective());
+        assert_eq!(windows[1].limit_window_seconds(), 604_800);
+        assert_eq!(windows[1].remaining_headroom(), 20);
+        assert_eq!(windows[1].reset_unix_seconds(), Some(9_000));
+        assert!(!windows[1].effective());
         assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
 
+        match server_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("quota mock thread panicked: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn quota_refresh_http_provider_times_out_hanging_usage_endpoint() {
+        let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+        let address = must_ok(listener.local_addr());
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _peer_address) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("quota mock should accept: {error}"),
+            };
+            let mut buffer = [0_u8; 1024];
+            let _bytes_read = stream.read(&mut buffer);
+            thread::sleep(Duration::from_millis(200));
+        });
+        let provider = must_ok(HttpQuotaRefreshProvider::new_with_timeout(
+            Duration::from_millis(10),
+        ));
+
+        let error = match provider.fetch_quota(QuotaRefreshProviderRequest::new(
+            account_id("acct_timeout"),
+            "timeout",
+            "responses",
+            format!("http://{address}"),
+            SecretString::new("timeout-token-canary"),
+        )) {
+            Ok(response) => panic!("hanging quota endpoint should time out: {response:?}"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("quota refresh request failed"));
+        assert!(!error.to_string().contains("timeout-token-canary"));
         match server_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("quota mock thread panicked: {error:?}"),
@@ -3558,8 +3968,12 @@ JSON
                 request.access_token().expose_secret().to_owned(),
             ));
             Ok(QuotaRefreshProviderResponse {
-                remaining_headroom: self.remaining_headroom,
-                reset_unix_seconds: None,
+                windows: vec![QuotaRefreshProviderWindow {
+                    limit_window_seconds: 18_000,
+                    remaining_headroom: self.remaining_headroom,
+                    reset_unix_seconds: None,
+                    effective: true,
+                }],
             })
         }
     }
@@ -3587,8 +4001,46 @@ JSON
                 panic!("background refresh signal should send: {error}");
             }
             Ok(QuotaRefreshProviderResponse {
-                remaining_headroom: self.remaining_headroom,
-                reset_unix_seconds: None,
+                windows: vec![QuotaRefreshProviderWindow {
+                    limit_window_seconds: 18_000,
+                    remaining_headroom: self.remaining_headroom,
+                    reset_unix_seconds: None,
+                    effective: true,
+                }],
+            })
+        }
+    }
+
+    struct AccountFailingQuotaRefreshProvider {
+        failing_account_label: &'static str,
+        remaining_headroom: u32,
+    }
+
+    impl AccountFailingQuotaRefreshProvider {
+        fn new(failing_account_label: &'static str, remaining_headroom: u32) -> Self {
+            Self {
+                failing_account_label,
+                remaining_headroom,
+            }
+        }
+    }
+
+    impl QuotaRefreshProvider for AccountFailingQuotaRefreshProvider {
+        fn fetch_quota(
+            &self,
+            request: QuotaRefreshProviderRequest,
+        ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+            if request.account_label() == self.failing_account_label {
+                return Err(crate::quota::QuotaCommandError::ProviderStatus { status: 429 });
+            }
+
+            Ok(QuotaRefreshProviderResponse {
+                windows: vec![QuotaRefreshProviderWindow {
+                    limit_window_seconds: 18_000,
+                    remaining_headroom: self.remaining_headroom,
+                    reset_unix_seconds: None,
+                    effective: true,
+                }],
             })
         }
     }
