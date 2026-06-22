@@ -3,7 +3,7 @@
 Date: 2026-06-22
 Parent: `docs/plans/2026-06-22-quota-runtime-status-oauth-readiness-plan.md`
 Status: executable stacked prerequisite child plan after review; revised after plan-review `needs_revision`
-Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-460b51e.md`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-734554d.md`
 
 ## Goal
 
@@ -38,6 +38,9 @@ interactive login, Keychain storage, logout, or remove.
 - [ ] Behavior-changing rows require red/green evidence.
 - [ ] Deferred and gated-live items remain explicit rather than prose-only.
 - [ ] Closeout reports command, exit code, pass/fail count where available, stale-proof guard result, and red/green result.
+- [ ] Exact-test preflight proof uses the exact-one policy in this plan. Raw
+      `cargo test ... -- --exact --list` output is a list source only; it does
+      not pass stale-proof by exit code alone.
 - [ ] Smoke, workspace-wide nextest, `cargo deny check`, `cargo audit`, and live proof remain deferred to Plan 1B unless the user turns Plan 1A into a separately mergeable PR.
 
 ## Write Surfaces
@@ -68,6 +71,7 @@ interactive login, Keychain storage, logout, or remove.
 - `crates/codex-router-state/src/sqlite.rs`
 - `crates/codex-router-proxy/src/http_sse.rs`
 - `crates/codex-router-proxy/src/account_selection.rs`
+- `crates/codex-router-proxy/src/lib.rs`
 - `crates/codex-router-proxy/src/server.rs`
 - `crates/codex-router-proxy/src/secret_store_factory.rs`
 - `crates/codex-router-proxy/src/websocket.rs`
@@ -102,8 +106,12 @@ Closed unless task-local amendment is approved:
       `openai_access_token.*` and `openai_refresh_token.*` keys are import or
       migration inputs only; they are not runtime truth after T3/T4.
 - [ ] `codex-router-state` owns durable account, quota, and selector projection
-      persistence. The selector consumes a selector-owned durable projection
-      table/API, not human status rows or a DTO over renderer-oriented rows.
+      persistence. The selector remains state-free and consumes selector DTOs.
+      A proxy-owned adapter, or another named adapter outside
+      `codex-router-selection`, reads the `codex-router-state` projection and
+      maps it to selector DTOs. The selector must not gain a direct state
+      dependency unless this plan is revised to add
+      `crates/codex-router-selection/Cargo.toml` and acyclic dependency proof.
 - [ ] Manifest changes are part of the plan, not task-local surprises. The A2
       receipt must list dependency-direction changes and prove the chosen
       resolver path compiles through CLI and proxy consumers.
@@ -128,7 +136,8 @@ creates a task-local write-surface table proving the intersection is empty.
 - T4 owns resolver call-site migration across quota refresh, HTTP/SSE, and
   WebSocket egress paths, proxy account-decision DTO extraction in
   `crates/codex-router-proxy/src/account_selection.rs`, named
-  `secret_store_factory` construction edges, plus the manifest changes required
+  `secret_store_factory` construction edges, module declarations/re-exports in
+  `crates/codex-router-proxy/src/lib.rs`, plus the manifest changes required
   for `codex-router-auth` to own the resolver.
 - T5 owns selector-input repository/schema surfaces only after T4 removes direct
   runtime secret reads.
@@ -396,10 +405,24 @@ Checkpoint:
 ## Plan 1A Proof Matrix
 
 Each row must run its preflight before its execution command. Exact test rows
-fail their stale-proof guard if the preflight returns zero matches, more than
-one named match, or does not list the exact expected test. Structural, search,
-docs, and smoke rows must state their expected match count or allowlist behavior
+use the listed command as the list source, then run an exact-one guard that
+fails if the list output contains zero matches, more than one match, or a
+different test name. The list command's exit code alone is not proof, because
+`cargo test -- --list` can exit `0` with `0 tests`. Structural, search, docs,
+and smoke rows must state their expected match count or allowlist behavior
 inside the row. Proof owner is task plus crate/module, not a person.
+
+Exact-one preflight policy:
+
+```text
+1. Run the row's `Preflight list command`.
+2. Capture stdout and the exit code.
+3. Fail the row unless stdout contains exactly one listed test whose full name
+   equals the expected test name for that row.
+4. Record stdout, exit code, expected name, and observed count in the receipt.
+5. Prove the guard once per closeout by running it against one known real test
+   and one missing sentinel; the missing sentinel must fail.
+```
 
 | Done | ID | Requirement | Source | Task | Proof owner | Layer | Fixture/mock | Preflight list command | Execution command | Expected observation | Stale-proof guard | Red/green |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -407,6 +430,10 @@ inside the row. Proof owner is task plus crate/module, not a person.
 | [ ] | 1A-00a | Boundary extraction creates account import behavior from reviewed base | plan-review-after-8fb965f T1 proof | T1 | T1 / `codex-router-cli::account` runtime boundary | integration | codex auth.json fixture | `cargo test -p codex-router-cli tests::account_import_codex_auth_writes_router_owned_state_and_secrets -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_writes_router_owned_state_and_secrets --exact` | Plan 1 account import parser/module wiring writes router-owned account state and credential bundle without mutating home Codex auth | exact test listed once; red evidence from `8fb965f` base is expected before implementation unless a carry-forward receipt exists | yes |
 | [ ] | 1A-00b | Boundary extraction creates quota status behavior from reviewed base | plan-review-after-8fb965f T1 proof | T1 | T1 / `codex-router-cli::quota status` runtime boundary | integration | preseeded SQLite rows | `cargo test -p codex-router-cli tests::quota_status_reads_sqlite_rows_without_provider_io -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_status_reads_sqlite_rows_without_provider_io --exact` | Plan 1 quota status parser/module wiring reads SQLite rows and performs zero provider I/O | exact test listed once; red evidence from `8fb965f` base is expected before implementation unless a carry-forward receipt exists | yes |
 | [ ] | 1A-00c | Boundary extraction preserves serve loopback behavior | plan-review-after-460b51e T1 proof | T1 | T1 / `codex-router-cli::serve` runtime boundary | integration | loopback router fixture | `cargo test -p codex-router-cli tests::serve_command_starts_runtime_and_forwards_one_loopback_request -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::serve_command_starts_runtime_and_forwards_one_loopback_request --exact` | serve starts runtime and forwards one authenticated loopback request through the extracted boundary | exact test listed once; runtime shutdown is bounded | yes |
+| [ ] | 1A-00d | Activation profile print emits router custom provider text without home mutation | spec Activation/Local Auth | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home plus fixed token env name | `cargo test -p codex-router-cli tests::profile_print_emits_router_custom_provider_without_home_mutation -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_print_emits_router_custom_provider_without_home_mutation --exact` | profile text includes custom provider id, loopback base URL, `wire_api = "responses"`, `requires_openai_auth = false`, `supports_websockets = true`, and `env_http_headers` with `CODEX_ROUTER_TOKEN`; no real or temp home file is written | exact-one preflight policy passes; red evidence from `8fb965f` base is expected if missing | yes |
+| [ ] | 1A-00e | Token export and profile doctor redact local bearer material | spec Local Auth/Audit | T1 | T1 / `codex-router-cli::token` + `profile` | integration/security | router root with initialized token | `cargo test -p codex-router-cli tests::token_export_and_profile_doctor_redact_router_token_value -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::token_export_and_profile_doctor_redact_router_token_value --exact` | export command is shell-safe, doctor reports presence/absence, and stdout/stderr never print the local bearer token value | exact-one preflight policy passes; token canary included | yes |
+| [ ] | 1A-00f | Profile dry-run previews named Codex profile write without mutation | spec Activation/Local Auth | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home | `cargo test -p codex-router-cli tests::profile_write_dry_run_previews_named_profile_without_mutation -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_dry_run_previews_named_profile_without_mutation --exact` | dry-run output shows the target named profile file and exact profile text, but writes no file | exact-one preflight policy passes; temp home remains unchanged | yes |
+| [ ] | 1A-00g | Approved profile write is temp-home scoped and explicit | spec Activation proof | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home | `cargo test -p codex-router-cli tests::profile_write_approved_writes_only_named_temp_profile_file -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_approved_writes_only_named_temp_profile_file --exact` | approved write requires the approval flag, writes only the named temp profile file, and never touches real `~/.codex` | exact-one preflight policy passes; real home path is not used | yes |
 | [ ] | 1A-01 | Secret-bearing auth DTOs do not leak | spec Security/Rust standards | T2 | T2 / `codex-router-auth::router_credentials` | unit | token canaries | `cargo test -p codex-router-auth tests::router_credentials_debug_redacts_secret_fields -- --exact --list` | `cargo nextest run -p codex-router-auth -- tests::router_credentials_debug_redacts_secret_fields --exact` | debug/error paths do not include access or refresh token canaries | new exact test listed once | yes |
 | [ ] | 1A-02 | Import errors redact credentials | spec Security/Rust standards | T2 | T2 / `codex-router-cli::account` | integration | malformed auth.json with canaries | `cargo test -p codex-router-cli tests::account_import_codex_auth_redacts_refresh_token_in_error_paths -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_redacts_refresh_token_in_error_paths --exact` | stdout/stderr/error text omit refresh/access token canaries | new exact test listed once | yes |
 | [ ] | 1A-03 | Token egress only after allowlist | spec Security | T2 | T2 / `codex-router-cli::quota` | integration | disallowed quota URL | `cargo test -p codex-router-cli tests::quota_refresh_rejects_non_provider_base_url_before_token_egress -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_refresh_rejects_non_provider_base_url_before_token_egress --exact` | local reject occurs before provider hit or secret egress | existing exact test listed once; assert secret/provider hit counts | yes |
@@ -427,8 +454,9 @@ inside the row. Proof owner is task plus crate/module, not a person.
 | [ ] | 1A-14 | Runtime paths cannot bypass resolver | spec Secret Storage/Security | T4 | T4 / runtime egress call sites | structural | source search | `rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs` | `bash -lc '! rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs'` | zero matches in runtime egress paths; credential reads happen only through auth resolver APIs | any direct match in listed runtime files fails the row | yes |
 | [ ] | 1A-14a | Runtime entrypoints are backend-neutral for Plan 2 | plan-review-after-8fb965f OAuth readiness | T4 | T4 / auth resolver + runtime constructors | structural/compile | source search plus package compile | `rg -n -e "FileSecretStore" -e "file_backend::SecretStore" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs` | `bash -lc '! rg -n -e "FileSecretStore" -e "file_backend::SecretStore" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs' && cargo check -p codex-router-auth -p codex-router-proxy -p codex-router-cli` | zero concrete file-backend type or `file_backend::SecretStore` imports in runtime request/refresh entrypoints; concrete file backend construction is isolated to named factory modules outside this search | structural row expects zero matches in listed runtime entrypoints; factory modules are proven by manifest/diff receipt, not by substring allowlist | yes |
 | [ ] | 1A-14b | Resolver manifest direction is acyclic and explicit | plan-review-after-460b51e resolver ownership | T4 | T4 / workspace manifests | structural/compile | cargo metadata/tree | `cargo tree -p codex-router-auth -e normal` | `cargo check -p codex-router-auth -p codex-router-proxy -p codex-router-cli` | `codex-router-auth` depends on needed state/secret-store surfaces without creating an auth/proxy/CLI cycle; CLI/proxy consume auth resolver APIs | manifest diff is listed in A2 receipt; cargo check succeeds | yes |
-| [ ] | 1A-14c | Selector decisions carry no raw provider token material | plan-review-after-8fb965f selector/resolver separation | T4 | T4 / selection + proxy account-decision structs | structural/compile | source search plus package compile | `rg -n -e "upstream_auth_token" -e "access_token" -e "provider_access_token" -e "provider_refresh_token" -e "refresh_token" crates/codex-router-selection/src crates/codex-router-proxy/src/account_selection.rs` | `bash -lc '! rg -n -e "upstream_auth_token" -e "access_token" -e "provider_access_token" -e "provider_refresh_token" -e "refresh_token" crates/codex-router-selection/src crates/codex-router-proxy/src/account_selection.rs' && cargo check -p codex-router-selection -p codex-router-proxy` | selector-owned and proxy account-decision DTOs carry account/route decisions only; egress files may hold resolver-output provider auth only after resolver call | structural row expects zero matches in selector/account-decision modules; resolver-output plumbing is outside this row and covered by egress tests | yes |
-| [ ] | 1A-15 | Per-window selector source is durable and selector-owned | spec Account/Quota | T5 | T5 / `codex-router-state` + selector projection | integration | existing or migrated DB | `cargo test -p codex-router-state tests::selector_input_reads_durable_per_window_rows_without_status_renderer -- --exact --list` | `cargo nextest run -p codex-router-state -- tests::selector_input_reads_durable_per_window_rows_without_status_renderer --exact` | selector-input API returns short and weekly windows, status, headroom, reset, limit-window seconds, and effective marker without parsing human status rows | new exact test listed once; migrated DB fixture included if schema changes | yes |
+| [ ] | 1A-14c | Selector decisions carry no raw provider token material | plan-review-after-734554d selector/resolver separation | T4 | T4 / selection + proxy account-decision structs | structural/compile | source search plus package compile | `rg -n -e "SelectedUpstreamAccount" -e "UpstreamAccountSelector" -e "upstream_auth_token" -e "provider_access_token" -e "provider_refresh_token" crates/codex-router-selection/src crates/codex-router-proxy/src/account_selection.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs` | `bash -lc '! rg -n -e "SelectedUpstreamAccount" -e "UpstreamAccountSelector" -e "upstream_auth_token" -e "provider_access_token" -e "provider_refresh_token" crates/codex-router-selection/src crates/codex-router-proxy/src/account_selection.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs' && cargo check -p codex-router-selection -p codex-router-proxy` | legacy token-bearing selector DTOs are deleted or redefined; selector-owned and account-decision modules carry account/route decisions only; resolver-output provider auth appears only in egress code under names outside this legacy DTO allowlist and is proven by egress tests | zero matches for legacy selector/token-carrier names in listed modules | yes |
+| [ ] | 1A-15 | Per-window selector source is durable and selector adapter-owned | spec Account/Quota | T5 | T5 / `codex-router-state` + proxy selector adapter | integration | existing or migrated DB | `cargo test -p codex-router-state tests::selector_input_reads_durable_per_window_rows_without_status_renderer -- --exact --list` | `cargo nextest run -p codex-router-state -- tests::selector_input_reads_durable_per_window_rows_without_status_renderer --exact` | state projection returns short and weekly windows, status, headroom, reset, limit-window seconds, and effective marker without parsing human status rows; proxy or named adapter maps it to state-free selector DTOs | exact-one preflight policy passes; migrated DB fixture included if schema changes | yes |
+| [ ] | 1A-15a | Selector crate remains state-free unless explicitly replanned | plan-review-after-734554d selector dependency boundary | T5 | T5 / dependency direction | structural/compile | cargo tree | `cargo tree -p codex-router-selection -e normal` | `bash -lc 'cargo tree -p codex-router-selection -e normal > /tmp/codex-router-selection-tree.txt && ! rg -n "codex-router-state" /tmp/codex-router-selection-tree.txt && cargo check -p codex-router-state -p codex-router-selection -p codex-router-proxy'` | selection consumes DTOs and does not depend directly on `codex-router-state`; repository-backed projection is owned by state plus adapter code outside selection | any state dependency in selection fails unless a reviewed replan adds it and proves acyclic direction | yes |
 | [ ] | 1A-16 | Route-band selector state remains partitioned | spec Account/Quota | T5 | T5 / `codex-router-state` | integration | route-band snapshots | `cargo test -p codex-router-state tests::quota_snapshots_are_partitioned_by_route_band_for_one_account -- --exact --list` | `cargo nextest run -p codex-router-state -- tests::quota_snapshots_are_partitioned_by_route_band_for_one_account --exact` | route-band snapshots remain separate for selector reads | exact test listed once; no alias collapse | yes |
 
 ## Validation Gates

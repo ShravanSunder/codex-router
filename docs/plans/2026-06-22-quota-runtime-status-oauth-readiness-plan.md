@@ -3,7 +3,7 @@
 Date: 2026-06-22
 Branch: `feature/initial-codex-router`
 Status: umbrella/control plan; not executable; revised after plan-review `needs_revision`
-Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-460b51e.md`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-734554d.md`
 Executable children:
 
 - `docs/plans/2026-06-22-codex-router-plan-1a-credential-state-substrate.md`
@@ -79,6 +79,9 @@ router onboarding as complete.
 
 Plan 1 is not complete until both child receipts exist:
 
+- [ ] Activation/profile proof rows pass: profile print, token export,
+      doctor redaction, profile dry-run no-mutation, and approved temp-home
+      profile write.
 - [ ] Plan 1A merge-gate receipt exists.
 - [ ] Plan 1A implementation-review blockers are resolved.
 - [ ] Plan 1B final closeout receipt exists.
@@ -296,6 +299,10 @@ Every closeout must report:
 - [ ] No executable proof row may use vague substitute wording, broad prefix
       filters, or wrapper-only smoke proof.
 - [ ] Smoke proof must name each exact `installed_codex_*` scenario individually.
+- [ ] Exact-test preflight proof must fail on zero or multiple matches. A raw
+      `cargo test ... -- --exact --list` command is only a list source, not a
+      passing stale-proof guard, unless wrapped by the exact-one preflight
+      policy in the child plan.
 - [ ] Structural proof rows, such as resolver bypass checks, must include the
       exact search command and expected match count.
 - [ ] Each checkpoint receipt must include the commit hash, `git show
@@ -310,13 +317,14 @@ These are not forgotten. They are intentionally deferred out of Plan 1A/1B:
 - [ ] OS keyring/Keychain normal login backend, Plan 2.
 - [ ] `account logout`/secret purge implementation, Plan 2.
 - [ ] `account remove` metadata plus secret purge, Plan 2.
-- [ ] Profile write apply with approval.
 - [ ] Gated live OAuth/device-code proof, Plan 2.
 - [ ] Realtime/WebRTC support, explicitly out of v1.
 - [ ] Real upstream account rotation/pooling live proof, approval-gated.
 
 These are not deferred:
 
+- [ ] Activation/profile output and temp-home profile write proof must appear
+      in Plan 1A.
 - [ ] Local bearer-token lifecycle proof receipt must appear in Plan 1B.
 - [ ] Same-turn and previous-response affinity must appear in Plan 1B.
 - [ ] Explicit precommit auth/quota rotation must appear in Plan 1B, with a
@@ -325,6 +333,8 @@ These are not deferred:
 - [ ] Resolver bypass guard must appear in Plan 1A.
 - [ ] Audit JSONL allowlist proof must appear in Plan 1A.
 - [ ] Quota refresh one-writer behavior must appear in Plan 1B.
+- [ ] Installed-Codex generated-profile/token/WebSocket smoke must appear in
+      Plan 1B final closeout.
 
 ## Route To Execution
 
