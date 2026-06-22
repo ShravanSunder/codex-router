@@ -3,7 +3,7 @@
 Date: 2026-06-22
 Parent: `docs/plans/2026-06-22-quota-runtime-status-oauth-readiness-plan.md`
 Status: executable stacked prerequisite child plan after review; revised after plan-review `needs_revision`
-Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-734554d.md`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-918db95.md`
 
 ## Goal
 
@@ -122,9 +122,24 @@ Default execution is serial. Do not fan out T2/T3 unless the executor first
 creates a task-local write-surface table proving the intersection is empty.
 
 - T1 owns extraction boundaries in `crates/codex-router-cli/src/lib.rs`,
-  `crates/codex-router-cli/src/quota.rs`, and adjacent auth/quota service files.
-- T2 owns secret DTO/debug/redaction and token-egress guards in auth,
-  secret-store, quota refresh, and proxy audit/status surfaces.
+  `crates/codex-router-cli/src/quota.rs`,
+  `crates/codex-router-cli/src/account.rs`,
+  `crates/codex-router-auth/src/live_quota.rs`,
+  `crates/codex-router-auth/src/quota_client.rs`, and
+  `crates/codex-router-auth/src/router_credentials.rs`.
+- T2 owns secret DTO/debug/redaction and token-egress guards in
+  `crates/codex-router-auth/src/router_credentials.rs`,
+  `crates/codex-router-auth/src/live_quota.rs`,
+  `crates/codex-router-auth/src/quota_client.rs`,
+  `crates/codex-router-secret-store/src/account_tokens.rs`,
+  `crates/codex-router-secret-store/src/backend.rs`,
+  `crates/codex-router-secret-store/src/file_backend.rs`,
+  `crates/codex-router-secret-store/src/lib.rs`,
+  `crates/codex-router-cli/src/account.rs`,
+  `crates/codex-router-cli/src/quota.rs`,
+  `crates/codex-router-proxy/src/http_sse.rs`,
+  `crates/codex-router-proxy/src/websocket.rs`, and
+  `crates/codex-router-proxy/src/server.rs`.
 - T3 owns `crates/codex-router-cli/src/account.rs`,
   `crates/codex-router-secret-store/src/account_tokens.rs`,
   `crates/codex-router-secret-store/src/file_backend.rs`,
@@ -135,12 +150,24 @@ creates a task-local write-surface table proving the intersection is empty.
   `crates/codex-router-state/src/sqlite.rs`.
 - T4 owns resolver call-site migration across quota refresh, HTTP/SSE, and
   WebSocket egress paths, proxy account-decision DTO extraction in
-  `crates/codex-router-proxy/src/account_selection.rs`, named
-  `secret_store_factory` construction edges, module declarations/re-exports in
-  `crates/codex-router-proxy/src/lib.rs`, plus the manifest changes required
-  for `codex-router-auth` to own the resolver.
-- T5 owns selector-input repository/schema surfaces only after T4 removes direct
-  runtime secret reads.
+  `crates/codex-router-proxy/src/account_selection.rs`,
+  `crates/codex-router-cli/src/secret_store_factory.rs`,
+  `crates/codex-router-proxy/src/secret_store_factory.rs`, module
+  declarations/re-exports in `crates/codex-router-proxy/src/lib.rs`, plus
+  manifest changes in `Cargo.toml`, `Cargo.lock`,
+  `crates/codex-router-auth/Cargo.toml`,
+  `crates/codex-router-proxy/Cargo.toml`,
+  `crates/codex-router-cli/Cargo.toml`,
+  `crates/codex-router-secret-store/Cargo.toml`, and
+  `crates/codex-router-state/Cargo.toml` required for `codex-router-auth` to
+  own the resolver.
+- T5 owns selector-input repository/schema surfaces in
+  `crates/codex-router-state/src/quota_snapshot.rs`,
+  `crates/codex-router-state/src/repositories.rs`,
+  `crates/codex-router-state/src/sqlite.rs`,
+  `crates/codex-router-proxy/src/account_selection.rs`, and
+  `crates/codex-router-selection/src/*` only after T4 removes direct runtime
+  secret reads.
 
 ## Security Context
 
@@ -430,10 +457,11 @@ Exact-one preflight policy:
 | [ ] | 1A-00a | Boundary extraction creates account import behavior from reviewed base | plan-review-after-8fb965f T1 proof | T1 | T1 / `codex-router-cli::account` runtime boundary | integration | codex auth.json fixture | `cargo test -p codex-router-cli tests::account_import_codex_auth_writes_router_owned_state_and_secrets -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_writes_router_owned_state_and_secrets --exact` | Plan 1 account import parser/module wiring writes router-owned account state and credential bundle without mutating home Codex auth | exact test listed once; red evidence from `8fb965f` base is expected before implementation unless a carry-forward receipt exists | yes |
 | [ ] | 1A-00b | Boundary extraction creates quota status behavior from reviewed base | plan-review-after-8fb965f T1 proof | T1 | T1 / `codex-router-cli::quota status` runtime boundary | integration | preseeded SQLite rows | `cargo test -p codex-router-cli tests::quota_status_reads_sqlite_rows_without_provider_io -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_status_reads_sqlite_rows_without_provider_io --exact` | Plan 1 quota status parser/module wiring reads SQLite rows and performs zero provider I/O | exact test listed once; red evidence from `8fb965f` base is expected before implementation unless a carry-forward receipt exists | yes |
 | [ ] | 1A-00c | Boundary extraction preserves serve loopback behavior | plan-review-after-460b51e T1 proof | T1 | T1 / `codex-router-cli::serve` runtime boundary | integration | loopback router fixture | `cargo test -p codex-router-cli tests::serve_command_starts_runtime_and_forwards_one_loopback_request -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::serve_command_starts_runtime_and_forwards_one_loopback_request --exact` | serve starts runtime and forwards one authenticated loopback request through the extracted boundary | exact test listed once; runtime shutdown is bounded | yes |
-| [ ] | 1A-00d | Activation profile print emits router custom provider text without home mutation | spec Activation/Local Auth | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home plus fixed token env name | `cargo test -p codex-router-cli tests::profile_print_emits_router_custom_provider_without_home_mutation -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_print_emits_router_custom_provider_without_home_mutation --exact` | profile text includes custom provider id, loopback base URL, `wire_api = "responses"`, `requires_openai_auth = false`, `supports_websockets = true`, and `env_http_headers` with `CODEX_ROUTER_TOKEN`; no real or temp home file is written | exact-one preflight policy passes; red evidence from `8fb965f` base is expected if missing | yes |
+| [ ] | 1A-00d | Activation profile print emits router custom provider text without home mutation | spec Activation/Local Auth | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home plus fixed token env name | `cargo test -p codex-router-cli tests::profile_print_emits_router_custom_provider_without_home_mutation -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_print_emits_router_custom_provider_without_home_mutation --exact` | profile text includes custom provider id, loopback base URL, `wire_api = "responses"`, `requires_openai_auth = false`, `supports_websockets = true`, and exact TOML `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`; no real or temp home file is written | exact-one preflight policy passes; red evidence from `8fb965f` base is expected if missing | yes |
 | [ ] | 1A-00e | Token export and profile doctor redact local bearer material | spec Local Auth/Audit | T1 | T1 / `codex-router-cli::token` + `profile` | integration/security | router root with initialized token | `cargo test -p codex-router-cli tests::token_export_and_profile_doctor_redact_router_token_value -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::token_export_and_profile_doctor_redact_router_token_value --exact` | export command is shell-safe, doctor reports presence/absence, and stdout/stderr never print the local bearer token value | exact-one preflight policy passes; token canary included | yes |
-| [ ] | 1A-00f | Profile dry-run previews named Codex profile write without mutation | spec Activation/Local Auth | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home | `cargo test -p codex-router-cli tests::profile_write_dry_run_previews_named_profile_without_mutation -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_dry_run_previews_named_profile_without_mutation --exact` | dry-run output shows the target named profile file and exact profile text, but writes no file | exact-one preflight policy passes; temp home remains unchanged | yes |
-| [ ] | 1A-00g | Approved profile write is temp-home scoped and explicit | spec Activation proof | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home | `cargo test -p codex-router-cli tests::profile_write_approved_writes_only_named_temp_profile_file -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_approved_writes_only_named_temp_profile_file --exact` | approved write requires the approval flag, writes only the named temp profile file, and never touches real `~/.codex` | exact-one preflight policy passes; real home path is not used | yes |
+| [ ] | 1A-00f | Profile dry-run previews named Codex profile write without mutation | spec Activation/Local Auth | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home | `cargo test -p codex-router-cli tests::profile_write_dry_run_previews_named_profile_without_mutation -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_dry_run_previews_named_profile_without_mutation --exact` | dry-run output shows the target named profile file and exact profile text, including `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`, but writes no file | exact-one preflight policy passes; temp home remains unchanged | yes |
+| [ ] | 1A-00g | Approved profile write is temp-home scoped and explicit | spec Activation proof | T1 | T1 / `codex-router-cli::profile` | integration | temp Codex home | `cargo test -p codex-router-cli tests::profile_write_approved_writes_only_named_temp_profile_file -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_approved_writes_only_named_temp_profile_file --exact` | approved write requires the approval flag, writes only the named temp profile file, writes the same exact header stanza as profile print, and never touches real `~/.codex` | exact-one preflight policy passes; real home path is not used | yes |
+| [ ] | 1A-00h | Exact-test preflight helper fails missing tests before Plan 1A handoff | plan-review-after-918db95 preflight false-green | T1 | T1 / validation harness | structural/test-harness | one real Plan 1A test plus missing sentinel | `cargo test -p codex-router-cli tests::profile_write_command_requires_approval_flag -- --exact --list` | `bash -lc 'exact_one(){ name="$1"; file="$2"; count="$(grep -c "^${name}: test$" "$file")"; test "$count" = 1; }; cargo test -p codex-router-cli tests::profile_write_command_requires_approval_flag -- --exact --list > /tmp/codex-router-1a-exact-real.out; exact_one "tests::profile_write_command_requires_approval_flag" /tmp/codex-router-1a-exact-real.out; cargo test -p codex-router-cli tests::definitely_missing_plan_review_probe -- --exact --list > /tmp/codex-router-1a-exact-missing.out; if exact_one "tests::definitely_missing_plan_review_probe" /tmp/codex-router-1a-exact-missing.out; then exit 1; else exit 0; fi'` | real test passes exact-one guard; missing sentinel fails even though raw `cargo test -- --list` exits `0` | receipt includes stdout, exit code, expected names, and observed counts for pass and fail cases | yes |
 | [ ] | 1A-01 | Secret-bearing auth DTOs do not leak | spec Security/Rust standards | T2 | T2 / `codex-router-auth::router_credentials` | unit | token canaries | `cargo test -p codex-router-auth tests::router_credentials_debug_redacts_secret_fields -- --exact --list` | `cargo nextest run -p codex-router-auth -- tests::router_credentials_debug_redacts_secret_fields --exact` | debug/error paths do not include access or refresh token canaries | new exact test listed once | yes |
 | [ ] | 1A-02 | Import errors redact credentials | spec Security/Rust standards | T2 | T2 / `codex-router-cli::account` | integration | malformed auth.json with canaries | `cargo test -p codex-router-cli tests::account_import_codex_auth_redacts_refresh_token_in_error_paths -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_redacts_refresh_token_in_error_paths --exact` | stdout/stderr/error text omit refresh/access token canaries | new exact test listed once | yes |
 | [ ] | 1A-03 | Token egress only after allowlist | spec Security | T2 | T2 / `codex-router-cli::quota` | integration | disallowed quota URL | `cargo test -p codex-router-cli tests::quota_refresh_rejects_non_provider_base_url_before_token_egress -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_refresh_rejects_non_provider_base_url_before_token_egress --exact` | local reject occurs before provider hit or secret egress | existing exact test listed once; assert secret/provider hit counts | yes |
@@ -463,6 +491,8 @@ Exact-one preflight policy:
 
 - [ ] `cargo fmt --all --check`
 - [ ] Exact proof-row preflights listed above.
+- [ ] Exact-test helper proof row `1A-00h` passes before any Plan 1A closeout
+      or handoff to Plan 1B.
 - [ ] `cargo nextest run -p codex-router-auth`
 - [ ] `cargo nextest run -p codex-router-cli`
 - [ ] `cargo nextest run -p codex-router-proxy`
@@ -477,7 +507,9 @@ Exact-one preflight policy:
 
 Required before T4 starts:
 
-- [ ] T1-T3 matrix rows 1A-00 through 1A-06b pass or route back to planning.
+- [ ] T1-T3 matrix rows 1A-00 through 1A-06a plus 1A-00h pass or route back
+      to planning. Resolver-consumption row 1A-06b belongs to A2 because T4
+      owns the resolver.
 - [ ] Dirty-tree isolation receipt proves only T1-T3 owned paths were staged.
 - [ ] Checkpoint commit contains only T1-T3 paths.
 - [ ] `git show --name-only <A1-checkpoint>` lists only T1-T3 owned paths.
@@ -489,7 +521,8 @@ Required before T4 starts:
 
 Required before Plan 1B starts:
 
-- [ ] T4-T5 matrix rows 1A-07 through 1A-16 pass.
+- [ ] Resolver active-generation consumption row 1A-06b and T4-T5 matrix rows
+      1A-07 through 1A-16 pass.
 - [ ] Plan 1A validation gates pass with command, exit code, pass/fail count,
       stale-proof result, and red/green result.
 - [ ] Dependency-direction receipt lists manifest changes and proves

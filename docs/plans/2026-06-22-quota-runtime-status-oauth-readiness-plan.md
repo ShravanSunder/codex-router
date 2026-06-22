@@ -3,7 +3,7 @@
 Date: 2026-06-22
 Branch: `feature/initial-codex-router`
 Status: umbrella/control plan; not executable; revised after plan-review `needs_revision`
-Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-734554d.md`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-918db95.md`
 Executable children:
 
 - `docs/plans/2026-06-22-codex-router-plan-1a-credential-state-substrate.md`
@@ -93,6 +93,11 @@ Each child plan must have:
 
 - [ ] Its own goal and non-goals.
 - [ ] Its own write surfaces.
+- [ ] Closed task-owned write surfaces: no vague buckets such as adjacent
+      service files, local-auth route support files, manifest edges, or
+      closeout-only receipts. Each task may name exact files or explicit
+      wildcards already present in the child write-surface list. Any new file
+      outside those entries requires a pre-task plan amendment.
 - [ ] Its own ordered checklist.
 - [ ] Its own requirement/proof matrix.
 - [ ] Its own validation gates.
@@ -335,6 +340,9 @@ These are not deferred:
 - [ ] Quota refresh one-writer behavior must appear in Plan 1B.
 - [ ] Installed-Codex generated-profile/token/WebSocket smoke must appear in
       Plan 1B final closeout.
+- [ ] Plan 1B live-proof row only verifies the current gate records
+      `not-run: approval required`; actual live OAuth/device-code or real quota
+      pooling proof remains Plan 2 or a reviewed replan.
 
 ## Route To Execution
 
