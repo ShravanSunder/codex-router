@@ -943,6 +943,7 @@ commands:
   token rotate --router-root <path>
   token export --router-root <path> [--shell posix]
   account login --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
+  account login --router-root <path> --label <label> --device-auth --allow-plaintext-file-secrets
   account import-codex-auth --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account list --router-root <path>
   quota status --router-root <path> [--format table|plain] [--all-limits]
@@ -964,6 +965,7 @@ mod tests {
     use std::net::Shutdown;
     use std::net::TcpListener;
     use std::net::TcpStream;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1800,6 +1802,86 @@ mod tests {
         );
         assert!(!output.stdout.contains("access-token-canary"));
         assert!(!output.stdout.contains("refresh-token-canary"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn account_login_device_auth_delegates_to_codex_and_imports_resulting_auth_json() {
+        let test_root = TestRoot::new("account-login-device-auth");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        let codex_bin = test_root.path().join("fake-codex");
+        let invocation_log = test_root.path().join("codex-invocation.log");
+        must_ok(fs::write(
+            &codex_bin,
+            format!(
+                r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" > "{}"
+test "$1" = "login"
+test "$2" = "--device-auth"
+test -n "${{CODEX_HOME:-}}"
+cat > "$CODEX_HOME/auth.json" <<'JSON'
+{{"auth_mode":"chatgpt","tokens":{{"access_token":"device-access-canary","refresh_token":"device-refresh-canary"}}}}
+JSON
+"#,
+                invocation_log.display()
+            ),
+        ));
+        let mut permissions = must_ok(fs::metadata(&codex_bin)).permissions();
+        permissions.set_mode(0o700);
+        must_ok(fs::set_permissions(&codex_bin, permissions));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "account",
+                "login",
+                "--router-root",
+                path_to_str(&router_root),
+                "--label",
+                "device primary",
+                "--device-auth",
+                "--codex-bin",
+                path_to_str(&codex_bin),
+                "--allow-plaintext-file-secrets",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let account_id = account_id("acct_device_primary");
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("device-auth account metadata should exist"));
+        assert_eq!(account.label(), "device primary");
+        assert_eq!(account.status(), AccountStatus::Enabled);
+        assert_eq!(account.active_credential_generation(), Some(1));
+
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
+            secrets.read_secret(&bundle_key),
+        )));
+        assert_eq!(
+            bundle.access_token().expose_secret(),
+            "device-access-canary"
+        );
+        assert_eq!(
+            bundle.refresh_token().map(SecretString::expose_secret),
+            Some("device-refresh-canary")
+        );
+        assert_eq!(
+            must_ok(fs::read_to_string(invocation_log)),
+            "login --device-auth\n"
+        );
+        assert!(
+            output
+                .stdout
+                .contains("logged in account: device primary\n")
+        );
+        assert!(output.stdout.contains("account_id: acct_device_primary\n"));
+        assert!(!output.stdout.contains("device-access-canary"));
+        assert!(!output.stdout.contains("device-refresh-canary"));
         assert!(output.stderr.is_empty());
     }
 

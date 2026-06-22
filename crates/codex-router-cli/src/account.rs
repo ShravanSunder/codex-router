@@ -3,6 +3,9 @@
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_router_core::ids::AccountId;
 use codex_router_secret_store::SecretStore;
@@ -34,6 +37,17 @@ pub enum AccountCommand {
         /// Explicit plaintext file-backend acknowledgement.
         allow_plaintext_file_secrets: bool,
     },
+    /// Delegates device-code login to Codex, then imports the resulting auth.json.
+    LoginDeviceAuth {
+        /// Router-owned root.
+        router_root: PathBuf,
+        /// Display label.
+        label: String,
+        /// Codex executable to run.
+        codex_bin: PathBuf,
+        /// Explicit plaintext file-backend acknowledgement.
+        allow_plaintext_file_secrets: bool,
+    },
     /// Imports an existing Codex OAuth auth.json into router-owned storage.
     ImportCodexAuth {
         /// Router-owned root.
@@ -62,13 +76,21 @@ impl AccountCommand {
 
         match command.as_str() {
             "login" => {
-                let options = AccountImportOptions::parse(parser)?;
-                Ok(Self::LoginAuthJson {
-                    router_root: options.router_root()?,
-                    label: options.label()?,
-                    auth_json: options.auth_json()?,
-                    allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
-                })
+                let options = AccountLoginOptions::parse(parser)?;
+                match options.method()? {
+                    AccountLoginMethod::AuthJson(auth_json) => Ok(Self::LoginAuthJson {
+                        router_root: options.router_root()?,
+                        label: options.label()?,
+                        auth_json,
+                        allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
+                    }),
+                    AccountLoginMethod::DeviceAuth { codex_bin } => Ok(Self::LoginDeviceAuth {
+                        router_root: options.router_root()?,
+                        label: options.label()?,
+                        codex_bin,
+                        allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
+                    }),
+                }
             }
             "import-codex-auth" => {
                 let options = AccountImportOptions::parse(parser)?;
@@ -122,6 +144,42 @@ pub enum AccountCommandError {
     /// API-key auth cannot be imported as quota-compatible OAuth state.
     #[error("account import-codex-auth requires Codex OAuth auth.json, not API-key auth")]
     ApiKeyAuth,
+    /// Login source was missing or ambiguous.
+    #[error("account login requires exactly one of --auth-json or --device-auth")]
+    LoginMethodRequired,
+    /// Device-auth process failed to start.
+    #[error("failed to start codex device-auth login {path}: {source}")]
+    DeviceAuthLaunch {
+        /// Codex executable path.
+        path: PathBuf,
+        /// IO source.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Device-auth process failed.
+    #[error("codex device-auth login failed with status {status}")]
+    DeviceAuthFailed {
+        /// Process status.
+        status: String,
+    },
+    /// Temporary Codex home creation failed.
+    #[error("failed to create temporary Codex home {path}: {source}")]
+    CreateTemporaryCodexHome {
+        /// Temporary Codex home path.
+        path: PathBuf,
+        /// IO source.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Temporary Codex home cleanup failed.
+    #[error("failed to remove temporary Codex home {path}: {source}")]
+    RemoveTemporaryCodexHome {
+        /// Temporary Codex home path.
+        path: PathBuf,
+        /// IO source.
+        #[source]
+        source: std::io::Error,
+    },
     /// Access token was missing.
     #[error("access token not found in auth json")]
     MissingAccessToken,
@@ -158,6 +216,18 @@ pub fn run_account_command(
             allow_plaintext_file_secrets,
             AccountImportOutputMode::Login,
         ),
+        AccountCommand::LoginDeviceAuth {
+            router_root,
+            label,
+            codex_bin,
+            allow_plaintext_file_secrets,
+        } => login_with_codex_device_auth(
+            stdout,
+            router_root,
+            label,
+            codex_bin,
+            allow_plaintext_file_secrets,
+        ),
         AccountCommand::ImportCodexAuth {
             router_root,
             label,
@@ -193,13 +263,23 @@ fn import_codex_auth(
         return Err(AccountCommandError::PlaintextFileSecretsNotAllowed);
     }
 
-    let trimmed_label = normalize_label(&label)?;
-    let account_id = account_id_from_label(&trimmed_label)?;
     let auth_text =
         std::fs::read_to_string(&auth_json).map_err(|error| AccountCommandError::ReadAuthJson {
             message: error.to_string(),
         })?;
-    let imported_auth = ImportedCodexAuth::parse(&auth_text)?;
+    import_codex_auth_text(stdout, router_root, label, &auth_text, output_mode)
+}
+
+fn import_codex_auth_text(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    label: String,
+    auth_text: &str,
+    output_mode: AccountImportOutputMode,
+) -> Result<(), AccountCommandError> {
+    let trimmed_label = normalize_label(&label)?;
+    let account_id = account_id_from_label(&trimmed_label)?;
+    let imported_auth = ImportedCodexAuth::parse(auth_text)?;
 
     create_router_root(&router_root)?;
     let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
@@ -234,6 +314,69 @@ fn import_codex_auth(
     }
 
     Ok(())
+}
+
+fn login_with_codex_device_auth(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    label: String,
+    codex_bin: PathBuf,
+    allow_plaintext_file_secrets: bool,
+) -> Result<(), AccountCommandError> {
+    if !allow_plaintext_file_secrets {
+        return Err(AccountCommandError::PlaintextFileSecretsNotAllowed);
+    }
+
+    let temporary_codex_home = temporary_codex_home_path();
+    std::fs::create_dir_all(&temporary_codex_home).map_err(|source| {
+        AccountCommandError::CreateTemporaryCodexHome {
+            path: temporary_codex_home.clone(),
+            source,
+        }
+    })?;
+    let status = Command::new(&codex_bin)
+        .arg("login")
+        .arg("--device-auth")
+        .env("CODEX_HOME", &temporary_codex_home)
+        .status()
+        .map_err(|source| AccountCommandError::DeviceAuthLaunch {
+            path: codex_bin.clone(),
+            source,
+        })?;
+    if !status.success() {
+        return Err(AccountCommandError::DeviceAuthFailed {
+            status: status.to_string(),
+        });
+    }
+
+    let auth_json = temporary_codex_home.join("auth.json");
+    let auth_text =
+        std::fs::read_to_string(&auth_json).map_err(|error| AccountCommandError::ReadAuthJson {
+            message: error.to_string(),
+        })?;
+    std::fs::remove_dir_all(&temporary_codex_home).map_err(|source| {
+        AccountCommandError::RemoveTemporaryCodexHome {
+            path: temporary_codex_home,
+            source,
+        }
+    })?;
+    import_codex_auth_text(
+        stdout,
+        router_root,
+        label,
+        &auth_text,
+        AccountImportOutputMode::Login,
+    )
+}
+
+fn temporary_codex_home_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    std::env::temp_dir().join(format!(
+        "codex-router-device-auth-{}-{nanos}",
+        std::process::id()
+    ))
 }
 
 /// Parsed import request used by CLI and failure-injection tests.
@@ -414,6 +557,85 @@ fn normalize_auth_mode(value: &str) -> String {
         .filter(|character| !matches!(character, '_' | '-' | ' '))
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct AccountLoginOptions {
+    router_root: Option<PathBuf>,
+    label: Option<String>,
+    auth_json: Option<PathBuf>,
+    device_auth: bool,
+    codex_bin: Option<PathBuf>,
+    allow_plaintext_file_secrets: bool,
+}
+
+impl AccountLoginOptions {
+    fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
+        let mut options = Self::default();
+
+        while let Some(argument) = parser.next_string()? {
+            match argument.as_str() {
+                "--router-root" => {
+                    options.router_root =
+                        Some(PathBuf::from(parser.next_required_value("--router-root")?));
+                }
+                "--label" => {
+                    options.label = Some(parser.next_required_value("--label")?);
+                }
+                "--auth-json" => {
+                    options.auth_json =
+                        Some(PathBuf::from(parser.next_required_value("--auth-json")?));
+                }
+                "--device-auth" => {
+                    options.device_auth = true;
+                }
+                "--codex-bin" => {
+                    options.codex_bin =
+                        Some(PathBuf::from(parser.next_required_value("--codex-bin")?));
+                }
+                "--allow-plaintext-file-secrets" => {
+                    options.allow_plaintext_file_secrets = true;
+                }
+                unknown => {
+                    return Err(CliError::UnknownOption {
+                        option: unknown.to_owned(),
+                    });
+                }
+            }
+        }
+
+        Ok(options)
+    }
+
+    fn router_root(&self) -> Result<PathBuf, CliError> {
+        self.router_root.clone().ok_or(CliError::MissingOption {
+            option: "--router-root",
+        })
+    }
+
+    fn label(&self) -> Result<String, CliError> {
+        self.label
+            .clone()
+            .ok_or(CliError::MissingOption { option: "--label" })
+    }
+
+    fn method(&self) -> Result<AccountLoginMethod, CliError> {
+        match (&self.auth_json, self.device_auth) {
+            (Some(_), true) | (None, false) => Err(AccountCommandError::LoginMethodRequired.into()),
+            (Some(auth_json), false) => Ok(AccountLoginMethod::AuthJson(auth_json.clone())),
+            (None, true) => Ok(AccountLoginMethod::DeviceAuth {
+                codex_bin: self
+                    .codex_bin
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("codex")),
+            }),
+        }
+    }
+}
+
+enum AccountLoginMethod {
+    AuthJson(PathBuf),
+    DeviceAuth { codex_bin: PathBuf },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
