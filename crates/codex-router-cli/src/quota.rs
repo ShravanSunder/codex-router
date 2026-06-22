@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
 use codex_router_state::repositories::AccountStateRepository;
@@ -38,6 +39,13 @@ pub enum QuotaCommand {
         /// Whether to include all known route bands.
         all_limits: bool,
     },
+    /// Refreshes persisted quota from the provider.
+    Refresh {
+        /// Router-owned root.
+        router_root: PathBuf,
+        /// Provider base URL.
+        base_url: String,
+    },
 }
 
 impl QuotaCommand {
@@ -55,6 +63,13 @@ impl QuotaCommand {
                     router_root: options.router_root()?,
                     format: options.format,
                     all_limits: options.all_limits,
+                })
+            }
+            "refresh" => {
+                let options = QuotaRefreshOptions::parse(parser)?;
+                Ok(Self::Refresh {
+                    router_root: options.router_root()?,
+                    base_url: options.base_url,
                 })
             }
             unknown => Err(CliError::UnknownCommand {
@@ -82,6 +97,15 @@ pub enum QuotaCommandError {
         /// Raw value.
         value: String,
     },
+    /// Quota refresh base URL is not one of the allowlisted provider URLs.
+    #[error("quota refresh base URL is not allowed: {base_url}")]
+    DisallowedBaseUrl {
+        /// Rejected base URL.
+        base_url: String,
+    },
+    /// Quota refresh is not implemented for allowed providers in this slice.
+    #[error("quota refresh provider execution is not implemented in Plan 1A")]
+    RefreshNotImplemented,
     /// State-store operation failed.
     #[error(transparent)]
     StateStore(#[from] StateStoreError),
@@ -101,7 +125,30 @@ pub fn run_quota_command(
             format,
             all_limits,
         } => render_quota_status(stdout, router_root, format, all_limits),
+        QuotaCommand::Refresh {
+            router_root,
+            base_url,
+        } => refresh_quota(stdout, router_root, base_url),
     }
+}
+
+fn refresh_quota(
+    _stdout: &mut impl Write,
+    _router_root: PathBuf,
+    base_url: String,
+) -> Result<(), QuotaCommandError> {
+    if !is_allowed_quota_refresh_base_url(&base_url) {
+        return Err(QuotaCommandError::DisallowedBaseUrl { base_url });
+    }
+
+    Err(QuotaCommandError::RefreshNotImplemented)
+}
+
+fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {
+    let trimmed = base_url.trim_end_matches('/');
+    trimmed == DEFAULT_CHATGPT_BACKEND_BASE_URL
+        || trimmed == "https://chatgpt.com"
+        || trimmed.starts_with("https://chatgpt.com/")
 }
 
 fn render_quota_status(
@@ -294,5 +341,51 @@ fn parse_quota_status_format(value: &str) -> Result<QuotaStatusFormat, CliError>
         unknown => Err(CliError::Quota(QuotaCommandError::InvalidFormat {
             value: unknown.to_owned(),
         })),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuotaRefreshOptions {
+    router_root: Option<PathBuf>,
+    base_url: String,
+}
+
+impl Default for QuotaRefreshOptions {
+    fn default() -> Self {
+        Self {
+            router_root: None,
+            base_url: DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+        }
+    }
+}
+
+impl QuotaRefreshOptions {
+    fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
+        let mut options = Self::default();
+
+        while let Some(argument) = parser.next_string()? {
+            match argument.as_str() {
+                "--router-root" => {
+                    options.router_root =
+                        Some(PathBuf::from(parser.next_required_value("--router-root")?));
+                }
+                "--base-url" => {
+                    options.base_url = parser.next_required_value("--base-url")?;
+                }
+                unknown => {
+                    return Err(CliError::UnknownOption {
+                        option: unknown.to_owned(),
+                    });
+                }
+            }
+        }
+
+        Ok(options)
+    }
+
+    fn router_root(&self) -> Result<PathBuf, CliError> {
+        self.router_root.clone().ok_or(CliError::MissingOption {
+            option: "--router-root",
+        })
     }
 }

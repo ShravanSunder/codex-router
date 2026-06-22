@@ -4,6 +4,7 @@ pub mod live_quota;
 pub mod oauth;
 pub mod quota_client;
 pub mod refresh_worker;
+pub mod router_credentials;
 
 /// Returns this crate's package name.
 #[must_use]
@@ -25,6 +26,7 @@ mod tests {
     use crate::refresh_worker::AccountRefreshInput;
     use crate::refresh_worker::RefreshWorkDecision;
     use crate::refresh_worker::RefreshWorker;
+    use crate::router_credentials::RouterCredentialBundle;
 
     #[test]
     fn reports_package_name() {
@@ -126,5 +128,23 @@ mod tests {
             assert_eq!(request.route_name(), "responses");
             Ok(QuotaFetchResponse::new(request.route_name(), 77))
         }
+    }
+
+    #[test]
+    fn router_credentials_debug_redacts_secret_fields() {
+        let bundle = RouterCredentialBundle::new(
+            "acct_primary",
+            "access-token-canary",
+            Some("refresh-token-canary"),
+            Some(2_000),
+        );
+        let debug = format!("{bundle:?}");
+
+        assert!(debug.contains("acct_primary"));
+        assert!(debug.contains("access_token"));
+        assert!(debug.contains("refresh_token"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("access-token-canary"));
+        assert!(!debug.contains("refresh-token-canary"));
     }
 }

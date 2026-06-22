@@ -4,6 +4,7 @@ use codex_router_core::audit::AuditEvent;
 use codex_router_core::audit::AuditEventFields;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::AuditOutcome;
+use codex_router_core::audit::AuditSinkError;
 use codex_router_core::audit::LocalAuthAuditResult;
 use codex_router_core::audit::ResponseCommitState;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
@@ -42,6 +43,37 @@ use crate::routes::RouteClass;
 use crate::routes::RouteKind;
 use crate::routes::classify_route;
 use crate::upstream::UpstreamRequestBuilder;
+
+/// Reports local audit append failures without exposing request or token material.
+pub trait AuditFailureReporter {
+    /// Reports one redacted audit failure diagnostic.
+    fn report_audit_failure(&self, diagnostic: &str);
+}
+
+/// Production audit failure reporter.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StderrAuditFailureReporter;
+
+impl AuditFailureReporter for StderrAuditFailureReporter {
+    fn report_audit_failure(&self, diagnostic: &str) {
+        eprintln!("{diagnostic}");
+    }
+}
+
+/// Appends one audit event and reports a redacted local diagnostic on failure.
+pub fn append_audit_event_with_reporter(
+    audit_sink: &AuditFileSink,
+    event: &AuditEvent,
+    reporter: &impl AuditFailureReporter,
+) {
+    if let Err(error) = audit_sink.append(event) {
+        reporter.report_audit_failure(&audit_failure_diagnostic(&error));
+    }
+}
+
+fn audit_failure_diagnostic(error: &AuditSinkError) -> String {
+    format!("audit append failed: {error}")
+}
 
 /// Client HTTP request DTO used by server adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -799,7 +831,7 @@ where
 
     fn emit_audit_event(&self, event: AuditEvent) {
         if let Some(audit_sink) = self.audit_sink {
-            let _result = audit_sink.append(&event);
+            append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
         }
     }
 }

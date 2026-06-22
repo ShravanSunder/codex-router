@@ -35,8 +35,10 @@ use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
 use crate::http_sse::HttpProxyRequest;
+use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::UpstreamAccountSelector;
 use crate::http_sse::allowed_audit_event;
+use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::http_sse::redacted_account_hash;
 use crate::local_auth::ProxyLocalAuthGate;
@@ -220,7 +222,7 @@ where
 
     fn emit_audit_event(&self, event: AuditEvent) {
         if let Some(audit_sink) = self.audit_sink {
-            let _result = audit_sink.append(&event);
+            append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
         }
     }
 

@@ -1741,6 +1741,47 @@ mod tests {
     }
 
     #[test]
+    fn account_import_codex_auth_redacts_refresh_token_in_error_paths() {
+        let test_root = TestRoot::new("account-import-redaction");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        let auth_json = test_root.path().join("auth.json");
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"refresh-token-canary","access_token":""}}"#,
+        ));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = match run_with_io(
+            vec![
+                "codex-router".into(),
+                "account".into(),
+                "import-codex-auth".into(),
+                "--router-root".into(),
+                router_root.as_os_str().to_owned(),
+                "--label".into(),
+                "primary".into(),
+                "--auth-json".into(),
+                auth_json.as_os_str().to_owned(),
+                "--allow-plaintext-file-secrets".into(),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("missing access token must fail"),
+            Err(error) => error,
+        };
+        let rendered_error = error.to_string();
+
+        assert_eq!(rendered_error, "access token not found in auth json");
+        assert!(!rendered_error.contains("refresh-token-canary"));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
     fn quota_status_reads_sqlite_rows_without_provider_io() {
         let test_root = TestRoot::new("quota-status");
         must_ok(fs::create_dir(test_root.path()));
@@ -1799,6 +1840,50 @@ mod tests {
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));
         assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_refresh_rejects_non_provider_base_url_before_token_egress() {
+        let test_root = TestRoot::new("quota-refresh-disallowed");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account_id = account_id("acct_refresh_reject");
+        let account = AccountRecord::new(account_id.clone(), "reject", AccountStatus::Enabled);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let access_key = must_ok(upstream_access_token_key(&account_id));
+        must_ok(secrets.write_secret(
+            &access_key,
+            &SecretString::new("quota-refresh-token-canary"),
+        ));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = match run_with_io(
+            vec![
+                "codex-router".into(),
+                "quota".into(),
+                "refresh".into(),
+                "--router-root".into(),
+                router_root.as_os_str().to_owned(),
+                "--base-url".into(),
+                "http://127.0.0.1:9".into(),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("disallowed quota base URL must fail before token egress"),
+            Err(error) => error,
+        };
+        let rendered_error = error.to_string();
+
+        assert!(rendered_error.contains("quota refresh base URL is not allowed"));
+        assert!(!rendered_error.contains("quota-refresh-token-canary"));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
     }
 
     #[test]

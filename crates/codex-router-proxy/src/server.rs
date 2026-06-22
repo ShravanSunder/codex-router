@@ -30,8 +30,10 @@ use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::HttpProxyResponse;
 use crate::http_sse::HttpRequestHandler;
 use crate::http_sse::RepositoryBackedAccountSelector;
+use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::StreamingHttpProxyResponse;
 use crate::http_sse::StreamingHttpRequestHandler;
+use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::routes::Method;
 use crate::routes::RouteClass;
@@ -329,11 +331,16 @@ impl LoopbackRouterRuntime {
                 Ok(_generation) => {}
                 Err(reason) => {
                     if let Some(audit_sink) = &self.audit_sink {
-                        let _result = audit_sink.append(&local_auth_rejection_audit_event(
+                        let event = local_auth_rejection_audit_event(
                             TransportKind::WebSocket,
                             AuditRouteKind::ResponsesWebSocket,
                             reason,
-                        ));
+                        );
+                        append_audit_event_with_reporter(
+                            audit_sink,
+                            &event,
+                            &StderrAuditFailureReporter,
+                        );
                     }
                     write_websocket_rejection(stream, 401, "Unauthorized")?;
                     return Ok(());

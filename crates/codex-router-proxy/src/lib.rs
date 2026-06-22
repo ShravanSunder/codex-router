@@ -19,6 +19,7 @@ mod tests {
     use super::package_name;
     use crate::headers::Header;
     use crate::headers::HeaderCollection;
+    use crate::http_sse::AuditFailureReporter;
     use crate::http_sse::AuthenticatedHttpProxyService;
     use crate::http_sse::HttpProxyError;
     use crate::http_sse::HttpProxyRequest;
@@ -33,6 +34,7 @@ mod tests {
     use crate::http_sse::UpstreamAccountSelector;
     use crate::http_sse::UpstreamHttpRequest;
     use crate::http_sse::UpstreamHttpTransport;
+    use crate::http_sse::append_audit_event_with_reporter;
     use crate::local_auth::ProxyLocalAuthGate;
     use crate::routes::Method;
     use crate::routes::RouteClass;
@@ -56,6 +58,15 @@ mod tests {
     use crate::websocket::WebSocketFrame;
     use crate::websocket::WebSocketHandshakeRequest;
     use crate::websocket::WebSocketProtocolRouter;
+    use codex_router_core::audit::AuditEvent;
+    use codex_router_core::audit::AuditEventFields;
+    use codex_router_core::audit::AuditFileSink;
+    use codex_router_core::audit::AuditOutcome;
+    use codex_router_core::audit::LocalAuthAuditResult;
+    use codex_router_core::audit::ResponseCommitState;
+    use codex_router_core::audit::RouteKind as AuditRouteKind;
+    use codex_router_core::audit::TransportKind;
+    use codex_router_core::ids::RequestId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::local_auth::LocalAuthError;
     use codex_router_core::local_auth::LocalRouterAuth;
@@ -1265,6 +1276,55 @@ mod tests {
                 Err(error) => panic!("audit metadata should read: {error}"),
             };
             assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn assembled_loopback_router_runtime_redacts_http_and_websocket_audit_events() {
+        assembled_loopback_router_runtime_writes_redacted_private_audit_events();
+        loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel();
+    }
+
+    #[test]
+    fn audit_append_failure_reports_through_audit_failure_reporter_without_secret_leak() {
+        let temp_dir = ProxyTestTempDir::new("audit_failure_reporter");
+        let blocked_parent = temp_dir.path().join("audit-parent-is-file");
+        match fs::write(&blocked_parent, "not-a-directory") {
+            Ok(()) => {}
+            Err(error) => panic!("blocked parent fixture should write: {error}"),
+        }
+        let sink = AuditFileSink::new(blocked_parent.join("events.jsonl"));
+        let reporter = RecordingAuditFailureReporter::default();
+        let event = AuditEvent::proxy_decision(AuditEventFields {
+            request_id: RequestId::new("request-audit-failure"),
+            route_kind: AuditRouteKind::Responses,
+            transport_kind: TransportKind::Http,
+            local_auth_result: LocalAuthAuditResult::Valid,
+            outcome: AuditOutcome::Allowed,
+            decision_reason: "allowed",
+            response_commit_state: ResponseCommitState::Committed,
+            account_hash: Some("acct_hash_without_secret".to_owned()),
+            error_class: None,
+        });
+
+        append_audit_event_with_reporter(&sink, &event, &reporter);
+        let diagnostics = reporter.diagnostics.borrow();
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("audit append failed"));
+        assert!(!diagnostics[0].contains("access-token-canary"));
+        assert!(!diagnostics[0].contains("refresh-token-canary"));
+        assert!(!diagnostics[0].contains("local-token-canary"));
+    }
+
+    #[derive(Default)]
+    struct RecordingAuditFailureReporter {
+        diagnostics: RefCell<Vec<String>>,
+    }
+
+    impl AuditFailureReporter for RecordingAuditFailureReporter {
+        fn report_audit_failure(&self, diagnostic: &str) {
+            self.diagnostics.borrow_mut().push(diagnostic.to_owned());
         }
     }
 
