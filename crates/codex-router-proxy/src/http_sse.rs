@@ -1,5 +1,7 @@
 //! HTTP and SSE proxy handling without network binding.
 
+use codex_router_auth::resolver::CredentialResolverError;
+use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_core::audit::AuditEvent;
 use codex_router_core::audit::AuditEventFields;
 use codex_router_core::audit::AuditFileSink;
@@ -16,9 +18,6 @@ use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::redaction::SecretString;
 use codex_router_quota::snapshot::QuotaSnapshot;
 use codex_router_quota::snapshot::SnapshotFreshness;
-use codex_router_secret_store::account_tokens::upstream_access_token_key;
-use codex_router_secret_store::file_backend::SecretStore;
-use codex_router_secret_store::model::SecretStoreError;
 use codex_router_selection::eligibility::Eligibility;
 use codex_router_selection::eligibility::SelectionCandidate;
 use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
@@ -316,6 +315,12 @@ pub enum HttpProxyError {
         /// Selection failure reason.
         reason: QuotaAwareAccountSelectorError,
     },
+    /// Provider credential resolution failed before upstream egress.
+    #[error("provider credential resolution failed: {reason}")]
+    ProviderCredential {
+        /// Credential resolver failure reason.
+        reason: CredentialResolverError,
+    },
 }
 
 /// Handles an HTTP request after server parsing.
@@ -359,16 +364,16 @@ where
     pub fn handle(
         &self,
         request: HttpProxyRequest,
-        upstream_auth_token: SecretString,
+        provider_bearer_token: SecretString,
     ) -> Result<HttpProxyResponse, HttpProxyError> {
-        self.build_upstream_request(request, upstream_auth_token)
+        self.build_upstream_request(request, provider_bearer_token)
             .and_then(|request| self.upstream.send(request))
     }
 
     fn build_upstream_request(
         &self,
         request: HttpProxyRequest,
-        upstream_auth_token: SecretString,
+        provider_bearer_token: SecretString,
     ) -> Result<UpstreamHttpRequest, HttpProxyError> {
         let original_path = request.path.clone();
         let classification_path = path_without_query(&request.path);
@@ -388,7 +393,7 @@ where
                 |builder, header| builder.with_header(header),
             )
             .with_body(request.body)
-            .build(upstream_auth_token);
+            .build(provider_bearer_token);
 
         Ok(UpstreamHttpRequest {
             method: request.method,
@@ -408,32 +413,26 @@ where
     pub fn handle_streaming(
         &self,
         request: HttpProxyRequest,
-        upstream_auth_token: SecretString,
+        provider_bearer_token: SecretString,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
-        self.build_upstream_request(request, upstream_auth_token)
+        self.build_upstream_request(request, provider_bearer_token)
             .and_then(|request| self.upstream.send_streaming(request))
     }
 }
 
 /// Selected upstream account material needed by the proxy.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SelectedUpstreamAccount {
+pub struct SelectedAccountDecision {
     account_id: AccountId,
-    upstream_auth_token: SecretString,
     selection_reason: String,
 }
 
-impl SelectedUpstreamAccount {
+impl SelectedAccountDecision {
     /// Creates selected account material.
     #[must_use]
-    pub fn new(
-        account_id: AccountId,
-        upstream_auth_token: SecretString,
-        selection_reason: impl Into<String>,
-    ) -> Self {
+    pub fn new(account_id: AccountId, selection_reason: impl Into<String>) -> Self {
         Self {
             account_id,
-            upstream_auth_token,
             selection_reason: selection_reason.into(),
         }
     }
@@ -444,12 +443,6 @@ impl SelectedUpstreamAccount {
         &self.account_id
     }
 
-    /// Returns the selected upstream bearer token.
-    #[must_use]
-    pub fn upstream_auth_token(&self) -> &SecretString {
-        &self.upstream_auth_token
-    }
-
     /// Returns a redacted static/audit-safe selection reason.
     #[must_use]
     pub fn selection_reason(&self) -> &str {
@@ -458,20 +451,19 @@ impl SelectedUpstreamAccount {
 }
 
 /// Selects an upstream account after local auth succeeds.
-pub trait UpstreamAccountSelector {
+pub trait AccountDecisionSelector {
     /// Selects account material for one request.
     fn select_upstream_account(
         &self,
         request: &HttpProxyRequest,
         token_generation: TokenGeneration,
-    ) -> Result<SelectedUpstreamAccount, HttpProxyError>;
+    ) -> Result<SelectedAccountDecision, HttpProxyError>;
 }
 
 /// Account state consumed by the quota-aware proxy selector adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuotaAwareAccountState {
     account_id: AccountId,
-    upstream_auth_token: SecretString,
     remaining_headroom: u32,
     freshness: SnapshotFreshness,
 }
@@ -481,13 +473,11 @@ impl QuotaAwareAccountState {
     #[must_use]
     pub const fn new(
         account_id: AccountId,
-        upstream_auth_token: SecretString,
         remaining_headroom: u32,
         freshness: SnapshotFreshness,
     ) -> Self {
         Self {
             account_id,
-            upstream_auth_token,
             remaining_headroom,
             freshness,
         }
@@ -536,46 +526,41 @@ impl QuotaAwareAccountSelector {
     }
 }
 
-impl UpstreamAccountSelector for QuotaAwareAccountSelector {
+impl AccountDecisionSelector for QuotaAwareAccountSelector {
     fn select_upstream_account(
         &self,
         _request: &HttpProxyRequest,
         _token_generation: TokenGeneration,
-    ) -> Result<SelectedUpstreamAccount, HttpProxyError> {
+    ) -> Result<SelectedAccountDecision, HttpProxyError> {
         select_from_account_states(&self.accounts, &self.weighted_selector)
     }
 }
 
 /// Selector that hydrates account state from repositories at request time.
 #[derive(Debug)]
-pub struct RepositoryBackedAccountSelector<'a, R, S>
+pub struct RepositoryBackedAccountSelector<'a, R>
 where
     R: AccountStateRepository + QuotaSnapshotRepository,
-    S: SecretStore,
 {
     state_repository: &'a R,
-    secret_store: &'a S,
     now_unix_seconds: u64,
     max_snapshot_age_seconds: u64,
     weighted_selector: Arc<Mutex<WeightedDeficitSelector>>,
 }
 
-impl<'a, R, S> RepositoryBackedAccountSelector<'a, R, S>
+impl<'a, R> RepositoryBackedAccountSelector<'a, R>
 where
     R: AccountStateRepository + QuotaSnapshotRepository,
-    S: SecretStore,
 {
     /// Creates a repository-backed selector.
     #[must_use]
     pub fn new(
         state_repository: &'a R,
-        secret_store: &'a S,
         now_unix_seconds: u64,
         max_snapshot_age_seconds: u64,
     ) -> Self {
         Self {
             state_repository,
-            secret_store,
             now_unix_seconds,
             max_snapshot_age_seconds,
             weighted_selector: Arc::new(Mutex::new(WeightedDeficitSelector::default())),
@@ -586,14 +571,12 @@ where
     #[must_use]
     pub fn new_with_weighted_selector(
         state_repository: &'a R,
-        secret_store: &'a S,
         now_unix_seconds: u64,
         max_snapshot_age_seconds: u64,
         weighted_selector: Arc<Mutex<WeightedDeficitSelector>>,
     ) -> Self {
         Self {
             state_repository,
-            secret_store,
             now_unix_seconds,
             max_snapshot_age_seconds,
             weighted_selector,
@@ -601,16 +584,15 @@ where
     }
 }
 
-impl<R, S> UpstreamAccountSelector for RepositoryBackedAccountSelector<'_, R, S>
+impl<R> AccountDecisionSelector for RepositoryBackedAccountSelector<'_, R>
 where
     R: AccountStateRepository + QuotaSnapshotRepository,
-    S: SecretStore,
 {
     fn select_upstream_account(
         &self,
         request: &HttpProxyRequest,
         _token_generation: TokenGeneration,
-    ) -> Result<SelectedUpstreamAccount, HttpProxyError> {
+    ) -> Result<SelectedAccountDecision, HttpProxyError> {
         let route_band = route_band_for_request(request)?;
         let accounts =
             self.state_repository
@@ -623,24 +605,9 @@ where
             if account.status() != AccountStatus::Enabled {
                 continue;
             }
-            let token_key = upstream_access_token_key(account.account_id()).map_err(|_error| {
-                HttpProxyError::Selection {
-                    reason: QuotaAwareAccountSelectorError::SecretUnavailable,
-                }
-            })?;
-            let upstream_auth_token = match self.secret_store.read_secret(&token_key) {
-                Ok(token) => token,
-                Err(SecretStoreError::Filesystem { source, .. })
-                    if source.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    continue;
-                }
-                Err(_error) => {
-                    return Err(HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::SecretUnavailable,
-                    });
-                }
-            };
+            if account.active_credential_generation().is_none() {
+                continue;
+            }
             let snapshot = self
                 .state_repository
                 .load_snapshot_for_route_band(account.account_id(), route_band)
@@ -649,7 +616,6 @@ where
                 })?;
             selector_accounts.push(account_state_from_repositories(
                 account.account_id().clone(),
-                upstream_auth_token,
                 snapshot.as_ref(),
                 route_band,
                 self.now_unix_seconds,
@@ -664,7 +630,7 @@ where
 fn select_from_account_states(
     accounts: &[QuotaAwareAccountState],
     weighted_selector: &Mutex<WeightedDeficitSelector>,
-) -> Result<SelectedUpstreamAccount, HttpProxyError> {
+) -> Result<SelectedAccountDecision, HttpProxyError> {
     let known_fresh_account_exists = accounts.iter().any(|account| {
         account.remaining_headroom > 0
             && matches!(account.freshness, SnapshotFreshness::Fresh { .. })
@@ -689,12 +655,6 @@ fn select_from_account_states(
             .ok_or(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
             })?;
-    let selected_input = accounts
-        .iter()
-        .find(|account| account.account_id == selected_account_id)
-        .ok_or(HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-        })?;
     let selected_candidate = weighted_candidates
         .iter()
         .find(|candidate| candidate.account_id == selected_account_id)
@@ -702,28 +662,21 @@ fn select_from_account_states(
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
         })?;
 
-    Ok(SelectedUpstreamAccount::new(
+    Ok(SelectedAccountDecision::new(
         selected_account_id,
-        selected_input.upstream_auth_token.clone(),
         selected_candidate.selection_reason,
     ))
 }
 
 fn account_state_from_repositories(
     account_id: AccountId,
-    upstream_auth_token: SecretString,
     snapshot: Option<&PersistedQuotaSnapshot>,
     route_band: &str,
     now_unix_seconds: u64,
     max_snapshot_age_seconds: u64,
 ) -> QuotaAwareAccountState {
     let Some(snapshot) = snapshot else {
-        return QuotaAwareAccountState::new(
-            account_id,
-            upstream_auth_token,
-            0,
-            SnapshotFreshness::Unknown,
-        );
+        return QuotaAwareAccountState::new(account_id, 0, SnapshotFreshness::Unknown);
     };
     let remaining_headroom = if snapshot.route_band() == route_band {
         snapshot.remaining_headroom()
@@ -736,12 +689,7 @@ fn account_state_from_repositories(
         max_snapshot_age_seconds,
     );
 
-    QuotaAwareAccountState::new(
-        account_id,
-        upstream_auth_token,
-        remaining_headroom,
-        freshness,
-    )
+    QuotaAwareAccountState::new(account_id, remaining_headroom, freshness)
 }
 
 fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, HttpProxyError> {
@@ -795,28 +743,37 @@ const fn selection_reason_for_freshness(freshness: SnapshotFreshness) -> &'stati
 
 /// HTTP/SSE service that composes local auth, account selection, and forwarding.
 #[derive(Clone, Copy, Debug)]
-pub struct AuthenticatedHttpProxyService<'a, T, S>
+pub struct AuthenticatedHttpProxyService<'a, T, S, C>
 where
     T: UpstreamHttpTransport,
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
     auth_gate: &'a ProxyLocalAuthGate,
     selector: &'a S,
+    credential_resolver: &'a C,
     proxy: HttpProxyService<'a, T>,
     audit_sink: Option<&'a AuditFileSink>,
 }
 
-impl<'a, T, S> AuthenticatedHttpProxyService<'a, T, S>
+impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C>
 where
     T: UpstreamHttpTransport,
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
     /// Creates an authenticated HTTP proxy service.
     #[must_use]
-    pub const fn new(auth_gate: &'a ProxyLocalAuthGate, selector: &'a S, upstream: &'a T) -> Self {
+    pub const fn new(
+        auth_gate: &'a ProxyLocalAuthGate,
+        selector: &'a S,
+        credential_resolver: &'a C,
+        upstream: &'a T,
+    ) -> Self {
         Self {
             auth_gate,
             selector,
+            credential_resolver,
             proxy: HttpProxyService::new(upstream),
             audit_sink: None,
         }
@@ -836,10 +793,11 @@ where
     }
 }
 
-impl<T, S> HttpRequestHandler for AuthenticatedHttpProxyService<'_, T, S>
+impl<T, S, C> HttpRequestHandler for AuthenticatedHttpProxyService<'_, T, S, C>
 where
     T: UpstreamHttpTransport,
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
     fn handle_request(
         &self,
@@ -864,8 +822,14 @@ where
             .selector
             .select_upstream_account(&request, token_generation)?;
         let account_hash = redacted_account_hash(selected.account_id());
+        let resolved = self
+            .credential_resolver
+            .resolve_provider_credentials(selected.account_id())
+            .map_err(|reason| HttpProxyError::ProviderCredential { reason })?;
 
-        let response = self.proxy.handle(request, selected.upstream_auth_token)?;
+        let response = self
+            .proxy
+            .handle(request, resolved.access_token().clone())?;
         self.emit_audit_event(allowed_audit_event(
             TransportKind::Http,
             audit_route_kind,
@@ -876,10 +840,11 @@ where
     }
 }
 
-impl<T, S> StreamingHttpRequestHandler for AuthenticatedHttpProxyService<'_, T, S>
+impl<T, S, C> StreamingHttpRequestHandler for AuthenticatedHttpProxyService<'_, T, S, C>
 where
     T: UpstreamHttpTransport + StreamingUpstreamHttpTransport,
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
     fn handle_streaming_request(
         &self,
@@ -904,10 +869,14 @@ where
             .selector
             .select_upstream_account(&request, token_generation)?;
         let account_hash = redacted_account_hash(selected.account_id());
+        let resolved = self
+            .credential_resolver
+            .resolve_provider_credentials(selected.account_id())
+            .map_err(|reason| HttpProxyError::ProviderCredential { reason })?;
 
         let response = self
             .proxy
-            .handle_streaming(request, selected.upstream_auth_token)?;
+            .handle_streaming(request, resolved.access_token().clone())?;
         self.emit_audit_event(allowed_audit_event(
             TransportKind::Http,
             audit_route_kind,

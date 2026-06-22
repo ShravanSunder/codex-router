@@ -17,12 +17,12 @@ use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
-use codex_router_secret_store::file_backend::FileSecretStore;
-use codex_router_secret_store::model::SecretStoreError;
 use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
+use crate::credential_runtime::ProxyCredentialResolver;
+use crate::credential_runtime::ProxyCredentialResolverOpenError;
 use crate::headers::Header;
 use crate::http_sse::AuthenticatedHttpProxyService;
 use crate::http_sse::HttpProxyError;
@@ -204,7 +204,7 @@ impl LoopbackRouterRuntimeConfig {
 pub struct LoopbackRouterRuntime {
     server: LoopbackServerRuntime,
     state_store: SqliteStateStore,
-    secret_store: FileSecretStore,
+    credential_resolver: ProxyCredentialResolver,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -220,7 +220,11 @@ impl LoopbackRouterRuntime {
     /// Opens router-owned state/secrets and binds the loopback listener.
     pub fn start(config: LoopbackRouterRuntimeConfig) -> Result<Self, LoopbackRouterRuntimeError> {
         let state_store = SqliteStateStore::open(&config.state_database_path)?;
-        let secret_store = FileSecretStore::open(&config.secret_store_root)?;
+        let credential_resolver = ProxyCredentialResolver::open(
+            &config.state_database_path,
+            &config.secret_store_root,
+            config.now_unix_seconds,
+        )?;
         let auth_gate = crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
             config.local_token,
             Vec::new(),
@@ -233,7 +237,7 @@ impl LoopbackRouterRuntime {
         Ok(Self {
             server,
             state_store,
-            secret_store,
+            credential_resolver,
             auth_gate,
             upstream,
             upstream_endpoint,
@@ -283,13 +287,16 @@ impl LoopbackRouterRuntime {
             .map_err(LoopbackRouterRuntimeError::ListenerClone)?;
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
-            &self.secret_store,
             self.now_unix_seconds,
             self.max_snapshot_age_seconds,
             Arc::clone(&self.weighted_selector),
         );
-        let service =
-            AuthenticatedHttpProxyService::new(&self.auth_gate, &selector, &self.upstream);
+        let service = AuthenticatedHttpProxyService::new(
+            &self.auth_gate,
+            &selector,
+            &self.credential_resolver,
+            &self.upstream,
+        );
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -356,7 +363,6 @@ impl LoopbackRouterRuntime {
 
             let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
                 &self.state_store,
-                &self.secret_store,
                 self.now_unix_seconds,
                 self.max_snapshot_age_seconds,
                 Arc::clone(&self.weighted_selector),
@@ -366,6 +372,7 @@ impl LoopbackRouterRuntime {
                 BlockingWebSocketTunnel::new_with_revocation_registry_and_audit_sink(
                     &self.auth_gate,
                     &selector,
+                    &self.credential_resolver,
                     &protocol_router,
                     self.websocket_revocations.clone(),
                     audit_sink,
@@ -374,6 +381,7 @@ impl LoopbackRouterRuntime {
                 BlockingWebSocketTunnel::new_with_revocation_registry(
                     &self.auth_gate,
                     &selector,
+                    &self.credential_resolver,
                     &protocol_router,
                     self.websocket_revocations.clone(),
                 )
@@ -394,13 +402,16 @@ impl LoopbackRouterRuntime {
 
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
-            &self.secret_store,
             self.now_unix_seconds,
             self.max_snapshot_age_seconds,
             Arc::clone(&self.weighted_selector),
         );
-        let service =
-            AuthenticatedHttpProxyService::new(&self.auth_gate, &selector, &self.upstream);
+        let service = AuthenticatedHttpProxyService::new(
+            &self.auth_gate,
+            &selector,
+            &self.credential_resolver,
+            &self.upstream,
+        );
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -515,9 +526,9 @@ pub enum LoopbackRouterRuntimeError {
     /// Opening or reading SQLite state failed.
     #[error(transparent)]
     State(#[from] StateStoreError),
-    /// Opening or reading secret state failed.
+    /// Opening runtime credential state failed.
     #[error(transparent)]
-    Secret(#[from] SecretStoreError),
+    CredentialResolver(#[from] ProxyCredentialResolverOpenError),
     /// Listener cloning failed before the bounded serve loop.
     #[error("failed to clone loopback listener")]
     ListenerClone(#[source] std::io::Error),

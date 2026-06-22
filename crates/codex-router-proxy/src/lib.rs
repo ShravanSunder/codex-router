@@ -1,5 +1,6 @@
 //! Loopback proxy boundary for codex-router.
 
+mod credential_runtime;
 pub mod headers;
 pub mod http_sse;
 pub mod local_auth;
@@ -19,6 +20,7 @@ mod tests {
     use super::package_name;
     use crate::headers::Header;
     use crate::headers::HeaderCollection;
+    use crate::http_sse::AccountDecisionSelector;
     use crate::http_sse::AuditFailureReporter;
     use crate::http_sse::AuthenticatedHttpProxyService;
     use crate::http_sse::HttpProxyError;
@@ -30,8 +32,7 @@ mod tests {
     use crate::http_sse::QuotaAwareAccountSelectorError;
     use crate::http_sse::QuotaAwareAccountState;
     use crate::http_sse::RepositoryBackedAccountSelector;
-    use crate::http_sse::SelectedUpstreamAccount;
-    use crate::http_sse::UpstreamAccountSelector;
+    use crate::http_sse::SelectedAccountDecision;
     use crate::http_sse::UpstreamHttpRequest;
     use crate::http_sse::UpstreamHttpTransport;
     use crate::http_sse::append_audit_event_with_reporter;
@@ -58,6 +59,12 @@ mod tests {
     use crate::websocket::WebSocketFrame;
     use crate::websocket::WebSocketHandshakeRequest;
     use crate::websocket::WebSocketProtocolRouter;
+    use codex_router_auth::resolver::CredentialRefreshClient;
+    use codex_router_auth::resolver::CredentialResolverError;
+    use codex_router_auth::resolver::NoopCredentialRefreshClient;
+    use codex_router_auth::resolver::ProviderCredentialResolver;
+    use codex_router_auth::resolver::ResolvedProviderCredential;
+    use codex_router_auth::resolver::RouterCredentialResolver;
     use codex_router_core::audit::AuditEvent;
     use codex_router_core::audit::AuditEventFields;
     use codex_router_core::audit::AuditFileSink;
@@ -73,7 +80,8 @@ mod tests {
     use codex_router_core::local_auth::LocalRouterTokenRecord;
     use codex_router_core::redaction::SecretString;
     use codex_router_quota::snapshot::SnapshotFreshness;
-    use codex_router_secret_store::account_tokens::upstream_access_token_key;
+    use codex_router_secret_store::account_tokens::AccountCredentialBundle;
+    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::file_backend::FileSecretStore;
     use codex_router_secret_store::file_backend::SecretStore;
     use codex_router_state::account::AccountRecord;
@@ -360,6 +368,46 @@ mod tests {
     }
 
     #[test]
+    fn http_proxy_resolver_refreshes_expired_access_token_before_upstream_egress() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"ok".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("resolved-upstream-token");
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+
+        let response = must_ok(
+            service.handle_request(
+                HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_header(Header::new("Authorization", "Bearer stale-token-canary"))
+                    .with_body(br#"{"input":"hi"}"#.to_vec()),
+            ),
+        );
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
+        );
+        assert_eq!(resolver.take_recorded(), vec!["acct_selected".to_owned()]);
+        let recorded = upstream.take_recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].headers().values("authorization"),
+            vec!["Bearer resolved-upstream-token"]
+        );
+        assert_ne!(
+            recorded[0].headers().values("authorization"),
+            vec!["Bearer stale-token-canary"]
+        );
+    }
+
+    #[test]
     fn http_proxy_preserves_query_string_after_route_classification() {
         let upstream = RecordingUpstream::new(HttpProxyResponse::new(
             200,
@@ -414,9 +462,11 @@ mod tests {
             HeaderCollection::default(),
             Vec::new(),
         ));
-        let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
-        let service = AuthenticatedHttpProxyService::new(&auth_gate, &selector, &upstream);
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
 
         let error = match service.handle_request(
             HttpProxyRequest::new(Method::Post, "/v1/responses")
@@ -443,9 +493,11 @@ mod tests {
             HeaderCollection::default(),
             b"data: kept\n\n".to_vec(),
         ));
-        let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
-        let service = AuthenticatedHttpProxyService::new(&auth_gate, &selector, &upstream);
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
 
         let response = match service.handle_request(
             HttpProxyRequest::new(Method::Post, "/v1/responses?stream=true")
@@ -476,16 +528,47 @@ mod tests {
     }
 
     #[test]
+    fn http_proxy_missing_refresh_token_fails_closed_before_upstream_egress() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"should-not-send".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver =
+            RejectingProviderCredentialResolver::new(CredentialResolverError::RefreshUnavailable);
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+
+        let error = match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+        ) {
+            Ok(response) => panic!("missing refresh token should fail closed: {response:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            HttpProxyError::ProviderCredential {
+                reason: CredentialResolverError::RefreshUnavailable
+            }
+        );
+        assert_eq!(resolver.take_recorded(), vec!["acct_selected".to_owned()]);
+        assert!(upstream.take_recorded().is_empty());
+    }
+
+    #[test]
     fn quota_aware_selector_prefers_fresh_headroom_over_penalized_stale_account() {
         let fresh_account = quota_account(
             "acct_fresh",
-            "fresh-token",
             50,
             SnapshotFreshness::Fresh { age_seconds: 10 },
         );
         let stale_account = quota_account(
             "acct_stale",
-            "stale-token",
             100,
             SnapshotFreshness::StaleWithPenalty { age_seconds: 600 },
         );
@@ -500,10 +583,6 @@ mod tests {
         };
 
         assert_eq!(selected.account_id().as_str(), "acct_fresh");
-        assert_eq!(
-            selected.upstream_auth_token().expose_secret(),
-            "fresh-token"
-        );
         assert_eq!(selected.selection_reason(), "fresh_quota");
     }
 
@@ -511,7 +590,6 @@ mod tests {
     fn quota_aware_selector_fails_closed_when_no_account_has_headroom() {
         let selector = QuotaAwareAccountSelector::new(vec![quota_account(
             "acct_empty",
-            "empty-token",
             0,
             SnapshotFreshness::Fresh { age_seconds: 10 },
         )]);
@@ -552,7 +630,7 @@ mod tests {
         persist_account_with_snapshot_and_token(&state, &secrets, &alpha, 80, "alpha-token");
         persist_account_with_snapshot_and_token(&state, &secrets, &disabled, 500, "disabled-token");
 
-        let selector = RepositoryBackedAccountSelector::new(&state, &secrets, 1_030, 60);
+        let selector = RepositoryBackedAccountSelector::new(&state, 1_030, 60);
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
@@ -562,10 +640,6 @@ mod tests {
         };
 
         assert_eq!(selected.account_id().as_str(), "acct_alpha");
-        assert_eq!(
-            selected.upstream_auth_token().expose_secret(),
-            "alpha-token"
-        );
         assert_eq!(selected.selection_reason(), "fresh_quota");
     }
 
@@ -587,7 +661,10 @@ mod tests {
             "route-specific",
             AccountStatus::Enabled,
         );
-        if let Err(error) = AccountStateRepository::upsert_account(&state, &account) {
+        if let Err(error) = AccountStateRepository::upsert_account(
+            &state,
+            &account.clone().with_active_credential_generation(1),
+        ) {
             panic!("account should persist: {error}");
         }
         let responses_snapshot = PersistedQuotaSnapshot::new(
@@ -610,17 +687,24 @@ mod tests {
         if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(&state, &models_snapshot) {
             panic!("models quota should persist: {error}");
         }
-        let token_key = match upstream_access_token_key(account.account_id()) {
+        let token_key = match account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,
             Err(error) => panic!("token key should build: {error}"),
         };
-        if let Err(error) =
-            secrets.write_secret(&token_key, &SecretString::new("route-specific-token"))
+        let bundle = match AccountCredentialBundle::imported_codex_auth(
+            "route-specific-token",
+            Some("route-specific-refresh-token".to_owned()),
+        )
+        .to_secret_string()
         {
+            Ok(bundle) => bundle,
+            Err(error) => panic!("credential bundle should serialize: {error}"),
+        };
+        if let Err(error) = secrets.write_secret(&token_key, &bundle) {
             panic!("upstream token should persist: {error}");
         }
 
-        let selector = RepositoryBackedAccountSelector::new(&state, &secrets, 1_030, 60);
+        let selector = RepositoryBackedAccountSelector::new(&state, 1_030, 60);
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Get, "/v1/models"),
             TokenGeneration::new(1),
@@ -629,10 +713,6 @@ mod tests {
             Err(error) => panic!("models request should select from models quota: {error}"),
         };
         assert_eq!(selected.account_id(), account.account_id());
-        assert_eq!(
-            selected.upstream_auth_token().expose_secret(),
-            "route-specific-token"
-        );
 
         assert_eq!(
             selector.select_upstream_account(
@@ -725,9 +805,11 @@ mod tests {
                     b"data: ok\n\n".to_vec(),
                 ),
             );
-            let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+            let selector = RecordingSelector::new();
+            let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
-            let service = AuthenticatedHttpProxyService::new(&auth_gate, &selector, &upstream);
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
 
             match LoopbackHttpAdapter::handle_connection(stream, &service) {
                 Ok(()) => {}
@@ -811,9 +893,11 @@ mod tests {
                 request_sender,
                 HttpProxyResponse::new(200, HeaderCollection::default(), b"ok".to_vec()),
             );
-            let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+            let selector = RecordingSelector::new();
+            let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
-            let service = AuthenticatedHttpProxyService::new(&auth_gate, &selector, &upstream);
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
 
             match LoopbackHttpAdapter::handle_connection(stream, &service) {
                 Ok(()) => {}
@@ -876,9 +960,11 @@ mod tests {
                 request_sender,
                 HttpProxyResponse::new(200, HeaderCollection::default(), b"ok".to_vec()),
             );
-            let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+            let selector = RecordingSelector::new();
+            let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
-            let service = AuthenticatedHttpProxyService::new(&auth_gate, &selector, &upstream);
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
 
             match LoopbackHttpServer::serve_connections(listener, &service, 2) {
                 Ok(handled) => handled,
@@ -2261,7 +2347,6 @@ mod tests {
 
     fn quota_account(
         account_id: &str,
-        upstream_auth_token: &str,
         remaining_headroom: u32,
         freshness: SnapshotFreshness,
     ) -> QuotaAwareAccountState {
@@ -2269,12 +2354,7 @@ mod tests {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
         };
-        QuotaAwareAccountState::new(
-            account_id,
-            SecretString::new(upstream_auth_token),
-            remaining_headroom,
-            freshness,
-        )
+        QuotaAwareAccountState::new(account_id, remaining_headroom, freshness)
     }
 
     fn persist_account_with_snapshot_and_token(
@@ -2284,7 +2364,9 @@ mod tests {
         remaining_headroom: u32,
         upstream_token: &str,
     ) {
-        if let Err(error) = AccountStateRepository::upsert_account(state, account) {
+        let account_with_generation = account.clone().with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(state, &account_with_generation)
+        {
             panic!("account should persist: {error}");
         }
         let snapshot = PersistedQuotaSnapshot::new(
@@ -2297,11 +2379,20 @@ mod tests {
         if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(state, &snapshot) {
             panic!("quota snapshot should persist: {error}");
         }
-        let token_key = match upstream_access_token_key(account.account_id()) {
+        let token_key = match account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,
             Err(error) => panic!("token key should build: {error}"),
         };
-        if let Err(error) = secrets.write_secret(&token_key, &SecretString::new(upstream_token)) {
+        let bundle = match AccountCredentialBundle::imported_codex_auth(
+            upstream_token,
+            Some(format!("{upstream_token}-refresh")),
+        )
+        .to_secret_string()
+        {
+            Ok(bundle) => bundle,
+            Err(error) => panic!("credential bundle should serialize: {error}"),
+        };
+        if let Err(error) = secrets.write_secret(&token_key, &bundle) {
             panic!("upstream token should persist: {error}");
         }
     }
@@ -2350,6 +2441,13 @@ mod tests {
         }
     }
 
+    fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("expected Ok, got error: {error}"),
+        }
+    }
+
     fn remove_dir_all(path: &Path) {
         if let Err(error) = fs::remove_dir_all(path) {
             panic!(
@@ -2385,14 +2483,12 @@ mod tests {
     }
 
     struct RecordingSelector {
-        upstream_auth_token: SecretString,
         recorded: RefCell<Vec<(String, TokenGeneration)>>,
     }
 
     impl RecordingSelector {
-        fn new(upstream_auth_token: SecretString) -> Self {
+        fn new() -> Self {
             Self {
-                upstream_auth_token,
                 recorded: RefCell::new(Vec::new()),
             }
         }
@@ -2402,12 +2498,12 @@ mod tests {
         }
     }
 
-    impl UpstreamAccountSelector for RecordingSelector {
+    impl AccountDecisionSelector for RecordingSelector {
         fn select_upstream_account(
             &self,
             request: &HttpProxyRequest,
             token_generation: TokenGeneration,
-        ) -> Result<SelectedUpstreamAccount, HttpProxyError> {
+        ) -> Result<SelectedAccountDecision, HttpProxyError> {
             self.recorded
                 .borrow_mut()
                 .push((request.path().to_owned(), token_generation));
@@ -2419,11 +2515,110 @@ mod tests {
                     });
                 }
             };
-            Ok(SelectedUpstreamAccount::new(
-                account_id,
-                self.upstream_auth_token.clone(),
-                "test_selection",
+            Ok(SelectedAccountDecision::new(account_id, "test_selection"))
+        }
+    }
+
+    struct RecordingProviderCredentialResolver {
+        access_token: SecretString,
+        recorded: RefCell<Vec<String>>,
+    }
+
+    impl RecordingProviderCredentialResolver {
+        fn new(access_token: &str) -> Self {
+            Self {
+                access_token: SecretString::new(access_token),
+                recorded: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn take_recorded(&self) -> Vec<String> {
+            self.recorded.take()
+        }
+    }
+
+    impl ProviderCredentialResolver for RecordingProviderCredentialResolver {
+        fn resolve_provider_credentials(
+            &self,
+            account_id: &codex_router_core::ids::AccountId,
+        ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+            self.recorded
+                .borrow_mut()
+                .push(account_id.as_str().to_owned());
+            Ok(ResolvedProviderCredential::new(
+                account_id.clone(),
+                self.access_token.clone(),
             ))
+        }
+    }
+
+    struct RejectingProviderCredentialResolver {
+        reason: CredentialResolverError,
+        recorded: RefCell<Vec<String>>,
+    }
+
+    impl RejectingProviderCredentialResolver {
+        fn new(reason: CredentialResolverError) -> Self {
+            Self {
+                reason,
+                recorded: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn take_recorded(&self) -> Vec<String> {
+            self.recorded.take()
+        }
+    }
+
+    impl ProviderCredentialResolver for RejectingProviderCredentialResolver {
+        fn resolve_provider_credentials(
+            &self,
+            account_id: &codex_router_core::ids::AccountId,
+        ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+            self.recorded
+                .borrow_mut()
+                .push(account_id.as_str().to_owned());
+            Err(self.reason.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingRefreshClient {
+        expected_account_id: String,
+        expected_refresh_token: String,
+        response: AccountCredentialBundle,
+        calls: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl RecordingRefreshClient {
+        fn new(
+            expected_account_id: &str,
+            expected_refresh_token: &str,
+            response: AccountCredentialBundle,
+        ) -> Self {
+            Self {
+                expected_account_id: expected_account_id.to_owned(),
+                expected_refresh_token: expected_refresh_token.to_owned(),
+                response,
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CredentialRefreshClient for RecordingRefreshClient {
+        fn refresh_credentials(
+            &self,
+            account_id: &codex_router_core::ids::AccountId,
+            refresh_token: &SecretString,
+        ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+            assert_eq!(account_id.as_str(), self.expected_account_id);
+            assert_eq!(refresh_token.expose_secret(), self.expected_refresh_token);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.response.clone())
         }
     }
 
@@ -2495,9 +2690,11 @@ mod tests {
     #[test]
     fn authenticated_websocket_router_selects_after_local_auth_and_first_frame() {
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
-        let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
-        let router = AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &protocol_router);
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
         let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
 
         let decision = match router.route_first_frame(
@@ -2528,11 +2725,127 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_websocket_router_refreshes_expired_access_token_before_upstream_open() {
+        let temp_dir = ProxyTestTempDir::new("websocket-router-refresh");
+        let state = must_ok(SqliteStateStore::open(
+            &temp_dir.path().join("state.sqlite"),
+        ));
+        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let account_id = account_id("acct_selected");
+        let account = AccountRecord::new(account_id.clone(), "selected", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "stale-websocket-access-token",
+                        Some("websocket-refresh-token".to_owned()),
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let refresh_client = RecordingRefreshClient::new(
+            "acct_selected",
+            "websocket-refresh-token",
+            AccountCredentialBundle::imported_codex_auth(
+                "refreshed-websocket-access-token",
+                Some("refreshed-websocket-refresh-token".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingSelector::new();
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+        let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
+
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_header(Header::new(
+                    "Authorization",
+                    "Bearer stale-websocket-access-token",
+                )),
+            frame,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("expired websocket credential should refresh: {error:?}"),
+        };
+
+        let WebSocketFirstFrameDecision::OpenUpstream { headers, .. } = decision;
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer refreshed-websocket-access-token"]
+        );
+        assert_eq!(refresh_client.calls(), 1);
+        let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("account should remain registered"));
+        assert_eq!(loaded_account.active_credential_generation(), Some(2));
+    }
+
+    #[test]
+    fn authenticated_websocket_router_missing_refresh_token_fails_closed_before_upstream_open() {
+        let temp_dir = ProxyTestTempDir::new("websocket-router-missing-refresh");
+        let state = must_ok(SqliteStateStore::open(
+            &temp_dir.path().join("state.sqlite"),
+        ));
+        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let account_id = account_id("acct_selected");
+        let account = AccountRecord::new(account_id.clone(), "selected", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "stale-websocket-access-token",
+                        None,
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingSelector::new();
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+
+        assert_eq!(
+            router.route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec()),
+            ),
+            Err(WebSocketCloseReason::ProviderCredential)
+        );
+        assert_eq!(
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
+        );
+    }
+
+    #[test]
     fn authenticated_websocket_router_rejects_missing_local_token_before_selection() {
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
-        let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
-        let router = AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &protocol_router);
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
 
         assert_eq!(
             router.route_first_frame(
@@ -2651,7 +2964,8 @@ mod tests {
             Ok(address) => address,
             Err(error) => panic!("router websocket address should read: {error}"),
         };
-        let selector = RecordingSelector::new(SecretString::new("selected-upstream-token"));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
@@ -2660,7 +2974,8 @@ mod tests {
                 Ok(connection) => connection,
                 Err(error) => panic!("router websocket should accept local client: {error}"),
             };
-            let tunnel = BlockingWebSocketTunnel::new(&auth_gate, &selector, &protocol_router);
+            let tunnel =
+                BlockingWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router);
             match tunnel.handle_connection(stream, upstream_url.as_str(), 1) {
                 Ok(()) => {}
                 Err(error) => panic!("websocket tunnel should complete: {error}"),

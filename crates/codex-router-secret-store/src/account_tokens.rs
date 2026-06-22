@@ -37,6 +37,13 @@ impl AccountCredentialBundle {
         }
     }
 
+    /// Sets the access-token expiry hint.
+    #[must_use]
+    pub const fn with_expires_unix_seconds(mut self, expires_unix_seconds: u64) -> Self {
+        self.expires_unix_seconds = Some(expires_unix_seconds);
+        self
+    }
+
     /// Returns the access token.
     #[must_use]
     pub const fn access_token(&self) -> &SecretString {

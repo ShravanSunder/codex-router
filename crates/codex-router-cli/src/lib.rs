@@ -23,6 +23,7 @@ use codex_router_proxy::upstream::UpstreamEndpointError;
 use codex_router_secret_store::file_backend::FileSecretStore;
 
 pub mod account;
+mod credential_runtime;
 pub mod doctor;
 mod live;
 pub mod profile;
@@ -953,6 +954,7 @@ commands:
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::ffi::OsString;
     use std::fs;
     use std::io::Read;
@@ -962,6 +964,7 @@ mod tests {
     use std::net::TcpStream;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
@@ -977,6 +980,10 @@ mod tests {
     use tungstenite::handshake::server::Response;
     use tungstenite::http::HeaderValue;
 
+    use codex_router_auth::resolver::CredentialRefreshClient;
+    use codex_router_auth::resolver::CredentialResolverError;
+    use codex_router_auth::resolver::NoopCredentialRefreshClient;
+    use codex_router_auth::resolver::RouterCredentialResolver;
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
@@ -1006,6 +1013,10 @@ mod tests {
     use crate::profile::CodexRouterProfile;
     use crate::profile::CodexRouterProfileWriter;
     use crate::profile::ProfileWriteError;
+    use crate::quota::QuotaRefreshProvider;
+    use crate::quota::QuotaRefreshProviderRequest;
+    use crate::quota::QuotaRefreshProviderResponse;
+    use crate::quota::refresh_quota_with_dependencies;
     use crate::token::LocalRouterTokenService;
     use crate::token::Shell;
     use crate::token::export_token_assignment;
@@ -2047,6 +2058,141 @@ mod tests {
     }
 
     #[test]
+    fn quota_refresh_resolver_refreshes_expired_access_token_before_provider_egress() {
+        let test_root = TestRoot::new("quota-refresh-resolver");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account_id = account_id("acct_quota_refresh");
+        let account = AccountRecord::new(account_id.clone(), "refresh", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "expired-quota-access-token",
+                        Some("quota-refresh-token".to_owned()),
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let refresh_client = RecordingRefreshClient::new(
+            "acct_quota_refresh",
+            "quota-refresh-token",
+            AccountCredentialBundle::imported_codex_auth(
+                "refreshed-quota-access-token",
+                Some("refreshed-quota-refresh-token".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
+        let provider = RecordingQuotaRefreshProvider::new(33);
+        let mut stdout = Vec::new();
+
+        must_ok(refresh_quota_with_dependencies(
+            &mut stdout,
+            router_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        ));
+
+        assert_eq!(refresh_client.calls(), 1);
+        let recorded = provider.take_recorded();
+        assert_eq!(
+            recorded,
+            vec![
+                (
+                    "acct_quota_refresh".to_owned(),
+                    "refresh".to_owned(),
+                    "responses".to_owned(),
+                    "https://chatgpt.com/backend-api".to_owned(),
+                    "refreshed-quota-access-token".to_owned(),
+                ),
+                (
+                    "acct_quota_refresh".to_owned(),
+                    "refresh".to_owned(),
+                    "models".to_owned(),
+                    "https://chatgpt.com/backend-api".to_owned(),
+                    "refreshed-quota-access-token".to_owned(),
+                )
+            ]
+        );
+        let refreshed_snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &state,
+            &account_id,
+            "responses",
+        ))
+        .unwrap_or_else(|| panic!("quota snapshot should be persisted"));
+        assert_eq!(refreshed_snapshot.remaining_headroom(), 33);
+        assert_eq!(
+            refreshed_snapshot.source(),
+            QuotaSnapshotSource::OpenAiEndpoint
+        );
+        assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
+    }
+
+    #[test]
+    fn quota_refresh_missing_refresh_token_fails_closed_before_provider_egress() {
+        let test_root = TestRoot::new("quota-refresh-missing-refresh");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account_id = account_id("acct_quota_missing_refresh");
+        let account = AccountRecord::new(account_id.clone(), "missing", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "expired-quota-access-token-canary",
+                        None,
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let provider = RecordingQuotaRefreshProvider::new(44);
+        let mut stdout = Vec::new();
+
+        let error = match refresh_quota_with_dependencies(
+            &mut stdout,
+            router_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        ) {
+            Ok(()) => panic!("missing refresh token should fail before provider egress"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            CredentialResolverError::RefreshUnavailable.to_string()
+        );
+        assert!(provider.take_recorded().is_empty());
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
     fn live_quota_command_rejects_api_key_auth_without_printing_key() {
         let test_root = TestRoot::new("live-quota-api-key");
         must_ok(fs::create_dir(test_root.path()));
@@ -2291,18 +2437,23 @@ mod tests {
         let token_service = LocalRouterTokenService::new(secrets.clone());
         let local_token = must_ok(token_service.rotate_with_token("current-token"));
         let account_id = account_id("acct_cli_serve");
-        let account = AccountRecord::new(account_id.clone(), "cli-serve", AccountStatus::Enabled);
+        let account = AccountRecord::new(account_id.clone(), "cli-serve", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let snapshot =
             PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
                 .with_observed_unix_seconds(1_000)
                 .with_route_band("responses", 100);
         must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
-        let upstream_token_key = must_ok(upstream_access_token_key(&account_id));
-        must_ok(secrets.write_secret(
-            &upstream_token_key,
-            &SecretString::new("cli-upstream-token"),
-        ));
+        let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let upstream_credential_bundle = must_ok(
+            AccountCredentialBundle::imported_codex_auth(
+                "cli-upstream-token",
+                Some("cli-upstream-refresh-token".to_owned()),
+            )
+            .to_secret_string(),
+        );
+        must_ok(secrets.write_secret(&upstream_token_key, &upstream_credential_bundle));
 
         let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
         let upstream_address = must_ok(upstream_listener.local_addr());
@@ -2423,18 +2574,23 @@ mod tests {
         let token_service = LocalRouterTokenService::new(secrets.clone());
         must_ok(token_service.rotate_with_token("current-token"));
         let account_id = account_id("acct_cli_ws");
-        let account = AccountRecord::new(account_id.clone(), "cli-ws", AccountStatus::Enabled);
+        let account = AccountRecord::new(account_id.clone(), "cli-ws", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let snapshot =
             PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
                 .with_observed_unix_seconds(1_000)
                 .with_route_band("responses", 100);
         must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
-        let upstream_token_key = must_ok(upstream_access_token_key(&account_id));
-        must_ok(secrets.write_secret(
-            &upstream_token_key,
-            &SecretString::new("cli-ws-upstream-token"),
-        ));
+        let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let upstream_credential_bundle = must_ok(
+            AccountCredentialBundle::imported_codex_auth(
+                "cli-ws-upstream-token",
+                Some("cli-ws-upstream-refresh-token".to_owned()),
+            )
+            .to_secret_string(),
+        );
+        must_ok(secrets.write_secret(&upstream_token_key, &upstream_credential_bundle));
 
         let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
         let upstream_address = must_ok(upstream_listener.local_addr());
@@ -2560,18 +2716,23 @@ mod tests {
         let token_service = LocalRouterTokenService::new(secrets.clone());
         must_ok(token_service.rotate_with_token("token-a"));
         let account_id = account_id("acct_cli_rotate");
-        let account = AccountRecord::new(account_id.clone(), "cli-rotate", AccountStatus::Enabled);
+        let account = AccountRecord::new(account_id.clone(), "cli-rotate", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let snapshot =
             PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
                 .with_observed_unix_seconds(1_000)
                 .with_route_band("responses", 100);
         must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
-        let upstream_token_key = must_ok(upstream_access_token_key(&account_id));
-        must_ok(secrets.write_secret(
-            &upstream_token_key,
-            &SecretString::new("cli-rotation-upstream-token"),
-        ));
+        let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let upstream_credential_bundle = must_ok(
+            AccountCredentialBundle::imported_codex_auth(
+                "cli-rotation-upstream-token",
+                Some("cli-rotation-upstream-refresh-token".to_owned()),
+            )
+            .to_secret_string(),
+        );
+        must_ok(secrets.write_secret(&upstream_token_key, &upstream_credential_bundle));
 
         let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
         let upstream_address = must_ok(upstream_listener.local_addr());
@@ -2736,6 +2897,84 @@ mod tests {
         match upstream_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingRefreshClient {
+        expected_account_id: String,
+        expected_refresh_token: String,
+        response: AccountCredentialBundle,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RecordingRefreshClient {
+        fn new(
+            expected_account_id: &str,
+            expected_refresh_token: &str,
+            response: AccountCredentialBundle,
+        ) -> Self {
+            Self {
+                expected_account_id: expected_account_id.to_owned(),
+                expected_refresh_token: expected_refresh_token.to_owned(),
+                response,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CredentialRefreshClient for RecordingRefreshClient {
+        fn refresh_credentials(
+            &self,
+            account_id: &AccountId,
+            refresh_token: &SecretString,
+        ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+            assert_eq!(account_id.as_str(), self.expected_account_id);
+            assert_eq!(refresh_token.expose_secret(), self.expected_refresh_token);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.response.clone())
+        }
+    }
+
+    type RecordedQuotaRefresh = (String, String, String, String, String);
+
+    struct RecordingQuotaRefreshProvider {
+        remaining_headroom: u32,
+        recorded: RefCell<Vec<RecordedQuotaRefresh>>,
+    }
+
+    impl RecordingQuotaRefreshProvider {
+        fn new(remaining_headroom: u32) -> Self {
+            Self {
+                remaining_headroom,
+                recorded: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn take_recorded(&self) -> Vec<RecordedQuotaRefresh> {
+            self.recorded.take()
+        }
+    }
+
+    impl QuotaRefreshProvider for RecordingQuotaRefreshProvider {
+        fn fetch_quota(
+            &self,
+            request: QuotaRefreshProviderRequest,
+        ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+            self.recorded.borrow_mut().push((
+                request.account_id().as_str().to_owned(),
+                request.account_label().to_owned(),
+                request.route_band().to_owned(),
+                request.base_url().to_owned(),
+                request.access_token().expose_secret().to_owned(),
+            ));
+            Ok(QuotaRefreshProviderResponse {
+                remaining_headroom: self.remaining_headroom,
+            })
         }
     }
 

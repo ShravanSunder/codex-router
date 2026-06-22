@@ -68,6 +68,8 @@ name = "codex-router-auth"
 version = "0.1.0"
 dependencies = [
  "codex-router-core",
+ "codex-router-secret-store",
+ "codex-router-state",
  "reqwest",
  "serde",
  "serde_json",
@@ -103,6 +105,7 @@ dependencies = [
 name = "codex-router-proxy"
 version = "0.1.0"
 dependencies = [
+ "codex-router-auth",
  "codex-router-core",
  "codex-router-quota",
  "codex-router-secret-store",

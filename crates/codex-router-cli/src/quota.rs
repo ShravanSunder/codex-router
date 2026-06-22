@@ -4,8 +4,14 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
+use codex_router_auth::resolver::CredentialResolverError;
+use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_core::ids::AccountId;
+use codex_router_core::redaction::SecretString;
 use codex_router_state::account::AccountRecord;
+use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
+use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::repositories::QuotaSnapshotRepository;
 use codex_router_state::sqlite::SqliteStateStore;
@@ -16,6 +22,8 @@ use thiserror::Error;
 
 use crate::ArgumentParser;
 use crate::CliError;
+use crate::credential_runtime::CliCredentialResolver;
+use crate::credential_runtime::CliCredentialResolverOpenError;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 
@@ -106,6 +114,12 @@ pub enum QuotaCommandError {
     /// Quota refresh is not implemented for allowed providers in this slice.
     #[error("quota refresh provider execution is not implemented in Plan 1A")]
     RefreshNotImplemented,
+    /// Credential resolver dependencies failed to open.
+    #[error(transparent)]
+    CredentialResolverOpen(#[from] CliCredentialResolverOpenError),
+    /// Credential resolution failed before provider quota refresh.
+    #[error(transparent)]
+    CredentialResolver(#[from] CredentialResolverError),
     /// State-store operation failed.
     #[error(transparent)]
     StateStore(#[from] StateStoreError),
@@ -133,15 +147,27 @@ pub fn run_quota_command(
 }
 
 fn refresh_quota(
-    _stdout: &mut impl Write,
-    _router_root: PathBuf,
+    stdout: &mut impl Write,
+    router_root: PathBuf,
     base_url: String,
 ) -> Result<(), QuotaCommandError> {
     if !is_allowed_quota_refresh_base_url(&base_url) {
         return Err(QuotaCommandError::DisallowedBaseUrl { base_url });
     }
 
-    Err(QuotaCommandError::RefreshNotImplemented)
+    let resolver = CliCredentialResolver::open(
+        &router_root.join("state.sqlite"),
+        &router_root.join("secrets"),
+        0,
+    )?;
+    refresh_quota_with_dependencies(
+        stdout,
+        router_root,
+        base_url,
+        &resolver,
+        &UnavailableQuotaRefreshProvider,
+        0,
+    )
 }
 
 fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {
@@ -149,6 +175,144 @@ fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {
     trimmed == DEFAULT_CHATGPT_BACKEND_BASE_URL
         || trimmed == "https://chatgpt.com"
         || trimmed.starts_with("https://chatgpt.com/")
+}
+
+/// Quota provider request after provider credentials have been resolved.
+pub(crate) struct QuotaRefreshProviderRequest {
+    account_id: AccountId,
+    account_label: String,
+    route_band: String,
+    base_url: String,
+    access_token: SecretString,
+}
+
+impl QuotaRefreshProviderRequest {
+    fn new(
+        account_id: AccountId,
+        account_label: impl Into<String>,
+        route_band: impl Into<String>,
+        base_url: impl Into<String>,
+        access_token: SecretString,
+    ) -> Self {
+        Self {
+            account_id,
+            account_label: account_label.into(),
+            route_band: route_band.into(),
+            base_url: base_url.into(),
+            access_token,
+        }
+    }
+
+    /// Returns the account id.
+    #[must_use]
+    pub(crate) const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns the account label.
+    #[must_use]
+    pub(crate) fn account_label(&self) -> &str {
+        &self.account_label
+    }
+
+    /// Returns the route band.
+    #[must_use]
+    pub(crate) fn route_band(&self) -> &str {
+        &self.route_band
+    }
+
+    /// Returns the provider base URL.
+    #[must_use]
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Returns the provider bearer token.
+    #[must_use]
+    pub(crate) const fn access_token(&self) -> &SecretString {
+        &self.access_token
+    }
+}
+
+/// Quota provider response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QuotaRefreshProviderResponse {
+    pub(crate) remaining_headroom: u32,
+}
+
+/// Provider egress dependency for quota refresh.
+pub(crate) trait QuotaRefreshProvider {
+    /// Fetches one route-band quota snapshot using resolved provider auth.
+    fn fetch_quota(
+        &self,
+        request: QuotaRefreshProviderRequest,
+    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError>;
+}
+
+struct UnavailableQuotaRefreshProvider;
+
+impl QuotaRefreshProvider for UnavailableQuotaRefreshProvider {
+    fn fetch_quota(
+        &self,
+        request: QuotaRefreshProviderRequest,
+    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+        let _provider_request_shape = (
+            request.account_id(),
+            request.account_label(),
+            request.route_band(),
+            request.base_url(),
+            request.access_token(),
+        );
+        Err(QuotaCommandError::RefreshNotImplemented)
+    }
+}
+
+pub(crate) fn refresh_quota_with_dependencies<R, P>(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    base_url: String,
+    credential_resolver: &R,
+    quota_provider: &P,
+    observed_unix_seconds: u64,
+) -> Result<(), QuotaCommandError>
+where
+    R: ProviderCredentialResolver,
+    P: QuotaRefreshProvider,
+{
+    if !is_allowed_quota_refresh_base_url(&base_url) {
+        return Err(QuotaCommandError::DisallowedBaseUrl { base_url });
+    }
+
+    let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
+    let accounts = AccountStateRepository::list_accounts(&state)?;
+    let mut refreshed_count = 0_u64;
+    for account in accounts
+        .iter()
+        .filter(|account| account.status() == AccountStatus::Enabled)
+        .filter(|account| account.active_credential_generation().is_some())
+    {
+        let resolved = credential_resolver.resolve_provider_credentials(account.account_id())?;
+        for route_band in DEFAULT_ROUTE_BANDS {
+            let response = quota_provider.fetch_quota(QuotaRefreshProviderRequest::new(
+                account.account_id().clone(),
+                account.label(),
+                *route_band,
+                base_url.clone(),
+                resolved.access_token().clone(),
+            ))?;
+            let snapshot = PersistedQuotaSnapshot::new(
+                account.account_id().clone(),
+                QuotaSnapshotSource::OpenAiEndpoint,
+            )
+            .with_observed_unix_seconds(observed_unix_seconds)
+            .with_route_band(*route_band, response.remaining_headroom)
+            .with_stale_penalty(false);
+            QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot)?;
+            refreshed_count = refreshed_count.saturating_add(1);
+        }
+    }
+
+    writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)
 }
 
 fn render_quota_status(
