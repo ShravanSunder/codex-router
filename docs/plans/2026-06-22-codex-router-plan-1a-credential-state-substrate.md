@@ -3,7 +3,7 @@
 Date: 2026-06-22
 Parent: `docs/plans/2026-06-22-quota-runtime-status-oauth-readiness-plan.md`
 Status: executable stacked prerequisite child plan after review; revised after plan-review `needs_revision`
-Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-revision.md`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-460b51e.md`
 
 ## Goal
 
@@ -85,6 +85,12 @@ Closed unless task-local amendment is approved:
 - [ ] `codex-router-secret-store` owns backend-neutral secret storage traits and
       file-backend implementation details. Plan 2 can add a keyring backend
       behind the same capability surface without changing runtime call sites.
+- [ ] Account credential atomicity uses one versioned bundled credential secret
+      per account generation plus a SQLite active-generation pointer flip. The
+      bundle contains access token, optional refresh token, expiry metadata,
+      provider/source metadata, and credential generation. Legacy
+      `openai_access_token.*` and `openai_refresh_token.*` keys are import or
+      migration inputs only; they are not runtime truth after T3/T4.
 - [ ] `codex-router-state` owns durable account, quota, and selector projection
       persistence. The selector consumes a selector-owned durable projection
       table/API, not human status rows or a DTO over renderer-oriented rows.
@@ -155,6 +161,13 @@ Invariants:
 - [ ] Record a carry-forward receipt with source path, target path, source
       commit/head, checksum or byte count, and `git status --short` before and
       after.
+- [ ] Freeze required source artifacts before code edits. If
+      `docs/specs/2026-06-20-codex-router-greenfield-spec.md` or
+      `docs/specs/references/2026-06-20-research-evidence.md` is dirty relative
+      to the execution base, either commit/promote it first or record a source
+      carry-forward receipt with path, source commit/head, checksum or byte
+      count, working-tree line count, execution-base line count, and normative
+      flag.
 - [ ] If executing in this worktree, create a dirty-path manifest classifying
       every dirty path as `out-of-scope`, `in-scope-preexisting`, or
       `new-task-surface`.
@@ -216,7 +229,17 @@ Checkpoint:
 
 Design decision:
 
-- [ ] Use one bundled account credential secret or a versioned pending/active secret set with a SQLite pointer flip.
+- [ ] Use one versioned bundled account credential secret per account generation
+      plus a SQLite active-generation pointer flip. The bundle contains access
+      token, optional refresh token, expiry metadata, provider/source metadata,
+      and credential generation.
+- [ ] `codex-router-secret-store` owns bundle read/write semantics.
+- [ ] `codex-router-state` owns active-generation metadata and atomic pointer
+      activation.
+- [ ] `codex-router-auth` resolver reads only the active bundle through the
+      backend-neutral capability contract.
+- [ ] Legacy `openai_access_token.*` and `openai_refresh_token.*` keys are
+      import/migration input only and are not runtime truth after T3/T4.
 - [ ] Do not leave access-token and refresh-token generations independently observable.
 - [ ] On credential mutation, invalidate quota selector/status state to explicit
       `unknown`/ineligible/stale state until successful refresh.
@@ -230,6 +253,9 @@ Design decision:
 Actions:
 
 - [ ] Add coherent write/update primitives for account metadata and token material.
+- [ ] Add or expose `stage_account_credential_bundle`,
+      `activate_account_credential_generation`, and
+      `read_active_account_credential_bundle` equivalent APIs.
 - [ ] Keep accounts disabled or ineligible until required secret material and metadata are installed.
 - [ ] Add recoverable repair/re-import behavior for partial failures.
 - [ ] Preserve healthy accounts if one import or repair fails.
@@ -244,6 +270,7 @@ Proof:
 - [ ] Prove healthy pre-existing accounts remain selectable.
 - [ ] Prove no response-backed alias remains eligible after mutation failure or
       repair failure until successful post-repair refresh.
+- [ ] Prove resolver reads only the active bundled credential generation.
 - [ ] Prove `code_review` status invalidation separately from selector
       eligibility.
 
@@ -260,6 +287,9 @@ Invariant:
 - [ ] Runtime request/refresh paths do not own direct `SecretStore`,
       `read_secret`, `upstream_access_token_key`, or
       `upstream_refresh_token_key` access outside the resolver module.
+- [ ] Selector-owned code returns account and route decisions without raw
+      provider token material. Provider auth material is emitted only by the auth
+      resolver immediately before HTTP/SSE, WebSocket, or quota-provider egress.
 
 Actions:
 
@@ -269,6 +299,11 @@ Actions:
 - [ ] Replace direct request-path access-token reads with resolver calls or explicit ineligible handling.
 - [ ] Replace direct quota-refresh access-token reads with resolver calls or
       explicit ineligible handling.
+- [ ] Use this runtime call order: local auth, route classification, selector
+      account/route decision without provider token material, then auth resolver
+      provider credential resolution immediately before upstream egress.
+- [ ] Remove raw provider token material from selector-owned return types such as
+      `SelectedUpstreamAccount`; provider tokens belong only to resolver output.
 - [ ] Add a backend-neutral secret-store capability surface that Plan 2 can
       extend to keyring/default login and logout/remove purge, without making
       file storage the normal backend.
@@ -290,6 +325,8 @@ Proof:
       HTTP/SSE, and WebSocket paths.
 - [ ] Structural backend-neutrality proof shows runtime entrypoints no longer
       require `FileSecretStore` as an architectural type.
+- [ ] Structural selector-boundary proof shows selector return types and
+      replacement-state structs carry no raw provider token material.
 
 Checkpoint:
 
@@ -337,16 +374,20 @@ not a person.
 
 | Done | ID | Requirement | Source | Task | Proof owner | Layer | Fixture/mock | Preflight list command | Execution command | Expected observation | Stale-proof guard | Red/green |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [ ] | 1A-00 | Boundary extraction preserves existing CLI guardrails | plan-review-after-revision mandatory lower-layer row | T1 | T1 / `codex-router-cli` runtime boundary | integration | existing CLI profile fixture | `cargo test -p codex-router-cli tests::profile_write_command_requires_approval_flag -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_command_requires_approval_flag --exact` | profile write approval guard still passes after extraction; no home mutation occurs | exact test listed once; extraction checkpoint also runs package compile gate | yes |
+| [ ] | 1A-00 | Boundary extraction preserves CLI profile-write guardrails | plan-review-after-460b51e T1 proof | T1 | T1 / `codex-router-cli` runtime boundary | integration | existing CLI profile fixture | `cargo test -p codex-router-cli tests::profile_write_command_requires_approval_flag -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::profile_write_command_requires_approval_flag --exact` | profile write approval guard still passes after extraction; no home mutation occurs | exact test listed once; extraction checkpoint also runs package compile gate | yes |
+| [ ] | 1A-00a | Boundary extraction preserves account import behavior | plan-review-after-460b51e T1 proof | T1 | T1 / `codex-router-cli::account` runtime boundary | integration | codex auth.json fixture | `cargo test -p codex-router-cli tests::account_import_codex_auth_writes_router_owned_state_and_secrets -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_writes_router_owned_state_and_secrets --exact` | import writes router-owned account state and credential bundle without mutating home Codex auth | exact test listed once; fixture path is temp-owned | yes |
+| [ ] | 1A-00b | Boundary extraction preserves quota status behavior | plan-review-after-460b51e T1 proof | T1 | T1 / `codex-router-cli::quota status` runtime boundary | integration | preseeded SQLite rows | `cargo test -p codex-router-cli tests::quota_status_reads_sqlite_rows_without_provider_io -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_status_reads_sqlite_rows_without_provider_io --exact` | quota status reads SQLite rows and performs zero provider I/O | exact test listed once; provider mock counter remains zero | yes |
+| [ ] | 1A-00c | Boundary extraction preserves serve loopback behavior | plan-review-after-460b51e T1 proof | T1 | T1 / `codex-router-cli::serve` runtime boundary | integration | loopback router fixture | `cargo test -p codex-router-cli tests::serve_command_starts_runtime_and_forwards_one_loopback_request -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::serve_command_starts_runtime_and_forwards_one_loopback_request --exact` | serve starts runtime and forwards one authenticated loopback request through the extracted boundary | exact test listed once; runtime shutdown is bounded | yes |
 | [ ] | 1A-01 | Secret-bearing auth DTOs do not leak | spec Security/Rust standards | T2 | T2 / `codex-router-auth::router_credentials` | unit | token canaries | `cargo test -p codex-router-auth tests::router_credentials_debug_redacts_secret_fields -- --exact --list` | `cargo nextest run -p codex-router-auth -- tests::router_credentials_debug_redacts_secret_fields --exact` | debug/error paths do not include access or refresh token canaries | new exact test listed once | yes |
 | [ ] | 1A-02 | Import errors redact credentials | spec Security/Rust standards | T2 | T2 / `codex-router-cli::account` | integration | malformed auth.json with canaries | `cargo test -p codex-router-cli tests::account_import_codex_auth_redacts_refresh_token_in_error_paths -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_redacts_refresh_token_in_error_paths --exact` | stdout/stderr/error text omit refresh/access token canaries | new exact test listed once | yes |
 | [ ] | 1A-03 | Token egress only after allowlist | spec Security | T2 | T2 / `codex-router-cli::quota` | integration | disallowed quota URL | `cargo test -p codex-router-cli tests::quota_refresh_rejects_non_provider_base_url_before_token_egress -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_refresh_rejects_non_provider_base_url_before_token_egress --exact` | local reject occurs before provider hit or secret egress | existing exact test listed once; assert secret/provider hit counts | yes |
 | [ ] | 1A-04 | Audit JSONL uses allowlisted schema | spec Local Auth/Audit | T2 | T2 / `codex-router-proxy` audit sink | integration | temp audit sink plus canaries | `cargo test -p codex-router-proxy tests::assembled_loopback_router_runtime_redacts_http_and_websocket_audit_events -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::assembled_loopback_router_runtime_redacts_http_and_websocket_audit_events --exact` | allowed HTTP, rejected HTTP, and rejected WS audit JSONL contain only allowlisted keys and no secrets | new or renamed exact test listed once; parses JSONL key sets, not substring-only | yes |
-| [ ] | 1A-04a | Audit append failure surfaces redacted diagnostic | plan-review-after-revision audit reliability | T2 | T2 / `codex-router-proxy` audit sink | integration | unwritable or injected-failure audit sink | `cargo test -p codex-router-proxy tests::audit_append_failure_surfaces_configured_policy_without_secret_leak -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::audit_append_failure_surfaces_configured_policy_without_secret_leak --exact` | best-effort allowed traffic surfaces a redacted local diagnostic instead of silent drop; local-auth failures still reject | new exact test listed once; policy named in test fixture | yes |
-| [ ] | 1A-04b | Audit append failures are not silently discarded | plan-review-after-revision audit reliability | T2 | T2 / `codex-router-proxy` audit emission | structural | source search | `rg -n "let _result = audit_sink\\.append|let _ = audit_sink\\.append" crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs` | same command | zero silent-drop append sites remain unless an allowlisted helper records the redacted diagnostic | any direct ignored append result in proxy emission paths fails the row | yes |
+| [ ] | 1A-04a | Audit append failure surfaces redacted diagnostic | plan-review-after-460b51e audit reliability | T2 | T2 / `codex-router-proxy` audit sink | integration | unwritable or injected-failure audit sink | `cargo test -p codex-router-proxy tests::audit_append_failure_surfaces_configured_policy_without_secret_leak -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::audit_append_failure_surfaces_configured_policy_without_secret_leak --exact` | best-effort allowed traffic records a structured in-process redacted local diagnostic warning instead of silent drop; local-auth failures still reject | new exact test listed once; helper returns or records append error and policy is named in test fixture | yes |
+| [ ] | 1A-04b | Audit append failures are not silently discarded | plan-review-after-460b51e audit reliability | T2 | T2 / `codex-router-proxy` audit emission | structural | source search | `rg -n "audit_sink\\.append" crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs` | `bash -lc '! rg -n -e "let _result = audit_sink\\.append" -e "let _ = audit_sink\\.append" crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs'` | zero silent-drop append sites remain; allowlisted helper must return or record the structured redacted diagnostic warning | any ignored append result in proxy emission paths fails the row | yes |
 | [ ] | 1A-05 | Partial credential writes fail closed | spec Secret Storage | T3 | T3 / `codex-router-cli::account` | integration | injected write failures | `cargo test -p codex-router-cli tests::account_import_codex_auth_partial_secret_write_disables_account_until_repair -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_partial_secret_write_disables_account_until_repair --exact` | partial account stays disabled/ineligible/unknown and healthy accounts remain selectable | new exact test listed once; inject every write boundary | yes |
 | [ ] | 1A-06 | Credential mutation invalidates stale quota | spec Account/Quota | T3 | T3 / state + quota mutation contract | integration | credential repair fixture | `cargo test -p codex-router-cli tests::account_import_codex_auth_invalidates_quota_snapshot_on_credential_mutation -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::account_import_codex_auth_invalidates_quota_snapshot_on_credential_mutation --exact` | `responses`, `models`, `memories_trace_summarize`, `responses_compact` become unknown/ineligible/stale until successful refresh; `code_review` status invalidation is asserted separately | new exact test listed once; selector cannot use stale generation | yes |
-| [ ] | 1A-06a | Credential mutation invalidates response-backed aliases atomically | plan-review-after-revision alias-family atomicity | T3 | T3 / state + credential mutation contract | integration | injected alias write failure | `cargo test -p codex-router-state tests::credential_mutation_invalidates_response_backed_alias_family_atomically -- --exact --list` | `cargo nextest run -p codex-router-state -- tests::credential_mutation_invalidates_response_backed_alias_family_atomically --exact` | injected failure cannot leave mixed-generation `responses`, `models`, `memories_trace_summarize`, or `responses_compact`; `code_review` remains status-only | new exact test listed once; reads all four routed aliases plus status-only row | yes |
+| [ ] | 1A-06a | Credential mutation invalidates response-backed aliases atomically | plan-review-after-460b51e alias-family atomicity | T3 | T3 / state + credential mutation contract | integration | injected alias write failure | `cargo test -p codex-router-state tests::credential_mutation_invalidates_response_backed_alias_family_atomically -- --exact --list` | `cargo nextest run -p codex-router-state -- tests::credential_mutation_invalidates_response_backed_alias_family_atomically --exact` | injected failure cannot leave mixed-generation `responses`, `models`, `memories_trace_summarize`, or `responses_compact`; `code_review` remains status-only | new exact test listed once; reads all four routed aliases plus status-only row | yes |
+| [ ] | 1A-06b | Resolver reads only active bundled credential generation | plan-review-after-460b51e credential atomicity | T3/T4 | T3 / secret-store + state credential bundle | integration | staged inactive bundle plus active pointer | `cargo test -p codex-router-auth tests::credential_resolver_reads_only_active_credential_bundle_generation -- --exact --list` | `cargo nextest run -p codex-router-auth -- tests::credential_resolver_reads_only_active_credential_bundle_generation --exact` | staged inactive credential material is never returned; active-generation pointer flip is the only runtime publication point | new exact test listed once; legacy split token keys are import-only inputs | yes |
 | [ ] | 1A-07 | Resolver covers quota refresh egress | spec Secret Storage | T4 | T4 / credential resolver + quota refresh | integration | expired access + refresh token | `cargo test -p codex-router-cli tests::quota_refresh_resolver_refreshes_expired_access_token_before_provider_egress -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_refresh_resolver_refreshes_expired_access_token_before_provider_egress --exact` | refreshed token is used before quota provider egress | new exact test listed once; no stale bearer leaves router | yes |
 | [ ] | 1A-08 | Resolver covers HTTP/SSE egress | spec Secret Storage/Protocol | T4 | T4 / `codex-router-proxy::http_sse` | protocol | expired access + refresh token | `cargo test -p codex-router-proxy tests::http_proxy_resolver_refreshes_expired_access_token_before_upstream_egress -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_resolver_refreshes_expired_access_token_before_upstream_egress --exact` | refreshed token is used before upstream HTTP/SSE egress | new exact test listed once; upstream mock rejects stale bearer | yes |
 | [ ] | 1A-09 | Resolver covers WebSocket egress | spec Secret Storage/WebSocket | T4 | T4 / `codex-router-proxy::websocket` | protocol | expired access + refresh token | `cargo test -p codex-router-proxy tests::authenticated_websocket_router_refreshes_expired_access_token_before_upstream_open -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::authenticated_websocket_router_refreshes_expired_access_token_before_upstream_open --exact` | refreshed token is used before upstream WS open | new exact test listed once; upstream mock rejects stale bearer | yes |
@@ -354,9 +395,10 @@ not a person.
 | [ ] | 1A-11 | Expired HTTP token without refresh fails closed | spec Secret Storage/Security | T4 | T4 / `codex-router-proxy::http_sse` | protocol | expired access, no refresh | `cargo test -p codex-router-proxy tests::http_proxy_missing_refresh_token_fails_closed_before_upstream_egress -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_missing_refresh_token_fails_closed_before_upstream_egress --exact` | local failure; zero HTTP upstream auth egress | new exact test listed once; bearer canary absent upstream | yes |
 | [ ] | 1A-12 | Expired WebSocket token without refresh fails closed | spec Secret Storage/Security | T4 | T4 / `codex-router-proxy::websocket` | protocol | expired access, no refresh | `cargo test -p codex-router-proxy tests::authenticated_websocket_router_missing_refresh_token_fails_closed_before_upstream_open -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::authenticated_websocket_router_missing_refresh_token_fails_closed_before_upstream_open --exact` | local failure; zero WS upstream auth egress | new exact test listed once; bearer canary absent upstream | yes |
 | [ ] | 1A-13 | Concurrent resolver paths single-flight | spec Secret Storage | T4 | T4 / credential resolver | integration | concurrent serve + quota refresh | `cargo test -p codex-router-auth tests::credential_resolver_single_flights_concurrent_quota_refresh_and_serve_request -- --exact --list` | `cargo nextest run -p codex-router-auth -- tests::credential_resolver_single_flights_concurrent_quota_refresh_and_serve_request --exact` | one owner refreshes; followers use result or fail closed | new exact test listed once; deterministic concurrent test | yes |
-| [ ] | 1A-14 | Runtime paths cannot bypass resolver | spec Secret Storage/Security | T4 | T4 / runtime egress call sites | structural | source search | `rg -n "read_secret|upstream_access_token_key|upstream_refresh_token_key" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs` | same command | zero matches outside the resolver module after refactor | any direct match in listed runtime files fails the row | yes |
-| [ ] | 1A-14a | Runtime entrypoints are backend-neutral for Plan 2 | plan-review-after-revision OAuth readiness | T4 | T4 / auth resolver + runtime constructors | structural/compile | source search plus package compile | `rg -n "FileSecretStore" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs` | same command; then `cargo check -p codex-router-auth -p codex-router-proxy -p codex-router-cli` | runtime request/refresh entrypoints do not require concrete `FileSecretStore`; CLI/proxy compile through trait/factory-backed resolver path | any concrete runtime `FileSecretStore` match fails unless only file-backend construction edge is explicitly allowlisted in the receipt | yes |
-| [ ] | 1A-14b | Resolver manifest direction is acyclic and explicit | plan-review-after-revision resolver ownership | T4 | T4 / workspace manifests | structural/compile | cargo metadata/tree | `cargo tree -p codex-router-auth -e normal` | `cargo check -p codex-router-auth -p codex-router-proxy -p codex-router-cli` | `codex-router-auth` depends on needed state/secret-store surfaces without creating an auth/proxy/CLI cycle; CLI/proxy consume auth resolver APIs | manifest diff is listed in A2 receipt; cargo check succeeds | yes |
+| [ ] | 1A-14 | Runtime paths cannot bypass resolver | spec Secret Storage/Security | T4 | T4 / runtime egress call sites | structural | source search | `rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs` | `bash -lc '! rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs'` | zero matches in runtime egress paths; credential reads happen only through auth resolver APIs | any direct match in listed runtime files fails the row | yes |
+| [ ] | 1A-14a | Runtime entrypoints are backend-neutral for Plan 2 | plan-review-after-460b51e OAuth readiness | T4 | T4 / auth resolver + runtime constructors | structural/compile | source search plus package compile | `bash -lc '! rg -n "FileSecretStore" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs'` | `bash -lc '! rg -n "FileSecretStore" crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs' && cargo check -p codex-router-auth -p codex-router-proxy -p codex-router-cli` | runtime request/refresh entrypoints do not require concrete `FileSecretStore`; CLI/proxy compile through trait/factory-backed resolver path | any concrete runtime `FileSecretStore` match fails unless only file-backend construction edge is explicitly allowlisted in the receipt | yes |
+| [ ] | 1A-14b | Resolver manifest direction is acyclic and explicit | plan-review-after-460b51e resolver ownership | T4 | T4 / workspace manifests | structural/compile | cargo metadata/tree | `cargo tree -p codex-router-auth -e normal` | `cargo check -p codex-router-auth -p codex-router-proxy -p codex-router-cli` | `codex-router-auth` depends on needed state/secret-store surfaces without creating an auth/proxy/CLI cycle; CLI/proxy consume auth resolver APIs | manifest diff is listed in A2 receipt; cargo check succeeds | yes |
+| [ ] | 1A-14c | Selector decisions carry no raw provider token material | plan-review-after-460b51e selector/resolver separation | T4 | T4 / selection + proxy account decision structs | structural/compile | source search plus package compile | `rg -n -e "upstream_auth_token" -e "access_token" -e "refresh_token" crates/codex-router-selection/src crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs` | `bash -lc '! rg -n -e "upstream_auth_token" -e "provider_access_token" -e "provider_refresh_token" -e "refresh_token" crates/codex-router-selection/src crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs' && cargo check -p codex-router-selection -p codex-router-proxy` | selector-owned return types carry account/route decisions only; provider auth is produced by resolver output immediately before egress | any raw provider token field in selector-owned decisions fails the row | yes |
 | [ ] | 1A-15 | Per-window selector source is durable and selector-owned | spec Account/Quota | T5 | T5 / `codex-router-state` + selector projection | integration | existing or migrated DB | `cargo test -p codex-router-state tests::selector_input_reads_durable_per_window_rows_without_status_renderer -- --exact --list` | `cargo nextest run -p codex-router-state -- tests::selector_input_reads_durable_per_window_rows_without_status_renderer --exact` | selector-input API returns short and weekly windows, status, headroom, reset, limit-window seconds, and effective marker without parsing human status rows | new exact test listed once; migrated DB fixture included if schema changes | yes |
 | [ ] | 1A-16 | Route-band selector state remains partitioned | spec Account/Quota | T5 | T5 / `codex-router-state` | integration | route-band snapshots | `cargo test -p codex-router-state tests::quota_snapshots_are_partitioned_by_route_band_for_one_account -- --exact --list` | `cargo nextest run -p codex-router-state -- tests::quota_snapshots_are_partitioned_by_route_band_for_one_account --exact` | route-band snapshots remain separate for selector reads | exact test listed once; no alias collapse | yes |
 
@@ -365,6 +407,8 @@ not a person.
 - [ ] `cargo fmt --all --check`
 - [ ] Exact proof-row preflights listed above.
 - [ ] `cargo nextest run -p codex-router-auth`
+- [ ] `cargo nextest run -p codex-router-cli`
+- [ ] `cargo nextest run -p codex-router-proxy`
 - [ ] `cargo nextest run -p codex-router-secret-store`
 - [ ] `cargo nextest run -p codex-router-state`
 - [ ] `cargo nextest run -p codex-router-selection`
@@ -376,7 +420,7 @@ not a person.
 
 Required before T4 starts:
 
-- [ ] T1-T3 matrix rows 1A-00 through 1A-06a pass or route back to planning.
+- [ ] T1-T3 matrix rows 1A-00 through 1A-06b pass or route back to planning.
 - [ ] Dirty-tree isolation receipt proves only T1-T3 owned paths were staged.
 - [ ] Checkpoint commit contains only T1-T3 paths.
 - [ ] `git show --name-only <A1-checkpoint>` lists only T1-T3 owned paths.

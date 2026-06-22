@@ -3,7 +3,7 @@
 Date: 2026-06-22
 Branch: `feature/initial-codex-router`
 Status: umbrella/control plan; not executable; revised after plan-review `needs_revision`
-Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-revision.md`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-460b51e.md`
 Executable children:
 
 - `docs/plans/2026-06-22-codex-router-plan-1a-credential-state-substrate.md`
@@ -55,6 +55,14 @@ path, save hunk fingerprints for same-path overlaps, and require each checkpoint
 commit to prove that no out-of-scope path or baseline-only hunk was staged. The
 same dirty-tree proof is required at A1, A2, B0, B1, and final closeout, not
 only at Gate 0.
+
+No code task may start until required source artifacts are frozen. If source
+inputs such as `docs/specs/2026-06-20-codex-router-greenfield-spec.md` or
+`docs/specs/references/2026-06-20-research-evidence.md` are dirty relative to
+the execution base, execution must either commit/promote them before cutting the
+fresh worktree or record a source carry-forward receipt for each input with
+path, source commit/head, checksum or byte count, working-tree line count,
+execution-base line count, and whether the input is normative.
 
 Plan 1A and Plan 1B are allowed to make quota/runtime/account-selection behavior
 safe, but they are not sufficient to claim onboarding-complete multi-account
