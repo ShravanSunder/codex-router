@@ -19,6 +19,7 @@ codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.0" }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.0" }
 codex-router-state = { path = "../codex-router-state", version = "0.1.0" }
 comfy-table.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

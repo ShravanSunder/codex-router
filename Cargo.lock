@@ -86,6 +86,7 @@ dependencies = [
  "codex-router-secret-store",
  "codex-router-state",
  "comfy-table",
+ "reqwest",
  "serde_json",
  "thiserror",
  "tungstenite",

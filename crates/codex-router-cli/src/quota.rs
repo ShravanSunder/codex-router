@@ -2,8 +2,13 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
+use codex_router_auth::live_quota::UsageResponse;
+use codex_router_auth::live_quota::WindowPair;
+use codex_router_auth::live_quota::usage_url;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_core::ids::AccountId;
@@ -114,6 +119,24 @@ pub enum QuotaCommandError {
     /// Quota refresh is not implemented for allowed providers in this slice.
     #[error("quota refresh provider execution is not implemented in Plan 1A")]
     RefreshNotImplemented,
+    /// Quota refresh provider request failed before a response status was available.
+    #[error("quota refresh request failed: {message}")]
+    ProviderRequest {
+        /// Redacted request failure.
+        message: String,
+    },
+    /// Quota refresh provider returned a non-success response.
+    #[error("quota refresh provider returned HTTP {status}")]
+    ProviderStatus {
+        /// Provider HTTP status.
+        status: u16,
+    },
+    /// Quota refresh provider response did not contain usable quota data.
+    #[error("quota refresh provider response was unusable: {message}")]
+    ProviderResponse {
+        /// Redacted response failure.
+        message: String,
+    },
     /// Credential resolver dependencies failed to open.
     #[error(transparent)]
     CredentialResolverOpen(#[from] CliCredentialResolverOpenError),
@@ -165,8 +188,8 @@ fn refresh_quota(
         router_root,
         base_url,
         &resolver,
-        &UnavailableQuotaRefreshProvider,
-        0,
+        &HttpQuotaRefreshProvider::new()?,
+        current_unix_seconds(),
     )
 }
 
@@ -238,6 +261,7 @@ impl QuotaRefreshProviderRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaRefreshProviderResponse {
     pub(crate) remaining_headroom: u32,
+    pub(crate) reset_unix_seconds: Option<u64>,
 }
 
 /// Provider egress dependency for quota refresh.
@@ -249,21 +273,56 @@ pub(crate) trait QuotaRefreshProvider {
     ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError>;
 }
 
-struct UnavailableQuotaRefreshProvider;
+/// HTTP quota refresh provider for ChatGPT/Codex usage endpoints.
+#[derive(Debug)]
+pub(crate) struct HttpQuotaRefreshProvider {
+    client: reqwest::blocking::Client,
+}
 
-impl QuotaRefreshProvider for UnavailableQuotaRefreshProvider {
+impl HttpQuotaRefreshProvider {
+    /// Creates an HTTP quota refresh provider.
+    pub(crate) fn new() -> Result<Self, QuotaCommandError> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("codex-router-quota-refresh")
+            .build()
+            .map_err(|error| QuotaCommandError::ProviderRequest {
+                message: error.to_string(),
+            })?;
+        Ok(Self { client })
+    }
+}
+
+impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
     fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
-        let _provider_request_shape = (
-            request.account_id(),
-            request.account_label(),
-            request.route_band(),
-            request.base_url(),
-            request.access_token(),
-        );
-        Err(QuotaCommandError::RefreshNotImplemented)
+        let _account_context = (request.account_id(), request.account_label());
+        let response = self
+            .client
+            .get(usage_url(request.base_url()))
+            .bearer_auth(request.access_token().expose_secret())
+            .send()
+            .map_err(|error| QuotaCommandError::ProviderRequest {
+                message: error.to_string(),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(QuotaCommandError::ProviderStatus {
+                status: status.as_u16(),
+            });
+        }
+        let body = response
+            .text()
+            .map_err(|error| QuotaCommandError::ProviderRequest {
+                message: error.to_string(),
+            })?;
+        let usage = serde_json::from_str::<UsageResponse>(&body).map_err(|error| {
+            QuotaCommandError::ProviderResponse {
+                message: error.to_string(),
+            }
+        })?;
+        quota_response_for_route_band(&usage, request.route_band())
     }
 }
 
@@ -279,10 +338,6 @@ where
     R: ProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
-    if !is_allowed_quota_refresh_base_url(&base_url) {
-        return Err(QuotaCommandError::DisallowedBaseUrl { base_url });
-    }
-
     let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
     let mut refreshed_count = 0_u64;
@@ -307,12 +362,69 @@ where
             .with_observed_unix_seconds(observed_unix_seconds)
             .with_route_band(*route_band, response.remaining_headroom)
             .with_stale_penalty(false);
+            let snapshot = if let Some(reset_unix_seconds) = response.reset_unix_seconds {
+                snapshot.with_reset_unix_seconds(reset_unix_seconds)
+            } else {
+                snapshot
+            };
             QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot)?;
             refreshed_count = refreshed_count.saturating_add(1);
         }
     }
 
     writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)
+}
+
+fn quota_response_for_route_band(
+    usage: &UsageResponse,
+    route_band: &str,
+) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    let window_pair = match route_band {
+        "code_review" => usage.code_review_rate_limit.as_ref(),
+        _ => usage.rate_limit.as_ref(),
+    }
+    .ok_or_else(|| QuotaCommandError::ProviderResponse {
+        message: format!("missing quota window for route band {route_band}"),
+    })?;
+    quota_response_from_window_pair(window_pair, route_band)
+}
+
+fn quota_response_from_window_pair(
+    window_pair: &WindowPair,
+    route_band: &str,
+) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    let window = window_pair
+        .primary_window
+        .as_ref()
+        .or(window_pair.secondary_window.as_ref())
+        .ok_or_else(|| QuotaCommandError::ProviderResponse {
+            message: format!("missing provider quota windows for route band {route_band}"),
+        })?;
+    let used_percent = window
+        .used_percent
+        .ok_or_else(|| QuotaCommandError::ProviderResponse {
+            message: format!("missing used_percent for route band {route_band}"),
+        })?
+        .clamp(0, 100);
+    let remaining_headroom = u32::try_from(100_i64 - used_percent).map_err(|_error| {
+        QuotaCommandError::ProviderResponse {
+            message: format!("invalid used_percent for route band {route_band}"),
+        }
+    })?;
+    let reset_unix_seconds = window
+        .reset_at
+        .and_then(|reset_at| u64::try_from(reset_at).ok());
+
+    Ok(QuotaRefreshProviderResponse {
+        remaining_headroom,
+        reset_unix_seconds,
+    })
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn render_quota_status(
