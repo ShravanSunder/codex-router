@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
 use codex_router_auth::resolver::ProviderCredentialResolver;
@@ -31,32 +32,57 @@ pub enum CliCredentialResolverOpenError {
 
 /// CLI-owned credential resolver adapter.
 #[derive(Debug)]
-pub struct CliCredentialResolver {
+pub struct CliCredentialResolver<C = OpenAiOAuthRefreshClient>
+where
+    C: CredentialRefreshClient + Clone,
+{
     state_store: SqliteStateStore,
     secret_store: CliRuntimeSecretStore,
     fallback_now_unix_seconds: u64,
-    refresh_client: OpenAiOAuthRefreshClient,
+    refresh_client: C,
     refresh_leases: RefreshLeaseRegistry,
 }
 
-impl CliCredentialResolver {
+impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
     /// Opens CLI credential resolver dependencies.
     pub fn open(
         state_db_path: &Path,
         secret_root: &Path,
         now_unix_seconds: u64,
     ) -> Result<Self, CliCredentialResolverOpenError> {
+        Self::open_with_refresh_client(
+            state_db_path,
+            secret_root,
+            now_unix_seconds,
+            OpenAiOAuthRefreshClient::new(),
+        )
+    }
+}
+
+impl<C> CliCredentialResolver<C>
+where
+    C: CredentialRefreshClient + Clone,
+{
+    pub(crate) fn open_with_refresh_client(
+        state_db_path: &Path,
+        secret_root: &Path,
+        now_unix_seconds: u64,
+        refresh_client: C,
+    ) -> Result<Self, CliCredentialResolverOpenError> {
         Ok(Self {
             state_store: SqliteStateStore::open(state_db_path)?,
             secret_store: open_cli_secret_store(secret_root)?,
             fallback_now_unix_seconds: now_unix_seconds,
-            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_client,
             refresh_leases: RefreshLeaseRegistry::new(),
         })
     }
 }
 
-impl ProviderCredentialResolver for CliCredentialResolver {
+impl<C> ProviderCredentialResolver for CliCredentialResolver<C>
+where
+    C: CredentialRefreshClient + Clone,
+{
     fn resolve_provider_credentials(
         &self,
         account_id: &AccountId,

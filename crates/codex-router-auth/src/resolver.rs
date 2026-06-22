@@ -1,7 +1,6 @@
 //! Router-owned provider credential resolution.
 
 use std::collections::HashMap;
-use std::env;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -26,8 +25,6 @@ use crate::oauth::classify_refresh_response;
 
 const DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const REFRESH_TOKEN_URL_OVERRIDE_ENV: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
-const LOGIN_CLIENT_ID_OVERRIDE_ENV: &str = "CODEX_APP_SERVER_LOGIN_CLIENT_ID";
 
 /// Credential resolver failure.
 #[derive(Debug, Error)]
@@ -147,7 +144,6 @@ impl CredentialRefreshClient for NoopCredentialRefreshClient {
 /// OpenAI OAuth refresh client compatible with Codex auth.json credentials.
 #[derive(Clone, Debug)]
 pub struct OpenAiOAuthRefreshClient {
-    client: reqwest::blocking::Client,
     token_endpoint: String,
     client_id: String,
 }
@@ -157,22 +153,19 @@ impl OpenAiOAuthRefreshClient {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
-            token_endpoint: env::var(REFRESH_TOKEN_URL_OVERRIDE_ENV)
-                .unwrap_or_else(|_error| DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT.to_owned()),
-            client_id: env::var(LOGIN_CLIENT_ID_OVERRIDE_ENV)
-                .unwrap_or_else(|_error| DEFAULT_OPENAI_OAUTH_CLIENT_ID.to_owned()),
+            token_endpoint: DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT.to_owned(),
+            client_id: DEFAULT_OPENAI_OAUTH_CLIENT_ID.to_owned(),
         }
     }
 
     /// Creates a refresh client with explicit endpoint/client id for tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn new_with_endpoint(
+    pub(crate) fn new_with_endpoint(
         token_endpoint: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
             token_endpoint: token_endpoint.into(),
             client_id: client_id.into(),
         }
@@ -198,8 +191,10 @@ impl CredentialRefreshClient for OpenAiOAuthRefreshClient {
         };
         let body = serde_json::to_string(&request)
             .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
-        let response = self
-            .client
+        let client = reqwest::blocking::Client::builder()
+            .build()
+            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+        let response = client
             .post(&self.token_endpoint)
             .header("content-type", "application/json")
             .body(body)

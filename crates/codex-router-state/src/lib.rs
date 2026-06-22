@@ -261,7 +261,6 @@ mod tests {
             "models",
             "memories_trace_summarize",
             "responses_compact",
-            "code_review",
         ] {
             let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
                 &store,
@@ -291,6 +290,24 @@ mod tests {
             assert_eq!(windows[0].observed_unix_seconds(), 0);
             assert!(windows[0].effective());
         }
+        let code_review_snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &store,
+            &account_id,
+            "code_review",
+        ) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => panic!("code_review stale marker should exist"),
+            Err(error) => panic!("code_review stale marker should load: {error}"),
+        };
+        assert_eq!(code_review_snapshot.remaining_headroom(), 0);
+        assert!(code_review_snapshot.stale_penalty());
+        let code_review_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "code_review") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("code_review selector input should load: {error}"),
+            };
+        assert_eq!(code_review_inputs.len(), 1);
+        assert!(code_review_inputs[0].windows().is_empty());
     }
 
     #[test]
@@ -324,6 +341,21 @@ mod tests {
         {
             panic!("selector window should persist: {error}");
         }
+        let weekly_selector_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(99)
+        .with_reset_unix_seconds(700_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(9_000);
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&store, &weekly_selector_window)
+        {
+            panic!("weekly selector window should persist: {error}");
+        }
 
         if let Err(error) = store.activate_account_credential_generation_and_invalidate_quota(
             &account_id,
@@ -341,10 +373,54 @@ mod tests {
         assert_eq!(selector_inputs.len(), 1);
         let windows = selector_inputs[0].windows();
         assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].limit_window_seconds(), 18_000);
         assert_eq!(windows[0].status(), SelectorQuotaWindowStatus::Ineligible);
         assert_eq!(windows[0].remaining_headroom(), 0);
+        assert_eq!(windows[0].reset_unix_seconds(), None);
         assert_eq!(windows[0].observed_unix_seconds(), 0);
         assert!(windows[0].effective());
+    }
+
+    #[test]
+    fn quota_snapshot_upsert_keeps_code_review_out_of_selector_projection() {
+        let temp_dir = TestTempDir::new("code_review_status_only");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_code_review_status_only");
+        let account = AccountRecord::new(account_id.clone(), "status-only", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
+            panic!("account should persist: {error}");
+        }
+        let snapshot =
+            PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
+                .with_observed_unix_seconds(3_000)
+                .with_route_band("code_review", 88)
+                .with_reset_unix_seconds(4_000)
+                .with_stale_penalty(false);
+
+        if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(&store, &snapshot) {
+            panic!("code_review quota snapshot should persist: {error}");
+        }
+
+        assert_eq!(
+            QuotaSnapshotRepository::load_snapshot_for_route_band(
+                &store,
+                &account_id,
+                "code_review"
+            ),
+            Ok(Some(snapshot))
+        );
+        let selector_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "code_review") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("code_review selector input should load: {error}"),
+            };
+        assert_eq!(selector_inputs.len(), 1);
+        assert!(selector_inputs[0].windows().is_empty());
     }
 
     #[test]

@@ -26,6 +26,7 @@ mod tests {
     use crate::account_selection::QuotaAwareAccountState;
     use crate::account_selection::RepositoryBackedAccountSelector;
     use crate::account_selection::SelectedAccountDecision;
+    use crate::credential_runtime::ProxyCredentialResolver;
     use crate::headers::Header;
     use crate::headers::HeaderCollection;
     use crate::http_sse::AuditFailureReporter;
@@ -35,6 +36,8 @@ mod tests {
     use crate::http_sse::HttpProxyResponse;
     use crate::http_sse::HttpProxyService;
     use crate::http_sse::HttpRequestHandler;
+    use crate::http_sse::StreamingHttpProxyResponse;
+    use crate::http_sse::StreamingUpstreamHttpTransport;
     use crate::http_sse::UpstreamHttpRequest;
     use crate::http_sse::UpstreamHttpTransport;
     use crate::http_sse::append_audit_event_with_reporter;
@@ -1053,6 +1056,46 @@ mod tests {
             let service =
                 AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
             must_ok(LoopbackHttpAdapter::handle_connection(stream, &service));
+        });
+        assert!(credential_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+    }
+
+    #[test]
+    fn loopback_http_streaming_adapter_returns_status_for_post_auth_proxy_rejections() {
+        let selection_response = http_response_from_one_connection(|stream| {
+            let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+                200,
+                HeaderCollection::default(),
+                b"should-not-send".to_vec(),
+            ));
+            let selector =
+                RejectingSelector::new(QuotaAwareAccountSelectorError::NoEligibleAccounts);
+            let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+            let auth_gate = local_auth_gate();
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            must_ok(LoopbackHttpAdapter::handle_streaming_connection(
+                stream, &service,
+            ));
+        });
+        assert!(selection_response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+
+        let credential_response = http_response_from_one_connection(|stream| {
+            let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+                200,
+                HeaderCollection::default(),
+                b"should-not-send".to_vec(),
+            ));
+            let selector = RecordingSelector::new();
+            let resolver = RejectingProviderCredentialResolver::new(
+                CredentialResolverError::RefreshUnavailable,
+            );
+            let auth_gate = local_auth_gate();
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            must_ok(LoopbackHttpAdapter::handle_streaming_connection(
+                stream, &service,
+            ));
         });
         assert!(credential_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
     }
@@ -2761,6 +2804,18 @@ mod tests {
         }
     }
 
+    impl StreamingUpstreamHttpTransport for RecordingUpstream {
+        fn send_streaming(
+            &self,
+            request: UpstreamHttpRequest,
+        ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
+            self.recorded.borrow_mut().push(request);
+            Ok(StreamingHttpProxyResponse::from_buffered(
+                self.response.clone(),
+            ))
+        }
+    }
+
     struct RecordingSelector {
         recorded: RefCell<Vec<(String, TokenGeneration)>>,
     }
@@ -3092,6 +3147,59 @@ mod tests {
         assert_eq!(
             headers.values("authorization"),
             vec!["Bearer refreshed-websocket-access-token"]
+        );
+        assert_eq!(refresh_client.calls(), 1);
+        let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("account should remain registered"));
+        assert_eq!(loaded_account.active_credential_generation(), Some(2));
+    }
+
+    #[test]
+    fn proxy_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
+        let temp_dir = ProxyTestTempDir::new("proxy-runtime-resolver-refresh");
+        let state_database_path = temp_dir.path().join("state.sqlite");
+        let secret_store_root = temp_dir.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_database_path));
+        let secrets = must_ok(FileSecretStore::open(&secret_store_root));
+        let account_id = account_id("acct_proxy_runtime_refresh");
+        let account = AccountRecord::new(account_id.clone(), "runtime", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "expired-proxy-runtime-access-token",
+                        Some("proxy-runtime-refresh-token".to_owned()),
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let refresh_client = RecordingRefreshClient::new(
+            "acct_proxy_runtime_refresh",
+            "proxy-runtime-refresh-token",
+            AccountCredentialBundle::imported_codex_auth(
+                "refreshed-proxy-runtime-access-token",
+                Some("refreshed-proxy-runtime-refresh-token".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000),
+        );
+        let resolver = must_ok(ProxyCredentialResolver::open_with_refresh_client(
+            &state_database_path,
+            &secret_store_root,
+            1_000,
+            refresh_client.clone(),
+        ));
+
+        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+
+        assert_eq!(
+            resolved.access_token().expose_secret(),
+            "refreshed-proxy-runtime-access-token"
         );
         assert_eq!(refresh_client.calls(), 1);
         let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))

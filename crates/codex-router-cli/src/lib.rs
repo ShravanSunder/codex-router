@@ -984,6 +984,7 @@ mod tests {
     use codex_router_auth::resolver::CredentialRefreshClient;
     use codex_router_auth::resolver::CredentialResolverError;
     use codex_router_auth::resolver::NoopCredentialRefreshClient;
+    use codex_router_auth::resolver::ProviderCredentialResolver;
     use codex_router_auth::resolver::RouterCredentialResolver;
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
@@ -1011,6 +1012,7 @@ mod tests {
     use super::run_with_io;
     use crate::account::AccountImportRequest;
     use crate::account::import_codex_auth_from_request;
+    use crate::credential_runtime::CliCredentialResolver;
     use crate::doctor::DoctorAccountState;
     use crate::doctor::DoctorReport;
     use crate::doctor::QuotaDoctorState;
@@ -2143,6 +2145,61 @@ mod tests {
             QuotaSnapshotSource::OpenAiEndpoint
         );
         assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
+    }
+
+    #[test]
+    fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
+        let test_root = TestRoot::new("cli-runtime-resolver-refresh");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account_id = account_id("acct_cli_runtime_refresh");
+        let account = AccountRecord::new(account_id.clone(), "runtime", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets_root = router_root.join("secrets");
+        let secrets = must_ok(FileSecretStore::open(&secrets_root));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "expired-cli-runtime-access-token",
+                        Some("cli-runtime-refresh-token".to_owned()),
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let refresh_client = RecordingRefreshClient::new(
+            "acct_cli_runtime_refresh",
+            "cli-runtime-refresh-token",
+            AccountCredentialBundle::imported_codex_auth(
+                "refreshed-cli-runtime-access-token",
+                Some("refreshed-cli-runtime-refresh-token".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &router_root.join("state.sqlite"),
+            &secrets_root,
+            1_000,
+            refresh_client.clone(),
+        ));
+
+        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+
+        assert_eq!(
+            resolved.access_token().expose_secret(),
+            "refreshed-cli-runtime-access-token"
+        );
+        assert_eq!(refresh_client.calls(), 1);
+        let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("account should remain registered"));
+        assert_eq!(loaded_account.active_credential_generation(), Some(2));
     }
 
     #[test]

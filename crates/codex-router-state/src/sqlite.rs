@@ -32,6 +32,12 @@ const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses_compact",
     "code_review",
 ];
+const SELECTOR_INVALIDATED_ROUTE_BANDS: &[&str] = &[
+    "responses",
+    "models",
+    "memories_trace_summarize",
+    "responses_compact",
+];
 
 /// SQLite state store failure.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -260,28 +266,31 @@ impl SqliteStateStore {
                     ],
                 )
                 .map_err(sqlite_error)?;
-            transaction
-                .execute(
-                    "INSERT INTO selector_quota_windows (
-                       account_id, route_band, limit_window_seconds, status,
-                       remaining_headroom, reset_unix_seconds, effective,
-                       observed_unix_seconds
-                     )
-                     VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, 0)
-                     ON CONFLICT(account_id, route_band, limit_window_seconds) DO UPDATE SET
-                       status = excluded.status,
-                       remaining_headroom = excluded.remaining_headroom,
-                       reset_unix_seconds = excluded.reset_unix_seconds,
-                       effective = excluded.effective,
-                       observed_unix_seconds = excluded.observed_unix_seconds",
-                    params![
-                        account_id.as_str(),
-                        route_band,
-                        u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?,
-                        SelectorQuotaWindowStatus::Ineligible.as_str(),
-                    ],
-                )
-                .map_err(sqlite_error)?;
+            if selector_route_band(route_band) {
+                transaction
+                    .execute(
+                        "DELETE FROM selector_quota_windows
+                          WHERE account_id = ?1 AND route_band = ?2",
+                        params![account_id.as_str(), route_band],
+                    )
+                    .map_err(sqlite_error)?;
+                transaction
+                    .execute(
+                        "INSERT INTO selector_quota_windows (
+                           account_id, route_band, limit_window_seconds, status,
+                           remaining_headroom, reset_unix_seconds, effective,
+                           observed_unix_seconds
+                         )
+                         VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, 0)",
+                        params![
+                            account_id.as_str(),
+                            route_band,
+                            u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?,
+                            SelectorQuotaWindowStatus::Ineligible.as_str(),
+                        ],
+                    )
+                    .map_err(sqlite_error)?;
+            }
         }
         transaction.commit().map_err(sqlite_error)?;
 
@@ -302,7 +311,11 @@ impl SqliteStateStore {
             0_i64
         };
 
-        self.connection
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error)?;
+        transaction
             .execute(
                 "INSERT INTO quota_snapshots (
                    account_id, source, observed_unix_seconds, route_band,
@@ -326,7 +339,43 @@ impl SqliteStateStore {
                 ],
             )
             .map_err(sqlite_error)?;
-        self.upsert_selector_quota_window(&selector_window_from_snapshot(snapshot))?;
+        if selector_route_band(snapshot.route_band()) {
+            let selector_window = selector_window_from_snapshot(snapshot);
+            transaction
+                .execute(
+                    "INSERT INTO selector_quota_windows (
+                       account_id, route_band, limit_window_seconds, status,
+                       remaining_headroom, reset_unix_seconds, effective,
+                       observed_unix_seconds
+                     )
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(account_id, route_band, limit_window_seconds) DO UPDATE SET
+                       status = excluded.status,
+                       remaining_headroom = excluded.remaining_headroom,
+                       reset_unix_seconds = excluded.reset_unix_seconds,
+                       effective = excluded.effective,
+                       observed_unix_seconds = excluded.observed_unix_seconds",
+                    params![
+                        selector_window.account_id().as_str(),
+                        selector_window.route_band(),
+                        u64_to_i64(selector_window.limit_window_seconds())?,
+                        selector_window.status().as_str(),
+                        u32_to_i64(selector_window.remaining_headroom()),
+                        selector_window
+                            .reset_unix_seconds()
+                            .map(u64_to_i64)
+                            .transpose()?,
+                        if selector_window.effective() {
+                            1_i64
+                        } else {
+                            0_i64
+                        },
+                        u64_to_i64(selector_window.observed_unix_seconds())?,
+                    ],
+                )
+                .map_err(sqlite_error)?;
+        }
+        transaction.commit().map_err(sqlite_error)?;
 
         Ok(())
     }
@@ -692,7 +741,11 @@ impl SqliteStateStore {
     }
 
     fn apply_v3(&self) -> Result<(), StateStoreError> {
-        self.connection
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error)?;
+        transaction
             .execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS selector_quota_windows (
@@ -706,18 +759,10 @@ impl SqliteStateStore {
                     observed_unix_seconds INTEGER NOT NULL,
                     PRIMARY KEY (account_id, route_band, limit_window_seconds)
                 );
-
-                PRAGMA user_version = 3;
                 ",
             )
             .map_err(sqlite_error)?;
-        self.backfill_selector_quota_windows_from_snapshots()?;
-
-        Ok(())
-    }
-
-    fn backfill_selector_quota_windows_from_snapshots(&self) -> Result<(), StateStoreError> {
-        self.connection
+        transaction
             .execute(
                 "INSERT INTO selector_quota_windows (
                    account_id, route_band, limit_window_seconds, status,
@@ -738,7 +783,7 @@ impl SqliteStateStore {
                    1,
                    observed_unix_seconds
                  FROM quota_snapshots
-                 WHERE true
+                 WHERE route_band IN (?5, ?6, ?7, ?8)
                  ON CONFLICT(account_id, route_band, limit_window_seconds) DO UPDATE SET
                    status = excluded.status,
                    remaining_headroom = excluded.remaining_headroom,
@@ -750,9 +795,17 @@ impl SqliteStateStore {
                     SelectorQuotaWindowStatus::Ineligible.as_str(),
                     SelectorQuotaWindowStatus::Stale.as_str(),
                     SelectorQuotaWindowStatus::Eligible.as_str(),
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[0],
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[1],
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[2],
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[3],
                 ],
             )
             .map_err(sqlite_error)?;
+        transaction
+            .execute_batch("PRAGMA user_version = 3;")
+            .map_err(sqlite_error)?;
+        transaction.commit().map_err(sqlite_error)?;
 
         Ok(())
     }
@@ -915,6 +968,10 @@ fn selector_window_from_snapshot(
     }
 
     window
+}
+
+fn selector_route_band(route_band: &str) -> bool {
+    SELECTOR_INVALIDATED_ROUTE_BANDS.contains(&route_band)
 }
 
 fn u64_to_i64(value: u64) -> Result<i64, StateStoreError> {
