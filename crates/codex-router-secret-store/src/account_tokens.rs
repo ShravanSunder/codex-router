@@ -9,3 +9,8 @@ use crate::model::SecretStoreError;
 pub fn upstream_access_token_key(account_id: &AccountId) -> Result<SecretKey, SecretStoreError> {
     SecretKey::new(format!("openai_access_token.{}", account_id.as_str()))
 }
+
+/// Builds the secret key for an account's upstream OpenAI refresh token.
+pub fn upstream_refresh_token_key(account_id: &AccountId) -> Result<SecretKey, SecretStoreError> {
+    SecretKey::new(format!("openai_refresh_token.{}", account_id.as_str()))
+}

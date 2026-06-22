@@ -22,15 +22,21 @@ use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_proxy::upstream::UpstreamEndpointError;
 use codex_router_secret_store::file_backend::FileSecretStore;
 
+pub mod account;
 pub mod doctor;
 mod live;
 pub mod profile;
+pub mod quota;
 pub mod token;
 
+use account::AccountCommand;
+use account::AccountCommandError;
 use live::LiveCommand;
 use profile::CodexRouterProfile;
 use profile::CodexRouterProfileWriter;
 use profile::ProfileWriteError;
+use quota::QuotaCommand;
+use quota::QuotaCommandError;
 use thiserror::Error;
 use token::LocalRouterTokenService;
 use token::Shell;
@@ -159,6 +165,8 @@ where
                 writeln!(stdout, "wrote: {}", written_path.display()).map_err(CliError::Stdout)?;
             }
         }
+        CliCommand::Account(command) => account::run_account_command(stdout, command)?,
+        CliCommand::Quota(command) => quota::run_quota_command(stdout, command)?,
         CliCommand::Live(command) => live::run_live_command(stdout, command)?,
         CliCommand::Help => {
             stdout
@@ -315,6 +323,8 @@ enum CliCommand {
     Serve(ServeCommand),
     Token(TokenCommand),
     Profile(ProfileCommand),
+    Account(AccountCommand),
+    Quota(QuotaCommand),
     Live(LiveCommand),
     Help,
 }
@@ -343,6 +353,8 @@ impl CliCommand {
             "serve" => Ok(Self::Serve(ServeCommand::parse(parser)?)),
             "profile" => Ok(Self::Profile(ProfileCommand::parse(parser)?)),
             "token" => Ok(Self::Token(TokenCommand::parse(parser)?)),
+            "account" => Ok(Self::Account(AccountCommand::parse(parser)?)),
+            "quota" => Ok(Self::Quota(QuotaCommand::parse(parser)?)),
             "live" => Ok(Self::Live(LiveCommand::parse(parser)?)),
             "--help" | "-h" | "help" => Ok(Self::Help),
             unknown => Err(CliError::UnknownCommand {
@@ -713,7 +725,7 @@ impl ProfileOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ArgumentParser {
+pub(crate) struct ArgumentParser {
     arguments: Vec<OsString>,
     index: usize,
 }
@@ -726,7 +738,7 @@ impl ArgumentParser {
         }
     }
 
-    fn next_string(&mut self) -> Result<Option<String>, CliError> {
+    pub(crate) fn next_string(&mut self) -> Result<Option<String>, CliError> {
         let Some(argument) = self.arguments.get(self.index) else {
             return Ok(None);
         };
@@ -738,12 +750,12 @@ impl ArgumentParser {
             .map_err(|value| CliError::NonUtf8Argument { value })
     }
 
-    fn next_required_value(&mut self, option: &'static str) -> Result<String, CliError> {
+    pub(crate) fn next_required_value(&mut self, option: &'static str) -> Result<String, CliError> {
         self.next_string()?
             .ok_or(CliError::MissingOptionValue { option })
     }
 
-    fn reject_remaining(&mut self) -> Result<(), CliError> {
+    pub(crate) fn reject_remaining(&mut self) -> Result<(), CliError> {
         if let Some(argument) = self.next_string()? {
             return Err(CliError::UnknownOption { option: argument });
         }
@@ -877,6 +889,12 @@ pub enum CliError {
     /// Token command failed.
     #[error(transparent)]
     Token(#[from] TokenCommandError),
+    /// Account command failed.
+    #[error(transparent)]
+    Account(#[from] AccountCommandError),
+    /// Quota command failed.
+    #[error(transparent)]
+    Quota(#[from] QuotaCommandError),
     /// Live quota command needs exactly one source.
     #[error("live quota requires exactly one of --auth-json or --profiles-root")]
     LiveQuotaSourceRequired,
@@ -922,6 +940,9 @@ commands:
   token init --router-root <path>
   token rotate --router-root <path>
   token export --router-root <path> [--shell posix]
+  account import-codex-auth --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
+  account list --router-root <path>
+  quota status --router-root <path> [--format table|plain] [--all-limits]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -959,6 +980,7 @@ mod tests {
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
     use codex_router_secret_store::account_tokens::upstream_access_token_key;
+    use codex_router_secret_store::account_tokens::upstream_refresh_token_key;
     use codex_router_secret_store::file_backend::FileSecretStore;
     use codex_router_secret_store::file_backend::SecretStore;
     use codex_router_state::account::AccountRecord;
@@ -1175,6 +1197,30 @@ mod tests {
     }
 
     #[test]
+    fn profile_print_emits_router_custom_provider_without_home_mutation() {
+        let test_root = TestRoot::new("profile-print-plan-row");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "profile",
+                "print",
+                "--port",
+                "9876",
+                "--codex-home",
+                path_to_str(&codex_home),
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert_router_profile_contract(&output.stdout, 9876);
+        assert!(!codex_home.join("codex-router.config.toml").exists());
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
     fn profile_doctor_reports_token_presence_without_token_value() {
         let output = run_cli(
             ["codex-router", "profile", "doctor"],
@@ -1187,6 +1233,46 @@ mod tests {
         assert!(output.stdout.contains("CODEX_ROUTER_TOKEN: present\n"));
         assert!(!output.stdout.contains("local-secret-token-canary"));
         assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn token_export_and_profile_doctor_redact_router_token_value() {
+        let test_root = TestRoot::new("token-export-profile-doctor");
+        let store = must_ok(FileSecretStore::open(test_root.path()));
+        let service = LocalRouterTokenService::new(store);
+        let record = must_ok(service.rotate_with_token("router-token-canary"));
+
+        let export_output = run_cli(
+            [
+                "codex-router",
+                "token",
+                "export",
+                "--router-root",
+                path_to_str(test_root.path()),
+            ],
+            CliContext::new(Vec::new()),
+        );
+        let doctor_output = run_cli(
+            ["codex-router", "profile", "doctor"],
+            CliContext::new(vec![(
+                "CODEX_ROUTER_TOKEN".to_owned(),
+                record.token().expose_secret().to_owned(),
+            )]),
+        );
+
+        assert!(export_output.stdout.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(
+            doctor_output
+                .stdout
+                .contains("CODEX_ROUTER_TOKEN: present\n")
+        );
+        assert!(
+            !doctor_output
+                .stdout
+                .contains(record.token().expose_secret())
+        );
+        assert!(export_output.stderr.is_empty());
+        assert!(doctor_output.stderr.is_empty());
     }
 
     #[test]
@@ -1227,6 +1313,40 @@ mod tests {
                 .contains("base_url = \"http://127.0.0.1:9876/v1\"\n")
         );
         assert!(!codex_home.join("codex-router.config.toml").exists());
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn profile_write_dry_run_previews_named_profile_without_mutation() {
+        let test_root = TestRoot::new("profile-dry-run-plan-row");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "profile",
+                "write",
+                "--codex-home",
+                path_to_str(&codex_home),
+                "--port",
+                "9876",
+                "--dry-run",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let target_path = codex_home.join("codex-router.config.toml");
+        assert!(
+            output
+                .stdout
+                .contains(format!("target: {}", target_path.display()).as_str())
+        );
+        assert!(output.stdout.contains("preview-token: "));
+        assert!(output.stdout.contains("current: <missing>\n"));
+        assert!(output.stdout.contains("proposed:\n"));
+        assert_router_profile_contract(&output.stdout, 9876);
+        assert!(!target_path.exists());
         assert!(output.stderr.is_empty());
     }
 
@@ -1496,6 +1616,188 @@ mod tests {
             must_ok(fs::read_to_string(&target_path)),
             CodexRouterProfile::new(8787).render()
         );
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn profile_write_approved_writes_only_named_temp_profile_file() {
+        let test_root = TestRoot::new("profile-write-plan-row");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let preview_output = run_cli(
+            [
+                "codex-router",
+                "profile",
+                "write",
+                "--codex-home",
+                path_to_str(&codex_home),
+                "--port",
+                "9876",
+                "--dry-run",
+            ],
+            CliContext::new(Vec::new()),
+        );
+        let preview_token = preview_token_from_stdout(&preview_output.stdout);
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "profile",
+                "write",
+                "--codex-home",
+                path_to_str(&codex_home),
+                "--port",
+                "9876",
+                "--approve-codex-home-write",
+                "--preview-token",
+                preview_token,
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let target_path = codex_home.join("codex-router.config.toml");
+        assert!(
+            output
+                .stdout
+                .contains(format!("wrote: {}", target_path.display()).as_str())
+        );
+        assert_eq!(
+            must_ok(fs::read_to_string(&target_path)),
+            CodexRouterProfile::new(9876).render()
+        );
+        assert!(output.stderr.is_empty());
+    }
+
+    fn assert_router_profile_contract(output: &str, port: u16) {
+        assert!(!output.contains("[profiles.codex-router]\n"));
+        assert!(output.contains("model_provider = \"codex-router\"\n"));
+        assert!(output.contains("[model_providers.codex-router]\n"));
+        assert!(output.contains("name = \"codex-router\"\n"));
+        assert!(output.contains(format!("base_url = \"http://127.0.0.1:{port}/v1\"\n").as_str()));
+        assert!(output.contains("wire_api = \"responses\"\n"));
+        assert!(output.contains("requires_openai_auth = false\n"));
+        assert!(output.contains("supports_websockets = true\n"));
+        assert!(output.contains(
+            "env_http_headers = { \"X-Codex-Router-Token\" = \"CODEX_ROUTER_TOKEN\" }\n"
+        ));
+        assert!(!output.contains("sk-"));
+        assert!(!output.contains("oauth"));
+    }
+
+    #[test]
+    fn account_import_codex_auth_writes_router_owned_state_and_secrets() {
+        let test_root = TestRoot::new("account-import");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        let auth_json = test_root.path().join("auth.json");
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"access-token-canary","refresh_token":"refresh-token-canary"}}"#,
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "account",
+                "import-codex-auth",
+                "--router-root",
+                path_to_str(&router_root),
+                "--label",
+                "primary",
+                "--auth-json",
+                path_to_str(&auth_json),
+                "--allow-plaintext-file-secrets",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let account_id = account_id("acct_primary");
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("imported account metadata should exist"));
+        assert_eq!(account.label(), "primary");
+        assert_eq!(account.status(), AccountStatus::Enabled);
+
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let access_key = must_ok(upstream_access_token_key(&account_id));
+        let refresh_key = must_ok(upstream_refresh_token_key(&account_id));
+        assert_eq!(
+            must_ok(secrets.read_secret(&access_key)).expose_secret(),
+            "access-token-canary"
+        );
+        assert_eq!(
+            must_ok(secrets.read_secret(&refresh_key)).expose_secret(),
+            "refresh-token-canary"
+        );
+        assert!(output.stdout.contains("imported account: primary\n"));
+        assert!(output.stdout.contains("account_id: acct_primary\n"));
+        assert!(!output.stdout.contains("access-token-canary"));
+        assert!(!output.stdout.contains("refresh-token-canary"));
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            must_ok(fs::read_to_string(&auth_json)),
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"access-token-canary","refresh_token":"refresh-token-canary"}}"#
+        );
+    }
+
+    #[test]
+    fn quota_status_reads_sqlite_rows_without_provider_io() {
+        let test_root = TestRoot::new("quota-status");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let primary_account = AccountRecord::new(
+            account_id("acct_primary"),
+            "primary",
+            AccountStatus::Enabled,
+        );
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_primary"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(1_000)
+            .with_route_band("responses", 72)
+            .with_reset_unix_seconds(2_000)
+            .with_stale_penalty(false),
+        ));
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_primary"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(1_005)
+            .with_route_band("models", 44)
+            .with_reset_unix_seconds(3_000),
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("account"));
+        assert!(output.stdout.contains("primary"));
+        assert!(output.stdout.contains("acct_primary"));
+        assert!(output.stdout.contains("responses"));
+        assert!(output.stdout.contains("72"));
+        assert!(output.stdout.contains("models"));
+        assert!(output.stdout.contains("44"));
+        assert!(!output.stdout.contains("access-token"));
+        assert!(!output.stdout.contains("refresh-token"));
         assert!(output.stderr.is_empty());
     }
 
