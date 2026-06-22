@@ -54,7 +54,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 3);
+        assert_eq!(store.schema_version(), 4);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -188,10 +188,10 @@ mod tests {
 
         let store = match SqliteStateStore::open(&database_path) {
             Ok(store) => store,
-            Err(error) => panic!("v2 state store should migrate to v3: {error}"),
+            Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 3);
+        assert_eq!(store.schema_version(), 4);
         let selector_inputs =
             match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "responses") {
                 Ok(inputs) => inputs,
@@ -208,6 +208,41 @@ mod tests {
         assert_eq!(window.reset_unix_seconds(), Some(2_000));
         assert_eq!(window.limit_window_seconds(), 18_000);
         assert!(window.effective());
+        let code_review_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "code_review") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("code_review selector input should load: {error}"),
+            };
+        assert_eq!(code_review_inputs.len(), 1);
+        assert!(code_review_inputs[0].windows().is_empty());
+    }
+
+    #[test]
+    fn v3_migration_removes_legacy_code_review_selector_windows() {
+        let temp_dir = TestTempDir::new("v3_code_review_selector_cleanup");
+        let database_path = temp_dir.path().join("state.sqlite");
+        create_v3_database_with_legacy_code_review_selector_window(&database_path);
+
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
+        };
+
+        assert_eq!(store.schema_version(), 4);
+        let responses_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "responses") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("responses selector input should load: {error}"),
+            };
+        assert_eq!(responses_inputs.len(), 1);
+        assert_eq!(responses_inputs[0].windows().len(), 1);
+        let code_review_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "code_review") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("code_review selector input should load: {error}"),
+            };
+        assert_eq!(code_review_inputs.len(), 1);
+        assert!(code_review_inputs[0].windows().is_empty());
     }
 
     #[test]
@@ -239,6 +274,22 @@ mod tests {
             if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(&store, &snapshot) {
                 panic!("{route_band} snapshot should persist: {error}");
             }
+        }
+        let legacy_code_review_selector_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "code_review",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(77)
+        .with_reset_unix_seconds(999_999)
+        .with_effective(true)
+        .with_observed_unix_seconds(12_345);
+        if let Err(error) = SelectorQuotaRepository::upsert_selector_window(
+            &store,
+            &legacy_code_review_selector_window,
+        ) {
+            panic!("legacy code_review selector window should persist: {error}");
         }
 
         if let Err(error) = store.activate_account_credential_generation_and_invalidate_quota(
@@ -660,10 +711,91 @@ mod tests {
                 64, 2000, 0
             );
 
+            INSERT INTO quota_snapshots (
+                account_id, source, observed_unix_seconds, route_band,
+                remaining_headroom, reset_unix_seconds, stale_penalty
+            ) VALUES (
+                'acct_v2_backfill', 'mock_endpoint', 1000, 'code_review',
+                64, 2000, 0
+            );
+
             PRAGMA user_version = 2;
             ",
         ) {
             panic!("raw v2 database should initialize: {error}");
+        }
+    }
+
+    fn create_v3_database_with_legacy_code_review_selector_window(database_path: &Path) {
+        let connection = match Connection::open(database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("raw v3 database should open: {error}"),
+        };
+        if let Err(error) = connection.execute_batch(
+            "
+            CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                active_credential_generation INTEGER
+            );
+
+            CREATE TABLE quota_snapshots (
+                account_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                route_band TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                stale_penalty INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE affinity_pins (
+                affinity_key TEXT PRIMARY KEY NOT NULL,
+                account_id TEXT NOT NULL
+            );
+
+            CREATE TABLE selector_quota_windows (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                limit_window_seconds INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                effective INTEGER NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band, limit_window_seconds)
+            );
+
+            INSERT INTO accounts (
+                account_id, label, status, active_credential_generation
+            ) VALUES (
+                'acct_v3_cleanup', 'v3-cleanup', 'enabled', 1
+            );
+
+            INSERT INTO selector_quota_windows (
+                account_id, route_band, limit_window_seconds, status,
+                remaining_headroom, reset_unix_seconds, effective,
+                observed_unix_seconds
+            ) VALUES (
+                'acct_v3_cleanup', 'responses', 18000, 'eligible',
+                64, 2000, 1, 1000
+            );
+
+            INSERT INTO selector_quota_windows (
+                account_id, route_band, limit_window_seconds, status,
+                remaining_headroom, reset_unix_seconds, effective,
+                observed_unix_seconds
+            ) VALUES (
+                'acct_v3_cleanup', 'code_review', 604800, 'eligible',
+                77, 999999, 1, 12345
+            );
+
+            PRAGMA user_version = 3;
+            ",
+        ) {
+            panic!("raw v3 database should initialize: {error}");
         }
     }
 }

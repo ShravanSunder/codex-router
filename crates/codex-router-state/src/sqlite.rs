@@ -23,7 +23,7 @@ use crate::repositories::AffinityRepository;
 use crate::repositories::QuotaSnapshotRepository;
 use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
@@ -266,14 +266,14 @@ impl SqliteStateStore {
                     ],
                 )
                 .map_err(sqlite_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM selector_quota_windows
+                      WHERE account_id = ?1 AND route_band = ?2",
+                    params![account_id.as_str(), route_band],
+                )
+                .map_err(sqlite_error)?;
             if selector_route_band(route_band) {
-                transaction
-                    .execute(
-                        "DELETE FROM selector_quota_windows
-                          WHERE account_id = ?1 AND route_band = ?2",
-                        params![account_id.as_str(), route_band],
-                    )
-                    .map_err(sqlite_error)?;
                 transaction
                     .execute(
                         "INSERT INTO selector_quota_windows (
@@ -672,9 +672,14 @@ impl SqliteStateStore {
             0 => self.apply_v1(),
             1 => {
                 self.apply_v2()?;
-                self.apply_v3()
+                self.apply_v3()?;
+                self.apply_v4()
             }
-            2 => self.apply_v3(),
+            2 => {
+                self.apply_v3()?;
+                self.apply_v4()
+            }
+            3 => self.apply_v4(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -719,7 +724,7 @@ impl SqliteStateStore {
                     PRIMARY KEY (account_id, route_band, limit_window_seconds)
                 );
 
-                PRAGMA user_version = 3;
+                PRAGMA user_version = 4;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -804,6 +809,31 @@ impl SqliteStateStore {
             .map_err(sqlite_error)?;
         transaction
             .execute_batch("PRAGMA user_version = 3;")
+            .map_err(sqlite_error)?;
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn apply_v4(&self) -> Result<(), StateStoreError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "DELETE FROM selector_quota_windows
+                  WHERE route_band NOT IN (?1, ?2, ?3, ?4)",
+                params![
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[0],
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[1],
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[2],
+                    SELECTOR_INVALIDATED_ROUTE_BANDS[3],
+                ],
+            )
+            .map_err(sqlite_error)?;
+        transaction
+            .execute_batch("PRAGMA user_version = 4;")
             .map_err(sqlite_error)?;
         transaction.commit().map_err(sqlite_error)?;
 

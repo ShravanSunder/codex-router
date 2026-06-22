@@ -149,7 +149,7 @@ pub struct OpenAiOAuthRefreshClient {
 }
 
 impl OpenAiOAuthRefreshClient {
-    /// Creates a refresh client using Codex-compatible defaults and env overrides.
+    /// Creates a refresh client using Codex-compatible production defaults.
     #[must_use]
     pub fn new() -> Self {
         Self {

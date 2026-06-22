@@ -50,15 +50,17 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
         secret_root: &Path,
         now_unix_seconds: u64,
     ) -> Result<Self, CliCredentialResolverOpenError> {
-        Self::open_with_refresh_client(
-            state_db_path,
-            secret_root,
-            now_unix_seconds,
-            OpenAiOAuthRefreshClient::new(),
-        )
+        Ok(Self {
+            state_store: SqliteStateStore::open(state_db_path)?,
+            secret_store: open_cli_secret_store(secret_root)?,
+            fallback_now_unix_seconds: now_unix_seconds,
+            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_leases: RefreshLeaseRegistry::new(),
+        })
     }
 }
 
+#[cfg(test)]
 impl<C> CliCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone,

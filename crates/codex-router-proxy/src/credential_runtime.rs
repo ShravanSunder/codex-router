@@ -38,15 +38,17 @@ impl ProxyCredentialResolver<OpenAiOAuthRefreshClient> {
         secret_store_root: &Path,
         now_unix_seconds: u64,
     ) -> Result<Self, ProxyCredentialResolverOpenError> {
-        Self::open_with_refresh_client(
-            state_database_path,
-            secret_store_root,
-            now_unix_seconds,
-            OpenAiOAuthRefreshClient::new(),
-        )
+        Ok(Self {
+            state_store: SqliteStateStore::open(state_database_path)?,
+            secret_store: open_proxy_secret_store(secret_store_root)?,
+            fallback_now_unix_seconds: now_unix_seconds,
+            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_leases: RefreshLeaseRegistry::new(),
+        })
     }
 }
 
+#[cfg(test)]
 impl<C> ProxyCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone,
