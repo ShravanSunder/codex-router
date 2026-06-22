@@ -3,6 +3,7 @@
 Date: 2026-06-22
 Branch: `feature/initial-codex-router`
 Status: umbrella/control plan; not executable; revised after plan-review `needs_revision`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-revision.md`
 Executable children:
 
 - `docs/plans/2026-06-22-codex-router-plan-1a-credential-state-substrate.md`
@@ -41,10 +42,19 @@ The success change is structural: the umbrella is no longer executable. Only the
 No code task may start unless it belongs to exactly one executable child plan.
 
 No code task may start until a dirty-tree isolation receipt exists. Preferred
-execution uses a fresh worktree from the same branch tip. If execution stays in
-this dirty worktree, the receipt must classify every dirty path, save hunk
-fingerprints for same-path overlaps, and require each checkpoint commit to prove
-that no out-of-scope path or baseline-only hunk was staged.
+execution uses a fresh worktree from the reviewed plan commit or the latest
+approved receipt commit. Before any code edit in a fresh worktree, copy or
+promote the exact lifecycle packets under
+`tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/` and
+`tmp/workflow-state/2026-06-22-codex-router-quota-oauth-runtime/`, then record a
+carry-forward receipt with source path, target path, source commit/head,
+checksum or byte count, and `git status --short` before and after.
+
+If execution stays in this dirty worktree, the receipt must classify every dirty
+path, save hunk fingerprints for same-path overlaps, and require each checkpoint
+commit to prove that no out-of-scope path or baseline-only hunk was staged. The
+same dirty-tree proof is required at A1, A2, B0, B1, and final closeout, not
+only at Gate 0.
 
 Plan 1A and Plan 1B are allowed to make quota/runtime/account-selection behavior
 safe, but they are not sufficient to claim onboarding-complete multi-account
@@ -189,33 +199,49 @@ Before implementation, create a separate reviewed Plan 2 artifact covering:
 ## Execution DAG
 
 ```text
-gate 0: dirty-tree isolation receipt + source artifact freeze
+gate 0a: source artifact freeze + dirty-tree inventory
+  |
+gate 0b: fresh-worktree/tmp lifecycle carry-forward receipt
   |
   v
 Plan 1A: credential/state substrate
   |
-  +-- T1 no-behavior-change boundary extraction
-  +-- T2 identity/redaction/token-egress guards
-  +-- T3 fail-closed credential writes
-  +-- merge gate A1: fail-closed credential receipt
-  +-- T4 unified credential resolver
-  +-- T5 durable per-window selector source
-  +-- merge gate A2: substrate-complete receipt
+  T1 no-behavior-change boundary extraction
+  |
+  T2 identity/redaction/token-egress guards
+  |
+  T3 fail-closed credential writes
+  |
+  merge gate A1: fail-closed credential receipt
+  |
+  T4 unified credential resolver
+  |
+  T5 durable per-window selector source
+  |
+  merge gate A2: substrate-complete receipt
   |
 Plan 1A validation + implementation-review-swarm
   |
   v
 Plan 1B: quota runtime/status/selection
   |
-  +-- T6 failure taxonomy
-  +-- merge gate B0: failure-taxonomy receipt
-  +-- T7 immediate + scheduled refresh
-  +-- T8 weekly-aware selection
-  +-- T9 next-normal-path switching + same-turn/previous-response affinity
-  +-- T10 quota status UX
-  +-- T11 docs/runbook
-  +-- merge gate B1: runtime/status/docs-ready receipt
-  +-- T12 validation/smoke
+  T6 failure taxonomy
+  |
+  merge gate B0: failure-taxonomy receipt
+  |
+  T7 immediate + scheduled refresh
+  |
+  T8 weekly-aware selection
+  |
+  T9 next-normal-path switching + same-turn/previous-response affinity
+  |
+  T10 quota status UX
+  |
+  T11 docs/runbook
+  |
+  merge gate B1: runtime/status/docs-ready receipt
+  |
+  T12 validation/smoke
   |
 Plan 1B validation + implementation-review-swarm
   |
@@ -227,14 +253,16 @@ Parallelism:
 
 - [ ] Do not parallelize across Plan 1A and Plan 1B.
 - [ ] Do not start Plan 1B before Plan 1A review and validation pass.
-- [ ] Within Plan 1A, do not fan out by default. T2 and T3 are serial because
-      current account import couples identity, secret writes, credential
-      metadata, and enabled-state flip in one path.
-- [ ] Within Plan 1A, do not parallelize T3 with T4 or T4 with T5.
-- [ ] Within Plan 1B, failure taxonomy must land before immediate background refresh.
-- [ ] Within Plan 1B, do not fan out by default. T8 precedes T9, and T10
-      precedes T11.
-- [ ] Within Plan 1B, do not parallelize T8 with T9, T10 with T11, or T12 with any writing lane.
+- [ ] Do not fan out tasks by default inside either child plan. Accepted review
+      findings tie auth, credential writes, SQLite visibility, alias-family
+      publication, one-writer leases, local auth, and smoke proof tightly enough
+      that serial execution is the safe default.
+- [ ] Parallel implementation requires an explicit replan proving disjoint write
+      surfaces, independent proof rows, and no shared checkpoint receipt.
+- [ ] Plan 1A order is T1, T2, T3, A1, T4, T5, A2, then validation and
+      implementation review.
+- [ ] Plan 1B order is T6, B0, T7, T8, T9, T10, T11, B1, T12, then validation
+      and implementation review.
 
 ## Cross-Plan Validation Rule
 
@@ -254,6 +282,9 @@ Every closeout must report:
 - [ ] Smoke proof must name each exact `installed_codex_*` scenario individually.
 - [ ] Structural proof rows, such as resolver bypass checks, must include the
       exact search command and expected match count.
+- [ ] Each checkpoint receipt must include the commit hash, `git show
+      --name-only <checkpoint>`, owned-path-only proof, same-path baseline-hunk
+      proof, and explicit evidence that no baseline-only hunk was staged.
 
 ## Deferred Full-Spec Rows
 
