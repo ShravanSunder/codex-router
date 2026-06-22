@@ -1,7 +1,14 @@
 //! Quota command glue for persisted router-owned quota state.
 
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -346,7 +353,31 @@ where
     R: ProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
-    let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
+    refresh_quota_store_paths_with_dependencies(
+        stdout,
+        &router_root.join("state.sqlite"),
+        &router_root.join("secrets"),
+        base_url,
+        credential_resolver,
+        quota_provider,
+        observed_unix_seconds,
+    )
+}
+
+pub(crate) fn refresh_quota_store_paths_with_dependencies<R, P>(
+    stdout: &mut impl Write,
+    state_db: &Path,
+    _secret_root: &Path,
+    base_url: String,
+    credential_resolver: &R,
+    quota_provider: &P,
+    observed_unix_seconds: u64,
+) -> Result<(), QuotaCommandError>
+where
+    R: ProviderCredentialResolver,
+    P: QuotaRefreshProvider,
+{
+    let state = SqliteStateStore::open(state_db)?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
     let mut refreshed_count = 0_u64;
     for account in accounts
@@ -381,6 +412,94 @@ where
     }
 
     writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)
+}
+
+/// Stoppable background quota refresh worker.
+pub(crate) struct BackgroundQuotaRefreshWorker {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for BackgroundQuotaRefreshWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _result = thread.join();
+        }
+    }
+}
+
+pub(crate) fn start_background_quota_refresh_worker_with_dependencies<R, P>(
+    state_db: PathBuf,
+    secret_root: PathBuf,
+    base_url: String,
+    credential_resolver: R,
+    quota_provider: P,
+    observed_unix_seconds: u64,
+    interval: Duration,
+) -> BackgroundQuotaRefreshWorker
+where
+    R: ProviderCredentialResolver + Send + 'static,
+    P: QuotaRefreshProvider + Send + 'static,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    let thread = thread::spawn(move || {
+        loop {
+            let mut sink = Vec::new();
+            let _result = refresh_quota_store_paths_with_dependencies(
+                &mut sink,
+                &state_db,
+                &secret_root,
+                base_url.clone(),
+                &credential_resolver,
+                &quota_provider,
+                observed_unix_seconds,
+            );
+            if interval.is_zero() || !sleep_interruptibly(&stop_for_thread, interval) {
+                break;
+            }
+        }
+    });
+
+    BackgroundQuotaRefreshWorker {
+        stop,
+        thread: Some(thread),
+    }
+}
+
+pub(crate) fn start_background_quota_refresh_worker(
+    state_db: PathBuf,
+    secret_root: PathBuf,
+    base_url: String,
+    observed_unix_seconds: u64,
+    interval: Duration,
+) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
+    let resolver = CliCredentialResolver::open(&state_db, &secret_root, observed_unix_seconds)?;
+    let provider = HttpQuotaRefreshProvider::new()?;
+    Ok(start_background_quota_refresh_worker_with_dependencies(
+        state_db,
+        secret_root,
+        base_url,
+        resolver,
+        provider,
+        observed_unix_seconds,
+        interval,
+    ))
+}
+
+fn sleep_interruptibly(stop: &AtomicBool, interval: Duration) -> bool {
+    let mut remaining = interval;
+    while !stop.load(Ordering::SeqCst) {
+        if remaining.is_zero() {
+            return true;
+        }
+        let step = remaining.min(Duration::from_millis(50));
+        thread::sleep(step);
+        remaining = remaining.saturating_sub(step);
+    }
+
+    false
 }
 
 fn quota_response_for_route_band(

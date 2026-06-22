@@ -12,6 +12,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use codex_router_proxy::server::LocalAuthReloader;
 use codex_router_proxy::server::LoopbackBindAddress;
 use codex_router_proxy::server::LoopbackRouterRuntime;
@@ -82,6 +83,8 @@ where
             let initial_token_generation = local_token.generation();
             let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
             let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url)?;
+            let state_db = command.state_db.clone();
+            let secret_root = command.secret_root.clone();
             let runtime_config = LoopbackRouterRuntimeConfig::new(
                 bind_address,
                 upstream_endpoint,
@@ -99,6 +102,17 @@ where
             );
 
             writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
+            let _quota_refresh_worker = if command.background_quota_refresh_enabled {
+                Some(quota::start_background_quota_refresh_worker(
+                    state_db,
+                    secret_root,
+                    DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+                    command.now_unix_seconds,
+                    Duration::from_secs(command.quota_refresh_interval_seconds),
+                )?)
+            } else {
+                None
+            };
             runtime.serve_protocol_connections(command.max_connections)?;
         }
         CliCommand::Token(TokenCommand::Init { router_root }) => {
@@ -382,6 +396,8 @@ struct ServeCommand {
     upstream_base_url: String,
     now_unix_seconds: u64,
     max_snapshot_age_seconds: u64,
+    quota_refresh_interval_seconds: u64,
+    background_quota_refresh_enabled: bool,
     max_websocket_upstream_messages: usize,
     max_connections: usize,
 }
@@ -413,6 +429,8 @@ impl ServeCommand {
                 .now_unix_seconds
                 .map_or_else(current_unix_seconds, Ok)?,
             max_snapshot_age_seconds: options.max_snapshot_age_seconds.unwrap_or(300),
+            quota_refresh_interval_seconds: options.quota_refresh_interval_seconds.unwrap_or(300),
+            background_quota_refresh_enabled: !options.disable_background_quota_refresh,
             max_websocket_upstream_messages: options
                 .max_websocket_upstream_messages
                 .unwrap_or(usize::MAX),
@@ -430,6 +448,8 @@ struct ServeCommandOptions {
     upstream_base_url: Option<String>,
     now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: Option<u64>,
+    quota_refresh_interval_seconds: Option<u64>,
+    disable_background_quota_refresh: bool,
     max_websocket_upstream_messages: Option<usize>,
     max_connections: Option<usize>,
 }
@@ -444,6 +464,8 @@ impl ServeCommandOptions {
             upstream_base_url: None,
             now_unix_seconds: None,
             max_snapshot_age_seconds: None,
+            quota_refresh_interval_seconds: None,
+            disable_background_quota_refresh: false,
             max_websocket_upstream_messages: None,
             max_connections: None,
         };
@@ -478,6 +500,16 @@ impl ServeCommandOptions {
                     let value = parser.next_required_value("--max-snapshot-age-seconds")?;
                     options.max_snapshot_age_seconds =
                         Some(parse_u64_option("--max-snapshot-age-seconds", &value)?);
+                }
+                "--quota-refresh-interval-seconds" => {
+                    let value = parser.next_required_value("--quota-refresh-interval-seconds")?;
+                    options.quota_refresh_interval_seconds = Some(parse_u64_option(
+                        "--quota-refresh-interval-seconds",
+                        &value,
+                    )?);
+                }
+                "--disable-background-quota-refresh" => {
+                    options.disable_background_quota_refresh = true;
                 }
                 "--max-connections" => {
                     let value = parser.next_required_value("--max-connections")?;
@@ -938,7 +970,7 @@ const HELP_TEXT: &str = "\
 codex-router
 
 commands:
-  serve --state-db <path> --secret-root <path> --upstream-base-url <url>
+  serve --state-db <path> --secret-root <path> --upstream-base-url <url> [--disable-background-quota-refresh]
   token init --router-root <path>
   token rotate --router-root <path>
   token export --router-root <path> [--shell posix]
@@ -1026,7 +1058,9 @@ mod tests {
     use crate::quota::QuotaRefreshProvider;
     use crate::quota::QuotaRefreshProviderRequest;
     use crate::quota::QuotaRefreshProviderResponse;
+    use crate::quota::refresh_quota_store_paths_with_dependencies;
     use crate::quota::refresh_quota_with_dependencies;
+    use crate::quota::start_background_quota_refresh_worker_with_dependencies;
     use crate::token::LocalRouterTokenService;
     use crate::token::Shell;
     use crate::token::export_token_assignment;
@@ -2365,6 +2399,121 @@ JSON
     }
 
     #[test]
+    fn quota_refresh_store_paths_persist_to_explicit_state_db_and_secret_root() {
+        let test_root = TestRoot::new("quota-refresh-store-paths");
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("custom-state.sqlite");
+        let secret_root = test_root.path().join("custom-secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("acct_quota_store_paths");
+        let account = AccountRecord::new(account_id.clone(), "store-paths", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "store-path-access-token",
+                        Some("store-path-refresh-token".to_owned()),
+                    )
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            &secret_root,
+            1_000,
+            NoopCredentialRefreshClient,
+        ));
+        let provider = RecordingQuotaRefreshProvider::new(61);
+        let mut stdout = Vec::new();
+
+        must_ok(refresh_quota_store_paths_with_dependencies(
+            &mut stdout,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_200,
+        ));
+
+        let snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &state,
+            &account_id,
+            "responses",
+        ))
+        .unwrap_or_else(|| panic!("explicit state-db snapshot should be persisted"));
+        assert_eq!(snapshot.remaining_headroom(), 61);
+        assert_eq!(snapshot.observed_unix_seconds(), 1_200);
+        assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
+    }
+
+    #[test]
+    fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_interval() {
+        let test_root = TestRoot::new("background-quota-refresh-immediate");
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("acct_background_refresh");
+        let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "background-access-token",
+                        Some("background-refresh-token".to_owned()),
+                    )
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            &secret_root,
+            1_000,
+            NoopCredentialRefreshClient,
+        ));
+        let (refresh_sender, refresh_receiver) = mpsc::channel();
+        let provider = SignalingQuotaRefreshProvider::new(58, refresh_sender);
+
+        let worker = start_background_quota_refresh_worker_with_dependencies(
+            state_path,
+            secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            resolver,
+            provider,
+            1_300,
+            Duration::from_secs(3_600),
+        );
+
+        let observed_route_band = match refresh_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(route_band) => route_band,
+            Err(error) => panic!("background refresh should run immediately: {error}"),
+        };
+        assert_eq!(observed_route_band, "responses");
+        drop(worker);
+        let snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &state,
+            &account_id,
+            "responses",
+        ))
+        .unwrap_or_else(|| panic!("background refresh should persist snapshot"));
+        assert_eq!(snapshot.remaining_headroom(), 58);
+        assert_eq!(snapshot.observed_unix_seconds(), 1_300);
+    }
+
+    #[test]
     fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
         let test_root = TestRoot::new("cli-runtime-resolver-refresh");
         must_ok(fs::create_dir(test_root.path()));
@@ -2936,6 +3085,7 @@ JSON
                 "1030",
                 "--max-snapshot-age-seconds",
                 "60",
+                "--disable-background-quota-refresh",
                 "--max-connections",
                 "1",
             ],
@@ -3096,6 +3246,7 @@ JSON
                 "1030",
                 "--max-snapshot-age-seconds",
                 "60",
+                "--disable-background-quota-refresh",
                 "--max-connections",
                 "1",
                 "--max-websocket-upstream-messages",
@@ -3237,6 +3388,7 @@ JSON
                     "1030",
                     "--max-snapshot-age-seconds",
                     "60",
+                    "--disable-background-quota-refresh",
                     "--max-connections",
                     "3",
                 ],
@@ -3405,6 +3557,35 @@ JSON
                 request.base_url().to_owned(),
                 request.access_token().expose_secret().to_owned(),
             ));
+            Ok(QuotaRefreshProviderResponse {
+                remaining_headroom: self.remaining_headroom,
+                reset_unix_seconds: None,
+            })
+        }
+    }
+
+    struct SignalingQuotaRefreshProvider {
+        remaining_headroom: u32,
+        sender: mpsc::Sender<String>,
+    }
+
+    impl SignalingQuotaRefreshProvider {
+        fn new(remaining_headroom: u32, sender: mpsc::Sender<String>) -> Self {
+            Self {
+                remaining_headroom,
+                sender,
+            }
+        }
+    }
+
+    impl QuotaRefreshProvider for SignalingQuotaRefreshProvider {
+        fn fetch_quota(
+            &self,
+            request: QuotaRefreshProviderRequest,
+        ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+            if let Err(error) = self.sender.send(request.route_band().to_owned()) {
+                panic!("background refresh signal should send: {error}");
+            }
             Ok(QuotaRefreshProviderResponse {
                 remaining_headroom: self.remaining_headroom,
                 reset_unix_seconds: None,
