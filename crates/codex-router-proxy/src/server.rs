@@ -21,6 +21,7 @@ use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
+use crate::account_selection::RepositoryBackedAccountSelector;
 use crate::credential_runtime::ProxyCredentialResolver;
 use crate::credential_runtime::ProxyCredentialResolverOpenError;
 use crate::headers::Header;
@@ -29,7 +30,6 @@ use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::HttpProxyResponse;
 use crate::http_sse::HttpRequestHandler;
-use crate::http_sse::RepositoryBackedAccountSelector;
 use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::StreamingHttpProxyResponse;
 use crate::http_sse::StreamingHttpRequestHandler;
@@ -208,8 +208,6 @@ pub struct LoopbackRouterRuntime {
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
-    now_unix_seconds: u64,
-    max_snapshot_age_seconds: u64,
     max_websocket_upstream_messages: usize,
     websocket_revocations: WebSocketRevocationRegistry,
     audit_sink: Option<AuditFileSink>,
@@ -241,8 +239,6 @@ impl LoopbackRouterRuntime {
             auth_gate,
             upstream,
             upstream_endpoint,
-            now_unix_seconds: config.now_unix_seconds,
-            max_snapshot_age_seconds: config.max_snapshot_age_seconds,
             max_websocket_upstream_messages: config.max_websocket_upstream_messages,
             websocket_revocations: WebSocketRevocationRegistry::new(),
             audit_sink,
@@ -287,8 +283,6 @@ impl LoopbackRouterRuntime {
             .map_err(LoopbackRouterRuntimeError::ListenerClone)?;
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
-            self.now_unix_seconds,
-            self.max_snapshot_age_seconds,
             Arc::clone(&self.weighted_selector),
         );
         let service = AuthenticatedHttpProxyService::new(
@@ -363,8 +357,6 @@ impl LoopbackRouterRuntime {
 
             let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
                 &self.state_store,
-                self.now_unix_seconds,
-                self.max_snapshot_age_seconds,
                 Arc::clone(&self.weighted_selector),
             );
             let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
@@ -402,8 +394,6 @@ impl LoopbackRouterRuntime {
 
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
-            self.now_unix_seconds,
-            self.max_snapshot_age_seconds,
             Arc::clone(&self.weighted_selector),
         );
         let service = AuthenticatedHttpProxyService::new(

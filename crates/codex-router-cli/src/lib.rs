@@ -996,9 +996,12 @@ mod tests {
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
+    use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
     use codex_router_state::quota_snapshot::QuotaSnapshotSource;
+    use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
     use codex_router_state::repositories::AccountStateRepository;
     use codex_router_state::repositories::QuotaSnapshotRepository;
+    use codex_router_state::repositories::SelectorQuotaRepository;
     use codex_router_state::sqlite::SqliteStateStore;
 
     use super::CliCommand;
@@ -2445,6 +2448,7 @@ mod tests {
                 .with_observed_unix_seconds(1_000)
                 .with_route_band("responses", 100);
         must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
+        persist_effective_selector_window(&state, &account_id, "responses", 100);
         let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
         let upstream_credential_bundle = must_ok(
             AccountCredentialBundle::imported_codex_auth(
@@ -2582,6 +2586,7 @@ mod tests {
                 .with_observed_unix_seconds(1_000)
                 .with_route_band("responses", 100);
         must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
+        persist_effective_selector_window(&state, &account_id, "responses", 100);
         let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
         let upstream_credential_bundle = must_ok(
             AccountCredentialBundle::imported_codex_auth(
@@ -2724,6 +2729,7 @@ mod tests {
                 .with_observed_unix_seconds(1_000)
                 .with_route_band("responses", 100);
         must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
+        persist_effective_selector_window(&state, &account_id, "responses", 100);
         let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
         let upstream_credential_bundle = must_ok(
             AccountCredentialBundle::imported_codex_auth(
@@ -3044,6 +3050,27 @@ mod tests {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
         }
+    }
+
+    fn persist_effective_selector_window(
+        state: &SqliteStateStore,
+        account_id: &AccountId,
+        route_band: &str,
+        remaining_headroom: u32,
+    ) {
+        let selector_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            route_band,
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(remaining_headroom)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        must_ok(SelectorQuotaRepository::upsert_selector_window(
+            state,
+            &selector_window,
+        ));
     }
 
     fn reserve_loopback_port() -> u16 {

@@ -1,5 +1,6 @@
 //! Loopback proxy boundary for codex-router.
 
+pub mod account_selection;
 mod credential_runtime;
 pub mod headers;
 pub mod http_sse;
@@ -18,9 +19,14 @@ pub const fn package_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::package_name;
+    use crate::account_selection::AccountDecisionSelector;
+    use crate::account_selection::QuotaAwareAccountSelector;
+    use crate::account_selection::QuotaAwareAccountSelectorError;
+    use crate::account_selection::QuotaAwareAccountState;
+    use crate::account_selection::RepositoryBackedAccountSelector;
+    use crate::account_selection::SelectedAccountDecision;
     use crate::headers::Header;
     use crate::headers::HeaderCollection;
-    use crate::http_sse::AccountDecisionSelector;
     use crate::http_sse::AuditFailureReporter;
     use crate::http_sse::AuthenticatedHttpProxyService;
     use crate::http_sse::HttpProxyError;
@@ -28,11 +34,6 @@ mod tests {
     use crate::http_sse::HttpProxyResponse;
     use crate::http_sse::HttpProxyService;
     use crate::http_sse::HttpRequestHandler;
-    use crate::http_sse::QuotaAwareAccountSelector;
-    use crate::http_sse::QuotaAwareAccountSelectorError;
-    use crate::http_sse::QuotaAwareAccountState;
-    use crate::http_sse::RepositoryBackedAccountSelector;
-    use crate::http_sse::SelectedAccountDecision;
     use crate::http_sse::UpstreamHttpRequest;
     use crate::http_sse::UpstreamHttpTransport;
     use crate::http_sse::append_audit_event_with_reporter;
@@ -87,9 +88,12 @@ mod tests {
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
+    use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
     use codex_router_state::quota_snapshot::QuotaSnapshotSource;
+    use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
     use codex_router_state::repositories::AccountStateRepository;
     use codex_router_state::repositories::QuotaSnapshotRepository;
+    use codex_router_state::repositories::SelectorQuotaRepository;
     use codex_router_state::sqlite::SqliteStateStore;
     use std::cell::RefCell;
     use std::env;
@@ -630,7 +634,7 @@ mod tests {
         persist_account_with_snapshot_and_token(&state, &secrets, &alpha, 80, "alpha-token");
         persist_account_with_snapshot_and_token(&state, &secrets, &disabled, 500, "disabled-token");
 
-        let selector = RepositoryBackedAccountSelector::new(&state, 1_030, 60);
+        let selector = RepositoryBackedAccountSelector::new(&state);
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
@@ -687,6 +691,33 @@ mod tests {
         if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(&state, &models_snapshot) {
             panic!("models quota should persist: {error}");
         }
+        let responses_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Ineligible,
+        )
+        .with_remaining_headroom(0)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        let models_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "models",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(10)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&state, &responses_window)
+        {
+            panic!("responses selector window should persist: {error}");
+        }
+        if let Err(error) = SelectorQuotaRepository::upsert_selector_window(&state, &models_window)
+        {
+            panic!("models selector window should persist: {error}");
+        }
         let token_key = match account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,
             Err(error) => panic!("token key should build: {error}"),
@@ -704,7 +735,7 @@ mod tests {
             panic!("upstream token should persist: {error}");
         }
 
-        let selector = RepositoryBackedAccountSelector::new(&state, 1_030, 60);
+        let selector = RepositoryBackedAccountSelector::new(&state);
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Get, "/v1/models"),
             TokenGeneration::new(1),
@@ -2378,6 +2409,23 @@ mod tests {
         .with_stale_penalty(false);
         if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(state, &snapshot) {
             panic!("quota snapshot should persist: {error}");
+        }
+        let selector_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "responses",
+            18_000,
+            if remaining_headroom == 0 {
+                SelectorQuotaWindowStatus::Ineligible
+            } else {
+                SelectorQuotaWindowStatus::Eligible
+            },
+        )
+        .with_remaining_headroom(remaining_headroom)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        if let Err(error) = SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
+        {
+            panic!("selector quota window should persist: {error}");
         }
         let token_key = match account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,

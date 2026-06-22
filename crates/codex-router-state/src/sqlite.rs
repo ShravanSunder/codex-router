@@ -14,12 +14,16 @@ use thiserror::Error;
 use crate::account::AccountRecord;
 use crate::account::AccountStatus;
 use crate::quota_snapshot::PersistedQuotaSnapshot;
+use crate::quota_snapshot::PersistedSelectorQuotaWindow;
 use crate::quota_snapshot::QuotaSnapshotSource;
+use crate::quota_snapshot::SelectorQuotaInput;
+use crate::quota_snapshot::SelectorQuotaWindowStatus;
 use crate::repositories::AccountStateRepository;
 use crate::repositories::AffinityRepository;
 use crate::repositories::QuotaSnapshotRepository;
+use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
     "models",
@@ -410,6 +414,167 @@ impl SqliteStateStore {
         Ok(Some(snapshot))
     }
 
+    /// Inserts or updates a selector quota window.
+    pub fn upsert_selector_quota_window(
+        &self,
+        window: &PersistedSelectorQuotaWindow,
+    ) -> Result<(), StateStoreError> {
+        let limit_window_seconds = u64_to_i64(window.limit_window_seconds())?;
+        let remaining_headroom = u32_to_i64(window.remaining_headroom());
+        let reset_unix_seconds = window.reset_unix_seconds().map(u64_to_i64).transpose()?;
+        let effective = if window.effective() { 1_i64 } else { 0_i64 };
+        let observed_unix_seconds = u64_to_i64(window.observed_unix_seconds())?;
+
+        self.connection
+            .execute(
+                "INSERT INTO selector_quota_windows (
+                   account_id, route_band, limit_window_seconds, status,
+                   remaining_headroom, reset_unix_seconds, effective,
+                   observed_unix_seconds
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(account_id, route_band, limit_window_seconds) DO UPDATE SET
+                   status = excluded.status,
+                   remaining_headroom = excluded.remaining_headroom,
+                   reset_unix_seconds = excluded.reset_unix_seconds,
+                   effective = excluded.effective,
+                   observed_unix_seconds = excluded.observed_unix_seconds",
+                params![
+                    window.account_id().as_str(),
+                    window.route_band(),
+                    limit_window_seconds,
+                    window.status().as_str(),
+                    remaining_headroom,
+                    reset_unix_seconds,
+                    effective,
+                    observed_unix_seconds,
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    /// Loads selector input rows for one route band.
+    pub fn selector_inputs_for_route_band(
+        &self,
+        route_band: &str,
+    ) -> Result<Vec<SelectorQuotaInput>, StateStoreError> {
+        let accounts = self.list_accounts()?;
+        let mut inputs = Vec::new();
+        for account in accounts {
+            let windows = self.load_selector_windows(account.account_id(), route_band)?;
+            inputs.push(SelectorQuotaInput::new(
+                account.account_id().clone(),
+                account.label(),
+                account.status(),
+                account.active_credential_generation(),
+                route_band,
+                windows,
+            ));
+        }
+
+        Ok(inputs)
+    }
+
+    fn load_selector_windows(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+    ) -> Result<Vec<PersistedSelectorQuotaWindow>, StateStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, route_band, limit_window_seconds, status,
+                        remaining_headroom, reset_unix_seconds, effective,
+                        observed_unix_seconds
+                   FROM selector_quota_windows
+                  WHERE account_id = ?1 AND route_band = ?2
+                  ORDER BY effective DESC, limit_window_seconds",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map(params![account_id.as_str(), route_band], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
+
+        let mut windows = Vec::new();
+        for row in rows {
+            let (
+                account_id_value,
+                route_band,
+                limit_window_seconds,
+                status_value,
+                remaining_headroom,
+                reset_unix_seconds,
+                effective,
+                observed_unix_seconds,
+            ) = row.map_err(sqlite_error)?;
+            let parsed_account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
+                StateStoreError::CorruptQuotaSnapshot {
+                    account_id: account_id_value.clone(),
+                    field: "account_id",
+                }
+            })?;
+            let status = SelectorQuotaWindowStatus::parse(&status_value).ok_or_else(|| {
+                StateStoreError::CorruptQuotaSnapshot {
+                    account_id: account_id_value.clone(),
+                    field: "selector_status",
+                }
+            })?;
+            let limit_window_seconds = i64_to_u64(
+                limit_window_seconds,
+                &account_id_value,
+                "limit_window_seconds",
+            )?;
+            let remaining =
+                i64_to_u32(remaining_headroom, &account_id_value, "remaining_headroom")?;
+            let reset = reset_unix_seconds
+                .map(|value| i64_to_u64(value, &account_id_value, "reset_unix_seconds"))
+                .transpose()?;
+            let effective = match effective {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(StateStoreError::CorruptQuotaSnapshot {
+                        account_id: account_id_value,
+                        field: "effective",
+                    });
+                }
+            };
+            let observed = i64_to_u64(
+                observed_unix_seconds,
+                &account_id_value,
+                "observed_unix_seconds",
+            )?;
+            let mut window = PersistedSelectorQuotaWindow::new(
+                parsed_account_id,
+                route_band,
+                limit_window_seconds,
+                status,
+            )
+            .with_remaining_headroom(remaining)
+            .with_effective(effective)
+            .with_observed_unix_seconds(observed);
+            if let Some(reset) = reset {
+                window = window.with_reset_unix_seconds(reset);
+            }
+            windows.push(window);
+        }
+
+        Ok(windows)
+    }
+
     /// Inserts raw account metadata for corruption fixtures.
     #[cfg(test)]
     pub fn insert_raw_account_for_test(
@@ -432,7 +597,11 @@ impl SqliteStateStore {
         let version = self.schema_version();
         match version {
             0 => self.apply_v1(),
-            1 => self.apply_v2(),
+            1 => {
+                self.apply_v2()?;
+                self.apply_v3()
+            }
+            2 => self.apply_v3(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -465,7 +634,19 @@ impl SqliteStateStore {
                     account_id TEXT NOT NULL
                 );
 
-                PRAGMA user_version = 2;
+                CREATE TABLE IF NOT EXISTS selector_quota_windows (
+                    account_id TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    limit_window_seconds INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    remaining_headroom INTEGER NOT NULL,
+                    reset_unix_seconds INTEGER,
+                    effective INTEGER NOT NULL,
+                    observed_unix_seconds INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, route_band, limit_window_seconds)
+                );
+
+                PRAGMA user_version = 3;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -479,6 +660,30 @@ impl SqliteStateStore {
                 "
                 ALTER TABLE accounts ADD COLUMN active_credential_generation INTEGER;
                 PRAGMA user_version = 2;
+                ",
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn apply_v3(&self) -> Result<(), StateStoreError> {
+        self.connection
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS selector_quota_windows (
+                    account_id TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    limit_window_seconds INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    remaining_headroom INTEGER NOT NULL,
+                    reset_unix_seconds INTEGER,
+                    effective INTEGER NOT NULL,
+                    observed_unix_seconds INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, route_band, limit_window_seconds)
+                );
+
+                PRAGMA user_version = 3;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -522,6 +727,22 @@ impl QuotaSnapshotRepository for SqliteStateStore {
         route_band: &str,
     ) -> Result<Option<PersistedQuotaSnapshot>, StateStoreError> {
         self.load_quota_snapshot_for_route_band(account_id, route_band)
+    }
+}
+
+impl SelectorQuotaRepository for SqliteStateStore {
+    fn upsert_selector_window(
+        &self,
+        window: &PersistedSelectorQuotaWindow,
+    ) -> Result<(), StateStoreError> {
+        self.upsert_selector_quota_window(window)
+    }
+
+    fn selector_inputs_for_route_band(
+        &self,
+        route_band: &str,
+    ) -> Result<Vec<SelectorQuotaInput>, StateStoreError> {
+        self.selector_inputs_for_route_band(route_band)
     }
 }
 

@@ -32,10 +32,10 @@ use tungstenite::handshake::server::Response;
 use tungstenite::http::HeaderName;
 use tungstenite::http::HeaderValue;
 
+use crate::account_selection::AccountDecisionSelector;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
-use crate::http_sse::AccountDecisionSelector;
 use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::allowed_audit_event;

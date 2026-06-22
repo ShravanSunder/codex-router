@@ -27,10 +27,13 @@ mod tests {
     use crate::account::AccountRecord;
     use crate::account::AccountStatus;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
+    use crate::quota_snapshot::PersistedSelectorQuotaWindow;
     use crate::quota_snapshot::QuotaSnapshotSource;
+    use crate::quota_snapshot::SelectorQuotaWindowStatus;
     use crate::repositories::AccountStateRepository;
     use crate::repositories::AffinityRepository;
     use crate::repositories::QuotaSnapshotRepository;
+    use crate::repositories::SelectorQuotaRepository;
     use crate::sqlite::SqliteStateStore;
     use crate::sqlite::StateStoreError;
 
@@ -50,7 +53,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 2);
+        assert_eq!(store.schema_version(), 3);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -108,6 +111,72 @@ mod tests {
             QuotaSnapshotRepository::load_snapshot_for_route_band(&store, &account_id, "models"),
             Ok(Some(models_snapshot))
         );
+    }
+
+    #[test]
+    fn selector_input_reads_durable_per_window_rows_without_status_renderer() {
+        let temp_dir = TestTempDir::new("selector_input_windows");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_selector_windows");
+        let account = AccountRecord::new(account_id.clone(), "selector", AccountStatus::Enabled)
+            .with_active_credential_generation(3);
+        if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
+            panic!("account should persist: {error}");
+        }
+        let short_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(72)
+        .with_reset_unix_seconds(19_000)
+        .with_observed_unix_seconds(1_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Stale,
+        )
+        .with_remaining_headroom(41)
+        .with_reset_unix_seconds(700_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        if let Err(error) = SelectorQuotaRepository::upsert_selector_window(&store, &short_window) {
+            panic!("short window should persist: {error}");
+        }
+        if let Err(error) = SelectorQuotaRepository::upsert_selector_window(&store, &weekly_window)
+        {
+            panic!("weekly window should persist: {error}");
+        }
+
+        let selector_inputs =
+            match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "responses") {
+                Ok(inputs) => inputs,
+                Err(error) => panic!("selector input should load: {error}"),
+            };
+
+        assert_eq!(selector_inputs.len(), 1);
+        let input = &selector_inputs[0];
+        assert_eq!(input.account_id(), &account_id);
+        assert_eq!(input.account_label(), "selector");
+        assert_eq!(input.account_status(), AccountStatus::Enabled);
+        assert_eq!(input.active_credential_generation(), Some(3));
+        assert_eq!(input.route_band(), "responses");
+        assert_eq!(input.windows(), &[weekly_window, short_window]);
+        let effective = input
+            .windows()
+            .iter()
+            .find(|window| window.effective())
+            .unwrap_or_else(|| panic!("effective selector window should exist"));
+        assert_eq!(effective.limit_window_seconds(), 604_800);
+        assert_eq!(effective.status(), SelectorQuotaWindowStatus::Stale);
+        assert_eq!(effective.remaining_headroom(), 41);
+        assert_eq!(effective.reset_unix_seconds(), Some(700_000));
     }
 
     #[test]

@@ -13,27 +13,17 @@ use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::RequestId;
-use codex_router_core::ids::TokenGeneration;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::redaction::SecretString;
-use codex_router_quota::snapshot::QuotaSnapshot;
-use codex_router_quota::snapshot::SnapshotFreshness;
-use codex_router_selection::eligibility::Eligibility;
-use codex_router_selection::eligibility::SelectionCandidate;
-use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
-use codex_router_state::account::AccountStatus;
-use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
-use codex_router_state::repositories::AccountStateRepository;
-use codex_router_state::repositories::QuotaSnapshotRepository;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::io::Cursor;
 use std::io::Read;
-use std::sync::Arc;
-use std::sync::Mutex;
 use thiserror::Error;
 
+use crate::account_selection::AccountDecisionSelector;
+use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::local_auth::ProxyLocalAuthGate;
@@ -122,6 +112,18 @@ impl HttpProxyRequest {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Returns request method.
+    #[must_use]
+    pub const fn method(&self) -> Method {
+        self.method
+    }
+
+    /// Returns whether this request is a WebSocket upgrade.
+    #[must_use]
+    pub const fn websocket_upgrade(&self) -> bool {
+        self.websocket_upgrade
     }
 
     /// Returns first header value by normalized name.
@@ -417,327 +419,6 @@ where
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
         self.build_upstream_request(request, provider_bearer_token)
             .and_then(|request| self.upstream.send_streaming(request))
-    }
-}
-
-/// Selected upstream account material needed by the proxy.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SelectedAccountDecision {
-    account_id: AccountId,
-    selection_reason: String,
-}
-
-impl SelectedAccountDecision {
-    /// Creates selected account material.
-    #[must_use]
-    pub fn new(account_id: AccountId, selection_reason: impl Into<String>) -> Self {
-        Self {
-            account_id,
-            selection_reason: selection_reason.into(),
-        }
-    }
-
-    /// Returns selected account id.
-    #[must_use]
-    pub const fn account_id(&self) -> &AccountId {
-        &self.account_id
-    }
-
-    /// Returns a redacted static/audit-safe selection reason.
-    #[must_use]
-    pub fn selection_reason(&self) -> &str {
-        &self.selection_reason
-    }
-}
-
-/// Selects an upstream account after local auth succeeds.
-pub trait AccountDecisionSelector {
-    /// Selects account material for one request.
-    fn select_upstream_account(
-        &self,
-        request: &HttpProxyRequest,
-        token_generation: TokenGeneration,
-    ) -> Result<SelectedAccountDecision, HttpProxyError>;
-}
-
-/// Account state consumed by the quota-aware proxy selector adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QuotaAwareAccountState {
-    account_id: AccountId,
-    remaining_headroom: u32,
-    freshness: SnapshotFreshness,
-}
-
-impl QuotaAwareAccountState {
-    /// Creates account state for selector input.
-    #[must_use]
-    pub const fn new(
-        account_id: AccountId,
-        remaining_headroom: u32,
-        freshness: SnapshotFreshness,
-    ) -> Self {
-        Self {
-            account_id,
-            remaining_headroom,
-            freshness,
-        }
-    }
-}
-
-/// Selection adapter failure.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub enum QuotaAwareAccountSelectorError {
-    /// No account has usable headroom.
-    #[error("no eligible accounts")]
-    NoEligibleAccounts,
-    /// Weighted selector state was unavailable.
-    #[error("selector state unavailable")]
-    SelectorStateUnavailable,
-    /// State repository could not be read.
-    #[error("state repository unavailable")]
-    StateUnavailable,
-    /// Secret store could not be read.
-    #[error("secret store unavailable")]
-    SecretUnavailable,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct WeightedAccountCandidate {
-    account_id: AccountId,
-    effective_headroom: u32,
-    selection_reason: &'static str,
-}
-
-/// Account selector adapter using quota freshness and weighted deficit state.
-#[derive(Debug)]
-pub struct QuotaAwareAccountSelector {
-    accounts: Vec<QuotaAwareAccountState>,
-    weighted_selector: Mutex<WeightedDeficitSelector>,
-}
-
-impl QuotaAwareAccountSelector {
-    /// Creates a quota-aware selector from account snapshots.
-    #[must_use]
-    pub fn new(accounts: Vec<QuotaAwareAccountState>) -> Self {
-        Self {
-            accounts,
-            weighted_selector: Mutex::new(WeightedDeficitSelector::default()),
-        }
-    }
-}
-
-impl AccountDecisionSelector for QuotaAwareAccountSelector {
-    fn select_upstream_account(
-        &self,
-        _request: &HttpProxyRequest,
-        _token_generation: TokenGeneration,
-    ) -> Result<SelectedAccountDecision, HttpProxyError> {
-        select_from_account_states(&self.accounts, &self.weighted_selector)
-    }
-}
-
-/// Selector that hydrates account state from repositories at request time.
-#[derive(Debug)]
-pub struct RepositoryBackedAccountSelector<'a, R>
-where
-    R: AccountStateRepository + QuotaSnapshotRepository,
-{
-    state_repository: &'a R,
-    now_unix_seconds: u64,
-    max_snapshot_age_seconds: u64,
-    weighted_selector: Arc<Mutex<WeightedDeficitSelector>>,
-}
-
-impl<'a, R> RepositoryBackedAccountSelector<'a, R>
-where
-    R: AccountStateRepository + QuotaSnapshotRepository,
-{
-    /// Creates a repository-backed selector.
-    #[must_use]
-    pub fn new(
-        state_repository: &'a R,
-        now_unix_seconds: u64,
-        max_snapshot_age_seconds: u64,
-    ) -> Self {
-        Self {
-            state_repository,
-            now_unix_seconds,
-            max_snapshot_age_seconds,
-            weighted_selector: Arc::new(Mutex::new(WeightedDeficitSelector::default())),
-        }
-    }
-
-    /// Creates a repository-backed selector with process-lifetime weighted state.
-    #[must_use]
-    pub fn new_with_weighted_selector(
-        state_repository: &'a R,
-        now_unix_seconds: u64,
-        max_snapshot_age_seconds: u64,
-        weighted_selector: Arc<Mutex<WeightedDeficitSelector>>,
-    ) -> Self {
-        Self {
-            state_repository,
-            now_unix_seconds,
-            max_snapshot_age_seconds,
-            weighted_selector,
-        }
-    }
-}
-
-impl<R> AccountDecisionSelector for RepositoryBackedAccountSelector<'_, R>
-where
-    R: AccountStateRepository + QuotaSnapshotRepository,
-{
-    fn select_upstream_account(
-        &self,
-        request: &HttpProxyRequest,
-        _token_generation: TokenGeneration,
-    ) -> Result<SelectedAccountDecision, HttpProxyError> {
-        let route_band = route_band_for_request(request)?;
-        let accounts =
-            self.state_repository
-                .list_accounts()
-                .map_err(|_error| HttpProxyError::Selection {
-                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                })?;
-        let mut selector_accounts = Vec::new();
-        for account in accounts {
-            if account.status() != AccountStatus::Enabled {
-                continue;
-            }
-            if account.active_credential_generation().is_none() {
-                continue;
-            }
-            let snapshot = self
-                .state_repository
-                .load_snapshot_for_route_band(account.account_id(), route_band)
-                .map_err(|_error| HttpProxyError::Selection {
-                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                })?;
-            selector_accounts.push(account_state_from_repositories(
-                account.account_id().clone(),
-                snapshot.as_ref(),
-                route_band,
-                self.now_unix_seconds,
-                self.max_snapshot_age_seconds,
-            ));
-        }
-
-        select_from_account_states(&selector_accounts, self.weighted_selector.as_ref())
-    }
-}
-
-fn select_from_account_states(
-    accounts: &[QuotaAwareAccountState],
-    weighted_selector: &Mutex<WeightedDeficitSelector>,
-) -> Result<SelectedAccountDecision, HttpProxyError> {
-    let known_fresh_account_exists = accounts.iter().any(|account| {
-        account.remaining_headroom > 0
-            && matches!(account.freshness, SnapshotFreshness::Fresh { .. })
-    });
-    let weighted_candidates = accounts
-        .iter()
-        .filter_map(|account| weighted_candidate_for_account(account, known_fresh_account_exists))
-        .collect::<Vec<_>>();
-    let selector_input = weighted_candidates
-        .iter()
-        .map(|candidate| (candidate.account_id.clone(), candidate.effective_headroom))
-        .collect::<Vec<_>>();
-    let mut weighted_selector =
-        weighted_selector
-            .lock()
-            .map_err(|_error| HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
-            })?;
-    let selected_account_id =
-        weighted_selector
-            .select(&selector_input, 1)
-            .ok_or(HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-            })?;
-    let selected_candidate = weighted_candidates
-        .iter()
-        .find(|candidate| candidate.account_id == selected_account_id)
-        .ok_or(HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-        })?;
-
-    Ok(SelectedAccountDecision::new(
-        selected_account_id,
-        selected_candidate.selection_reason,
-    ))
-}
-
-fn account_state_from_repositories(
-    account_id: AccountId,
-    snapshot: Option<&PersistedQuotaSnapshot>,
-    route_band: &str,
-    now_unix_seconds: u64,
-    max_snapshot_age_seconds: u64,
-) -> QuotaAwareAccountState {
-    let Some(snapshot) = snapshot else {
-        return QuotaAwareAccountState::new(account_id, 0, SnapshotFreshness::Unknown);
-    };
-    let remaining_headroom = if snapshot.route_band() == route_band {
-        snapshot.remaining_headroom()
-    } else {
-        0
-    };
-    let freshness = QuotaSnapshot::freshness_for_observed_at(
-        Some(snapshot.observed_unix_seconds()),
-        now_unix_seconds,
-        max_snapshot_age_seconds,
-    );
-
-    QuotaAwareAccountState::new(account_id, remaining_headroom, freshness)
-}
-
-fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, HttpProxyError> {
-    let classification_path = path_without_query(request.path());
-    match classify_route(
-        request.method,
-        classification_path,
-        request.websocket_upgrade,
-    ) {
-        RouteClass::Supported(RouteKind::Responses | RouteKind::ResponsesWebSocket) => {
-            Ok("responses")
-        }
-        RouteClass::Supported(RouteKind::Models) => Ok("models"),
-        RouteClass::Supported(RouteKind::MemoriesTraceSummarize) => Ok("memories_trace_summarize"),
-        RouteClass::Supported(RouteKind::ResponsesCompact) => Ok("responses_compact"),
-        RouteClass::Rejected { reason } => Err(HttpProxyError::Rejected { reason }),
-    }
-}
-
-fn weighted_candidate_for_account(
-    account: &QuotaAwareAccountState,
-    known_fresh_account_exists: bool,
-) -> Option<WeightedAccountCandidate> {
-    let candidate = SelectionCandidate::new(
-        account.account_id.clone(),
-        account.remaining_headroom,
-        account.freshness,
-    );
-    match candidate.eligibility(known_fresh_account_exists) {
-        Eligibility::Eligible { headroom } => Some(WeightedAccountCandidate {
-            account_id: account.account_id.clone(),
-            effective_headroom: headroom,
-            selection_reason: selection_reason_for_freshness(account.freshness),
-        }),
-        Eligibility::Penalized { headroom, reason } => Some(WeightedAccountCandidate {
-            account_id: account.account_id.clone(),
-            effective_headroom: headroom,
-            selection_reason: reason,
-        }),
-        Eligibility::Ineligible { .. } => None,
-    }
-}
-
-const fn selection_reason_for_freshness(freshness: SnapshotFreshness) -> &'static str {
-    match freshness {
-        SnapshotFreshness::Fresh { .. } => "fresh_quota",
-        SnapshotFreshness::StaleWithPenalty { .. } => "stale_quota_fallback",
-        SnapshotFreshness::Unknown => "unknown_quota_fallback",
     }
 }
 
