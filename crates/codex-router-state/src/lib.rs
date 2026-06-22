@@ -208,6 +208,22 @@ mod tests {
         assert_eq!(window.reset_unix_seconds(), Some(2_000));
         assert_eq!(window.limit_window_seconds(), 18_000);
         assert!(window.effective());
+        let expected_code_review_snapshot = PersistedQuotaSnapshot::new(
+            account_id("acct_v2_backfill"),
+            QuotaSnapshotSource::MockEndpoint,
+        )
+        .with_observed_unix_seconds(1_000)
+        .with_route_band("code_review", 64)
+        .with_reset_unix_seconds(2_000)
+        .with_stale_penalty(false);
+        assert_eq!(
+            QuotaSnapshotRepository::load_snapshot_for_route_band(
+                &store,
+                &account_id("acct_v2_backfill"),
+                "code_review"
+            ),
+            Ok(Some(expected_code_review_snapshot))
+        );
         let code_review_inputs =
             match SelectorQuotaRepository::selector_inputs_for_route_band(&store, "code_review") {
                 Ok(inputs) => inputs,

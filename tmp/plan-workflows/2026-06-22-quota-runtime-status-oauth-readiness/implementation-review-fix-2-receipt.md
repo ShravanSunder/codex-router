@@ -4,7 +4,7 @@ Date: 2026-06-22
 Branch: plan1a-quota-substrate-05bf755
 Checkpoint base: e9970a6 fix: close quota oauth review blockers
 
-## Accepted Review Findings Closed
+## Accepted Review Findings Closed In This Receipt Series
 
 - Removed production OAuth refresh endpoint/client-id environment overrides from `OpenAiOAuthRefreshClient`.
 - Deferred construction of the blocking `reqwest` client until refresh execution so resolver construction cannot panic at startup.
@@ -15,7 +15,7 @@ Checkpoint base: e9970a6 fix: close quota oauth review blockers
 - Made v2-to-v3 selector-window migration transactional and excluded status-only `code_review` rows from selector backfill.
 - Made credential mutation clear stale selector windows for routed bands before inserting the default ineligible window, so weekly windows cannot survive credential replacement.
 - Added schema v4 cleanup for legacy v3 `code_review` selector rows and pinned it with an exact polluted-v3 migration test.
-- Added v2 migration coverage proving `code_review` quota snapshots remain status-only and do not backfill selector windows.
+- Added v2 migration coverage proving `code_review` quota snapshots survive as status-only state and do not backfill selector windows.
 - Moved CLI/proxy fake refresh-client injection constructors behind `#[cfg(test)]` so production constructors are the only compiled runtime path.
 - Corrected the OAuth refresh client constructor documentation to match the production no-env-override behavior.
 
