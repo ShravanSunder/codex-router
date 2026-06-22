@@ -3,7 +3,7 @@
 Date: 2026-06-22
 Branch: `feature/initial-codex-router`
 Status: umbrella/control plan; not executable; revised after plan-review `needs_revision`
-Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-918db95.md`
+Revision status: folded accepted findings from `tmp/plan-workflows/2026-06-22-quota-runtime-status-oauth-readiness/plan-review-after-e7b55fc.md`
 Executable children:
 
 - `docs/plans/2026-06-22-codex-router-plan-1a-credential-state-substrate.md`
