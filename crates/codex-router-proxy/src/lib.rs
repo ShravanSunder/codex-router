@@ -892,6 +892,50 @@ mod tests {
     }
 
     #[test]
+    fn repository_backed_selector_skips_ineligible_account_for_next_normal_request() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_next_normal");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let exhausted = AccountRecord::new(
+            account_id("acct_exhausted"),
+            "exhausted",
+            AccountStatus::Enabled,
+        );
+        let eligible = AccountRecord::new(
+            account_id("acct_eligible"),
+            "eligible",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &exhausted,
+            "responses",
+            &[(18_000, 0, true)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &eligible,
+            "responses",
+            &[(18_000, 42, true)],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("next normal request should select eligible account: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), eligible.account_id());
+        assert_eq!(selected.selection_reason(), "fresh_quota");
+    }
+
+    #[test]
     fn repository_backed_selector_partitions_weighted_state_by_route_band() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_weighted_route_band");
         let database_path = temp_dir.path().join("state.sqlite");
