@@ -2161,6 +2161,82 @@ JSON
     }
 
     #[test]
+    fn quota_status_all_limits_shows_effective_provider_windows_pace_and_runout() {
+        let test_root = TestRoot::new("quota-status-all-limits");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let primary_account = AccountRecord::new(
+            account_id("acct_primary"),
+            "primary",
+            AccountStatus::Enabled,
+        );
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        let five_hour_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary"),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(25)
+        .with_reset_unix_seconds(20_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(10_000);
+        must_ok(SelectorQuotaRepository::upsert_selector_window(
+            &state,
+            &five_hour_window,
+        ));
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary"),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(614_800)
+        .with_observed_unix_seconds(10_000);
+        must_ok(SelectorQuotaRepository::upsert_selector_window(
+            &state,
+            &weekly_window,
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "plain",
+                "--all-limits",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let lines = output.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines[0],
+            "account\taccount_id\tstatus\troute_band\twindow\tremaining\treset\tpace\trunout\tstale\tsource"
+        );
+        assert!(
+            lines[1].contains("\tresponses\teffective\t25\t20000\t+25pp\t3000s\tfalse\tselector")
+        );
+        assert!(lines[2].contains("\tresponses\t5h\t25\t20000\t+25pp\t3000s\tfalse\tselector"));
+        assert!(
+            lines[3].contains("\tresponses\tweekly\t80\t614800\t+20pp\t4000s\tfalse\tselector")
+        );
+        assert_eq!(lines.len(), 4);
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
     fn quota_refresh_rejects_non_provider_base_url_before_token_egress() {
         let test_root = TestRoot::new("quota-refresh-disallowed");
         must_ok(fs::create_dir(test_root.path()));
