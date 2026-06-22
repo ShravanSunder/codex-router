@@ -84,6 +84,10 @@ Closed unless task-local amendment is approved:
       selector/status publication. Plan 1B may add the manifest dependencies
       needed for that crate to depend on auth, state, secret-store/core, and
       provider clients.
+- [ ] `codex-router-quota` must not read provider credential secrets directly.
+      If it depends on secret-store, that dependency is limited to refresh leases
+      or backend-neutral state helpers; provider auth material still flows through
+      `codex-router-auth` resolver APIs.
 - [ ] `codex-router-cli` owns command parsing/rendering and calls
       `codex-router-quota` service APIs for `quota refresh`, `quota status`,
       and serve-owned background refresh startup. It must not own the long-lived
@@ -103,11 +107,47 @@ Default execution is serial.
 - T7 owns serve startup/background/manual refresh convergence and
   cross-process one-writer behavior in `codex-router-quota`.
 - T8 owns selector scoring and durable selector projection consumption.
-- T9 owns next-normal account switching, HTTP/SSE affinity, WebSocket
+- T9 owns explicit precommit auth/quota rotation, next-normal account switching,
+  HTTP/SSE affinity, WebSocket
   first-frame affinity, route support proof, and local bearer lifecycle receipt.
 - T10 owns status rendering/math from SQLite only.
 - T11 owns docs/runbook/help alignment after T10 behavior is final.
 - T12 owns exact installed-smoke test expansion and final validation receipts.
+
+Task-owned file table:
+
+- T6: `crates/codex-router-quota/src/*`,
+  `crates/codex-router-state/src/quota_snapshot.rs`,
+  `crates/codex-router-state/src/repositories.rs`,
+  `crates/codex-router-state/src/sqlite.rs`, and manifest edges needed by the
+  quota/state publication API.
+- T7: `crates/codex-router-quota/src/*`, `crates/codex-router-cli/src/lib.rs`,
+  `crates/codex-router-cli/src/quota.rs`, and refresh-worker/serve startup
+  manifest edges.
+- T8: `crates/codex-router-selection/src/*`,
+  `crates/codex-router-state/src/quota_snapshot.rs`,
+  `crates/codex-router-state/src/repositories.rs`, and
+  `crates/codex-router-state/src/sqlite.rs`.
+- T9: `crates/codex-router-proxy/src/account_selection.rs`,
+  `crates/codex-router-proxy/src/http_sse.rs`,
+  `crates/codex-router-proxy/src/websocket.rs`,
+  `crates/codex-router-proxy/src/server.rs`,
+  `crates/codex-router-selection/src/turn_state.rs`,
+  `crates/codex-router-selection/src/affinity.rs`, and local-auth route support
+  files needed by those proofs.
+- T10: `crates/codex-router-cli/src/quota.rs`,
+  `crates/codex-router-state/src/quota_snapshot.rs`,
+  `crates/codex-router-state/src/repositories.rs`, and
+  `crates/codex-router-state/src/sqlite.rs`.
+- T11: `README.md`, `docs/testing/live-oauth-quota.md`, and help text in
+  `crates/codex-router-cli/src/lib.rs` after command behavior is final.
+- T12: `tests/smoke/installed_codex_mock.sh`,
+  `crates/codex-router-test-support/src/*`, and closeout-only docs/runbook
+  receipts.
+
+Each checkpoint receipt must compare `git show --name-only <checkpoint>` to this
+table, attach shared-file hunk fingerprints, and explain any manifest or shared
+file touched by more than one task.
 
 ## Execution Checklist
 
@@ -257,19 +297,30 @@ Actions:
 - [ ] Resolve `x-codex-turn-state` after local auth and before weighted quota
       selection on HTTP/SSE.
 - [ ] Define the turn-state envelope payload before implementation. It must bind
-      at least account id, upstream token if present, router/session scope,
-      turn or request scope, issued/expiry time, generation or nonce, and route
-      context sufficient to reject cross-turn, cross-session, wrong-key, stale,
-      and replayed envelopes before selection.
+      at least account id, optional protocol continuation value, router/session
+      scope, turn or request scope, issued/expiry time, generation or nonce, and
+      route context sufficient to reject cross-turn, cross-session, wrong-key,
+      stale, and replayed envelopes before selection. It must not bind provider
+      access, refresh, or bearer auth.
 - [ ] The T9 design packet must name the replay-state owner before code starts:
       repository/cache owner, nonce lifecycle, TTL, restart behavior,
       router-instance key behavior, and whether replay state is durable or
       process-local.
+- [ ] Turn-state and affinity envelopes must never carry provider access tokens,
+      refresh tokens, or bearer auth. If a protocol continuation value exists,
+      call it `upstream_continuation_value`; resolver-owned provider auth is
+      still injected only after affinity resolves the account/route decision.
 - [ ] Decode the router-owned turn-state envelope, use the router account pin
-      locally, and forward only the upstream token/value upstream when needed.
+      locally, and forward only the non-auth `upstream_continuation_value`
+      upstream when needed.
 - [ ] Resolve `previous_response_id` ownership before weighted quota selection.
 - [ ] On disabled/unauthenticated owner, fail clearly before selecting a
       different account.
+- [ ] For explicit precommit auth/quota rejection before an upstream response is
+      committed, release the failed reservation, mark the account or route band
+      according to failure taxonomy, and select another eligible account once.
+- [ ] Do not rotate or retry for transport failures, 5xx, overload, timeout,
+      DNS failure, reset, cancellation, or any post-commit stream failure.
 - [ ] Extract bounded affinity metadata from the first WebSocket
       `response.create` frame before upstream open.
 - [ ] Persist previous-response ownership only after successful response commit.
@@ -295,6 +346,9 @@ Proof:
       envelopes fail locally before account selection.
 - [ ] Replay-state ownership receipt names the cache/repository boundary, TTL,
       restart semantics, and router-instance key behavior.
+- [ ] Replay across restart/new router instance fails before account selection.
+- [ ] Explicit precommit auth/quota rejection can rotate once to another eligible
+      account; transport and post-commit failures do not rotate.
 - [ ] WebSocket continuation metadata routes to owner before upstream open.
 - [ ] Existing local-token lifecycle tests are attached as receipts or rerun
       with exact commands.
@@ -359,6 +413,7 @@ Required local gates:
 - [ ] `cargo fmt --all --check`
 - [ ] Exact proof-row preflights listed below.
 - [ ] `cargo nextest run -p codex-router-auth`
+- [ ] `cargo nextest run -p codex-router-core`
 - [ ] `cargo nextest run -p codex-router-cli`
 - [ ] `cargo nextest run -p codex-router-proxy`
 - [ ] `cargo nextest run -p codex-router-quota`
@@ -376,6 +431,8 @@ Required local gates:
 Named smoke cases:
 
 - [ ] `installed_codex::tests::installed_codex_mock_smoke_exercises_generated_profile_token_and_websocket`
+- [ ] `installed_codex::tests::installed_codex_mock_smoke_proves_nonblocking_quota_startup_and_redacted_status`
+- [ ] `installed_codex::tests::installed_codex_mock_smoke_transcript_is_redacted_and_schema_allowlisted`
 - [ ] `installed_codex::tests::installed_codex_hostile_no_token_smoke_keeps_upstream_empty`
 - [ ] New split scenarios may replace the broad mock smoke only if each scenario
       has an exact ignored libtest name and one matrix row.
@@ -400,10 +457,11 @@ Checkpoint:
 
 ## Plan 1B Proof Matrix
 
-Each row must run its preflight before its execution command. The stale-proof
-guard fails if the preflight returns zero matches, more than one named match, or
-does not list the exact expected test. Proof owner is task plus crate/module,
-not a person.
+Each row must run its preflight before its execution command. Exact test rows
+fail their stale-proof guard if the preflight returns zero matches, more than
+one named match, or does not list the exact expected test. Structural, search,
+docs, and smoke rows must state their expected match count or allowlist behavior
+inside the row. Proof owner is task plus crate/module, not a person.
 
 | Done | ID | Requirement | Source | Task | Proof owner | Layer | Fixture/mock | Preflight list command | Execution command | Expected observation | Stale-proof guard | Red/green |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -421,9 +479,12 @@ not a person.
 | [ ] | 1B-09 | Weekly pressure beats short-reset urgency | spec Account/Quota | T8 | T8 / selector scoring | unit/integration | mixed 5h + weekly windows | `cargo test -p codex-router-selection tests::weekly_quota_pressure_outweighs_short_reset_urgency -- --exact --list` | `cargo nextest run -p codex-router-selection -- tests::weekly_quota_pressure_outweighs_short_reset_urgency --exact` | low-weekly account is not preferred only due short reset | new exact test listed once; fixed windows and clock | yes |
 | [ ] | 1B-10 | Repository-backed selector consumes durable windows | spec Account/Quota | T8 | T8 / proxy selector projection | integration | state rows with short + weekly windows | `cargo test -p codex-router-proxy tests::repository_backed_selector_prefers_known_healthy_account_over_unknown_snapshot -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::repository_backed_selector_prefers_known_healthy_account_over_unknown_snapshot --exact` | selector uses durable state and avoids unknown when healthy account exists | new exact test listed once; state fixture recreated | yes |
 | [ ] | 1B-11 | Next HTTP/SSE request switches to another eligible account | spec Account/Quota/Protocol | T9 | T9 / `codex-router-proxy::http_sse` | protocol | two accounts + terminal ineligible A | `cargo test -p codex-router-proxy tests::http_proxy_rotates_to_next_eligible_account_after_terminal_ineligibility -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_rotates_to_next_eligible_account_after_terminal_ineligibility --exact` | next request selects B; no inline broad refresh; unaffected route bands stay scoped | new exact test listed once; route band explicit | yes |
+| [ ] | 1B-11a | Explicit precommit auth/quota rejection rotates once before response commit | spec Rotation/Quota | T9 | T9 / `codex-router-proxy::http_sse` | protocol | A precommit auth/quota reject, B eligible success | `cargo test -p codex-router-proxy tests::http_proxy_rotates_once_on_explicit_precommit_auth_or_quota_rejection -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_rotates_once_on_explicit_precommit_auth_or_quota_rejection --exact` | A rejection before response commit releases reservation and marks route/account state; B is selected once and commits response; audit rotation count is redacted | new exact test listed once; no broad retry loop or body rewrite after commit | yes |
+| [ ] | 1B-11b | Transport and post-commit failures do not trigger router rotation | spec Rotation/Transport non-goal | T9 | T9 / `codex-router-proxy::http_sse` | protocol | 5xx/timeout/DNS/reset/cancel/post-commit fixtures | `cargo test -p codex-router-proxy tests::http_proxy_does_not_rotate_for_transport_or_post_commit_failures -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_does_not_rotate_for_transport_or_post_commit_failures --exact` | router does not create retry/timeout/overload/circuit-breaker policy; transport and post-commit failures surface without alternate account selection | new exact test listed once; selector call count proves no second account | yes |
 | [ ] | 1B-12 | WebSocket existing connection stays pinned; next connection can switch | spec Routing/WebSocket | T9 | T9 / `codex-router-proxy::websocket` | protocol | two WS connections | `cargo test -p codex-router-proxy tests::websocket_connection_stays_pinned_while_next_connection_reselects_after_ineligibility -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::websocket_connection_stays_pinned_while_next_connection_reselects_after_ineligibility --exact` | old WS stays A; next WS selects B after A becomes ineligible | new exact test listed once; frame preservation asserted | yes |
 | [ ] | 1B-13 | Turn-state envelope pins same-turn HTTP/SSE continuation | spec Routing Granularity | T9 | T9 / selection affinity | protocol | two accounts + signed envelope | `cargo test -p codex-router-proxy tests::http_proxy_turn_state_envelope_pins_same_turn_to_owner_account -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_turn_state_envelope_pins_same_turn_to_owner_account --exact` | continuation uses owning account; invalid/replayed envelope fails locally | new exact test listed once; no silent fallback to other account | yes |
 | [ ] | 1B-13a | Turn-state envelope rejects wrong scope, expiry, nonce, and signing key | spec Routing Granularity/Security | T9 | T9 / `codex-router-selection` turn-state codec | unit/security | fixed clock, session, route, nonce fixtures | `cargo test -p codex-router-selection tests::turn_state_envelope_rejects_wrong_scope_expiry_nonce_and_signing_key -- --exact --list` | `cargo nextest run -p codex-router-selection -- tests::turn_state_envelope_rejects_wrong_scope_expiry_nonce_and_signing_key --exact` | cross-turn, cross-session, wrong route, expired, wrong-key, and reused nonce/generation envelopes fail locally | new exact test listed once; valid signature alone is insufficient | yes |
+| [ ] | 1B-13b | Turn-state replay fails across restart or router-instance change | spec Routing Granularity/Security | T9 | T9 / turn-state replay owner | unit/integration | two codec/cache instances over one router root | `cargo test -p codex-router-selection tests::turn_state_envelope_replay_fails_across_restart_or_router_instance_change -- --exact --list` | `cargo nextest run -p codex-router-selection -- tests::turn_state_envelope_replay_fails_across_restart_or_router_instance_change --exact` | replayed envelope fails before selection after restart/new router instance; durable nonce state or router-instance signing-key rotation is proven | new exact test listed once; selector/upstream counters stay zero in integration receipt | yes |
 | [ ] | 1B-14 | Previous-response affinity prefers owner or fails clearly | spec Routing Granularity | T9 | T9 / affinity repository | protocol | previous_response_id ownership fixture | `cargo test -p codex-router-proxy tests::http_proxy_previous_response_id_prefers_owner_or_fails_clearly -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_previous_response_id_prefers_owner_or_fails_clearly --exact` | owner is selected; disabled/unauthenticated owner fails before different account selection | new exact test listed once; account switch on continuation forbidden | yes |
 | [ ] | 1B-14a | Previous-response ownership persists only after commit | spec Routing Granularity/Security | T9 | T9 / affinity repository | protocol/integration | committed vs uncommitted response ids | `cargo test -p codex-router-proxy tests::http_proxy_previous_response_affinity_requires_committed_owner_and_fresh_scope -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_previous_response_affinity_requires_committed_owner_and_fresh_scope --exact` | uncommitted response id does not pin; committed owner pins; disabled owner fails before alternate selection | new exact test listed once; owner-unavailable path is explicit | yes |
 | [ ] | 1B-15 | WebSocket first-frame affinity routes before upstream open | spec Routing/WebSocket | T9 | T9 / WebSocket first-frame routing | protocol | continuation metadata in first response.create | `cargo test -p codex-router-proxy tests::websocket_first_frame_affinity_routes_to_owner_before_upstream_open -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::websocket_first_frame_affinity_routes_to_owner_before_upstream_open --exact` | first frame routes to owner before upstream open and remains forwarded unchanged | new exact test listed once; bounded metadata only | yes |
@@ -431,11 +492,12 @@ not a person.
 | [ ] | 1B-16aa | Missing HTTP local token rejects before selection or upstream | spec Local Auth | T9/T12 | T9 / HTTP local auth | integration/security | missing local token | `cargo test -p codex-router-proxy tests::authenticated_http_proxy_rejects_missing_token_before_selection_or_upstream -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::authenticated_http_proxy_rejects_missing_token_before_selection_or_upstream --exact` | HTTP rejects locally before selection and upstream open | existing exact test listed once; selector/upstream counters stay zero | yes |
 | [ ] | 1B-16ab | Empty, wrong, and old HTTP local tokens reject before selection or upstream | spec Local Auth/Security | T9/T12 | T9 / HTTP local auth | integration/security | empty, wrong, and rotated local tokens | `cargo test -p codex-router-proxy tests::authenticated_http_proxy_rejects_invalid_and_old_tokens_before_selection_or_upstream -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::authenticated_http_proxy_rejects_invalid_and_old_tokens_before_selection_or_upstream --exact` | empty, wrong, and old HTTP tokens reject locally before account selection and upstream open | new or existing exact test listed once; selector/upstream counters stay zero | yes |
 | [ ] | 1B-16b | Missing WebSocket local token rejects before upstream open | spec Local Auth/WebSocket | T9/T12 | T9 / WS local auth | protocol | missing local token | `cargo test -p codex-router-proxy tests::authenticated_websocket_router_rejects_missing_local_token_before_selection -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::authenticated_websocket_router_rejects_missing_local_token_before_selection --exact` | WebSocket rejects locally and opens zero upstream connections | existing exact test listed once; upstream-open count asserted | yes |
+| [ ] | 1B-16bd | Empty, wrong, and old WebSocket local tokens reject before selection or upstream | spec Local Auth/WebSocket/Security | T9/T12 | T9 / WS local auth | protocol/security | empty, wrong, and rotated local tokens | `cargo test -p codex-router-proxy tests::authenticated_websocket_router_rejects_invalid_and_old_tokens_before_selection_or_upstream -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::authenticated_websocket_router_rejects_invalid_and_old_tokens_before_selection_or_upstream --exact` | empty, wrong, and old WebSocket tokens reject locally before account selection and upstream open | new exact test listed once; selector/upstream counters stay zero | yes |
 | [ ] | 1B-16c | Local token rotation closes old-generation WebSocket | spec Local Auth | T9/T12 | T9 / local auth + WS revocation | integration/protocol | rotated local token | `cargo test -p codex-router-proxy tests::loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket --exact` | rotation closes old-generation WS and rejects old token without upstream open; close reason redacted | existing exact test listed once; rerun after proxy/WS/local-auth changes | yes |
 | [ ] | 1B-17a | Route classifier classifies required routes and marks Realtime unsupported | spec Supported Codex Traffic | T9 | T9 / route classifier | unit/protocol | route fixtures | `cargo test -p codex-router-proxy tests::route_classifier_supports_required_codex_routes_and_rejects_realtime -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::route_classifier_supports_required_codex_routes_and_rejects_realtime --exact` | required route kinds classify and Realtime/WebRTC is classified unsupported | existing exact test listed once; before-selection fail-closed proof lives in 1B-17f | yes |
 | [ ] | 1B-17aa | `/v1/responses` preserves body bytes and unknown fields | spec Supported Codex Traffic | T9 | T9 / proxy protocol | protocol | mock upstream | `cargo test -p codex-router-proxy tests::http_proxy_preserves_responses_body_bytes_without_interpreting_unknown_fields -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_preserves_responses_body_bytes_without_interpreting_unknown_fields --exact` | POST `/v1/responses` preserves request body bytes and unknown Codex fields | existing exact test listed once; protocol transcript asserted | yes |
 | [ ] | 1B-17b | `/v1/models` forwards supported route and preserves `ETag` | spec Supported Codex Traffic | T9 | T9 / proxy protocol | protocol | mock upstream | `cargo test -p codex-router-proxy tests::http_proxy_forwards_supported_routes_and_preserves_models_etag -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_forwards_supported_routes_and_preserves_models_etag --exact` | method/path/status/headers preserved for existing models fixture; local token stripped; upstream auth injected once; `ETag` preserved | existing exact test listed once; query-string coverage lives in 1B-17ba | yes |
-| [ ] | 1B-17ba | `/v1/models` preserves query string after route classification | spec Supported Codex Traffic | T9 | T9 / proxy protocol | protocol | mock upstream with query | `cargo test -p codex-router-proxy tests::http_proxy_preserves_query_string_after_route_classification -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_preserves_query_string_after_route_classification --exact` | models request query string survives route classification and upstream forwarding unchanged | existing or new exact test listed once; protocol transcript asserts query | yes |
+| [ ] | 1B-17ba | `/v1/models` preserves query string after route classification | spec Supported Codex Traffic | T9 | T9 / proxy protocol | protocol | mock upstream with query | `cargo test -p codex-router-proxy tests::http_proxy_preserves_models_query_string_after_route_classification -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_preserves_models_query_string_after_route_classification --exact` | `/v1/models?<query>` request query string survives route classification and upstream forwarding unchanged | new exact models-query test listed once; existing `/v1/responses?...` query test is not sufficient | yes |
 | [ ] | 1B-17c | `/v1/memories/trace_summarize` forwards protocol | spec Supported Codex Traffic | T9 | T9 / proxy protocol | protocol | mock upstream | `cargo test -p codex-router-proxy tests::http_proxy_forwards_memories_trace_summarize_protocol_unchanged -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_forwards_memories_trace_summarize_protocol_unchanged --exact` | method/path/query/body/status/headers preserved; local token stripped; upstream auth injected once | new exact test listed once; protocol transcript asserted | yes |
 | [ ] | 1B-17d | `/v1/responses/compact` forwards protocol | spec Supported Codex Traffic | T9 | T9 / proxy protocol | protocol | mock upstream | `cargo test -p codex-router-proxy tests::http_proxy_forwards_responses_compact_protocol_unchanged -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::http_proxy_forwards_responses_compact_protocol_unchanged --exact` | method/path/query/body/status/headers preserved; local token stripped; upstream auth injected once | new exact test listed once; protocol transcript asserted | yes |
 | [ ] | 1B-17e | WebSocket preserves `x-models-etag` when catalog metadata is present | spec Supported Codex Traffic | T9 | T9 / WebSocket protocol | protocol | mock WS upstream | `cargo test -p codex-router-proxy tests::websocket_handshake_preserves_x_models_etag_from_upstream_response -- --exact --list` | `cargo nextest run -p codex-router-proxy -- tests::websocket_handshake_preserves_x_models_etag_from_upstream_response --exact` | upstream `x-models-etag` survives WS handshake response when catalog metadata is present | exact test listed once; if impossible, route to spec review rather than waiving this row locally | yes |
@@ -444,12 +506,14 @@ not a person.
 | [ ] | 1B-19 | Expanded status keeps effective row visible first | spec Account/Quota | T10 | T10 / status renderer | integration | multi-window rows | `cargo test -p codex-router-cli tests::quota_status_all_limits_keeps_effective_row_visible_first -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_status_all_limits_keeps_effective_row_visible_first --exact` | effective row remains visible with every provider window in deterministic order | new exact test listed once; deterministic ordering | yes |
 | [ ] | 1B-20 | Pace/runout math matches fixed-window expectations | spec Account/Quota | T10 | T10 / status math | unit | fixed clock/window rows | `cargo test -p codex-router-cli tests::quota_status_formats_pace_and_projected_runout_from_fixed_windows -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_status_formats_pace_and_projected_runout_from_fixed_windows --exact` | expected-vs-actual pace and burn-rate runout match fixed fixture | new exact test listed once; fixed now, elapsed, used, remaining | yes |
 | [ ] | 1B-21 | Status redacts failure notes | spec Account/Quota/Security | T10 | T10 / status renderer | integration | token/account canaries | `cargo test -p codex-router-cli tests::quota_status_redacts_failure_notes_without_token_or_account_leak -- --exact --list` | `cargo nextest run -p codex-router-cli -- tests::quota_status_redacts_failure_notes_without_token_or_account_leak --exact` | output omits token, raw account email, and secret-bearing diagnostics | new exact test listed once; unique canaries | yes |
-| [ ] | 1B-22 | Docs and root help state current command truth | spec Activation/Secret Storage | T11 | T11 / docs + CLI help | docs/manual | root `--help` output | `cargo run -p codex-router-cli -- --help` | `cargo run -p codex-router-cli -- --help`; `rg -n -e "account login" -e "account logout" -e "account remove" -e "keyring" -e "--auth-json" -e "--path" README.md docs/testing/live-oauth-quota.md` | docs use `--auth-json`; login/logout/remove/keyring marked Plan 2; file import not normal steady-state; no nonexistent subcommand-help command is required unless T11 explicitly implements it | compare docs against root help and current command vocabulary | no |
-| [ ] | 1B-23 | Installed smoke main scenario enumerates exactly | spec Smoke | T12 | T12 / smoke harness | smoke | installed Codex mock | `cargo test -p codex-router-test-support installed_codex::tests::installed_codex_mock_smoke_exercises_generated_profile_token_and_websocket -- --ignored --exact --list` | `cargo nextest run -p codex-router-test-support --run-ignored ignored-only -- installed_codex::tests::installed_codex_mock_smoke_exercises_generated_profile_token_and_websocket --exact` | installed Codex version/profile captured; temp profile used; startup is not quota-blocked while quota refresh is delayed; redacted quota status table is captured after background refresh; HTTP/SSE and WS transcript proves token strip/auth injection/body-frame preservation | named ignored test lists exactly once; scenario name appears in receipt | yes |
+| [ ] | 1B-22 | Docs and root help state current command truth | spec Activation/Secret Storage | T11 | T11 / docs + CLI help | docs/manual | root `--help` output plus docs checklist | `cargo run -p codex-router-cli -- --help` | `cargo run -p codex-router-cli -- --help`; `rg -n -e "account login" -e "account logout" -e "account remove" -e "keyring" -e "--auth-json" -e "--path" README.md docs/testing/live-oauth-quota.md` | docs use `--auth-json`; login/logout/remove/keyring marked Plan 2; file import not normal steady-state; no nonexistent subcommand-help command is required unless T11 explicitly implements it | manual docs checklist must classify each match as correct Plan 2/deferred wording or fail the receipt; command output alone is not proof | no |
+| [ ] | 1B-23 | Installed smoke quota startup/status scenario enumerates exactly | spec Smoke | T12 | T12 / smoke harness | smoke | installed Codex mock with delayed quota | `cargo test -p codex-router-test-support installed_codex::tests::installed_codex_mock_smoke_proves_nonblocking_quota_startup_and_redacted_status -- --ignored --exact --list` | `cargo nextest run -p codex-router-test-support --run-ignored ignored-only -- installed_codex::tests::installed_codex_mock_smoke_proves_nonblocking_quota_startup_and_redacted_status --exact` | installed Codex version/profile captured; temp profile used; startup is not quota-blocked while quota refresh is delayed; redacted quota status table is captured after background refresh | new exact ignored smoke test lists once and fails on the current stale transcript-only harness | yes |
+| [ ] | 1B-23a | Installed smoke transcript is redacted and schema-allowlisted | spec Smoke/Security | T12 | T12 / smoke harness transcript | smoke/security | installed Codex transcript with token/body/prompt canaries | `cargo test -p codex-router-test-support installed_codex::tests::installed_codex_mock_smoke_transcript_is_redacted_and_schema_allowlisted -- --ignored --exact --list` | `cargo nextest run -p codex-router-test-support --run-ignored ignored-only -- installed_codex::tests::installed_codex_mock_smoke_transcript_is_redacted_and_schema_allowlisted --exact` | transcript JSON contains only allowlisted keys and omits raw tokens, account labels, prompts, request/response bodies, memory traces, tool arguments, and full first-frame payloads | new exact ignored smoke test lists once; token/body/prompt canaries fail if present | yes |
 | [ ] | 1B-24 | Installed smoke hostile no-token scenario enumerates exactly | spec Smoke | T12 | T12 / installed Codex mock | smoke | installed Codex mock | `cargo test -p codex-router-test-support installed_codex::tests::installed_codex_hostile_no_token_smoke_keeps_upstream_empty -- --ignored --exact --list` | `cargo nextest run -p codex-router-test-support --run-ignored ignored-only -- installed_codex::tests::installed_codex_hostile_no_token_smoke_keeps_upstream_empty --exact` | hostile local request without router token opens zero upstream connections | named ignored test lists exactly once and output includes zero-upstream observation | yes |
 | [ ] | 1B-25 | Installed smoke all-scenario wrapper is explicit | spec Smoke | T12 | T12 / installed Codex mock | smoke | installed Codex mock | `bash -n tests/smoke/installed_codex_mock.sh && bash -lc 'rg -n -e "EXPECTED_SCENARIOS" -e "installed_codex::tests::installed_codex_" tests/smoke/installed_codex_mock.sh && ! rg -n -e "installed_codex_[[:space:]]*\\\\" -e "installed_codex_[[:space:]]*$" tests/smoke/installed_codex_mock.sh'` | `tests/smoke/installed_codex_mock.sh` | wrapper enumerates expected scenarios explicitly, runs each once, prints count equal to the explicit expected-scenario array length, and fails if any expected scenario is missing | syntax passes, source search lists both exact smoke scenarios, negative broad-prefix guard passes, and wrapper output count equals array length | yes |
-| [ ] | 1B-26 | Live OAuth/quota proof is gated | spec Gated live | T12 | T12 / live proof runbook | gated live | real accounts only with approval | `rg -n -e "not-run: approval required" -e "live OAuth" -e "live quota" docs/testing/live-oauth-quota.md` | runbook commands only after explicit approval | redacted proof or `not-run: approval required` | explicit approval captured | no unless approved |
-| [ ] | 1B-27 | Final runtime egress surfaces cannot bypass resolver | plan-review-after-460b51e resolver-bypass scope | T12 | T12 / runtime egress surfaces | structural/compile | source search plus package compile | `rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" -e "FileSecretStore" crates/codex-router-quota/src crates/codex-router-cli/src crates/codex-router-proxy/src` | `bash -lc 'rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" -e "FileSecretStore" crates/codex-router-quota/src crates/codex-router-cli/src crates/codex-router-proxy/src; ! rg -v -e "credential_resolver" -e "router_credentials" -e "secret_store_factory" -e "file_backend_factory" -e "local_auth" <(rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" -e "FileSecretStore" crates/codex-router-quota/src crates/codex-router-cli/src crates/codex-router-proxy/src)' && cargo check -p codex-router-quota -p codex-router-cli -p codex-router-proxy` | matches are limited to allowlisted resolver/backend construction modules; quota, serve, refresh, HTTP/SSE, and WebSocket egress use resolver APIs | receipt must include raw search output and allowlist explanation; any non-allowlisted runtime secret read fails | yes |
+| [ ] | 1B-26 | Live OAuth/quota proof is gated | spec Gated live | T12 | T12 / live proof runbook | gated live | real accounts only with approval | `rg -n -e "live_oauth_quota_gate:" -e "approval:" -e "result:" -e "not-run: approval required" docs/testing/live-oauth-quota.md` | if no explicit approval: `bash -lc '! rg -n -e "live_oauth_quota_gate: run" -e "approval: explicit" -e "result:" docs/testing/live-oauth-quota.md'`; if approved: runbook commands only after explicit approval | without approval, current gate block records only `not-run: approval required`; with approval, current dated approval and redacted proof are attached | stale generic approval text is not enough; current gate block decides pass/fail | no unless approved |
+| [ ] | 1B-27 | Final provider-token egress surfaces cannot bypass resolver | plan-review-after-8fb965f resolver-bypass scope | T12 | T12 / runtime provider egress surfaces | structural/compile | source search plus package compile | `rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" crates/codex-router-quota/src crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs` | `bash -lc '! rg -n -e "read_secret" -e "upstream_access_token_key" -e "upstream_refresh_token_key" crates/codex-router-quota/src crates/codex-router-cli/src/quota.rs crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/websocket.rs' && cargo check -p codex-router-quota -p codex-router-cli -p codex-router-proxy` | zero provider secret/token-key reads in quota, quota CLI refresh/status, HTTP/SSE, and WebSocket runtime egress paths; account import/bootstrap/local router token code is outside this provider-token row | structural row expects zero matches in listed egress paths; tests/bootstrap/local-token modules are not scanned here | yes |
+| [ ] | 1B-27a | Final backend construction remains isolated to named factories | plan-review-after-8fb965f backend-neutrality scope | T12 | T12 / runtime backend construction edges | structural/compile | source search plus package compile | `rg -n -e "FileSecretStore" -e "file_backend::SecretStore" crates/codex-router-cli/src crates/codex-router-proxy/src` | `bash -lc 'rg -n -e "FileSecretStore" -e "file_backend::SecretStore" crates/codex-router-cli/src crates/codex-router-proxy/src; ! rg -v -e "src/secret_store_factory.rs" -e "#\\[cfg\\(test\\)\\]" -e "mod tests" <(rg -n -e "FileSecretStore" -e "file_backend::SecretStore" crates/codex-router-cli/src crates/codex-router-proxy/src)' && cargo check -p codex-router-cli -p codex-router-proxy` | concrete file backend appears only in named factory modules or test-only code; runtime entrypoints consume backend-neutral trait/factory APIs | receipt includes raw search output and path-based allowlist; broad substring allowlists are forbidden | yes |
 
 ## Review Gate
 
@@ -476,6 +540,9 @@ Required before T7 starts:
 Required before T12 starts:
 
 - [ ] Matrix rows 1B-03 through 1B-22 pass or route back to planning.
+- [ ] Explicit precommit auth/quota rotation rows 1B-11a and 1B-11b pass.
+- [ ] Replay restart row 1B-13b passes.
+- [ ] WebSocket invalid-token row 1B-16bd passes.
 - [ ] Cross-process refresh owner/follower and stale-owner recovery proof passes.
 - [ ] Replay-safe turn-state and previous-response affinity proof passes.
 - [ ] Local bearer-token lifecycle proof is rerun with exact commands if T9 or
@@ -490,12 +557,13 @@ Required before T12 starts:
 
 ## Final Closeout Gate
 
-- [ ] Matrix rows 1B-23 through 1B-25 pass. They are mandatory installed-smoke
-      proof and must not be marked `not-run`.
+- [ ] Matrix rows 1B-23, 1B-23a, 1B-24, and 1B-25 pass. They are mandatory
+      installed-smoke proof and must not be marked `not-run`.
 - [ ] Matrix row 1B-26 passes only if explicitly approved and run; otherwise it
       records `not-run: approval required`.
-- [ ] Matrix row 1B-27 passes as the final resolver-bypass proof across quota,
-      serve/refresh, HTTP/SSE, and WebSocket runtime egress surfaces.
+- [ ] Matrix rows 1B-27 and 1B-27a pass as final resolver-bypass and backend
+      construction proof across quota, serve/refresh, HTTP/SSE, and WebSocket
+      runtime egress surfaces.
 - [ ] Installed smoke enumerates and runs each exact scenario, including hostile
       no-token, with scenario count in output.
 - [ ] Supported-route protocol/header proof passes for models `ETag`,

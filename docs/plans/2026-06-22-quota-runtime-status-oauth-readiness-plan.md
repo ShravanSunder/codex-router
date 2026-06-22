@@ -64,6 +64,14 @@ fresh worktree or record a source carry-forward receipt for each input with
 path, source commit/head, checksum or byte count, working-tree line count,
 execution-base line count, and whether the input is normative.
 
+Reviewed base story: `8fb965f` remains the implementation base for plan
+execution. The `account` and non-live `quota` CLI surfaces are target Plan 1
+implementation surfaces, not pre-existing base behavior. A fresh-worktree
+executor must create those parser/module/help/test surfaces inside Plan 1A/1B.
+If any current dirty product code is reused as implementation input, it must be
+committed first or carried with path, checksum or byte count, base-vs-working
+line counts, and a hunk fingerprint receipt before code edits continue.
+
 Plan 1A and Plan 1B are allowed to make quota/runtime/account-selection behavior
 safe, but they are not sufficient to claim onboarding-complete multi-account
 auth. A reviewed Plan 2 receipt is required before README/default UX can present
@@ -94,7 +102,7 @@ Each child plan must have:
 
 ## Account UX And Secret Backend Boundary
 
-Current Plan 1-compatible command vocabulary:
+Target Plan 1-compatible command vocabulary:
 
 - `account import-codex-auth --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets`
 - `account list --router-root <path>`
@@ -311,6 +319,9 @@ These are not deferred:
 
 - [ ] Local bearer-token lifecycle proof receipt must appear in Plan 1B.
 - [ ] Same-turn and previous-response affinity must appear in Plan 1B.
+- [ ] Explicit precommit auth/quota rotation must appear in Plan 1B, with a
+      paired no-router-retry proof for transport, timeout, overload, DNS,
+      reset, cancellation, and post-commit stream failures.
 - [ ] Resolver bypass guard must appear in Plan 1A.
 - [ ] Audit JSONL allowlist proof must appear in Plan 1A.
 - [ ] Quota refresh one-writer behavior must appear in Plan 1B.
