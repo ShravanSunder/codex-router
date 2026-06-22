@@ -979,10 +979,13 @@ mod tests {
 
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
+    use codex_router_secret_store::account_tokens::AccountCredentialBundle;
+    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::account_tokens::upstream_access_token_key;
-    use codex_router_secret_store::account_tokens::upstream_refresh_token_key;
     use codex_router_secret_store::file_backend::FileSecretStore;
     use codex_router_secret_store::file_backend::SecretStore;
+    use codex_router_secret_store::model::SecretKey;
+    use codex_router_secret_store::model::SecretStoreError;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
@@ -995,6 +998,8 @@ mod tests {
     use super::CliContext;
     use super::package_name;
     use super::run_with_io;
+    use crate::account::AccountImportRequest;
+    use crate::account::import_codex_auth_from_request;
     use crate::doctor::DoctorAccountState;
     use crate::doctor::DoctorReport;
     use crate::doctor::QuotaDoctorState;
@@ -1035,6 +1040,44 @@ mod tests {
             if self.path.exists() {
                 remove_dir_all(&self.path);
             }
+        }
+    }
+
+    struct FailingSecretStore {
+        write_attempts: AtomicUsize,
+    }
+
+    impl FailingSecretStore {
+        fn new() -> Self {
+            Self {
+                write_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn write_attempts(&self) -> usize {
+            self.write_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SecretStore for FailingSecretStore {
+        fn write_secret(
+            &self,
+            _key: &SecretKey,
+            _secret: &SecretString,
+        ) -> Result<(), SecretStoreError> {
+            self.write_attempts.fetch_add(1, Ordering::SeqCst);
+
+            Err(SecretStoreError::Filesystem {
+                path: PathBuf::from("injected-secret-store-failure"),
+                source: std::io::Error::other("injected secret-store failure"),
+            })
+        }
+
+        fn read_secret(&self, _key: &SecretKey) -> Result<SecretString, SecretStoreError> {
+            Err(SecretStoreError::Filesystem {
+                path: PathBuf::from("injected-secret-store-failure"),
+                source: std::io::Error::other("injected secret-store failure"),
+            })
         }
     }
 
@@ -1717,17 +1760,17 @@ mod tests {
             .unwrap_or_else(|| panic!("imported account metadata should exist"));
         assert_eq!(account.label(), "primary");
         assert_eq!(account.status(), AccountStatus::Enabled);
+        assert_eq!(account.active_credential_generation(), Some(1));
 
         let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-        let access_key = must_ok(upstream_access_token_key(&account_id));
-        let refresh_key = must_ok(upstream_refresh_token_key(&account_id));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
+            secrets.read_secret(&bundle_key),
+        )));
+        assert_eq!(bundle.access_token().expose_secret(), "access-token-canary");
         assert_eq!(
-            must_ok(secrets.read_secret(&access_key)).expose_secret(),
-            "access-token-canary"
-        );
-        assert_eq!(
-            must_ok(secrets.read_secret(&refresh_key)).expose_secret(),
-            "refresh-token-canary"
+            bundle.refresh_token().map(SecretString::expose_secret),
+            Some("refresh-token-canary")
         );
         assert!(output.stdout.contains("imported account: primary\n"));
         assert!(output.stdout.contains("account_id: acct_primary\n"));
@@ -1779,6 +1822,123 @@ mod tests {
         assert!(!rendered_error.contains("refresh-token-canary"));
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn account_import_codex_auth_partial_secret_write_disables_account_until_repair() {
+        let test_root = TestRoot::new("account-import-partial-secret");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let failing_secrets = FailingSecretStore::new();
+        let request =
+            AccountImportRequest::new(account_id("acct_primary"), "primary", "access-token-canary")
+                .with_refresh_token("refresh-token-canary");
+
+        let error = must_err(import_codex_auth_from_request(
+            &state,
+            &failing_secrets,
+            request,
+        ));
+
+        assert!(error.to_string().contains("secret store"));
+        let account = must_ok(AccountStateRepository::load_account(
+            &state,
+            &account_id("acct_primary"),
+        ))
+        .unwrap_or_else(|| panic!("failed import should leave disabled account metadata"));
+        assert_eq!(account.status(), AccountStatus::Disabled);
+        assert_eq!(account.active_credential_generation(), None);
+        assert_eq!(failing_secrets.write_attempts(), 1);
+    }
+
+    #[test]
+    fn account_import_codex_auth_invalidates_quota_snapshot_on_credential_mutation() {
+        let test_root = TestRoot::new("account-import-invalidates-quota");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        let auth_json = test_root.path().join("auth.json");
+        must_ok(fs::create_dir_all(&router_root));
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"new-access-token","refresh_token":"new-refresh-token"}}"#,
+        ));
+        let account_id = account_id("acct_primary");
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(account_id.clone(), "primary", AccountStatus::Enabled)
+                .with_active_credential_generation(1),
+        ));
+        for route_band in [
+            "responses",
+            "models",
+            "memories_trace_summarize",
+            "responses_compact",
+            "code_review",
+        ] {
+            must_ok(QuotaSnapshotRepository::upsert_snapshot(
+                &state,
+                &PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
+                    .with_observed_unix_seconds(9_000)
+                    .with_route_band(route_band, 99)
+                    .with_reset_unix_seconds(10_000)
+                    .with_stale_penalty(false),
+            ));
+        }
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "account",
+                "import-codex-auth",
+                "--router-root",
+                path_to_str(&router_root),
+                "--label",
+                "primary",
+                "--auth-json",
+                path_to_str(&auth_json),
+                "--allow-plaintext-file-secrets",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("account should remain registered"));
+        assert_eq!(account.status(), AccountStatus::Enabled);
+        assert_eq!(account.active_credential_generation(), Some(2));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 2));
+        let bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
+            secrets.read_secret(&bundle_key),
+        )));
+        assert_eq!(bundle.access_token().expose_secret(), "new-access-token");
+        assert_eq!(
+            bundle.refresh_token().map(SecretString::expose_secret),
+            Some("new-refresh-token")
+        );
+        for route_band in [
+            "responses",
+            "models",
+            "memories_trace_summarize",
+            "responses_compact",
+            "code_review",
+        ] {
+            let snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+                &state,
+                &account_id,
+                route_band,
+            ))
+            .unwrap_or_else(|| panic!("{route_band} snapshot should remain as stale marker"));
+            assert_eq!(snapshot.remaining_headroom(), 0);
+            assert_eq!(snapshot.observed_unix_seconds(), 0);
+            assert!(snapshot.stale_penalty());
+        }
+        assert!(output.stdout.contains("imported account: primary\n"));
+        assert!(!output.stdout.contains("new-access-token"));
+        assert!(!output.stdout.contains("new-refresh-token"));
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -2583,6 +2743,13 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("expected Ok, got error: {error}"),
+        }
+    }
+
+    fn must_err<T, E: std::fmt::Display>(result: Result<T, E>) -> E {
+        match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(error) => error,
         }
     }
 

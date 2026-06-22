@@ -50,7 +50,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 1);
+        assert_eq!(store.schema_version(), 2);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -108,6 +108,75 @@ mod tests {
             QuotaSnapshotRepository::load_snapshot_for_route_band(&store, &account_id, "models"),
             Ok(Some(models_snapshot))
         );
+    }
+
+    #[test]
+    fn credential_mutation_invalidates_response_backed_alias_family_atomically() {
+        let temp_dir = TestTempDir::new("credential_mutation_invalidates_aliases");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_credential_mutation");
+        let account = AccountRecord::new(account_id.clone(), "mutation", AccountStatus::Disabled);
+        if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
+            panic!("account should persist: {error}");
+        }
+        for route_band in [
+            "responses",
+            "models",
+            "memories_trace_summarize",
+            "responses_compact",
+            "code_review",
+        ] {
+            let snapshot =
+                PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
+                    .with_observed_unix_seconds(3_000)
+                    .with_route_band(route_band, 88)
+                    .with_reset_unix_seconds(4_000)
+                    .with_stale_penalty(false);
+            if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(&store, &snapshot) {
+                panic!("{route_band} snapshot should persist: {error}");
+            }
+        }
+
+        if let Err(error) = store.activate_account_credential_generation_and_invalidate_quota(
+            &account_id,
+            7,
+            AccountStatus::Enabled,
+        ) {
+            panic!("credential mutation should activate and invalidate atomically: {error}");
+        }
+
+        let loaded_account = match AccountStateRepository::load_account(&store, &account_id) {
+            Ok(Some(account)) => account,
+            Ok(None) => panic!("account should still exist"),
+            Err(error) => panic!("account should load: {error}"),
+        };
+        assert_eq!(loaded_account.status(), AccountStatus::Enabled);
+        assert_eq!(loaded_account.active_credential_generation(), Some(7));
+        for route_band in [
+            "responses",
+            "models",
+            "memories_trace_summarize",
+            "responses_compact",
+            "code_review",
+        ] {
+            let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
+                &store,
+                &account_id,
+                route_band,
+            ) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => panic!("{route_band} stale marker should exist"),
+                Err(error) => panic!("{route_band} stale marker should load: {error}"),
+            };
+            assert_eq!(snapshot.remaining_headroom(), 0);
+            assert_eq!(snapshot.observed_unix_seconds(), 0);
+            assert_eq!(snapshot.reset_unix_seconds(), None);
+            assert!(snapshot.stale_penalty());
+        }
     }
 
     #[test]

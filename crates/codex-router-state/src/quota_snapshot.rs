@@ -9,6 +9,8 @@ pub enum QuotaSnapshotSource {
     MockEndpoint,
     /// OpenAI quota endpoint.
     OpenAiEndpoint,
+    /// Stale marker written after credential mutation.
+    CredentialMutation,
 }
 
 impl QuotaSnapshotSource {
@@ -18,6 +20,7 @@ impl QuotaSnapshotSource {
         match self {
             Self::MockEndpoint => "mock_endpoint",
             Self::OpenAiEndpoint => "openai_endpoint",
+            Self::CredentialMutation => "credential_mutation",
         }
     }
 
@@ -27,6 +30,7 @@ impl QuotaSnapshotSource {
         match value {
             "mock_endpoint" => Some(Self::MockEndpoint),
             "openai_endpoint" => Some(Self::OpenAiEndpoint),
+            "credential_mutation" => Some(Self::CredentialMutation),
             _ => None,
         }
     }

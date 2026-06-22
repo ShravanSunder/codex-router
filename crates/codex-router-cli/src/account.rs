@@ -5,9 +5,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_router_core::ids::AccountId;
-use codex_router_core::redaction::SecretString;
-use codex_router_secret_store::account_tokens::upstream_access_token_key;
-use codex_router_secret_store::account_tokens::upstream_refresh_token_key;
+use codex_router_secret_store::account_tokens::AccountCredentialBundle;
+use codex_router_secret_store::account_tokens::account_credential_bundle_key;
 use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_secret_store::file_backend::SecretStore;
 use codex_router_secret_store::model::SecretStoreError;
@@ -165,24 +164,83 @@ fn import_codex_auth(
     let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
     let secrets = FileSecretStore::open(router_root.join("secrets"))?;
 
-    let account = AccountRecord::new(
+    let request = AccountImportRequest::new(
         account_id.clone(),
         trimmed_label.clone(),
-        AccountStatus::Enabled,
-    );
-    AccountStateRepository::upsert_account(&state, &account)?;
-    let access_key = upstream_access_token_key(&account_id)?;
-    secrets.write_secret(
-        &access_key,
-        &SecretString::new(imported_auth.access_token.clone()),
-    )?;
-    if let Some(refresh_token) = imported_auth.refresh_token {
-        let refresh_key = upstream_refresh_token_key(&account_id)?;
-        secrets.write_secret(&refresh_key, &SecretString::new(refresh_token))?;
-    }
+        imported_auth.access_token,
+    )
+    .with_optional_refresh_token(imported_auth.refresh_token);
+    import_codex_auth_from_request(&state, &secrets, request)?;
 
     writeln!(stdout, "imported account: {trimmed_label}").map_err(AccountCommandError::Stdout)?;
     writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)
+}
+
+/// Parsed import request used by CLI and failure-injection tests.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountImportRequest {
+    account_id: AccountId,
+    label: String,
+    access_token: String,
+    refresh_token: Option<String>,
+}
+
+impl AccountImportRequest {
+    /// Creates an account import request.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        label: impl Into<String>,
+        access_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            account_id,
+            label: label.into(),
+            access_token: access_token.into(),
+            refresh_token: None,
+        }
+    }
+
+    /// Sets a required refresh token.
+    #[must_use]
+    pub fn with_refresh_token(mut self, refresh_token: impl Into<String>) -> Self {
+        self.refresh_token = Some(refresh_token.into());
+        self
+    }
+
+    /// Sets an optional refresh token.
+    #[must_use]
+    pub fn with_optional_refresh_token(mut self, refresh_token: Option<String>) -> Self {
+        self.refresh_token = refresh_token;
+        self
+    }
+}
+
+/// Imports an already-parsed Codex OAuth auth record into router-owned state.
+pub fn import_codex_auth_from_request(
+    state: &SqliteStateStore,
+    secrets: &impl SecretStore,
+    request: AccountImportRequest,
+) -> Result<(), AccountCommandError> {
+    let active_credential_generation = state.next_credential_generation(&request.account_id)?;
+    let disabled_account = AccountRecord::new(
+        request.account_id.clone(),
+        request.label.clone(),
+        AccountStatus::Disabled,
+    );
+    AccountStateRepository::upsert_account(state, &disabled_account)?;
+    let bundle_key =
+        account_credential_bundle_key(&request.account_id, active_credential_generation)?;
+    let bundle =
+        AccountCredentialBundle::imported_codex_auth(request.access_token, request.refresh_token);
+    secrets.write_secret(&bundle_key, &bundle.to_secret_string()?)?;
+    state.activate_account_credential_generation_and_invalidate_quota(
+        &request.account_id,
+        active_credential_generation,
+        AccountStatus::Enabled,
+    )?;
+
+    Ok(())
 }
 
 fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), AccountCommandError> {

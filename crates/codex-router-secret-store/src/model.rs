@@ -59,6 +59,13 @@ pub enum SecretStoreError {
         #[source]
         source: std::io::Error,
     },
+
+    /// Stored secret payload was malformed.
+    #[error("invalid secret payload: {message}")]
+    InvalidSecretPayload {
+        /// Redacted parse or validation message.
+        message: String,
+    },
 }
 
 fn is_allowed_key_char(character: char) -> bool {

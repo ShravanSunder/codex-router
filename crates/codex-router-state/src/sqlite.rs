@@ -19,7 +19,14 @@ use crate::repositories::AccountStateRepository;
 use crate::repositories::AffinityRepository;
 use crate::repositories::QuotaSnapshotRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
+    "responses",
+    "models",
+    "memories_trace_summarize",
+    "responses_compact",
+    "code_review",
+];
 
 /// SQLite state store failure.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -94,15 +101,20 @@ impl SqliteStateStore {
     pub fn upsert_account(&self, account: &AccountRecord) -> Result<(), StateStoreError> {
         self.connection
             .execute(
-                "INSERT INTO accounts (account_id, label, status)
-                 VALUES (?1, ?2, ?3)
+                "INSERT INTO accounts (account_id, label, status, active_credential_generation)
+                 VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(account_id) DO UPDATE SET
                    label = excluded.label,
-                   status = excluded.status",
+                   status = excluded.status,
+                   active_credential_generation = excluded.active_credential_generation",
                 params![
                     account.account_id().as_str(),
                     account.label(),
-                    account.status().as_str()
+                    account.status().as_str(),
+                    account
+                        .active_credential_generation()
+                        .map(u64_to_i64)
+                        .transpose()?
                 ],
             )
             .map_err(sqlite_error)?;
@@ -118,31 +130,45 @@ impl SqliteStateStore {
         let row = self
             .connection
             .query_row(
-                "SELECT account_id, label, status FROM accounts WHERE account_id = ?1",
+                "SELECT account_id, label, status, active_credential_generation
+                   FROM accounts
+                  WHERE account_id = ?1",
                 params![account_id.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
                     ))
                 },
             )
             .optional()
             .map_err(sqlite_error)?;
 
-        let Some((account_id_value, label, status_value)) = row else {
+        let Some((account_id_value, label, status_value, active_credential_generation)) = row
+        else {
             return Ok(None);
         };
 
-        parse_account_row(account_id_value, label, status_value).map(Some)
+        parse_account_row(
+            account_id_value,
+            label,
+            status_value,
+            active_credential_generation,
+        )
+        .map(Some)
     }
 
     /// Lists account metadata in deterministic selector order.
     pub fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
         let mut statement = self
             .connection
-            .prepare("SELECT account_id, label, status FROM accounts ORDER BY account_id")
+            .prepare(
+                "SELECT account_id, label, status, active_credential_generation
+                   FROM accounts
+                  ORDER BY account_id",
+            )
             .map_err(sqlite_error)?;
         let rows = statement
             .query_map([], |row| {
@@ -150,17 +176,89 @@ impl SqliteStateStore {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             })
             .map_err(sqlite_error)?;
 
         let mut accounts = Vec::new();
         for row in rows {
-            let (account_id_value, label, status_value) = row.map_err(sqlite_error)?;
-            accounts.push(parse_account_row(account_id_value, label, status_value)?);
+            let (account_id_value, label, status_value, active_credential_generation) =
+                row.map_err(sqlite_error)?;
+            accounts.push(parse_account_row(
+                account_id_value,
+                label,
+                status_value,
+                active_credential_generation,
+            )?);
         }
 
         Ok(accounts)
+    }
+
+    /// Returns the next credential generation for an account.
+    pub fn next_credential_generation(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<u64, StateStoreError> {
+        let current_generation = self
+            .load_account(account_id)?
+            .and_then(|account| account.active_credential_generation())
+            .unwrap_or(0);
+
+        current_generation
+            .checked_add(1)
+            .ok_or_else(|| StateStoreError::Sqlite {
+                message: "credential generation overflow".to_owned(),
+            })
+    }
+
+    /// Activates one credential generation and invalidates quota selector state.
+    pub fn activate_account_credential_generation_and_invalidate_quota(
+        &self,
+        account_id: &AccountId,
+        active_credential_generation: u64,
+        status: AccountStatus,
+    ) -> Result<(), StateStoreError> {
+        let active_generation = u64_to_i64(active_credential_generation)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "UPDATE accounts
+                    SET status = ?2,
+                        active_credential_generation = ?3
+                  WHERE account_id = ?1",
+                params![account_id.as_str(), status.as_str(), active_generation],
+            )
+            .map_err(sqlite_error)?;
+        for route_band in CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS {
+            transaction
+                .execute(
+                    "INSERT INTO quota_snapshots (
+                       account_id, source, observed_unix_seconds, route_band,
+                       remaining_headroom, reset_unix_seconds, stale_penalty
+                     )
+                     VALUES (?1, ?2, 0, ?3, 0, NULL, 1)
+                     ON CONFLICT(account_id, route_band) DO UPDATE SET
+                       source = excluded.source,
+                       observed_unix_seconds = excluded.observed_unix_seconds,
+                       remaining_headroom = excluded.remaining_headroom,
+                       reset_unix_seconds = excluded.reset_unix_seconds,
+                       stale_penalty = excluded.stale_penalty",
+                    params![
+                        account_id.as_str(),
+                        QuotaSnapshotSource::CredentialMutation.as_str(),
+                        route_band,
+                    ],
+                )
+                .map_err(sqlite_error)?;
+        }
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(())
     }
 
     /// Inserts or updates a persisted quota snapshot.
@@ -334,6 +432,7 @@ impl SqliteStateStore {
         let version = self.schema_version();
         match version {
             0 => self.apply_v1(),
+            1 => self.apply_v2(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -346,7 +445,8 @@ impl SqliteStateStore {
                 CREATE TABLE IF NOT EXISTS accounts (
                     account_id TEXT PRIMARY KEY NOT NULL,
                     label TEXT NOT NULL,
-                    status TEXT NOT NULL
+                    status TEXT NOT NULL,
+                    active_credential_generation INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS quota_snapshots (
@@ -365,7 +465,20 @@ impl SqliteStateStore {
                     account_id TEXT NOT NULL
                 );
 
-                PRAGMA user_version = 1;
+                PRAGMA user_version = 2;
+                ",
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn apply_v2(&self) -> Result<(), StateStoreError> {
+        self.connection
+            .execute_batch(
+                "
+                ALTER TABLE accounts ADD COLUMN active_credential_generation INTEGER;
+                PRAGMA user_version = 2;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -462,6 +575,7 @@ fn parse_account_row(
     account_id_value: String,
     label: String,
     status_value: String,
+    active_credential_generation: Option<i64>,
 ) -> Result<AccountRecord, StateStoreError> {
     let parsed_account_id =
         AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
@@ -472,8 +586,22 @@ fn parse_account_row(
         account_id: account_id_value,
         field: "status",
     })?;
+    let active_credential_generation = active_credential_generation
+        .map(|value| {
+            i64_to_u64_account_generation(
+                value,
+                parsed_account_id.as_str(),
+                "active_credential_generation",
+            )
+        })
+        .transpose()?;
 
-    Ok(AccountRecord::new(parsed_account_id, label, status))
+    let mut account = AccountRecord::new(parsed_account_id, label, status);
+    if let Some(generation) = active_credential_generation {
+        account = account.with_active_credential_generation(generation);
+    }
+
+    Ok(account)
 }
 
 fn u64_to_i64(value: u64) -> Result<i64, StateStoreError> {
@@ -488,6 +616,17 @@ const fn u32_to_i64(value: u32) -> i64 {
 
 fn i64_to_u64(value: i64, account_id: &str, field: &'static str) -> Result<u64, StateStoreError> {
     u64::try_from(value).map_err(|_| StateStoreError::CorruptQuotaSnapshot {
+        account_id: account_id.to_owned(),
+        field,
+    })
+}
+
+fn i64_to_u64_account_generation(
+    value: i64,
+    account_id: &str,
+    field: &'static str,
+) -> Result<u64, StateStoreError> {
+    u64::try_from(value).map_err(|_| StateStoreError::CorruptAccount {
         account_id: account_id.to_owned(),
         field,
     })
