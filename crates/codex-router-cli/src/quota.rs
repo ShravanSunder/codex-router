@@ -40,6 +40,7 @@ use crate::ArgumentParser;
 use crate::CliError;
 use crate::credential_runtime::CliCredentialResolver;
 use crate::credential_runtime::CliCredentialResolverOpenError;
+use crate::router_root_or_default;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
@@ -1159,9 +1160,7 @@ impl QuotaStatusOptions {
     }
 
     fn router_root(&self) -> Result<PathBuf, CliError> {
-        self.router_root.clone().ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_root_or_default(self.router_root.clone())
     }
 }
 
@@ -1215,8 +1214,6 @@ impl QuotaRefreshOptions {
     }
 
     fn router_root(&self) -> Result<PathBuf, CliError> {
-        self.router_root.clone().ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_root_or_default(self.router_root.clone())
     }
 }

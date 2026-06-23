@@ -23,6 +23,7 @@ use thiserror::Error;
 
 use crate::ArgumentParser;
 use crate::CliError;
+use crate::router_root_or_default;
 
 /// Account CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -632,9 +633,7 @@ impl AccountLoginOptions {
     }
 
     fn router_root(&self) -> Result<PathBuf, CliError> {
-        self.router_root.clone().ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_root_or_default(self.router_root.clone())
     }
 
     fn label(&self) -> Result<String, CliError> {
@@ -702,9 +701,7 @@ impl AccountImportOptions {
     }
 
     fn router_root(&self) -> Result<PathBuf, CliError> {
-        self.router_root.clone().ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_root_or_default(self.router_root.clone())
     }
 
     fn label(&self) -> Result<String, CliError> {
@@ -747,8 +744,6 @@ impl AccountRootOptions {
     }
 
     fn router_root(self) -> Result<PathBuf, CliError> {
-        self.router_root.ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_root_or_default(self.router_root)
     }
 }

@@ -28,12 +28,15 @@ quota command.
 Router-owned account setup:
 
 ```shell
-cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account list --router-root <router-root>
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
-cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
+cargo run -p codex-router-cli -- account login --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --label <label> --auth-json <path> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account list
+cargo run -p codex-router-cli -- quota refresh
+cargo run -p codex-router-cli -- quota status --all-limits
 ```
+
+By default, router-owned state is under `$HOME/.codex-router`. Use
+`--router-root <path>` only for tests or an alternate local router home.
 
 `account login --device-auth` delegates the interactive OAuth device-code flow
 to the installed `codex` binary in a temporary owner-only `CODEX_HOME`, then
@@ -64,16 +67,16 @@ for quota because the ChatGPT quota endpoint requires Codex OAuth access tokens.
 The implemented CLI surface for local router proof is:
 
 ```shell
-cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account list --router-root <router-root>
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
-cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
+cargo run -p codex-router-cli -- account login [--router-root <path>] --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account list [--router-root <path>]
+cargo run -p codex-router-cli -- quota refresh [--router-root <path>]
+cargo run -p codex-router-cli -- quota status [--router-root <path>] --all-limits
 cargo run -p codex-router-cli -- profile print --port 8787
 cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
-cargo run -p codex-router-cli -- token export --router-root <router-secret-root> --shell posix
-cargo run -p codex-router-cli -- serve --state-db <state.sqlite> --secret-root <router-secret-root> --upstream-base-url <url>
+cargo run -p codex-router-cli -- token export [--router-root <secret-root>] --shell posix
+cargo run -p codex-router-cli -- serve [--state-db <state.sqlite>] [--secret-root <secret-root>] [--upstream-base-url <url>]
 cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label>
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
 ```
@@ -105,10 +108,10 @@ tests does not authorize this live gate.
 Approved live quota proof commands for this revision:
 
 ```shell
-cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
-cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
+cargo run -p codex-router-cli -- account login --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --label <label> --auth-json <path> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- quota refresh
+cargo run -p codex-router-cli -- quota status --all-limits
 cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root>
 ```
 

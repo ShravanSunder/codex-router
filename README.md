@@ -15,15 +15,17 @@ Current design source of truth:
 
 ## Current Local Flow
 
-Use a router-owned root for account state and upstream OAuth credentials:
+By default, `codex-router` stores router-owned state under
+`$HOME/.codex-router`, for example `/Users/shravansunder/.codex-router` on this
+machine. Use `--router-root <path>` only for tests or an alternate local router
+home.
 
 ```shell
-ROUTER_ROOT=/path/to/codex-router-state
-cargo run -p codex-router-cli -- account login --router-root "$ROUTER_ROOT" --label primary --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login --router-root "$ROUTER_ROOT" --label backup --auth-json /path/to/auth.json --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account list --router-root "$ROUTER_ROOT"
-cargo run -p codex-router-cli -- quota refresh --router-root "$ROUTER_ROOT"
-cargo run -p codex-router-cli -- quota status --router-root "$ROUTER_ROOT" --all-limits
+cargo run -p codex-router-cli -- account login --label primary --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --label backup --auth-json /path/to/auth.json --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account list
+cargo run -p codex-router-cli -- quota refresh
+cargo run -p codex-router-cli -- quota status --all-limits
 ```
 
 `account login --device-auth` delegates the browser/device-code OAuth step to
@@ -38,12 +40,9 @@ test setup. API-key auth is not quota-compatible.
 Start the local router from the same persisted state:
 
 ```shell
-cargo run -p codex-router-cli -- token init --router-root "$ROUTER_ROOT/secrets"
-cargo run -p codex-router-cli -- token export --router-root "$ROUTER_ROOT/secrets" --shell posix
+cargo run -p codex-router-cli -- token init
+cargo run -p codex-router-cli -- token export --shell posix
 cargo run -p codex-router-cli -- serve \
-  --state-db "$ROUTER_ROOT/state.sqlite" \
-  --secret-root "$ROUTER_ROOT/secrets" \
-  --upstream-base-url https://chatgpt.com/backend-api \
   --quota-refresh-interval-seconds 300
 ```
 
