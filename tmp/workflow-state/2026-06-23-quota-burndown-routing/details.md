@@ -1,0 +1,450 @@
+# Goal Details: 2026-06-23-quota-burndown-routing
+
+## Objective
+
+Deliver reset-aware quota burn-down routing and quota status for `codex-router`
+as a fully proven product path, not only a spec, plan, or partial
+implementation.
+
+Completion requires:
+
+- accepted revised spec
+- accepted implementation plan that traces every task back to the goal and spec
+- adversarial plan review passed or findings folded back into the plan
+- implementation completed for the accepted plan
+- implementation review findings addressed or explicitly rejected with evidence
+- full proof loop captured, including end-to-end Codex-through-router behavior
+- PR created or updated and proven ready, but not merged unless separately
+  authorized
+
+## Scope
+
+In scope:
+
+- reset-aware quota burn-down algorithm
+- account classification and routing decisions across 5h and weekly windows
+- shared quota assessment semantics for runtime routing and status display
+- human quota/status UX with concise account-centric rows, Unicode bars, and
+  explicit preferred-next explanation
+- non-blocking startup and request behavior using persisted quota state
+- background refresh/probe behavior and stale/unknown/ineligible handling
+- proof gates across unit, integration, smoke, and end-to-end runtime paths
+
+Out of scope unless explicitly brought back into this goal:
+
+- merging the PR
+- unrelated OAuth/keychain work not required by quota routing/status proof
+- destructive cleanup of unrelated dirty worktree files
+- weakening or deleting proof gates to make the lifecycle pass
+
+## Required Reading
+
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/algorithm-prior-art-crux.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/contract-architecture-difference.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/planning-adversarial-crux.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/requirements-validation.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/ux-progressive-guardrails.md`
+
+## Accepted Spec Review Findings
+
+The current spec is not accepted. The review found these required fixes:
+
+1. Make the burn-down score to selector weight contract normative.
+2. Define shared ownership and dependency edges for assessment DTOs, selection,
+   proxy adapters, state DTOs, and CLI display.
+3. Freeze threshold and reset-salvage policy as fixed v1 constants or named
+   config defaults with rationale and proof bounds.
+4. Define mixed window collapse for ineligible, stale, unknown, missing reset,
+   no effective row, and empty window set.
+5. Make human quota/status output strict: at most two rows per account, Unicode
+   bars, no `pp`, no `bottleneck`, no account id in default human table, and
+   explicit preferred-next explanation when routing is shown.
+6. Define black-box non-blocking proof for server boot/listen, first routed
+   request, and quota status render.
+7. Define redaction and observability proof across status rows, selection
+   explanations, refresh errors, traces/logs, and smoke transcripts.
+
+## Current Phase Update: Revised Spec Ready For Review
+
+The spec-creation pass revised the primary spec to fold in the accepted
+spec-review blockers:
+
+- deterministic burn-down score and selector weight contract
+- fixed v1 threshold and salvage constants
+- explicit crate ownership and dependency rules
+- conservative mixed-window collapse
+- strict human and machine quota status contracts
+- black-box non-blocking proof expectations
+- surface-by-surface redaction proof expectations
+- end-to-end Codex-through-router WebSocket proof as an implementation gate
+
+Next hard gate:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- the dedicated security/trust-boundary lane should be rerun because the prior
+  security lane crashed
+- do not route to `plan-creation-swarm` unless spec review returns
+  `phase_result: complete`
+
+## Current Phase Update: Second Review Findings Folded Into Spec
+
+The second `spec-review-swarm` pass did not accept the first revision. It found
+additional blockers around route-band batch assessment ownership, then-unknown
+selection semantics, WebSocket routing/security order, machine/plain status
+surfaces, safe account display, smoke/log redaction, and deterministic scenario
+coverage.
+
+The second spec-creation revision now folds those findings into the primary
+spec:
+
+- `BurnDownRouteBandAssessment` owns selected pool, weighted candidates, and
+  neutral `preferred_next` for CLI status.
+- Unknown quota is not fallback capacity. It is `probe_required`, never enters
+  weighted routing, and may only become usable after background probe or refresh
+  writes verified quota to SQLite.
+- `/v1/responses` WebSocket support is explicit, uses the `responses` route
+  band, and fails closed for unsupported routes before selection or upstream
+  open.
+- WebSocket local auth, bounded first-frame validation, selection, credential
+  resolution, upstream open, forwarding, and account pinning are ordered
+  normatively.
+- Default `table` and `plain` output are human-only, while JSON is the explicit
+  local machine/debug format.
+- Safe account labels or hashes are required by default; raw account id is
+  explicit local JSON/debug only.
+- Smoke/log/trace transcript evidence is allowlisted and forbids raw bodies,
+  full WebSocket first frames, prompts, memory traces, tool args, unsafe labels,
+  tokens, auth headers, and secret-store material.
+- Scenario D now includes weekly reset facts and numeric expected scoring.
+- Scenario E is probe-required isolation, not same-pool unknown weighting.
+
+Next hard gate:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- do not route to `plan-creation-swarm` unless this second-revision spec review
+  returns `phase_result: complete`
+
+## Current Phase Update: Third Review Still Needs Revision
+
+The third `spec-review-swarm` pass reviewed the second-revision spec at commit
+`ab89b2bb4e67a2e327a6dfb253cf7de1241ab8f5` with full 837-line coverage. It did
+not pass the hard gate.
+
+Accepted blockers:
+
+- `selected_next` overclaims live runtime truth because proxy-owned affinity and
+  weighted-deficit state can change the actual next request. The spec must use a
+  neutral `preferred_next` projection for shared assessment/status, or define a
+  live runtime status surface. The parent reducer chooses `preferred_next` for
+  this goal to preserve boundaries and avoid misleading default status.
+- Previous-response affinity lacks a first-class fail-closed contract. The spec
+  must define durable owner lookup, HTTP/SSE and WebSocket scope, missing or
+  unavailable owner behavior, and proof rows before planning.
+
+Accepted important fixes:
+
+- call out the current WebSocket call-order delta as an intentional target
+  change
+- collapse unsupported WebSocket route taxonomy to an explicit v1
+  `unsupported_path` class
+- replace ambiguous `account_label` machine output with `safe_account_label`
+- resolve unknown behavior when all accounts require probe
+- add live CLI smoke proof for `table`, `plain`, and `json`
+- add delayed/failing-refresh proof for first `/v1/responses` WebSocket
+- make the default human table invariant explicit
+
+Next hard gate:
+
+- revise the spec through `shravan-dev-workflow:spec-creation-swarm`
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- do not route to `plan-creation-swarm` until review returns
+  `phase_result: complete`
+
+## Current Phase Update: Third Review Findings Folded Into Spec
+
+The spec-creation pass after R3 folded in accepted review findings:
+
+- Pure shared assessment now exposes neutral `preferred_next`, not runtime-exact
+  `selected_next`.
+- Default status says `preferred next` and explicitly does not claim live next
+  request truth after affinity or accumulated weighted-deficit state.
+- Previous-response affinity now has a first-class HTTP/SSE and WebSocket
+  contract with durable owner lookup and fail-closed owner-resolution failures.
+- Weighted fallback is allowed only when no previous-response affinity key is
+  present.
+- Current WebSocket call-order delta is named as a target change.
+- All non-`/v1/responses` WebSocket paths collapse to `unsupported_path`.
+- JSON status uses `safe_account_label`, and unsafe configured labels degrade to
+  deterministic safe hash/tag.
+- Unknown/no-data accounts are probe-required, never weighted fallback, and
+  background probe must not block startup or request routing.
+- Live-safe CLI status smoke is required for `table`, `plain`, and `json`.
+- First valid `/v1/responses` WebSocket routing must prove non-blocking behavior
+  under delayed or failing quota refresh.
+
+Next hard gate:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- do not route to `plan-creation-swarm` unless the R4 review returns
+  `phase_result: complete`
+
+## Current Phase Update: Fourth Review Still Needs Focused Revision
+
+The fourth `spec-review-swarm` pass reviewed commit
+`053d3069bad6596d202824c00768e74c1579fe50` with full 961-line coverage. It did
+not pass the hard gate, but the remaining issues were focused.
+
+Accepted R4 findings:
+
+- `preferred_next` must be computed from the exact ordered candidate list passed
+  to `WeightedDeficitSelector`, not from a prose-only tie rule.
+- `next use` needs `available` for same-pool non-preferred accounts.
+- Public reason vocabulary must map every assessment outcome to
+  `routing_reason`, human phrase, and `next use`.
+- V1 public UX is explicitly 5h plus weekly; generic short/long helpers may
+  remain internal only.
+- Current WebSocket code hardcodes `/v1/responses` selection and lacks
+  pre-selection handshake path classification; the spec must name this target
+  delta.
+- WebSocket first-frame guardrails must freeze 1 MiB, 250 ms,
+  `response.create`, local routing/affinity fields only, and upstream-owned full
+  schema validation.
+- WebSocket redaction proof needs synthetic canary evidence for first-frame and
+  request-body non-leakage.
+
+The follow-up spec revision folds these in. Next hard gate remains:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- no `plan-creation-swarm` until review returns `phase_result: complete`
+
+## Requirements/proof matrix
+
+Requirement / claim:
+Spec captures the actual algorithm and UX contract.
+Proof source:
+Second-revision spec plus rerun `shravan-dev-workflow:spec-review-swarm` with
+`phase_result: complete`.
+evidence source:
+phase skill result and parent inspection of review artifacts.
+freshness guard:
+Review must cite the revised spec path and current line coverage.
+
+Requirement / claim:
+Implementation plan is true to the goal and accepted spec.
+Proof source:
+`shravan-dev-workflow:plan-creation-swarm` output with explicit traceability
+from every task to goal/spec requirements.
+evidence source:
+phase skill result and parent inspection of requirements/proof matrix.
+freshness guard:
+Plan must name the accepted spec review artifact and current git commit.
+
+Requirement / claim:
+Plan is not allowed to proceed if it misses full fixes or e2e proof.
+Proof source:
+`shravan-dev-workflow:plan-review-swarm` with zero accepted blocker findings, or
+accepted findings folded back into plan creation.
+evidence source:
+phase skill result plus parent verification of review findings.
+freshness guard:
+Review must load both the plan and the accepted spec, not the plan alone.
+
+Requirement / claim:
+Runtime routing uses reset-aware burn-down assessment, not minimum-headroom-only
+selection.
+Proof source:
+must be defined by plan-creation-swarm.
+evidence source:
+unit tests, integration tests, implementation review, and parent command output.
+freshness guard:
+Tests must run against the implementation branch after final fixes.
+
+Requirement / claim:
+Quota status is concise and useful for humans.
+Proof source:
+must be defined by plan-creation-swarm.
+evidence source:
+snapshot/golden tests and manual CLI output inspection.
+freshness guard:
+Golden output must include historical bad cases: noisy per-route rows, `pp`,
+`bottleneck`, account ids, and missing preferred-next explanation.
+
+Requirement / claim:
+Startup and normal requests do not block on live provider quota refresh.
+Proof source:
+must be defined by plan-creation-swarm.
+evidence source:
+smoke test, runtime logs, and parent command output.
+freshness guard:
+Proof must include boot/listen, first routed request, and quota status render.
+
+Requirement / claim:
+Codex can communicate through the router end to end, including WebSocket.
+Proof source:
+must be defined by plan-creation-swarm.
+evidence source:
+e2e command transcript using real Codex profile against local router, plus
+server logs showing WebSocket path, selected account pinning, and fail-fast
+behavior when no verified usable account exists.
+freshness guard:
+Must run after implementation fixes in the current repo state.
+
+Requirement / claim:
+Sensitive account/token material is not leaked in user output, logs, traces, or
+test transcripts.
+Proof source:
+must be defined by plan-creation-swarm.
+evidence source:
+implementation review, redaction tests, log/trace inspection, and smoke
+transcript inspection.
+freshness guard:
+Must inspect the final emitted output surfaces, not only data structures.
+
+## Hard Gates
+
+- No plan creation until the spec is revised and spec review passes.
+- No implementation until plan review passes or accepted plan findings are
+  folded back into plan creation.
+- No implementation completion claim without unit, integration, smoke, and e2e
+  proof gates accounted for.
+- No goal completion while implementation review, PR readiness, or WebSocket
+  end-to-end proof remains open.
+- No checkpoint commit may include unrelated dirty worktree files.
+
+## Blocked Condition
+
+This goal is blocked only if the same blocker repeats under host blocked-state
+rules and meaningful progress cannot continue without user input or external
+state change. Failed review, failed tests, dirty worktree state, or missing
+proof are not completion; they route back to the owning workflow.
+
+## Checkpoint Rhythm
+
+- After revised spec: commit scoped spec artifacts only.
+- After accepted spec review: commit scoped review artifacts only.
+- After accepted plan: commit scoped plan artifacts only.
+- After plan review: commit review artifacts and route to implementation only
+  if accepted.
+- During implementation: commit only verified slices after proof.
+- Before any done claim: run goal closeout audit with matrix rows and current
+  evidence.
+
+## R5 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`a7dd754cb9ac6016fd767ec2dcb1515af0fed696`
+
+Review worktree:
+`/tmp/codex-router-r5-review.zGGh9D`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1014 lines and was read in chunks
+1-180, 181-360, 361-540, 541-720, 721-900, and 901-1014.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r5/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- all-unknown fallback was previously considered but is rejected by the current
+  product decision; unknown/no-data is `probe_required`
+- salvage tie ordering is not deterministic enough
+- Codex-through-router e2e acceptance is under-specified
+- WebSocket preselection failure proof needs a closed matrix
+- previous-response affinity extraction is not exact
+- unknown/no-window/missing-reset human placeholders can recreate fake `0%`
+- JSON status schema is too small to audit the table/routing contract
+
+Revision applied:
+The spec now defines probe-required next-use semantics, exact salvage tie key,
+unknown/no-data placeholders, expanded JSON debug/proof shape, exact
+`previous_response_id` affinity extraction, WebSocket preselection failure
+matrix, and installed-Codex-through-router e2e acceptance.
+
+## R6 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`8dab4631a8f2cdabfaaedb0be233f633f15fa04d`
+
+Review worktree:
+`/tmp/codex-router-r6-review.8EyxlP`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1106 lines and was read in chunks
+1-200, 201-400, 401-600, 601-800, 801-1000, and 1001-1106.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r6/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- WebSocket first-frame local field allowlist was not exact
+- account eligibility ownership was overloaded
+- old unknown fallback final `routing_reason` conflicted with raw evidence reason
+- partial v1 5h/weekly window sets were not normatively collapsed
+
+Revision applied:
+The spec now makes `/v1/responses` route band path-derived before selection,
+allows only top-level `type` and top-level `previous_response_id` first-frame
+reads before selection, splits `quota_evidence_reason` from final
+`routing_reason`, defines `missing_expected_window`, and separates proxy fact
+adaptation/runtime enforcement from pure burn-down exclusion/classification.
+
+## Product Correction: Unknown Means Probe Required
+
+Date: 2026-06-23
+
+The user clarified that unknown quota, no quota data, missing reset evidence, or
+failed auth evidence must not be treated as fallback capacity. Unknown means the
+router needs to probe the account, but that probe must run in the background.
+Startup and normal Codex request routing must not block on the probe.
+
+Accepted correction:
+
+- unknown/no-data/missing-reset accounts are `probe_required`
+- `probe_required` accounts never enter weighted routing
+- if every account is `probe_required`, the request fails fast with no verified
+  usable account instead of probing inline
+- background probe/refresh may later write verified quota rows to SQLite
+- later requests may use the account only after persisted quota proves it usable
+
+Spec artifacts updated:
+
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/swarm-ledger.md`
+
+## Implementation Plan
+
+Date: 2026-06-23
+
+Plan artifacts:
+
+- `tmp/plan-workflows/2026-06-23-quota-burndown-routing/implementation-plan.md`
+- `tmp/plan-workflows/2026-06-23-quota-burndown-routing/plan-ledger.md`
+
+Plan summary:
+
+- pure burn-down assessment in `codex-router-selection`
+- proxy adapter/runtime selection in `codex-router-proxy`
+- WebSocket route-band selection and pinning proof
+- quota status UX in `codex-router-cli`
+- background probe/refresh persistence proof
+- installed Codex e2e proof over HTTP/SSE and WebSocket
+
+Next hard gate:
+
+- run `shravan-dev-workflow:plan-review-swarm`
+- do not route to implementation until plan review has no accepted blockers or
+  accepted findings are folded back into this plan

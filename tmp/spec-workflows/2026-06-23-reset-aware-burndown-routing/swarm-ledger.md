@@ -1,7 +1,7 @@
 # Reset-Aware Burn-Down Routing Spec Ledger
 
 Date: 2026-06-23
-Status: parent synthesis
+Status: revised parent synthesis after spec-review findings
 
 ## Source Inputs
 
@@ -14,6 +14,10 @@ Status: parent synthesis
 - `docs/specs/2026-06-20-codex-router-greenfield-spec.md`
 - `docs/plans/2026-06-22-codex-router-plan-1b-quota-runtime-status-selection.md`
 - `MEMORY.md:2455-2541` for recovered prior context; treated as secondary to live repo evidence
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/*.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r2/review-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r2/lanes/*.md`
 
 ## Lanes Run
 
@@ -35,12 +39,23 @@ Accepted direct observations:
 - CLI status already computes pace and runout from reset time. Source: `crates/codex-router-cli/src/quota.rs:924-1007`.
 - existing spec already constrains weekly quota protection and selection-visible reset timing. Source: `docs/specs/2026-06-20-codex-router-greenfield-spec.md:147-151`.
 - existing plan already identifies long-window pressure ahead of reset urgency. Source: `docs/plans/2026-06-22-codex-router-plan-1b-quota-runtime-status-selection.md:322-338`.
+- spec review found the first draft under-specified across scoring, dependency
+  ownership, thresholds, mixed-window collapse, human status output,
+  non-blocking proof, and redaction proof. Source:
+  `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`.
+- second spec review found the first revision still under-specified route-band
+  batch assessment ownership, unknown fallback semantics, WebSocket routing and
+  security order, machine/plain status surfaces, safe-label policy, and security
+  proof. Source:
+  `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r2/review-ledger.md`.
 
 Rejected or deferred evidence:
 
 - "earliest reset wins" is rejected as the primary policy because it can over-route nearly empty or weekly-dangerous accounts.
 - external README/issues from the UX/pragmatic lanes were not accepted as source of truth for this repo. They only support product intuition.
-- exact threshold constants remain open decisions for spec review.
+- the dedicated security review lane crashed; the revised spec adds
+  surface-by-surface redaction expectations, but the next `spec-review-swarm`
+  should rerun a dedicated security/trust-boundary lane.
 
 ## Accepted Design Decisions
 
@@ -51,16 +66,100 @@ Rejected or deferred evidence:
 5. Allow bounded reset salvage for soon-reset windows only when durable-budget risk is not dangerous, or when the long window itself is imminently resetting.
 6. Use structured routing reasons shared by runtime audit and quota status display.
 7. Keep default human quota output account-centric and avoid internal score jargon.
+8. Put pure assessment in `codex-router-selection::burn_down`; proxy and CLI
+   adapt state DTOs into pure assessment DTOs.
+9. Use fixed v1 policy constants for near-reset thresholds, reserve thresholds,
+   pressure multiplier, salvage caps, and weight clamps.
+10. Classify mixed windows with any-window conservative collapse:
+    ineligible/exhausted blocks, unknown or missing reset becomes
+    `probe_required`, stale marks stale, and `effective` is only an explanation
+    hint.
+11. Route by availability pool before weighted fairness:
+    `usable`, then `reserve`; `probe_required`, `excluded`, and `blocked` never
+    enter weighted routing.
+12. Make default human status output strict: safe account label only, Unicode
+    bars when supported, no `pp`, no `bottleneck`, no raw score, and
+    preferred-next explanation when routing is shown.
+13. Require black-box non-blocking proof for boot/listen, first routed request,
+    and quota status render.
+14. Require end-to-end Codex-through-router proof, including WebSocket behavior,
+    before implementation completion can be claimed.
+15. Make route-band batch assessment the selector-facing contract so one pure
+    assessment owns selected pool, weighted candidates, and neutral
+    `preferred_next`.
+16. Make unknown quota probe-required, not fallback capacity; remove the legacy
+    same-pool unknown freshness penalty and require background probe before
+    later requests can use the account.
+17. Define `/v1/responses` WebSocket support as a first-class route using the
+    `responses` route band, with local auth and first-frame validation before
+    selection, credential resolution, or upstream open.
+18. Split status surfaces into table/plain human output and explicit JSON
+    machine output with stable fields and enums.
+19. Use safe account labels or hashes by default in human output, logs, traces,
+    smoke transcripts, and selection explanations; raw account id is explicit
+    local JSON/debug only.
+20. Treat smoke/log/transcript output as allowlisted evidence and forbid raw
+    bodies, full WebSocket first frames, prompts, memory traces, tool args,
+    unsafe labels, tokens, auth headers, and secret-store material.
+21. Define previous-response affinity as a fail-closed continuation contract for
+    HTTP/SSE and WebSocket before weighted fallback.
+22. Collapse all non-`/v1/responses` WebSocket paths to `unsupported_path`.
+23. Require live-safe CLI status smoke over persisted router state for `table`,
+    `plain`, and `json`.
+24. Require delayed/failing-refresh proof for first valid `/v1/responses`
+    WebSocket routing.
+25. Define all-probe-required output as explicit `needs probe` rows so unknown
+    quota never looks healthy and is never treated as request-path fallback.
+26. Replace prose salvage tiebreaking with an exact salvage tie key shared by
+    assessment, status, proxy adapter, and deterministic tests.
+27. Forbid fake `0% left` placeholders for unknown, missing-reset, and no-data
+    human status slots.
+28. Expand JSON status into an audit shape that can reconstruct selected pool,
+    next use, displayed window slots, all relevant windows, reset metadata, and
+    safe routing explanations.
+29. Define previous-response affinity extraction as the top-level
+    `previous_response_id` field in HTTP/SSE bodies and first WebSocket
+    `response.create` frames, with malformed values failing closed.
+30. Require a WebSocket preselection failure matrix covering local auth,
+    unsupported path, wrong type, oversized frame, timed-out frame, malformed
+    affinity, and owner-resolution failures.
+31. Define local Codex-through-router e2e acceptance as installed Codex CLI plus
+    generated router profile, served local router, mock upstream, HTTP/SSE and
+    WebSocket transport, reset-aware multi-account choice, status agreement,
+    pinning, and redacted transcripts. Live OAuth/quota remains separate and
+    approval-gated.
+32. Treat WebSocket `/v1/responses` route band as path-derived in v1; before
+    selection the router may read only top-level `type` and top-level
+    `previous_response_id` from the first frame.
+33. Split raw quota evidence from final public/audit routing explanation:
+    `quota_evidence_reason` records evidence before pool choice, while
+    `routing_reason` is assigned after selected-pool mapping.
+34. Missing exactly one expected v1 response window, 5h or weekly, makes the
+    account `probe_required` and renders the missing slot as `no data`.
+35. Separate proxy-owned account fact adaptation/runtime enforcement from
+    selection-owned pure exclusion/classification. Disabled and
+    missing-credential accounts are returned as `excluded` for status, never
+    selected.
+36. Keep provider quota probe off the request path. Startup and normal routing
+    use only last-known persisted selector rows; background probe may later
+    promote an account from `probe_required` after verified quota is persisted.
 
 ## Open Decisions
 
-- weekly near-reset threshold: 12h vs 24h
-- reserve behavior: zero normal traffic vs tiny trickle
-- module home: `codex-router-selection` module vs new crate
-- human display of risk score: default hidden vs debug only
+No product decisions remain open before the next spec review. The next review
+may still reject decisions, but plan creation must not reopen them silently.
 
 ## Next Route
 
-Recommended next skill: `shravan-dev-workflow:spec-review-swarm`.
+Recommended next skill: `shravan-dev-workflow:plan-review-swarm`.
 
-After review acceptance, route to `shravan-dev-workflow:plan-creation-swarm`.
+Review the corrected spec together with:
+`tmp/plan-workflows/2026-06-23-quota-burndown-routing/implementation-plan.md`.
+
+Only after plan review acceptance should orchestrator route to
+`shravan-dev-workflow:implementation-execute-plan`.
+
+phase_result: complete
+evidence: `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`, `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/swarm-ledger.md`
+recommended_next_workflow: `shravan-dev-workflow:plan-review-swarm`
+recommended_transition_reason: Corrected spec and implementation plan are ready for adversarial plan review before implementation.
