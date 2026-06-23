@@ -48,17 +48,26 @@ Head at plan creation: `0bde7ae`
 6. Required redaction proof over produced artifacts, not only source-level
    assertions.
 7. Chose `plan-review-swarm` as the next workflow before implementation.
+8. First plan-review pass returned `needs revision`; accepted findings are
+   recorded under
+   `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/plan-review/`.
+9. Revision 1 split risky tasks and proof gates before implementation:
+   T2a/T2b/T2c for state/affinity/secret, T8a/T8b for harness/route-native
+   proof, serialized T3 -> T5 -> T6, and transport-specific installed-Codex
+   proof for HTTP/SSE and WebSocket.
 
 ## Accepted Plan Artifact
 
 - `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/implementation-plan.md`
+- `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/plan-review/review-ledger.md`
 
 ## Completion Receipt
 
-Phase result: complete
+Phase result: revised after review
 
-Recommended next workflow: `shravan-dev-workflow:plan-review-swarm`
+Recommended next workflow: focused `shravan-dev-workflow:plan-review-swarm`
 
-Recommended transition reason: the R20 spec has a written implementation plan
-with task sequence, write scopes, execution DAG, proof matrix, security gates,
-and split/replan triggers; the plan has not yet been adversarially reviewed.
+Recommended transition reason: the first plan-review pass found accepted
+blockers/important findings; revision 1 folds them into task ownership, DAG
+order, proof commands, and write-scope gates. A focused review should verify
+closure before implementation.

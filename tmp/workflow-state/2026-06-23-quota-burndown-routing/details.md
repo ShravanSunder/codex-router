@@ -56,6 +56,39 @@ When older sections mention `phase_result` or rejected generated-profile auth
 shapes, the active source of truth is the required-reading list above, the
 latest orchestrator event, and the current primary spec.
 
+## Current Phase Update: Plan Review Findings Folded Into Plan
+
+The first `plan-review-swarm` pass for the R20 implementation plan returned
+`needs revision`. The spec was clear enough for planning, but the first plan
+missed several required task/proof ownership boundaries:
+
+- previous-response owner-record writes were not assigned to HTTP/SSE and
+  WebSocket runtime tasks
+- HTTP/SSE `affinity_secret_unavailable` fail-closed ordering was missing
+- WebSocket local-auth proof missed manual header success, mixed-carrier
+  mismatch, and subprotocol token-smuggling rejection
+- T2 combined quota refresh state, affinity owner storage, and affinity secret
+  lifecycle into one oversized checkpoint
+- T8 was split in the DAG but not in the task list
+- installed-Codex HTTP/SSE and WebSocket proof was not transport-isolated
+- final redaction and validation scope was too narrow
+
+Revision 1 folds the accepted findings into the implementation plan:
+
+- T2 is split into T2a/T2b/T2c
+- T8 is split into T8a/T8b
+- T3 owns HTTP/SSE affinity-secret fail-closed ordering and owner-record writes
+- T5 owns shared cross-transport local auth
+- T6 owns WebSocket auth, affinity-secret, pinning, and owner-record writes
+- T9/T10 use exact transport-specific installed-Codex proof commands
+- T7/T11 have explicit write allowlists and stop/replan gates
+
+Next hard gate:
+
+- run a focused `shravan-dev-workflow:plan-review-swarm`
+- do not start implementation until the focused review verifies closure or any
+  new accepted findings are folded back into the plan
+
 ## Accepted Spec Review Findings
 
 The current spec is not accepted. The review found these required fixes:
