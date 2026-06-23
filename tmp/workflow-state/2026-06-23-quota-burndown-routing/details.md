@@ -1020,3 +1020,66 @@ Next hard gate:
 Run `shravan-dev-workflow:spec-review-swarm` against R18. Do not proceed to
 `plan-creation-swarm` until that review returns a parent-verified `ready`
 verdict.
+
+## R18 Spec Review
+
+Date: 2026-06-23
+
+Phase:
+spec-review-swarm review of R18.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r18/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted blockers:
+
+- HTTP/SSE routing order still used `unsupported_route_band` for raw classifier
+  misses and did not cover every routed HTTP API
+- wrong HTTP methods on otherwise supported paths were not included in the
+  black-box fail-closed proof gate
+- shared assessment/result contract was still ambiguous between enum payloads
+  and one flat envelope
+- WebSocket invalid local auth and unsupported path proof did not require
+  handshake/connect failure or another non-101 local rejection
+
+Accepted important fixes:
+
+- routes marked not previous-response capable needed explicit
+  `previous_response_id` behavior
+- `BurnDownAccountInput` should not carry per-account `route_band`
+- unsupported-route-band JSON should be internal/test-only in v1
+
+## R19 Spec Revision
+
+Date: 2026-06-23
+
+Phase:
+spec-creation-swarm revision after R18.
+
+Revision artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r19/swarm-ledger.md`
+
+Revision applied:
+
+- chose one flat `BurnDownRouteBandAssessmentResult` envelope with
+  `route_result` as discriminator
+- removed per-account `route_band` from pure assessment input
+- made unsupported-route-band JSON internal/test-only, not a new v1 user
+  command
+- made HTTP/SSE routing order apply to every supported HTTP route
+- split raw `unsupported_path` classifier misses from classified
+  `unsupported_route_band` policy misses
+- scoped affinity to previous-response-capable routes only; non-capable routes
+  pass top-level `previous_response_id` through as normal upstream payload after
+  local auth and auth-smuggling checks
+- required wrong-method black-box proof on supported paths
+- required WebSocket invalid-auth/unsupported-path proof to observe
+  handshake/connect failure or another non-101 local rejection
+
+Next hard gate:
+Run `shravan-dev-workflow:spec-review-swarm` against R19. Do not proceed to
+`plan-creation-swarm` until that review returns a parent-verified `ready`
+verdict.

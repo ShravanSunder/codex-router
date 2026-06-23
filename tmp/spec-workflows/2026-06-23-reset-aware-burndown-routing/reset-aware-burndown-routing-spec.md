@@ -148,11 +148,12 @@ burn-down assessment
         from supplied facts, and structured explanation
   crate: codex-router-selection::burn_down
   inputs: BurnDownRouteBandAssessmentInput with core RouteBand
-  exposes: BurnDownRouteBandAssessmentResult::ok(BurnDownRouteBandAssessment)
-           or ::unsupported_route_band(UnsupportedRouteBandAssessment)
-  assessment exposes: route_result, selected_pool, selected_pool_reason,
-                      preferred_next_account_id, weighted_candidates, accounts,
-                      account presentation fields, and safe route/status reason fields
+  exposes: one flat BurnDownRouteBandAssessmentResult envelope with
+           route_result as discriminator; ok(...) and
+           unsupported_route_band(...) are constructors only
+  assessment exposes: route_result, route_band, selected_pool,
+                      selected_pool_reason, preferred_next_account_id,
+                      weighted_candidates, accounts, and safe reason fields
   must not depend on: codex-router-state, codex-router-proxy, codex-router-cli
 
 proxy account selection
@@ -379,10 +380,15 @@ Refresh state transitions:
 
 - `account_id`
 - `safe_account_label`
-- `route_band`
 - `windows: Vec<QuotaWindowFact>`
 - `account_enabled: bool`
 - `has_active_credential: bool`
+
+Account inputs do not carry `route_band`. The top-level
+`BurnDownRouteBandAssessmentInput.route_band` is the only route-band input to
+the pure assessment. State repositories and proxy/CLI adapters may filter facts
+by route band before building inputs, but they must not pass a second
+per-account route-band value that could diverge.
 
 `QuotaWindowFact`:
 
@@ -431,13 +437,12 @@ misses. `unsupported_route_band` is an assessment/status result for a classified
 `RouteBand` that has no registered burn-down policy. The two reasons must not
 be collapsed.
 
-Unknown or unregistered route bands return
-`BurnDownRouteBandAssessmentResult::unsupported_route_band(UnsupportedRouteBandAssessment)`
-before account assessment or weighted selection. The unsupported branch payload
-is:
+Unknown or unregistered route bands return the same
+`BurnDownRouteBandAssessmentResult` envelope before account assessment or
+weighted selection. The unsupported branch payload is:
 
 ```text
-UnsupportedRouteBandAssessment {
+BurnDownRouteBandAssessmentResult {
   route_band,
   route_result: unsupported_route_band,
   selected_pool: none,
@@ -453,11 +458,11 @@ result; none of them may keep a separate unsupported-band branch with different
 route-band strings or reason names. Classified routes with no registered policy
 fail locally with machine reason `unsupported_route_band` before selector
 advancement, credential resolution, upstream auth injection, or upstream open.
-JSON machine output for an explicit unsupported route-band status request emits
-the payload above and no account rows. Default human quota status renders the
-user `responses` quota route only; it must not emit per-route rows for the other
-route bands unless a future explicit debug or multi-route mode changes the
-contract.
+Unsupported-route-band JSON is v1 internal/test-only serialization proof; v1
+does not add a new user-facing debug/status command for arbitrary route bands.
+Default human quota status renders the user `responses` quota route only; it
+must not emit per-route rows for other route bands unless a future explicit
+debug or multi-route mode changes the contract.
 
 Route-band drift guard:
 
@@ -613,7 +618,8 @@ The route-band assessment owns cross-account pool choice and neutral
 preferred-next projection. Per-account assessment does not know about sibling
 accounts.
 
-`BurnDownRouteBandAssessment`:
+`BurnDownRouteBandAssessmentResult` is one flat DTO for supported and
+unsupported route bands:
 
 - `route_result: ok`
 - `route_band`
@@ -625,7 +631,8 @@ accounts.
 - `accounts_order: account_id ascending`
 - `weighted_candidates_order: neutral selector order`
 
-Unsupported route-band payload:
+For supported route bands, `route_result=ok` and `accounts[]` contains
+per-account assessments. For unsupported route bands, the same DTO has:
 
 ```text
 BurnDownRouteBandAssessmentResult {
@@ -639,15 +646,11 @@ BurnDownRouteBandAssessmentResult {
 }
 ```
 
-Supported and unsupported route bands return the same route-level inventory:
-`route_result`, `route_band`, `selected_pool`, `selected_pool_reason`,
-`preferred_next_account_id`, `weighted_candidates`, and `accounts`. Supported
-route bands use `route_result=ok`; unsupported route bands use
-`route_result=unsupported_route_band`, `selected_pool=none`,
-`selected_pool_reason=unsupported_route_band`, null preferred account, and empty
-candidate/account arrays. Unsupported route bands never enter weighted
-selection, never advance selector state, and never synthesize per-account rows
-from unclassified request data.
+`ok(...)` and `unsupported_route_band(...)` may exist as constructors, but they
+must return this exact flat envelope rather than a public enum with separate
+payload shapes. Unsupported route bands never enter weighted selection, never
+advance selector state, and never synthesize per-account rows from unclassified
+request data.
 
 `BurnDownAccountAssessment`:
 
@@ -856,64 +859,13 @@ Tie and determinism contract:
 
 ## Required Scenario Contracts
 
-### Scenario A: low 5h, healthy weekly, 5h reset soon
-
-```text
-A: 5h 5% left, resets in 2m; weekly 80% left, resets in 5d
-B: 5h 90% left, resets in 4h; weekly 20% left, resets in 5d
-```
-
-Expected: A is selected from the `usable` pool. B is held in `reserve`.
-
-Reason: B's weekly pressure is durable-budget risk. A's low 5h is acceptable because the short window resets soon and weekly is healthy.
-
-### Scenario B: low weekly, weekly reset soon
-
-```text
-A: 5h 5% left, resets in 2m; weekly 80% left, resets in 5d
-B: 5h 90% left, resets in 4h; weekly 20% left, resets in 10m
-```
-
-Expected: B outranks A when the weighted selector starts with empty deficit
-state.
-
-Reason: B's low weekly quota is near reset, so the durable-budget risk is about to disappear. This is the bounded long-window salvage case.
-
-Normative result: B outranks A when the selector starts with empty deficit
-state.
-
-### Scenario C: weekly empty
-
-```text
-A: 5h 80% left; weekly 0% left
-B: 5h 42% left; weekly 42% left
-```
-
-Expected: A is blocked for the route band until weekly reset; B is selected if otherwise eligible.
-
-### Scenario D: same weekly, different short reset pressure
-
-```text
-A: 5h 30% left, resets in 10m; weekly 60% left, resets in 3d
-B: 5h 30% left, resets in 4h; weekly 60% left, resets in 3d
-```
-
-Expected: A receives higher `routing_weight` than B and outranks B when the
-weighted selector starts with empty deficit state.
-
-Reason: A has near-reset short-window quota that is safe to spend. B is under more short-window pressure because 30% must last much longer.
-
-### Scenario E: unknown versus known healthy
-
-```text
-A: known fresh 50% 5h, 50% weekly
-B: unknown 90% 5h, unknown weekly, missing reset evidence
-```
-
-Expected: A is selected from the `usable` pool. B is not selected because
-`unknown` is fallback-only while any known `usable` or `reserve` account exists.
-
-Reason: unknown quota is not free capacity when known healthy quota exists.
+| Scenario | Input | Expected |
+| --- | --- | --- |
+| low 5h, healthy weekly, 5h reset soon | A: 5h 5% left resets in 2m, weekly 80% left; B: 5h 90%, weekly 20% far from reset | A selected from `usable`; B held in `reserve` |
+| low weekly, weekly reset soon | A as above; B: 5h 90%, weekly 20% resets in 10m | B outranks A from empty weighted selector because long-window risk is about to reset |
+| weekly empty | A: weekly 0%; B: 5h/weekly 42% | A blocked until weekly reset; B selected if otherwise eligible |
+| same weekly, different short reset pressure | A/B both 5h 30%, weekly 60%; A resets in 10m, B in 4h | A has higher `routing_weight` from short-window salvage |
+| unknown versus known healthy | A: fresh known 50%/50%; B: unknown 90%/unknown missing reset | A selected; B fallback-only while known `usable` or `reserve` exists |
 
 ## User-Visible Status Contract
 
@@ -1391,9 +1343,12 @@ Owner record creation:
 
 Owner resolution:
 
-- affinity extraction reads only the top-level JSON field
-  `previous_response_id` from HTTP/SSE request bodies and from the first
-  WebSocket `response.create` frame
+- for routes marked previous-response capable, affinity extraction reads only
+  top-level `previous_response_id` from HTTP/SSE request bodies and from the
+  first WebSocket `response.create` frame
+- for routes not marked previous-response capable, top-level
+  `previous_response_id` is not router control metadata and is forwarded as
+  ordinary upstream-owned payload after local auth and auth-smuggling checks
 - absent `previous_response_id` means no previous-response affinity key is
   present and weighted burn-down selection may run
 - present `previous_response_id` must be a non-empty string; `null`, empty
@@ -1532,30 +1487,40 @@ mixed-carrier failure cases.
 
 ### HTTP/SSE Routing Order Contract
 
-HTTP/SSE routing order is normative for response-creating and
-previous-response-capable routes:
+HTTP/SSE routing order is normative for every supported HTTP route in the route
+inventory:
 
 1. Validate local router auth and reject any forbidden auth carrier before
    route-band assessment, selector state, credential resolution, or upstream
    open.
-2. Classify the HTTP path into `codex-router-core::routes::RouteBand` or the
-   shared `unsupported_route_band` result before selector state, credential
-   resolution, or upstream open.
-3. For any route that can create or consume previous-response ids, load or
+2. Classify HTTP method plus path. Raw classifier misses, including wrong
+   methods on otherwise supported paths, fail as `unsupported_path` before
+   selector state, credential resolution, upstream auth injection, or upstream
+   open.
+3. Map supported route kinds to core `RouteBand` and run selection-owned policy
+   lookup. A classified route band with no registered policy fails as
+   `unsupported_route_band` before selector advancement, credential resolution,
+   upstream auth injection, or upstream open.
+4. For routes marked previous-response capable in the route inventory, load or
    create `router_affinity_hash_secret.v1` before selector advancement,
    credential resolution, upstream auth injection, or upstream open.
-4. If the affinity secret is unavailable, fail locally as
+5. If the affinity secret is unavailable, fail locally as
    `affinity_secret_unavailable` with zero selector advancement, zero credential
    resolver calls, zero upstream auth injection, and zero upstream open.
-5. Extract previous-response affinity metadata, when present, before weighted
+6. Extract previous-response affinity metadata, when present, before weighted
    fallback.
-6. If affinity is present, apply the Previous-Response Affinity Contract. Any
+7. If affinity is present, apply the Previous-Response Affinity Contract. Any
    owner-resolution failure fails closed before weighted fallback.
-7. If no affinity is present, call the shared route-band assessment and select
+8. For routes not marked previous-response capable, do not load the affinity
+   secret and do not parse `previous_response_id` as router control metadata.
+   A top-level `previous_response_id` on those routes is ordinary upstream-owned
+   payload and is forwarded unchanged after local auth and auth-smuggling
+   checks.
+9. If no affinity is present, call the shared route-band assessment and select
    from `weighted_candidates`.
-8. Resolve the selected account credential and inject upstream auth exactly once
+10. Resolve the selected account credential and inject upstream auth exactly once
    after selection and before upstream open.
-9. Strip local client auth, router bearer auth, and hop-by-hop headers before
+11. Strip local client auth, router bearer auth, and hop-by-hop headers before
    upstream open.
 
 HTTP/SSE proof must cover mixed-carrier local-auth failure and
@@ -1738,15 +1703,15 @@ The implementation plan must provide proof at these layers:
   currently classified route band and fails closed for unregistered route bands
   before weighted selection
 - tests proving `assess_route_band(...)` owns policy lookup internally, callers
-  do not pass `route_band_policy`, and unsupported bands return the exact
-  `UnsupportedRouteBandAssessment` payload with empty accounts/candidates
+  do not pass `route_band_policy`, and unsupported bands return the exact flat
+  `BurnDownRouteBandAssessmentResult` payload with empty accounts/candidates
 - tests proving proxy route classification, core `RouteBand` variants, and
   selection policy lookup cannot drift, with every routed `RouteBand` covered by
   either an explicit policy or `unsupported_route_band`
 - route inventory tests proving every current method/path/WebSocket row maps to
   the normative inventory above, including previous-response capability,
-  auth-smuggling applicability, and `unsupported_path` versus
-  `unsupported_route_band` reason separation
+  wrong-method rejection on supported paths, auth-smuggling applicability, and
+  `unsupported_path` versus `unsupported_route_band` reason separation
 - tests proving the exact salvage tie key produces deterministic
   `weighted_candidates`, `preferred_next_account_id`, and empty-state
   `WeightedDeficitSelector` agreement when accounts tie on weight and pressure
@@ -1894,10 +1859,11 @@ The implementation plan must provide proof at these layers:
   WebSocket requests fail locally before selector advancement, credential
   resolution, upstream auth injection, or upstream open when the hash secret
   cannot be loaded or created
-- HTTP/SSE call-order tests proving local auth, route classification,
-  affinity-secret load/create, affinity handling, assessment, credential
-  resolution, auth injection, header stripping, and upstream open happen in the
-  normative order for response-creating and previous-response-capable routes
+- HTTP/SSE call-order tests proving local auth, route classification, optional
+  route-scoped affinity, assessment, credential resolution, auth injection,
+  header stripping, and upstream open happen in the normative order for every
+  supported HTTP route; non-capable routes with top-level `previous_response_id`
+  must prove pass-through payload behavior, not affinity lookup
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload
@@ -1942,9 +1908,14 @@ The implementation plan must provide proof at these layers:
   `POST /v1/responses/compact`. Each success proof must show local auth,
   quota-based account selection for that route band, upstream auth injection,
   local-auth stripping, protocol/header/body preservation appropriate to the
-  route, and safe transcript fields. HTTP and WebSocket unsupported paths must
-  have black-box fail-closed proof with zero selector advancement, zero
-  credential resolution, zero upstream auth injection, and zero upstream open.
+  route, and safe transcript fields. HTTP unsupported paths and wrong HTTP
+  methods on supported paths must have black-box fail-closed proof with zero
+  selector advancement, zero credential resolution, zero upstream auth
+  injection, and zero upstream open. WebSocket unsupported paths and invalid
+  local WebSocket auth must prove handshake/connect failure or another non-101
+  local rejection at the pre-upgrade ingress boundary; a post-upgrade close with
+  zero upstream open is insufficient for the `Local upgrade accepted? = no`
+  invariant.
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
