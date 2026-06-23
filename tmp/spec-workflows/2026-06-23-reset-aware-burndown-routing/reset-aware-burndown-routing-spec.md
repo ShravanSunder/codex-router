@@ -341,6 +341,14 @@ Refresh read-model contract:
 - `last_error_class` is not consumed by pure selection. It is exposed only by
   explicit status/log/proof DTOs that use redacted error classes and safe
   labels.
+- `quota_refresh_statuses_for_route_band(route_band) ->
+  BTreeMap<AccountId, QuotaRefreshStatusView>` returns one row per account
+  known to the state store for that route band, sorted by `AccountId`. Accounts
+  with selector windows but no refresh-status row return
+  `status_source=legacy_missing_refresh_status`,
+  `last_success_unix_seconds=null`, `last_attempt_unix_seconds=null`,
+  `last_error_class=null`, and `stale_after_unix_seconds=null`. Accounts with
+  neither selector windows nor refresh status are omitted.
 - The CLI status adapter may join selector inputs with refresh status metadata
   to display `needs refresh`/stale notes, but it must not recompute stale
   semantics outside the repository read model.
@@ -406,6 +414,23 @@ V1 contains explicit policies for every currently classified route band:
 - `models`: quota-managed 5h plus weekly public quota policy
 - `memories_trace_summarize`: quota-managed 5h plus weekly public quota policy
 
+Current routed API inventory is normative:
+
+| Method/path | WebSocket | Route kind | Route band | Previous-response capable | Auth-smuggling rule | Required proof |
+| --- | --- | --- | --- | --- | --- | --- |
+| `POST /v1/responses` | no | `Responses` | `responses` | yes | top-level JSON body denylist | installed-Codex HTTP/SSE e2e plus route-native protocol proof |
+| `GET /v1/models` | no | `Models` | `models` | no | no body check | route-native e2e success proof |
+| `POST /v1/memories/trace_summarize` | no | `MemoriesTraceSummarize` | `memories_trace_summarize` | no | top-level JSON body denylist | route-native e2e success proof |
+| `POST /v1/responses/compact` | no | `ResponsesCompact` | `responses_compact` | no in v1 | top-level JSON body denylist | route-native e2e success proof |
+| `POST /v1/responses` | yes | `ResponsesWebSocket` | `responses` | yes | top-level first-frame denylist | installed-Codex WebSocket e2e plus route-native protocol proof |
+| any other HTTP path/method | no | rejected | none | no | none | `unsupported_path` fail-closed proof |
+| any other WebSocket path | yes | rejected | none | no | none | `unsupported_path` pre-upgrade fail-closed proof |
+
+`unsupported_path` is a proxy edge rejection for raw method/path/classifier
+misses. `unsupported_route_band` is an assessment/status result for a classified
+`RouteBand` that has no registered burn-down policy. The two reasons must not
+be collapsed.
+
 Unknown or unregistered route bands return
 `BurnDownRouteBandAssessmentResult::unsupported_route_band(UnsupportedRouteBandAssessment)`
 before account assessment or weighted selection. The unsupported branch payload
@@ -425,8 +450,8 @@ UnsupportedRouteBandAssessment {
 
 Proxy, CLI, status, tests, and smoke proof must consume that same route-level
 result; none of them may keep a separate unsupported-band branch with different
-route-band strings or reason names. HTTP/SSE and WebSocket requests fail
-locally with machine reason `unsupported_route_band` before selector
+route-band strings or reason names. Classified routes with no registered policy
+fail locally with machine reason `unsupported_route_band` before selector
 advancement, credential resolution, upstream auth injection, or upstream open.
 JSON machine output for an explicit unsupported route-band status request emits
 the payload above and no account rows. Default human quota status renders the
@@ -768,7 +793,6 @@ RuntimeSelectedAccountDecision {
     | preferred_next
     | available
     | fallback,
-  assessment_selected_pool: usable | reserve | unknown | none,
   actual_selected_from_weighted_deficit: bool
 }
 ```
@@ -786,6 +810,9 @@ Cooldown and pinning contract:
 
 - selected pool is computed before any cooldown or previous-response pin is
   considered
+- runtime weighted-deficit state and route-band account holds are partitioned
+  by route band; traffic on one route band must not perturb another route
+  band's fairness state or hold state
 - a cooldown/hold can reuse an account only if that account is still present in
   the current assessment's `weighted_candidates`
 - previous-response affinity is a continuation-correctness override, not a
@@ -802,15 +829,19 @@ Cooldown and pinning contract:
 - when `selected_pool=unknown`, a hold may reuse only an account still in the
   unknown fallback pool; known-pool holds do not keep an account alive after the
   route falls to unknown-only evidence
-- a successful previous-response affinity hit does not advance
-  `WeightedDeficitSelector` state, because no weighted fallback occurred
-- a successful previous-response affinity hit refreshes the route-band
-  connection/account hold for that selected account and selected route band, so
-  the continuation remains pinned unless the owner later becomes blocked,
-  excluded, unknown, stale-generation, credential-invalid, or unsupported
-- when affinity reuses a reserve owner outside the current selected pool, the
-  hold is recorded for runtime continuity only; it must not move the reserve
-  owner into `weighted_candidates` or change the pure assessment envelope
+
+Runtime side effects:
+
+| Path | Weighted-deficit state | Route-band hold | Connection pin | Durable owner store |
+| --- | --- | --- | --- | --- |
+| weighted fallback | advances by selected pool candidates | set to selected account | WebSocket only | writes later only if upstream response id observed |
+| cooldown reuse | records selection against current selected-pool candidates | refreshes held account timestamp | WebSocket only | unchanged |
+| previous-response affinity hit | does not advance | set/refresh selected owner for continuity | WebSocket only | unchanged on lookup |
+| upstream response id observed | unchanged | unchanged | unchanged | writes owner record |
+
+When affinity reuses a reserve owner outside the current selected pool, the hold
+is for runtime continuity only; it must not move the owner into
+`weighted_candidates` or change the pure assessment envelope.
 
 Tie and determinism contract:
 
@@ -822,69 +853,6 @@ Tie and determinism contract:
   `preferred_next`, and reason codes, not only the final selector output.
 - Integration tests that need a selected winner start the weighted selector
   from empty state and provide candidates in the neutral selector order above.
-
-### Worked Scoring Examples
-
-The examples use the fixed v1 policy and assume fresh windows, known resets, and
-an empty weighted selector.
-
-Scenario A:
-
-```text
-A: 5h 5% left, resets in 2m; weekly 80% left, resets in 5d
-B: 5h 90% left, resets in 4h; weekly 20% left, resets in 5d
-
-A:
-  short expected = 1, short surplus = 4, short salvage = 4
-  long expected = 72, long surplus = 8, long salvage = 0
-  usable_headroom = 5, long_pressure = 0, short_pressure = 0
-  routing_weight = 5 + 4 = 9
-
-B:
-  long expected = 72, long pressure = 52
-  weekly reset is not near, so availability = reserve
-```
-
-Expected: A is selected from the `usable` pool. B is held in `reserve`.
-
-Scenario B:
-
-```text
-A: 5h 5% left, resets in 2m; weekly 80% left, resets in 5d
-B: 5h 90% left, resets in 4h; weekly 20% left, resets in 10m
-
-A routing_weight = 9, availability = usable
-
-B:
-  short expected = 80, short surplus = 10, short salvage = 0 because reset is not near
-  long expected = 1, long surplus = 19, long salvage = 19
-  usable_headroom = 20, long_pressure = 0, short_pressure = 0
-  routing_weight = 20 + 19 = 39
-```
-
-Expected: B outranks A and is selected from an empty weighted selector.
-
-Scenario D:
-
-```text
-A: 5h 30% left, resets in 10m; weekly 60% left, resets in 3d
-B: 5h 30% left, resets in 4h; weekly 60% left, resets in 3d
-
-A:
-  short expected = 4, short surplus = 26, short salvage = 10
-  long expected = 43, long surplus = 17, long salvage = 0
-  usable_headroom = 30, long_pressure = 0, short_pressure = 0
-  routing_weight = 30 + 10 = 40
-
-B:
-  short expected = 80, short pressure = 50, short salvage = 0
-  long expected = 43, long surplus = 17, long salvage = 0
-  usable_headroom = 30, long_pressure = 0, short_pressure = 50
-  routing_weight = clamp(30 - 50, 1..100) = 1
-```
-
-Expected: A has higher `routing_weight` than B and is selected from an empty
-weighted selector.
 
 ## Required Scenario Contracts
 
@@ -912,7 +880,7 @@ state.
 Reason: B's low weekly quota is near reset, so the durable-budget risk is about to disappear. This is the bounded long-window salvage case.
 
 Normative result: B outranks A when the selector starts with empty deficit
-state, as shown in the worked scoring example.
+state.
 
 ### Scenario C: weekly empty
 
@@ -1499,7 +1467,8 @@ auth injection, upstream HTTP/SSE open, or upstream WebSocket open. Requests
 that present any forbidden token carrier also fail before those same side
 effects.
 
-HTTP/SSE forbidden body-carrier detection is intentionally narrow:
+HTTP/SSE forbidden body-carrier detection applies to supported JSON POST routes
+in the route inventory above and is intentionally narrow:
 
 - applies only to JSON request bodies with an object at the top level
 - checks only top-level field names against `authorization`,
@@ -1548,10 +1517,13 @@ and negative cases for query, cookie, HTTP body-token, WebSocket
 subprotocol-token, WebSocket first-frame auth-smuggling field, and mismatched
 mixed-carrier requests.
 
-Installed-Codex e2e proof must emit the audit-safe enum
-`local_auth_carrier=authorization_bearer` and boolean
-`local_auth_validated=true` from the local router test harness. It must not emit
-the bearer token, raw auth header, header length, token hash, or token prefix.
+Installed-Codex e2e proof must emit transport-specific audit-safe receipt
+fields from the local router test harness:
+`http_sse.local_auth_carrier=authorization_bearer`,
+`http_sse.local_auth_validated=true`,
+`websocket.local_auth_carrier=authorization_bearer`, and
+`websocket.local_auth_validated=true`. It must not emit the bearer token, raw
+auth header, header length, token hash, or token prefix.
 Upstream-only evidence is insufficient for the generated-profile bearer-auth
 e2e gate.
 Dedicated local-auth ingress tests remain the authoritative negative proof for
@@ -1613,12 +1585,14 @@ WebSocket routing order is normative:
    - accepted first frame shapes:
      - enveloped `response.create`: top-level `type == "response.create"`
      - installed-Codex direct Responses payload: no top-level `type`, with
-       minimal structural fields `model`, `input`, and `stream=true`
+       `model` as a non-empty string, `input` as a top-level array, and
+       `stream` as literal `true`
    - locally read fields before selection:
      - top-level `type`, when present
      - top-level `previous_response_id`, when present
-     - for direct payload compatibility only: whether `model` is present,
-       whether `input` is present, and whether `stream` is `true`
+     - for direct payload compatibility only: whether `model` is a non-empty
+       string, whether `input` is a top-level array, and whether `stream` is
+       literal `true`
      - for auth-smuggling rejection only: whether any forbidden top-level
        auth-carrier field name is present
    - no route-band field is read from the first-frame body in v1; the
@@ -1769,6 +1743,10 @@ The implementation plan must provide proof at these layers:
 - tests proving proxy route classification, core `RouteBand` variants, and
   selection policy lookup cannot drift, with every routed `RouteBand` covered by
   either an explicit policy or `unsupported_route_band`
+- route inventory tests proving every current method/path/WebSocket row maps to
+  the normative inventory above, including previous-response capability,
+  auth-smuggling applicability, and `unsupported_path` versus
+  `unsupported_route_band` reason separation
 - tests proving the exact salvage tie key produces deterministic
   `weighted_candidates`, `preferred_next_account_id`, and empty-state
   `WeightedDeficitSelector` agreement when accounts tie on weight and pressure
@@ -1776,11 +1754,16 @@ The implementation plan must provide proof at these layers:
   `preferred_next_account_id` because of previous-response affinity or
   accumulated weighted-deficit fairness state, and that default status does not
   claim runtime-exact next use
+- tests proving weighted-deficit state and route-band account holds are
+  partitioned by route band, so traffic on one routed API cannot perturb another
+  route band's fairness or hold state
 - tests proving runtime audit receives one `RuntimeSelectedAccountDecision`
   containing the shared `BurnDownRouteBandAssessmentResult` envelope and does
   not reconstruct route-result fields from raw quota rows after selection
 - tests proving cooldown/hold reuse happens only when the held account remains
   in the current assessment's `weighted_candidates`
+- tests proving cooldown/hold reuse advances weighted-deficit state with the
+  current selected-pool candidates, unlike previous-response affinity hits
 - tests proving a selected-pool change breaks a hold when the held account is
   no longer in the new selected pool
 - tests proving previous-response affinity can reuse a reserve owner outside
@@ -1869,6 +1852,10 @@ The implementation plan must provide proof at these layers:
 - refresh read-model tests proving legacy selector rows with missing
   `quota_refresh_status` or null `stale_after_unix_seconds` are treated as
   stale on the first post-upgrade read before a successful refresh
+- refresh-status read tests proving `quota_refresh_statuses_for_route_band`
+  returns a `BTreeMap<AccountId, QuotaRefreshStatusView>` sorted by account id,
+  includes legacy selector-row accounts with `status_source=legacy_missing_refresh_status`,
+  and omits accounts with neither selector rows nor refresh status
 - WebSocket compatibility tests for `/v1/responses` routing, selected-account
   pinning, previous-response affinity before weighted fallback, no weighted
   fallback on continuation-owner failure, `/v1/realtime` and unknown path
@@ -1921,9 +1908,12 @@ The implementation plan must provide proof at these layers:
 - WebSocket first-frame allowlist proof with canary values in non-allowlisted
   fields such as `model`, `input`, `metadata`, `tools`, and prompt text,
   proving selection reads only top-level `type`, top-level
-  `previous_response_id`, direct-payload structural booleans, and forbidden
-  top-level auth-carrier field-name presence before selection, and never emits
-  raw direct-payload values
+  `previous_response_id`, the direct-payload structural predicate, and
+  forbidden top-level auth-carrier field-name presence before selection, and
+  never emits raw direct-payload values
+- WebSocket direct-payload negative tests for empty/non-string `model`,
+  non-array `input`, and non-true `stream`, all failing before selector
+  advancement, credential resolution, upstream auth injection, or upstream open
 - smoke transcript negative proof with the same non-allowlisted first-frame/body
   canaries, proving persisted/shared smoke artifacts do not emit raw `model`,
   `input`, `metadata`, `tools`, prompt text, request body content, or any
@@ -1944,7 +1934,17 @@ The implementation plan must provide proof at these layers:
 - HTTP/SSE body auth-smuggling tests proving only top-level JSON field names in
   the denylist fail as `forbidden_carrier_kind=http_body`, while nested prompt,
   tool, metadata, message, binary, form, and arbitrary string values are not
-  scanned or emitted
+  scanned or emitted; compatibility proof must cover every supported JSON POST
+  route in the route inventory
+- route-native black-box e2e proof through a served local router and mock
+  upstream for every supported routed API: `POST /v1/responses`, WebSocket
+  `/v1/responses`, `GET /v1/models`, `POST /v1/memories/trace_summarize`, and
+  `POST /v1/responses/compact`. Each success proof must show local auth,
+  quota-based account selection for that route band, upstream auth injection,
+  local-auth stripping, protocol/header/body preservation appropriate to the
+  route, and safe transcript fields. HTTP and WebSocket unsupported paths must
+  have black-box fail-closed proof with zero selector advancement, zero
+  credential resolution, zero upstream auth injection, and zero upstream open.
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
@@ -1963,11 +1963,13 @@ The implementation plan must provide proof at these layers:
   helper-rendered Codex custom-provider profile must use
   `env_key = "CODEX_ROUTER_TOKEN"` and installed Codex must authenticate to the
   local router with `Authorization: Bearer` for both HTTP/SSE and WebSocket.
-  The e2e transcript must prove local router receipt with the audit-safe enum
-  `local_auth_carrier=authorization_bearer` plus
-  `local_auth_validated=true`, must prove local auth is stripped before upstream
-  HTTP/SSE and WebSocket opens, and must never print the token, raw auth header,
-  token hash, token length, or token prefix.
+  The e2e transcript must prove local router receipt with transport-specific
+  audit-safe fields `http_sse.local_auth_carrier=authorization_bearer`,
+  `http_sse.local_auth_validated=true`,
+  `websocket.local_auth_carrier=authorization_bearer`, and
+  `websocket.local_auth_validated=true`; it must prove local auth is stripped
+  before upstream HTTP/SSE and WebSocket opens, and must never print the token,
+  raw auth header, token hash, token length, or token prefix.
 - redaction proof for status rows, machine status, selection explanations,
   refresh errors, traces/logs, and smoke transcripts
 

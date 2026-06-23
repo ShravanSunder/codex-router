@@ -923,3 +923,100 @@ Next hard gate:
 Run `shravan-dev-workflow:spec-review-swarm` against R17. Do not proceed to
 `plan-creation-swarm` until that review returns a parent-verified `ready`
 verdict.
+
+## R17 Spec Review
+
+Date: 2026-06-23
+
+Phase:
+spec-review-swarm review of R17.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r17/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted blockers:
+
+- proof expectations were too `/v1/responses`-centric and did not hard-gate
+  every routed API: HTTP/SSE `/v1/responses`, WebSocket `/v1/responses`,
+  `/v1/models`, `/v1/memories/trace_summarize`, `/v1/responses/compact`, and
+  unsupported path rejection
+- `unsupported_path` proxy-edge rejection and `unsupported_route_band`
+  assessment/status misses were collapsed
+- runtime account-selection side effects were not exact enough for weighted
+  fallback, cooldown reuse, previous-response affinity, WebSocket connection
+  pins, route-band holds, and durable owner writes
+- WebSocket direct-payload validation did not match the current fail-closed
+  behavior for non-empty string `model`, top-level array `input`, and literal
+  `stream=true`
+
+Accepted important fixes:
+
+- refresh-status reads needed an exact sorted return contract and legacy missing
+  metadata semantics
+- `RuntimeSelectedAccountDecision` duplicated selected-pool state already owned
+  by the shared assessment envelope
+- weighted-deficit state and cooldown holds needed explicit route-band
+  partitioning
+- cooldown reuse must debit weighted-deficit state, but previous-response
+  affinity must not
+- installed-Codex bearer proof needed transport-specific local-auth receipt
+  fields
+- HTTP/SSE body auth-smuggling proof needed to be scoped to every supported JSON
+  POST route
+
+## R18 Spec Revision
+
+Date: 2026-06-23
+
+Phase:
+spec-creation-swarm revision after R17.
+
+Revision artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r18/swarm-ledger.md`
+
+Revision applied:
+
+- added a normative route/API inventory and route-native e2e proof requirement
+  for every currently routed surface, not just `/v1/responses`
+- split raw classifier rejection `unsupported_path` from classified route-band
+  policy miss `unsupported_route_band`
+- closed the refresh-status read API as
+  `quota_refresh_statuses_for_route_band(route_band) ->
+  BTreeMap<AccountId, QuotaRefreshStatusView>`
+- removed duplicate `assessment_selected_pool` from the runtime selected account
+  DTO
+- made route-band partitioning of weighted-deficit state and cooldown holds
+  normative
+- added a runtime side-effects table: weighted fallback advances fairness,
+  cooldown reuse records a fairness debit, previous-response affinity does not
+  advance fairness, and upstream response ids alone write durable owner records
+- required affinity continuation to remain a runtime continuity override, not a
+  way to move reserve owners into weighted candidates
+- made installed-Codex local-auth e2e receipts transport-specific for HTTP/SSE
+  and WebSocket
+- tightened WebSocket direct-payload compatibility to non-empty string `model`,
+  top-level array `input`, and literal `stream=true`
+
+Current implementation deltas that the plan must force with tests:
+
+- `RepositoryBackedAccountSelector::select_affinity_owner` currently requires
+  the owner to be in `weighted_candidates` and calls
+  `WeightedDeficitSelector::record_selection`; the spec requires successful
+  previous-response affinity to avoid fairness mutation and to allow valid
+  reserve-owner continuation outside the currently weighted pool
+- `BurnDownRouteBandAssessmentInput` currently still exposes caller-supplied
+  policy; the spec requires policy lookup/registration to be owned by the
+  selection crate so proxy/status callers cannot drift by passing alternate
+  route-band policy
+- proxy tests already cover route-band partitioning and cooldown reuse, but the
+  plan still needs explicit red/green tests for affinity-no-fairness-mutation,
+  reserve-affinity continuity, per-route API e2e, and unsupported path versus
+  unsupported route-band separation
+
+Next hard gate:
+Run `shravan-dev-workflow:spec-review-swarm` against R18. Do not proceed to
+`plan-creation-swarm` until that review returns a parent-verified `ready`
+verdict.
