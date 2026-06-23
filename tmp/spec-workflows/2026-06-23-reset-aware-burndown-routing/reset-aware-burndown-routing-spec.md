@@ -161,8 +161,7 @@ proxy account selection
         affinity resolution/enforcement, process-lifetime fairness state, and
         runtime exact account choice
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
-  consumes: BurnDownRouteBandAssessmentResult and
-            BurnDownRouteBandAssessment.weighted_candidates
+  consumes: BurnDownRouteBandAssessmentResult and its weighted_candidates field
   exposes: RuntimeSelectedAccountDecision with the shared route assessment
            envelope plus runtime-only selected-account fields
 
@@ -1501,26 +1500,31 @@ inventory:
    lookup. A classified route band with no registered policy fails as
    `unsupported_route_band` before selector advancement, credential resolution,
    upstream auth injection, or upstream open.
-4. For routes marked previous-response capable in the route inventory, load or
+4. Build the shared `BurnDownRouteBandAssessmentResult` for the route band.
+   This pure assessment computes selected pool, owner route-eligibility,
+   `weighted_candidates`, and `preferred_next_account_id` before any
+   previous-response affinity or cooldown/pinning decision.
+5. For routes marked previous-response capable in the route inventory, load or
    create `router_affinity_hash_secret.v1` before selector advancement,
    credential resolution, upstream auth injection, or upstream open.
-5. If the affinity secret is unavailable, fail locally as
+6. If the affinity secret is unavailable, fail locally as
    `affinity_secret_unavailable` with zero selector advancement, zero credential
    resolver calls, zero upstream auth injection, and zero upstream open.
-6. Extract previous-response affinity metadata, when present, before weighted
+7. Extract previous-response affinity metadata, when present, before weighted
    fallback.
-7. If affinity is present, apply the Previous-Response Affinity Contract. Any
-   owner-resolution failure fails closed before weighted fallback.
-8. For routes not marked previous-response capable, do not load the affinity
+8. If affinity is present, apply the Previous-Response Affinity Contract against
+   the already-built route-band assessment. Any owner-resolution failure fails
+   closed before weighted fallback.
+9. For routes not marked previous-response capable, do not load the affinity
    secret and do not parse `previous_response_id` as router control metadata.
    A top-level `previous_response_id` on those routes is ordinary upstream-owned
    payload and is forwarded unchanged after local auth and auth-smuggling
    checks.
-9. If no affinity is present, call the shared route-band assessment and select
-   from `weighted_candidates`.
-10. Resolve the selected account credential and inject upstream auth exactly once
+10. If no affinity is present, select from the assessment's
+   `weighted_candidates`, applying cooldown reuse before weighted fallback.
+11. Resolve the selected account credential and inject upstream auth exactly once
    after selection and before upstream open.
-11. Strip local client auth, router bearer auth, and hop-by-hop headers before
+12. Strip local client auth, router bearer auth, and hop-by-hop headers before
    upstream open.
 
 HTTP/SSE proof must cover mixed-carrier local-auth failure and
@@ -1575,18 +1579,21 @@ WebSocket routing order is normative:
    top-level field-name check only; the router does not scan nested prompt text,
    tool arguments, metadata values, or arbitrary body strings for token-like
    words.
-7. Load or create `router_affinity_hash_secret.v1` for the router root before
-   selection, because `/v1/responses` can create or consume previous-response
-   ids. If the secret is unavailable, fail locally as
+7. Run reset-aware route-band assessment for the `responses` route band before
+   any previous-response affinity or cooldown/pinning decision.
+8. Load or create `router_affinity_hash_secret.v1` for the router root before
+   selector advancement, because `/v1/responses` can create or consume
+   previous-response ids. If the secret is unavailable, fail locally as
    `affinity_secret_unavailable` before selector advancement, credential
    resolution, upstream auth injection, or upstream open.
-8. Extract previous-response affinity metadata from the first frame, when
+9. Extract previous-response affinity metadata from the first frame, when
    present, before weighted fallback.
-9. If affinity is present, apply the Previous-Response Affinity Contract. Any
-   owner-resolution failure fails closed before weighted fallback.
-10. If no affinity is present, run reset-aware route-band assessment for the
-   `responses` route band and select from weighted candidates.
-11. Resolve the selected account credential and inject upstream auth exactly once
+10. If affinity is present, apply the Previous-Response Affinity Contract
+   against the already-built route-band assessment. Any owner-resolution failure
+   fails closed before weighted fallback.
+11. If no affinity is present, select from the assessment's weighted candidates,
+   applying cooldown reuse before weighted fallback.
+12. Resolve the selected account credential and inject upstream auth exactly once
    after selection and before upstream open.
 12. Strip local client auth, router bearer auth, and hop-by-hop headers before
    upstream open.
@@ -1758,8 +1765,8 @@ The implementation plan must provide proof at these layers:
 - tests proving unknown, missing-reset, and no-window human slots never render
   fake `0% left`
 - tests proving disabled and missing-active-credential accounts are returned in
-  `BurnDownRouteBandAssessment.accounts` as `availability=excluded`, never enter
-  `weighted_candidates`, map to `excluded_disabled` or
+  `BurnDownRouteBandAssessmentResult.accounts` as `availability=excluded`, never
+  enter `weighted_candidates`, map to `excluded_disabled` or
   `excluded_missing_credential`, and render as blocked without leaking unsafe
   labels or secret material
 - CLI renderer tests proving status uses the same assessment reason and limiting-window semantics as routing
@@ -1859,11 +1866,12 @@ The implementation plan must provide proof at these layers:
   WebSocket requests fail locally before selector advancement, credential
   resolution, upstream auth injection, or upstream open when the hash secret
   cannot be loaded or created
-- HTTP/SSE call-order tests proving local auth, route classification, optional
-  route-scoped affinity, assessment, credential resolution, auth injection,
-  header stripping, and upstream open happen in the normative order for every
-  supported HTTP route; non-capable routes with top-level `previous_response_id`
-  must prove pass-through payload behavior, not affinity lookup
+- HTTP/SSE call-order tests proving local auth, route classification,
+  assessment, optional route-scoped affinity, credential resolution, auth
+  injection, header stripping, and upstream open happen in the normative order
+  for every supported HTTP route; non-capable routes with top-level
+  `previous_response_id` must prove pass-through payload behavior, not affinity
+  lookup
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload

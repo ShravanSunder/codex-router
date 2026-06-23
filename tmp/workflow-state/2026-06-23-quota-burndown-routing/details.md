@@ -1083,3 +1083,56 @@ Next hard gate:
 Run `shravan-dev-workflow:spec-review-swarm` against R19. Do not proceed to
 `plan-creation-swarm` until that review returns a parent-verified `ready`
 verdict.
+
+## R19 Spec Review
+
+Date: 2026-06-23
+
+Phase:
+spec-review-swarm review of R19.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r19/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted blockers:
+
+- stale public references to `BurnDownRouteBandAssessment.*` undermined the
+  flat `BurnDownRouteBandAssessmentResult` envelope cutover
+- HTTP/SSE and WebSocket routing order made shared assessment look conditional
+  on no affinity, contradicting selected-pool-before-affinity and current
+  selector flow
+
+What held:
+
+- WebSocket/harness proof lane returned ready
+- `unsupported_path` versus `unsupported_route_band`, wrong-method proof,
+  unsupported-route-band JSON scope, route-scoped affinity, and non-capable
+  `previous_response_id` pass-through held
+
+## R20 Spec Revision
+
+Date: 2026-06-23
+
+Phase:
+spec-creation-swarm revision after R19.
+
+Revision artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r20/swarm-ledger.md`
+
+Revision applied:
+
+- removed remaining `BurnDownRouteBandAssessment.*` public-surface references
+- made HTTP/SSE build the shared route-band assessment before route-scoped
+  affinity enforcement
+- made WebSocket build the shared `responses` assessment before route-scoped
+  affinity enforcement
+- aligned HTTP/SSE call-order proof wording so assessment precedes optional
+  affinity
+
+Next hard gate:
+Run focused `shravan-dev-workflow:spec-review-swarm` against R20. Do not
+proceed to `plan-creation-swarm` until that review returns a parent-verified
+`ready` verdict.
