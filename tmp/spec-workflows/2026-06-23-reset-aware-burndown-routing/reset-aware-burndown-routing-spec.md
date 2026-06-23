@@ -361,12 +361,25 @@ Within the selected pool, candidates are ordered before they are passed to
 1. higher `routing_weight`
 2. lower `long_pressure`
 3. lower `short_pressure`
-4. earlier near-reset salvage
+4. salvage tie key
 5. `account_id` ascending
 
 Tests that need a deterministic selected winner use this same order and an
 empty selector state. `preferred_next` must equal the account selected by this
 exact neutral selector contract.
+
+`salvage tie key` is exact and deterministic:
+
+1. accounts with positive `short_salvage + long_salvage` sort before accounts
+   with no positive salvage
+2. lower `reset_unix_seconds` among windows that contributed positive salvage
+3. lower `window_seconds` for that contributing window
+4. `account_id` ascending
+
+Accounts with no positive salvage have no salvage reset key and sort after any
+account with positive salvage. This tie key must be derived inside the pure
+assessment and used consistently by status, tests, and the proxy adapter; it is
+not displayed in the default human table.
 
 For each selectable `usable` or `reserve` account:
 
@@ -619,7 +632,7 @@ Column semantics:
 - `weekly`: long-window bar, percent left, reset timing, and long-window note
 - `routing`: stable reason phrase from the route-band assessment
 - `next use`: one of `preferred`, `available`, `held`, `blocked`, or
-  `needs refresh`
+  `needs refresh`, or `fallback`
 
 Wording:
 
@@ -635,7 +648,13 @@ Bar rendering:
 
 - table: `█` for filled segments and `░` for empty segments
 - plain: `#` for filled segments and `-` for empty segments
-- both modes include a numeric percent with `left`, for example `54% left`
+- both modes include a numeric percent with `left` only when headroom is known,
+  for example `54% left`
+- unknown or absent headroom must not render as `0% left`; table mode uses
+  `░░░░░░░░░░ unknown` or `░░░░░░░░░░ no data`, and plain mode uses
+  `---------- unknown` or `---------- no data`
+- known headroom with missing reset time may render a bar and percent, but its
+  second line must say `reset unknown`
 
 Normative vocabulary:
 
@@ -650,6 +669,7 @@ Normative vocabulary:
 | `preferred next` | this account is the neutral next normal candidate, before affinity or accumulated fairness state | `preferred_next=true` |
 | `available` | selectable in the current pool, but not the neutral preferred row | `preferred_next=false, availability=usable or reserve, selected_pool matches availability` |
 | `held` | usable only after a higher-priority pool is empty | `preferred_next=false, availability lower than selected_pool` |
+| `fallback` | selectable only because every known usable or reserve pool is empty | `selected_pool=unknown` |
 
 Stable routing reason enum:
 
@@ -661,6 +681,8 @@ Stable routing reason enum:
 | `available_same_pool` | `available: same pool` |
 | `held_reserve` | `held: reserve` |
 | `held_unknown` | `held: needs refresh` |
+| `unknown_fallback_preferred` | `fallback: needs refresh` |
+| `unknown_fallback_available` | `fallback: same unknown pool` |
 | `blocked_window_exhausted` | `blocked: quota empty` |
 | `blocked_window_ineligible` | `blocked: quota ineligible` |
 | `unknown_quota_window` | `needs refresh: unknown quota` |
@@ -677,6 +699,8 @@ Public reason mapping:
 | non-preferred account in the selected pool | `available_same_pool` | `available: same pool` | `available` |
 | reserve account while a usable pool exists | `held_reserve` | `held: reserve` | `held` |
 | unknown account while usable or reserve pool exists | `held_unknown` | `held: needs refresh` | `held` |
+| preferred unknown account when selected pool is unknown | `unknown_fallback_preferred` | `fallback: needs refresh` | `fallback` |
+| non-preferred unknown account when selected pool is unknown | `unknown_fallback_available` | `fallback: same unknown pool` | `fallback` |
 | exhausted relevant window | `blocked_window_exhausted` | `blocked: quota empty` | `blocked` |
 | ineligible relevant window | `blocked_window_ineligible` | `blocked: quota ineligible` | `blocked` |
 | unknown relevant window | `unknown_quota_window` | `needs refresh: unknown quota` | `needs refresh` |
@@ -705,22 +729,40 @@ ssdev    enabled  ██████████ 100% left        ██░░�
 
 JSON output schema:
 
+- `route_band`
+- `selected_pool`
+- `weighted_candidates`
 - `account_id`
 - `safe_account_label`
 - `availability`
 - `freshness`
+- `next_use`
 - `limiting_window`
 - `short_pressure`
 - `long_pressure`
 - `short_salvage`
 - `long_salvage`
+- `salvage_tie_key`
 - `routing_reason`
 - `routing_weight`
 - `preferred_next`
+- `window_slots`
+- `windows`
 
 JSON output may expose scores. Default table/plain output must not. The JSON
 schema must use stable enums for availability, limiting window, freshness, and
 routing reason.
+
+`window_slots` contains the exact human-display slot inputs for `5h` and
+`weekly`: slot label, evidence state `known | unknown | no_data`, optional
+`remaining_headroom`, optional `reset_unix_seconds`, optional
+`reset_duration_seconds`, display note, and the source window ids included in
+the slot. `windows` contains every relevant route-band window with safe
+metadata only: window seconds, status, optional headroom, optional reset time,
+observed time, effective flag, pressure, surplus, and whether that window
+contributed to salvage. JSON must be able to reconstruct why the human table
+rendered `unknown`, `no data`, `fallback`, `held`, `available`, or `preferred`
+without reading logs or raw provider DTOs.
 
 `safe_account_label` is always sanitized for emission. If the configured label
 looks like an email address, provider-derived identity, token, auth header, or
@@ -798,6 +840,17 @@ Ownership:
 
 Owner resolution:
 
+- affinity extraction reads only the top-level JSON field
+  `previous_response_id` from HTTP/SSE request bodies and from the first
+  WebSocket `response.create` frame
+- absent `previous_response_id` means no previous-response affinity key is
+  present and weighted burn-down selection may run
+- present `previous_response_id` must be a non-empty string; `null`, empty
+  string, number, boolean, array, or object is `malformed_affinity` and fails
+  closed before weighted fallback, credential resolution, or upstream open
+- the canonical affinity key is `previous_response_id:<value>`; logs, traces,
+  audit events, and smoke transcripts may emit only a hash of this key, never
+  the raw previous response id
 - a continuation request with a known previous-response owner must use that
   owner account if the account is enabled, has an active credential generation,
   and is route-eligible
@@ -817,6 +870,7 @@ Proof must cover:
 - disabled owner
 - stale or unavailable credential generation
 - route-ineligible or exhausted owner
+- malformed affinity metadata
 - no weighted fallback on any continuation-owner failure
 
 ### WebSocket Compatibility Contract
@@ -826,12 +880,14 @@ same `responses` route band as HTTP/SSE response creation.
 
 WebSocket routing order is normative:
 
-1. Validate local router auth before selector state, quota assessment,
-   credential resolution, or upstream connection open.
+1. Validate local router auth before accepting the local WebSocket upgrade,
+   selector state, quota assessment, credential resolution, or upstream
+   connection open.
 2. Fail closed with `unsupported_path` for any WebSocket path other than
-   `/v1/responses` before selector state, quota assessment, credential
-   resolution, or upstream connection open. `/v1/realtime` and any unknown path
-   are representative `unsupported_path` cases in v1.
+   `/v1/responses` before accepting the local WebSocket upgrade, selector
+   state, quota assessment, credential resolution, or upstream connection open.
+   `/v1/realtime` and any unknown path are representative `unsupported_path`
+   cases in v1.
 3. Require a bounded first client frame containing a valid `response.create`
    payload before opening the upstream WebSocket.
 4. Enforce the v1 first-frame resource contract before selection:
@@ -863,6 +919,19 @@ Malformed first frames, unsupported WebSocket routes, and failed local auth must
 advance no selector state, resolve no provider credential, inject no upstream
 auth, and open no upstream connection.
 
+Preselection WebSocket failure matrix:
+
+| Failure mode | Local upgrade accepted? | Selector advance | Credential resolver | Upstream auth injection | Upstream open | Logging/redaction |
+| --- | --- | --- | --- | --- | --- | --- |
+| missing or invalid local auth | no | 0 | 0 | 0 | 0 | no tokens or auth headers |
+| unsupported path | no | 0 | 0 | 0 | 0 | route and reason only |
+| non-text or non-JSON first frame | yes | 0 | 0 | 0 | 0 | no full payload |
+| syntactically valid wrong `type` | yes | 0 | 0 | 0 | 0 | no full payload |
+| oversized first frame | yes | 0 | 0 | 0 | 0 | size class only |
+| timed-out first frame | yes | 0 | 0 | 0 | 0 | timeout reason only |
+| malformed affinity metadata | yes | 0 | 0 | 0 | 0 | affinity key hash only when available |
+| missing/disabled/stale/unavailable/exhausted owner | yes | 0 | 0 | 0 | 0 | affinity key hash and safe label/hash only |
+
 Required WebSocket proof:
 
 - valid `/v1/responses` WebSocket routes through reset-aware selection
@@ -870,12 +939,16 @@ Required WebSocket proof:
 - `/v1/realtime` and one unknown WebSocket path fail closed as
   `unsupported_path` before selection
 - invalid local auth fails before selection
-- malformed first frame fails before selection
+- malformed first frame and syntactically valid wrong-type first frame fail
+  before selection
 - oversized or timed-out first frame fails before selection
 - previous-response affinity is honored before weighted fallback and fails
   closed on owner-resolution failure
-- malformed/unsupported/auth-failed paths show zero selector advance, zero
-  credential resolver calls, and zero upstream opens
+- malformed, wrong-type, oversized, timed-out, unsupported, auth-failed, and
+  affinity-failed paths show zero selector advance, zero credential resolver
+  calls, zero upstream auth injection, and zero upstream opens
+- a local-field allowlist canary proves first-frame parsing reads only `type`,
+  route-band metadata, and previous-response affinity metadata before selection
 
 Allowed and forbidden emission surfaces:
 
@@ -905,6 +978,9 @@ The implementation plan must provide proof at these layers:
 - tests proving route-band batch assessment returns the same account ordering,
   selected pool, weighted candidates, and neutral `preferred_next` projection
   used by status
+- tests proving the exact salvage tie key produces deterministic
+  `weighted_candidates`, `preferred_next`, and empty-state
+  `WeightedDeficitSelector` agreement when accounts tie on weight and pressure
 - tests proving runtime exact selection may differ from `preferred_next` because
   of previous-response affinity or accumulated weighted-deficit fairness state,
   and that default status does not claim runtime-exact next use
@@ -914,10 +990,17 @@ The implementation plan must provide proof at these layers:
 - tests proving unknown fallback never competes with known `usable` or
   `reserve`, but preserves conservative partial-headroom ordering inside the
   all-unknown fallback pool
+- tests proving all-unknown fallback emits `fallback` next-use rows without
+  implying healthy quota
+- tests proving unknown, missing-reset, and no-window human slots never render
+  fake `0% left`
 - CLI renderer tests proving status uses the same assessment reason and limiting-window semantics as routing
 - JSON schema tests for stable machine fields and enum values
 - JSON schema tests proving `safe_account_label` is sanitized/hash-tagged and
   no unsafe configured label is emitted
+- JSON schema tests proving machine output contains selected pool, next use,
+  window slots, all relevant windows, reset metadata, and enough safe fields to
+  reconstruct the default human status explanation
 - plain renderer tests proving ASCII bars, no raw scores, no account ids, and
   the same routing phrases as table mode
 - reason mapping tests from stable enum to human phrase
@@ -937,24 +1020,33 @@ The implementation plan must provide proof at these layers:
 - WebSocket compatibility tests for `/v1/responses` routing, selected-account
   pinning, previous-response affinity before weighted fallback, no weighted
   fallback on continuation-owner failure, `/v1/realtime` and unknown path
-  `unsupported_path` failure, malformed first frame failure, oversized first
-  frame failure, first-frame timeout failure, and local-auth failure before
-  selection
+  `unsupported_path` pre-upgrade failure, malformed first frame failure,
+  wrong-type first frame failure, oversized first frame failure, first-frame
+  timeout failure, malformed affinity failure, and local-auth pre-upgrade
+  failure before selection
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload
 - WebSocket non-blocking proof that delayed or failing quota refresh does not
   block the first valid `/v1/responses` route after bounded first-frame parsing,
   and that selection uses persisted selector rows on that path
-- security call-order tests proving failed local auth, unsupported WebSocket
-  route, and malformed first frame make zero selector-state advances, zero
-  credential resolver calls, and zero upstream opens
+- security call-order tests proving every row in the WebSocket preselection
+  failure matrix makes zero selector-state advances, zero credential resolver
+  calls, zero upstream auth injections, and zero upstream opens
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
   - quota status render using persisted data while refresh is delayed or failing
-- end-to-end Codex-through-router proof, including WebSocket behavior, before
-  implementation completion can be claimed
+- end-to-end Codex-through-router proof before implementation completion can be
+  claimed. Minimum acceptance is installed Codex CLI using a generated
+  codex-router profile against a served local router and mock upstream, with
+  both HTTP/SSE and WebSocket transport exercised. The fixture must include
+  multiple persisted accounts and selector quota windows that force a
+  reset-aware account choice, then prove the chosen safe label/hash, routing
+  reason, status output, WebSocket selected-account pinning, and redacted
+  transcript artifacts agree. Live OAuth, live quota refresh, or real upstream
+  quota cycling is not part of this required local e2e gate unless explicitly
+  approved as a separate live-proof layer.
 - redaction proof for status rows, machine status, selection explanations,
   refresh errors, traces/logs, and smoke transcripts
 

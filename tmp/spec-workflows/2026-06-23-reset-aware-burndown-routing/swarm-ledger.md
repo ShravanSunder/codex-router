@@ -106,6 +106,27 @@ Rejected or deferred evidence:
     `plain`, and `json`.
 24. Require delayed/failing-refresh proof for first valid `/v1/responses`
     WebSocket routing.
+25. Define all-unknown fallback as explicit `fallback` next-use output so
+    unknown quota never looks healthy while still showing the account the router
+    may try when every known pool is empty.
+26. Replace prose salvage tiebreaking with an exact salvage tie key shared by
+    assessment, status, proxy adapter, and deterministic tests.
+27. Forbid fake `0% left` placeholders for unknown, missing-reset, and no-data
+    human status slots.
+28. Expand JSON status into an audit shape that can reconstruct selected pool,
+    next use, displayed window slots, all relevant windows, reset metadata, and
+    safe routing explanations.
+29. Define previous-response affinity extraction as the top-level
+    `previous_response_id` field in HTTP/SSE bodies and first WebSocket
+    `response.create` frames, with malformed values failing closed.
+30. Require a WebSocket preselection failure matrix covering local auth,
+    unsupported path, wrong type, oversized frame, timed-out frame, malformed
+    affinity, and owner-resolution failures.
+31. Define local Codex-through-router e2e acceptance as installed Codex CLI plus
+    generated router profile, served local router, mock upstream, HTTP/SSE and
+    WebSocket transport, reset-aware multi-account choice, status agreement,
+    pinning, and redacted transcripts. Live OAuth/quota remains separate and
+    approval-gated.
 
 ## Open Decisions
 

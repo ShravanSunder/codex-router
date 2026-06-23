@@ -330,3 +330,39 @@ proof are not completion; they route back to the owning workflow.
 - During implementation: commit only verified slices after proof.
 - Before any done claim: run goal closeout audit with matrix rows and current
   evidence.
+
+## R5 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`a7dd754cb9ac6016fd767ec2dcb1515af0fed696`
+
+Review worktree:
+`/tmp/codex-router-r5-review.zGGh9D`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1014 lines and was read in chunks
+1-180, 181-360, 361-540, 541-720, 721-900, and 901-1014.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r5/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- all-unknown fallback is routable but not publicly mapped
+- salvage tie ordering is not deterministic enough
+- Codex-through-router e2e acceptance is under-specified
+- WebSocket preselection failure proof needs a closed matrix
+- previous-response affinity extraction is not exact
+- unknown/no-window/missing-reset human placeholders can recreate fake `0%`
+- JSON status schema is too small to audit the table/routing contract
+
+Revision applied:
+The spec now defines fallback next-use semantics, exact salvage tie key,
+unknown/no-data placeholders, expanded JSON audit shape, exact
+`previous_response_id` affinity extraction, WebSocket preselection failure
+matrix, and installed-Codex-through-router e2e acceptance.
