@@ -39,13 +39,16 @@ Out of scope unless explicitly brought back into this goal:
 
 ## Required Reading
 
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/algorithm-prior-art-crux.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/contract-architecture-difference.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/planning-adversarial-crux.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/requirements-validation.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/ux-progressive-guardrails.md`
+Resolve these paths in the current checkout or review worktree for the git
+commit being reviewed:
+
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r12/review-ledger.md`
+- `tmp/workflow-state/2026-06-23-quota-burndown-routing/details.md`
+- `tmp/workflow-state/2026-06-23-quota-burndown-routing/events.jsonl`
+
+Earlier review ledgers remain historical context only. The latest review ledger
+is authoritative for the next workflow transition.
 
 ## Accepted Spec Review Findings
 
@@ -255,18 +258,27 @@ Requirement / claim:
 Runtime routing uses reset-aware burn-down assessment, not minimum-headroom-only
 selection.
 Proof source:
-must be defined by plan-creation-swarm.
+unit tests for per-window math, account collapse, selected pool choice,
+neutral selector ordering, `preferred_next`, route-level
+`unsupported_route_band`, previous-response affinity fail-closed paths, and
+proxy integration tests proving runtime selection consumes
+`BurnDownRouteBandAssessmentResult.weighted_candidates`.
 evidence source:
-unit tests, integration tests, implementation review, and parent command output.
+unit/integration command output, implementation review, and parent inspection of
+changed proxy/selection boundaries.
 freshness guard:
 Tests must run against the implementation branch after final fixes.
 
 Requirement / claim:
 Quota status is concise and useful for humans.
 Proof source:
-must be defined by plan-creation-swarm.
+CLI renderer golden/snapshot tests for table and plain output, JSON schema tests
+for machine output, and live-safe CLI smoke over persisted state. Required bad
+case negatives: noisy per-route rows, `pp`, `bottleneck`, default `account_id`,
+raw scores, token-like strings, and missing preferred-next explanation.
 evidence source:
-snapshot/golden tests and manual CLI output inspection.
+snapshot/golden output, JSON assertion output, smoke transcript, and parent
+manual CLI inspection.
 freshness guard:
 Golden output must include historical bad cases: noisy per-route rows, `pp`,
 `bottleneck`, account ids, and missing preferred-next explanation.
@@ -274,7 +286,10 @@ Golden output must include historical bad cases: noisy per-route rows, `pp`,
 Requirement / claim:
 Startup and normal requests do not block on live provider quota refresh.
 Proof source:
-must be defined by plan-creation-swarm.
+black-box smoke proving server boot/listen readiness while refresh is delayed or
+failing, first routed HTTP/SSE and WebSocket requests using persisted selector
+rows while refresh is delayed or failing, and `quota status` rendering
+last-known state immediately with needs-refresh/stale indications.
 evidence source:
 smoke test, runtime logs, and parent command output.
 freshness guard:
@@ -283,19 +298,28 @@ Proof must include boot/listen, first routed request, and quota status render.
 Requirement / claim:
 Codex can communicate through the router end to end, including WebSocket.
 Proof source:
-must be defined by plan-creation-swarm.
+installed Codex CLI e2e against a served local router and mock upstream with a
+generated codex-router profile using
+`env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`. The
+fixture must exercise HTTP/SSE and WebSocket `/v1/responses`, reset-aware
+account choice, WebSocket selected-account pinning, local auth stripping before
+upstream open, and redacted transcript artifacts.
 evidence source:
-e2e command transcript using real Codex profile against local router, plus
-server logs showing WebSocket path or explicit fallback behavior if fallback is
-part of the accepted spec.
+e2e command transcript, mock upstream assertions, router logs, and redacted
+smoke artifact inspection.
 freshness guard:
-Must run after implementation fixes in the current repo state.
+Must run after implementation fixes in the current repo state. WebSocket is not
+optional for this proof gate.
 
 Requirement / claim:
 Sensitive account/token material is not leaked in user output, logs, traces, or
 test transcripts.
 Proof source:
-must be defined by plan-creation-swarm.
+safe-label helper tests, JSON redaction tests, log/trace canary tests, WebSocket
+first-frame/body canary tests, local-auth negative tests, affinity-secret
+redaction tests, and smoke transcript negative assertions for tokens, auth
+headers, account ids where forbidden, unsafe labels, prompts, tool args, raw
+bodies, and secret-store material.
 evidence source:
 implementation review, redaction tests, log/trace inspection, and smoke
 transcript inspection.
@@ -587,3 +611,47 @@ The spec now defines `preferred_weekly_reset_soon`, smoke transcript
 first-frame/body field allowlisting, previous-response raw-key cutover,
 core-owned `RouteBand`, affinity secret-store API/key/encoding/error contract,
 and `SafeAccountLabel` semantics with deterministic redacted tag format.
+
+## R12 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`195cb74`
+
+Review worktree:
+`/tmp/codex-router-r12-review.8otShY`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1545 lines before R12 fixes and was
+read by the parent in chunks 1-320, 321-640, 641-960, 961-1120, 1121-1280,
+1281-1440, and 1441-1545. Three review lanes also reported full-read coverage.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r12/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- local router auth needed an explicit accepted `X-Codex-Router-Token` surface
+  and forbidden fallback surfaces for HTTP/SSE, WebSocket, and generated Codex
+  profiles
+- WebSocket routing needed to load/create `router_affinity_hash_secret.v1`
+  before selection because `/v1/responses` can create previous-response owner
+  records even when the first request has no incoming affinity
+- unknown fallback reason precedence made fallback reasons unreachable
+- shared assessment output needed to carry status presentation fields instead
+  of leaving CLI/JSON to rederive routing semantics
+- route-band policy lookup needed a route-level unsupported-band result surface
+- quota refresh lifecycle needed normative startup, scheduling, failure, and
+  persistence ownership rules
+- goal details needed current required-reading paths and concrete proof rows
+
+Revision applied:
+The spec now defines `BurnDownRouteBandAssessmentResult`, selection-owned
+presentation fields, selected-pool-aware fallback reason precedence, a quota
+refresh lifecycle, local-auth ingress contract, WebSocket affinity-secret
+preselection, and the required proof rows. Goal details now point at current
+checkout-relative sources and concrete proof families.

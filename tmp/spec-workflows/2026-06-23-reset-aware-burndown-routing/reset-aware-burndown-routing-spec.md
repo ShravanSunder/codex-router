@@ -115,7 +115,10 @@ burn-down assessment
         from supplied facts, and structured explanation
   crate: codex-router-selection::burn_down
   inputs: BurnDownRouteBandAssessmentInput, core RouteBand, fixed v1 route band policy
-  exposes: BurnDownRouteBandAssessment { accounts, selected_pool, weighted_candidates, preferred_next }
+  exposes: BurnDownRouteBandAssessmentResult::ok(BurnDownRouteBandAssessment)
+           or ::unsupported_route_band
+  assessment exposes: accounts, selected_pool, weighted_candidates, preferred_next,
+                      account presentation fields, and safe route/status reason fields
   must not depend on: codex-router-state, codex-router-proxy, codex-router-cli
 
 proxy account selection
@@ -123,7 +126,8 @@ proxy account selection
         affinity resolution/enforcement, process-lifetime fairness state, and
         runtime exact account choice
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
-  consumes: BurnDownRouteBandAssessment.weighted_candidates
+  consumes: BurnDownRouteBandAssessmentResult and
+            BurnDownRouteBandAssessment.weighted_candidates
   exposes: SelectedAccountDecision
 
 weighted deficit selector
@@ -134,7 +138,8 @@ weighted deficit selector
 quota status CLI
   owns: human and machine rendering
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
-  consumes: BurnDownRouteBandAssessment explanation and neutral preferred-next projection
+  consumes: BurnDownRouteBandAssessmentResult, account presentation fields,
+            route explanation, and neutral preferred-next projection
   must not own: routing math
   must not claim: runtime-exact next account after affinity or fairness state
 ```
@@ -159,6 +164,10 @@ Dependency contract:
   routing share the same assessment output. It owns formatting only.
 - Reimplementing pressure, reserve, unknown, or limiting-window math in the CLI
   or proxy is out of contract.
+- Reimplementing `next_use`, public `routing_reason`, `window_slots`,
+  `windows[]`, `salvage_tie_key`, or route-level unsupported-band handling in
+  the CLI or proxy is out of contract. Selection owns those safe presentation
+  fields because they are direct consequences of routing assessment.
 - `codex-router-core::redaction` owns the shared `SafeAccountLabel` and
   deterministic redacted account hash/tag helper. Proxy, CLI, state-backed
   status adapters, traces/logs, and smoke transcript helpers must consume this
@@ -168,22 +177,51 @@ Dependency contract:
   outputs this core type. Selection policy lookup accepts this core type. CLI
   status adapters use the same core type. Proxy and selection must not maintain
   parallel string-only route-band lists.
-- `codex-router-core::affinity` owns typed
-  `PreviousResponseId`, `AffinityKeyHash`, and `RouterAffinityHashSecret`
-  wrappers plus the one HMAC helper:
-  `hash_previous_response_id(secret: &RouterAffinityHashSecret,
-  previous_response_id: &PreviousResponseId) -> AffinityKeyHash`.
-  State repositories store and query only `AffinityKeyHash` values and never
-  accept raw previous-response ids or raw canonical affinity keys.
-- `codex-router-secret-store` owns loading or creating
-  `router_affinity_hash_secret` for the router root. Proxy calls the secret
-  store at the edge before affinity lookup/write; state never stores or returns
-  the secret.
-- `codex-router-selection::affinity` is removed from previous-response owner
-  lookup/write/resolve scope in this feature. No previous-response path may use
-  the old raw `AffinityKey` or a selection-owned affinity table. Any remaining
-  non-previous-response affinity concept must be renamed and explicitly proven
-  not to read, write, or resolve provider previous-response ids.
+
+### Quota Refresh Lifecycle Contract
+
+Refresh is background maintenance of persisted selector quota windows. It is not
+part of the request critical path.
+
+Normative lifecycle:
+
+1. Server startup binds the loopback listener before any provider quota refresh
+   attempt is awaited. Startup may schedule an immediate refresh task after the
+   listener is ready, but failed or delayed provider I/O must not delay bind,
+   readiness, first route-band assessment, or status rendering.
+2. A periodic refresh task runs on the configured refresh interval. It fetches
+   provider quota, normalizes windows, and writes selector rows through
+   `codex-router-state`.
+3. Refresh writes are per account and route band. A successful refresh replaces
+   the account/route-band selector window set and records `observed_unix_seconds`.
+4. A transient provider, auth, network, parse, or rate-limit refresh failure
+   preserves the last successful selector rows. It records a redacted refresh
+   error class and marks the affected rows stale according to existing freshness
+   policy instead of deleting known quota evidence.
+5. If no persisted rows exist for an account/route band, assessment receives no
+   relevant rows and returns `unknown` with `needs_quota_refresh`; it does not
+   synthesize `0% left`.
+6. If a provider explicitly reports a window as ineligible or exhausted, refresh
+   persists that status/headroom so assessment can return `blocked`; this is not
+   treated as a transient failure.
+7. If an account is disabled or lacks an active credential generation, the proxy
+   and CLI adapters supply those administrative facts to assessment; refresh
+   does not decide runtime credential availability.
+8. Refresh errors, logs, traces, and status notes use safe account labels or
+   hashes and redacted provider error classes only.
+
+Ownership:
+
+- `codex-router-proxy` owns startup orchestration, listener readiness, immediate
+  refresh task scheduling, and request-path guarantee that selection reads
+  persisted selector rows without awaiting provider refresh.
+- `codex-router-quota` or the existing provider quota client owns provider fetch
+  and normalization into route-band window facts.
+- `codex-router-state` owns durable selector window writes, last-success rows,
+  stale markers, and redacted refresh error metadata.
+- `codex-router-selection::burn_down` owns interpretation of the supplied
+  persisted facts as `fresh`, `stale`, `unknown`, `blocked`, `reserve`, or
+  `usable`.
 
 ## Burn-Down Assessment Contract
 
@@ -232,10 +270,14 @@ V1 contains explicit policies for every currently classified route band:
 - `models`: quota-managed 5h plus weekly public quota policy
 - `memories_trace_summarize`: quota-managed 5h plus weekly public quota policy
 
-Unknown or unregistered route bands fail closed as `unsupported_route_band`
-before weighted selection. Default quota status renders the user `responses`
-quota route only; it must not emit per-route rows for the other route bands
-unless a future explicit debug or multi-route mode changes the contract.
+Unknown or unregistered route bands return
+`BurnDownRouteBandAssessmentResult::unsupported_route_band` before weighted
+selection. Proxy, CLI, status, tests, and smoke proof must consume that same
+route-level result; none of them may keep a separate unsupported-band branch
+with different route-band strings or reason names. Default quota status renders
+the user `responses` quota route only; it must not emit per-route rows for the
+other route bands unless a future explicit debug or multi-route mode changes the
+contract.
 
 Route-band drift guard:
 
@@ -407,15 +449,25 @@ accounts.
 - `availability: usable | reserve | blocked | unknown | excluded`
 - `freshness: fresh | stale | unknown`
 - `routing_exclusion: none | disabled | missing_credential`
+- `next_use: preferred | available | held | blocked | needs_refresh | fallback`
 - `limiting_window`
 - `quota_evidence_reason`
 - `short_pressure`
 - `long_pressure`
 - `short_salvage`
 - `long_salvage`
+- `salvage_tie_key`
 - `routing_weight`
 - `routing_reason`
 - `preferred_next`
+- `window_slots.{5h,weekly}`
+- `windows[]`
+
+The assessment output intentionally includes the safe presentation fields used
+by default table/plain and JSON output. Status renderers may choose layout,
+bar glyphs, column widths, and color, but they must not derive different
+`next_use`, `routing_reason`, limiting-window, slot state, pressure, salvage, or
+fallback semantics from raw provider rows.
 
 Only `usable` accounts enter the normal weighted-deficit pool. If no usable
 account exists, `reserve` accounts may enter. `blocked` accounts never enter.
@@ -810,22 +862,30 @@ Public reason mapping:
 Reason precedence is deterministic. Public `routing_reason` is assigned after
 availability pool selection in this order:
 
-1. `excluded`, `blocked`, and `unknown` evidence reasons map to their exact
-   public reason before any preferred-account reason.
-2. Accounts outside the selected pool map to `held_reserve` or `held_unknown`.
-3. Non-preferred accounts inside the selected pool map to `available_same_pool`
-   or `unknown_fallback_available`.
-4. The preferred account in an `unknown` selected pool maps to
-   `unknown_fallback_preferred`.
-5. The preferred account in a known selected pool maps to
+1. `excluded` and `blocked` evidence reasons map to their exact public reason
+   before any preferred-account reason.
+2. Unknown accounts outside the selected pool map to `held_unknown`.
+3. Reserve accounts outside the selected pool map to `held_reserve`.
+4. Non-preferred accounts inside an `unknown` selected pool map to
+   `unknown_fallback_available`, preserving the raw `quota_evidence_reason`
+   separately.
+5. The preferred account inside an `unknown` selected pool maps to
+   `unknown_fallback_preferred`, preserving the raw `quota_evidence_reason`
+   separately.
+6. Unknown accounts that are not in an unknown selected pool map to their exact
+   evidence reason: `unknown_quota_window`, `missing_reset_time`,
+   `missing_expected_window`, or `needs_quota_refresh`.
+7. Non-preferred accounts inside a known selected pool map to
+   `available_same_pool`.
+8. The preferred account in a known selected pool maps to
    `preferred_weekly_reset_soon` when `long_salvage > 0`.
-6. Else, the preferred account in a known selected pool maps to
+9. Else, the preferred account in a known selected pool maps to
    `preferred_weekly_healthier` when its `long_pressure` is strictly lower than
    at least one other known selected-pool candidate, or when another supplied
    known account was held in `reserve` because of long-window pressure.
-7. Else, the preferred account maps to `preferred_short_reset_soon` when
+10. Else, the preferred account maps to `preferred_short_reset_soon` when
    `short_salvage > 0`.
-8. Else, the preferred account maps to `preferred_highest_weight`.
+11. Else, the preferred account maps to `preferred_highest_weight`.
 
 When multiple preferred-account predicates are true, this precedence wins. The
 runtime audit, table/plain status, JSON status, and tests must use the same
@@ -1178,6 +1238,36 @@ Proof must cover:
 - malformed affinity metadata
 - no weighted fallback on any continuation-owner failure
 
+### Local Router Auth Contract
+
+Local router auth is an ingress boundary between Codex CLI and codex-router. It
+is separate from upstream OAuth/provider credentials and from router-owned
+secret storage.
+
+Accepted local auth surface in v1:
+
+- HTTP/SSE: `X-Codex-Router-Token: <token>`
+- WebSocket upgrade: `X-Codex-Router-Token: <token>`
+- Generated Codex profile: `env_http_headers = { "X-Codex-Router-Token" =
+  "CODEX_ROUTER_TOKEN" }`
+
+Forbidden local auth fallback surfaces in this goal:
+
+- `Authorization: Bearer <token>`
+- `env_key = "CODEX_ROUTER_TOKEN"` generated-profile auth
+- query-string tokens
+- cookies
+- WebSocket subprotocol token smuggling
+- request body tokens
+
+Requests that omit `X-Codex-Router-Token` or present the token only through a
+forbidden fallback surface fail as local auth failures before route-band
+assessment, selector advancement, credential resolution, upstream auth
+injection, upstream HTTP/SSE open, or upstream WebSocket open. HTTP/SSE and
+WebSocket proof must include negative cases for the forbidden fallback surfaces
+that were previously confusing: generated `env_key`/Authorization bearer auth
+must not be accepted as a compatibility path for this goal.
+
 ### WebSocket Compatibility Contract
 
 The v1 router must support the Codex `/v1/responses` WebSocket path. It uses the
@@ -1206,19 +1296,24 @@ WebSocket routing order is normative:
    - full request-schema validation remains upstream-owned
 5. Parse only the routing metadata needed for route-band assessment from the
    first frame; do not log the full payload.
-6. Extract previous-response affinity metadata from the first frame, when
+6. Load or create `router_affinity_hash_secret.v1` for the router root before
+   selection, because `/v1/responses` can create or consume previous-response
+   ids. If the secret is unavailable, fail locally as
+   `affinity_secret_unavailable` before selector advancement, credential
+   resolution, upstream auth injection, or upstream open.
+7. Extract previous-response affinity metadata from the first frame, when
    present, before weighted fallback.
-7. If affinity is present, apply the Previous-Response Affinity Contract. Any
+8. If affinity is present, apply the Previous-Response Affinity Contract. Any
    owner-resolution failure fails closed before weighted fallback.
-8. If no affinity is present, run reset-aware route-band assessment for the
+9. If no affinity is present, run reset-aware route-band assessment for the
    `responses` route band and select from weighted candidates.
-9. Resolve the selected account credential and inject upstream auth exactly once
+10. Resolve the selected account credential and inject upstream auth exactly once
    after selection and before upstream open.
-10. Strip local client auth, router bearer auth, and hop-by-hop headers before
+11. Strip local client auth, router bearer auth, and hop-by-hop headers before
    upstream open.
-11. Forward the accepted first frame and all later frames unchanged at the
+12. Forward the accepted first frame and all later frames unchanged at the
    protocol payload layer.
-12. Pin the selected account for the lifetime of the WebSocket connection. Do
+13. Pin the selected account for the lifetime of the WebSocket connection. Do
     not switch accounts mid-stream. A later connection may reselect after quota
     state changes.
 
@@ -1236,6 +1331,7 @@ Preselection WebSocket failure matrix:
 | syntactically valid wrong `type` | yes | 0 | 0 | 0 | 0 | no full payload |
 | oversized first frame | yes | 0 | 0 | 0 | 0 | size class only |
 | timed-out first frame | yes | 0 | 0 | 0 | 0 | timeout reason only |
+| affinity hash secret unavailable | yes | 0 | 0 | 0 | 0 | error class only; no secret path/id/value |
 | malformed affinity metadata | yes | 0 | 0 | 0 | 0 | affinity key hash only when available |
 | missing/disabled/stale/unavailable/exhausted owner | yes | 0 | 0 | 0 | 0 | affinity key hash and safe label/hash only |
 
@@ -1249,6 +1345,8 @@ Required WebSocket proof:
 - malformed first frame and syntactically valid wrong-type first frame fail
   before selection
 - oversized or timed-out first frame fails before selection
+- affinity hash-secret unavailable fails before selection, credential
+  resolution, upstream auth injection, and upstream open
 - previous-response affinity is honored before weighted fallback and fails
   closed on owner-resolution failure
 - malformed, wrong-type, oversized, timed-out, unsupported, auth-failed, and
@@ -1433,6 +1531,11 @@ The implementation plan must provide proof at these layers:
 - security call-order tests proving every row in the WebSocket preselection
   failure matrix makes zero selector-state advances, zero credential resolver
   calls, zero upstream auth injections, and zero upstream opens
+- local-auth ingress tests proving only `X-Codex-Router-Token` is accepted for
+  HTTP/SSE and WebSocket, and that Authorization bearer, query parameter,
+  cookie, request-body, WebSocket subprotocol, and generated `env_key` fallback
+  auth fail before selection, credential resolution, upstream auth injection, or
+  upstream open
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
@@ -1492,19 +1595,35 @@ chooses:
   ascending; selector candidate order is neutral selector order
 - route-band policy registry: `codex-router-selection::burn_down` owns explicit
   policies for `responses`, `responses_compact`, `models`, and
-  `memories_trace_summarize`; unknown route bands fail closed
+  `memories_trace_summarize`; unknown route bands return the shared
+  `BurnDownRouteBandAssessmentResult::unsupported_route_band`
 - route-band identity: `codex-router-core::routes::RouteBand` is the shared
   identifier type used by proxy classification, selection policy lookup, and
   CLI status adapters
+- route/status presentation boundary: selection-owned assessment output carries
+  `next_use`, `routing_reason`, `window_slots`, `windows[]`, `salvage_tie_key`,
+  and unsupported-band result fields; CLI/proxy render or act on these fields
+  without recalculating routing semantics
 - output ordering: `accounts[]` is `account_id` ascending;
   `weighted_candidates[]` is neutral selector order
 - routing reason precedence: weekly-reset-salvage preferred explanation, then
   weekly-health preferred explanation, then short-reset preferred explanation,
   then safest-quota fallback after availability and pool mapping
+- unknown fallback reason mapping: all-unknown selected pools render fallback
+  reasons while preserving raw `quota_evidence_reason` separately
+- quota refresh lifecycle: startup/listen, request selection, WebSocket routing,
+  and status rendering never await provider refresh; immediate and periodic
+  refresh update SQLite in the background and preserve last-known rows on
+  transient failure
+- local router auth: only `X-Codex-Router-Token` is accepted for HTTP/SSE and
+  WebSocket in this goal; Authorization bearer, generated `env_key`, query,
+  cookie, subprotocol, and body-token fallback surfaces are rejected before
+  selection or upstream open
 - WebSocket support: `/v1/responses` supported; every other WebSocket path is
   `unsupported_path` and fails closed before selection or upstream open
 - WebSocket selection: valid first `response.create` frame is required before
-  upstream open; selected account is pinned for connection lifetime
+  upstream open; affinity hash secret is loaded before selection; selected
+  account is pinned for connection lifetime
 - previous-response affinity: applies to HTTP/SSE and WebSocket; owner
   resolution failures fail closed before weighted fallback
 - previous-response affinity hash secret: generated once per router root,
@@ -1530,7 +1649,8 @@ chooses:
 - safe-label format: preserved printable local labels or
   `acct-<12 lowercase hex chars>` deterministic tags for unsafe labels
 - generated Codex profile local auth: the e2e and profile helpers use
-  `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`
+  `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`, not
+  `env_key` or Authorization bearer fallback
 - smoke/log transcript policy: allowlisted fields only, no raw bodies, prompts,
   tool args, memory traces, unsafe labels, tokens, auth headers, or secret-store
   material
