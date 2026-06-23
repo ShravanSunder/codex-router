@@ -2,6 +2,7 @@
 
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditEvent;
 use codex_router_core::audit::AuditEventFields;
 use codex_router_core::audit::AuditFileSink;
@@ -350,6 +351,12 @@ pub trait StreamingHttpRequestHandler {
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError>;
 }
 
+/// Provides router-owned affinity secret material to HTTP/SSE selection.
+pub trait HttpAffinitySecretProvider {
+    /// Loads or creates the router affinity secret.
+    fn load_or_create_affinity_secret(&self) -> Result<RouterAffinityHashSecret, HttpProxyError>;
+}
+
 /// HTTP/SSE proxy service.
 #[derive(Clone, Copy, Debug)]
 pub struct HttpProxyService<'a, T>
@@ -433,7 +440,7 @@ where
 }
 
 /// HTTP/SSE service that composes local auth, account selection, and forwarding.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct AuthenticatedHttpProxyService<'a, T, S, C>
 where
     T: UpstreamHttpTransport,
@@ -445,6 +452,7 @@ where
     credential_resolver: &'a C,
     proxy: HttpProxyService<'a, T>,
     audit_sink: Option<&'a AuditFileSink>,
+    affinity_secret_provider: Option<&'a dyn HttpAffinitySecretProvider>,
 }
 
 impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C>
@@ -467,6 +475,7 @@ where
             credential_resolver,
             proxy: HttpProxyService::new(upstream),
             audit_sink: None,
+            affinity_secret_provider: None,
         }
     }
 
@@ -475,6 +484,32 @@ where
     pub const fn with_audit_sink(mut self, audit_sink: &'a AuditFileSink) -> Self {
         self.audit_sink = Some(audit_sink);
         self
+    }
+
+    /// Adds the router-owned affinity secret provider.
+    #[must_use]
+    pub const fn with_affinity_secret_provider(
+        mut self,
+        affinity_secret_provider: &'a dyn HttpAffinitySecretProvider,
+    ) -> Self {
+        self.affinity_secret_provider = Some(affinity_secret_provider);
+        self
+    }
+
+    fn load_affinity_secret_for_request(
+        &self,
+        request: &HttpProxyRequest,
+    ) -> Result<Option<RouterAffinityHashSecret>, HttpProxyError> {
+        if !request_route_kind(request)?.previous_response_affinity_capable() {
+            return Ok(None);
+        }
+
+        let provider = self
+            .affinity_secret_provider
+            .ok_or(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            })?;
+        provider.load_or_create_affinity_secret().map(Some)
     }
 
     fn emit_audit_event(&self, event: AuditEvent) {
@@ -510,8 +545,14 @@ where
             }
         };
         let selected = self
-            .selector
-            .select_upstream_account(&request, token_generation)
+            .load_affinity_secret_for_request(&request)
+            .and_then(|affinity_secret| {
+                self.selector.select_upstream_account(
+                    &request,
+                    token_generation,
+                    affinity_secret.as_ref(),
+                )
+            })
             .inspect_err(|_error| {
                 self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
             })?;
@@ -568,8 +609,14 @@ where
             }
         };
         let selected = self
-            .selector
-            .select_upstream_account(&request, token_generation)
+            .load_affinity_secret_for_request(&request)
+            .and_then(|affinity_secret| {
+                self.selector.select_upstream_account(
+                    &request,
+                    token_generation,
+                    affinity_secret.as_ref(),
+                )
+            })
             .inspect_err(|_error| {
                 self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
             })?;
@@ -693,17 +740,26 @@ fn http_credential_rejection_audit_event(
 }
 
 fn audit_route_kind_for_request(request: &HttpProxyRequest) -> AuditRouteKind {
+    match request_route_kind(request) {
+        Ok(route_kind) => match route_kind {
+            RouteKind::Responses => AuditRouteKind::Responses,
+            RouteKind::ResponsesWebSocket => AuditRouteKind::ResponsesWebSocket,
+            RouteKind::Models => AuditRouteKind::Models,
+            RouteKind::MemoriesTraceSummarize => AuditRouteKind::MemoryTrace,
+            RouteKind::ResponsesCompact => AuditRouteKind::Compact,
+        },
+        Err(_error) => AuditRouteKind::Responses,
+    }
+}
+
+fn request_route_kind(request: &HttpProxyRequest) -> Result<RouteKind, HttpProxyError> {
     match classify_route(
         request.method,
         path_without_query(request.path()),
         request.websocket_upgrade,
     ) {
-        RouteClass::Supported(RouteKind::Responses) => AuditRouteKind::Responses,
-        RouteClass::Supported(RouteKind::ResponsesWebSocket) => AuditRouteKind::ResponsesWebSocket,
-        RouteClass::Supported(RouteKind::Models) => AuditRouteKind::Models,
-        RouteClass::Supported(RouteKind::MemoriesTraceSummarize) => AuditRouteKind::MemoryTrace,
-        RouteClass::Supported(RouteKind::ResponsesCompact) => AuditRouteKind::Compact,
-        RouteClass::Rejected { .. } => AuditRouteKind::Responses,
+        RouteClass::Supported(route_kind) => Ok(route_kind),
+        RouteClass::Rejected { reason } => Err(HttpProxyError::Rejected { reason }),
     }
 }
 

@@ -225,3 +225,53 @@ Notes:
   affinity adapter still calls the old raw affinity methods; that runtime
   cutover requires the T3 proxy secret/selection adapter work so the proxy can
   compute `AffinityKeyHash` before lookup.
+
+## T3a Proxy Runtime Affinity Secret And Hash Lookup Cutover
+
+Plan rows:
+
+- RP-09 previous-response affinity is HMAC hashed and fail-closed.
+- RP-10 HTTP/SSE order gates affinity secret before selector advancement.
+- RP-11 WebSocket continuation affinity can use the same hash-owner contract.
+
+Files changed:
+
+- `crates/codex-router-proxy/src/routes.rs`
+- `crates/codex-router-proxy/src/account_selection.rs`
+- `crates/codex-router-proxy/src/http_sse.rs`
+- `crates/codex-router-proxy/src/server.rs`
+- `crates/codex-router-proxy/src/websocket.rs`
+- `crates/codex-router-proxy/src/lib.rs`
+
+Implemented:
+
+- `RouteKind` now exposes shared `RouteBand` and previous-response affinity
+  capability metadata.
+- `AccountDecisionSelector` accepts optional router affinity secret material.
+- Repository-backed selection parses top-level `previous_response_id`, computes
+  `AffinityKeyHash`, and loads `PreviousResponseAffinityOwnerRecord` instead of
+  raw `AffinityKey` pins.
+- Affinity owner hits no longer advance weighted fairness state.
+- HTTP/SSE response-capable routes load/create the affinity secret before
+  selector advancement, credential resolution, auth injection, or upstream open.
+- Production runtime wires the router secret store into HTTP/SSE and WebSocket
+  continuation affinity paths.
+- WebSocket first-frame continuation affinity can use the same hash-owner lookup
+  when `previous_response_id` is present.
+
+Proof:
+
+- `cargo test -p codex-router-proxy` passed: 72 tests.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 72, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- This slice does not yet write new owner rows from successful upstream
+  HTTP/SSE or WebSocket response bodies. That remains the next T3/T6 runtime
+  capture slice.
+- Legacy raw affinity repository methods and SQLite table still exist for now,
+  but proxy runtime selection no longer calls them.

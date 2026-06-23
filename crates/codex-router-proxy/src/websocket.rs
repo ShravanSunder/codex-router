@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditEvent;
 use codex_router_core::audit::AuditEventFields;
 use codex_router_core::audit::AuditFileSink;
@@ -36,6 +37,7 @@ use crate::account_selection::AccountDecisionSelector;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
+use crate::http_sse::HttpAffinitySecretProvider;
 use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::allowed_audit_event;
@@ -217,7 +219,7 @@ fn is_direct_response_create_payload(payload: &serde_json::Value) -> bool {
 }
 
 /// WebSocket router that composes local auth, account selection, and first-frame routing.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct AuthenticatedWebSocketRouter<'a, S, C>
 where
     S: AccountDecisionSelector,
@@ -228,6 +230,7 @@ where
     credential_resolver: &'a C,
     protocol_router: &'a WebSocketProtocolRouter,
     audit_sink: Option<&'a AuditFileSink>,
+    affinity_secret_provider: Option<&'a dyn HttpAffinitySecretProvider>,
 }
 
 impl<'a, S, C> AuthenticatedWebSocketRouter<'a, S, C>
@@ -249,6 +252,7 @@ where
             credential_resolver,
             protocol_router,
             audit_sink: None,
+            affinity_secret_provider: None,
         }
     }
 
@@ -256,6 +260,16 @@ where
     #[must_use]
     pub const fn with_audit_sink(mut self, audit_sink: &'a AuditFileSink) -> Self {
         self.audit_sink = Some(audit_sink);
+        self
+    }
+
+    /// Adds the router-owned affinity secret provider.
+    #[must_use]
+    pub const fn with_affinity_secret_provider(
+        mut self,
+        affinity_secret_provider: &'a dyn HttpAffinitySecretProvider,
+    ) -> Self {
+        self.affinity_secret_provider = Some(affinity_secret_provider);
         self
     }
 
@@ -295,9 +309,22 @@ where
         let selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
             .with_websocket_upgrade(true)
             .with_body(first_frame_bytes);
+        let affinity_secret = if first_frame_mentions_previous_response_id(selection_request.body())
+        {
+            Some(self.load_affinity_secret().map_err(|_reason| {
+                self.emit_audit_event(websocket_selection_rejection_audit_event());
+                WebSocketCloseReason::Selection
+            })?)
+        } else {
+            None
+        };
         let selected = self
             .selector
-            .select_upstream_account(&selection_request, token_generation)
+            .select_upstream_account(
+                &selection_request,
+                token_generation,
+                affinity_secret.as_ref(),
+            )
             .map_err(|_error| {
                 self.emit_audit_event(websocket_selection_rejection_audit_event());
                 WebSocketCloseReason::Selection
@@ -344,6 +371,20 @@ where
             },
         })
     }
+
+    fn load_affinity_secret(&self) -> Result<RouterAffinityHashSecret, WebSocketCloseReason> {
+        let provider = self
+            .affinity_secret_provider
+            .ok_or(WebSocketCloseReason::Selection)?;
+        provider
+            .load_or_create_affinity_secret()
+            .map_err(|_error| WebSocketCloseReason::Selection)
+    }
+}
+
+fn first_frame_mentions_previous_response_id(body: &[u8]) -> bool {
+    body.windows(b"previous_response_id".len())
+        .any(|window| window == b"previous_response_id")
 }
 
 fn websocket_selection_rejection_audit_event() -> AuditEvent {
@@ -437,7 +478,7 @@ impl WebSocketRevocationRegistry {
 }
 
 /// Blocking WebSocket tunnel that uses the authenticated first-frame router.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BlockingWebSocketTunnel<'a, S, C>
 where
     S: AccountDecisionSelector,
@@ -511,6 +552,18 @@ where
             .with_audit_sink(audit_sink),
             revocations,
         }
+    }
+
+    /// Adds the router-owned affinity secret provider.
+    #[must_use]
+    pub fn with_affinity_secret_provider(
+        mut self,
+        affinity_secret_provider: &'a dyn HttpAffinitySecretProvider,
+    ) -> Self {
+        self.router = self
+            .router
+            .with_affinity_secret_provider(affinity_secret_provider);
+        self
     }
 
     /// Handles one local WebSocket connection and forwards a bounded upstream transcript.

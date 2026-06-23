@@ -1,5 +1,7 @@
 //! Codex route classification.
 
+use codex_router_core::routes::RouteBand;
+
 /// HTTP method used by route classifier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Method {
@@ -24,6 +26,25 @@ pub enum RouteKind {
     MemoriesTraceSummarize,
     /// `POST /v1/responses/compact`.
     ResponsesCompact,
+}
+
+impl RouteKind {
+    /// Returns the shared quota route band for this route.
+    #[must_use]
+    pub const fn route_band(self) -> RouteBand {
+        match self {
+            Self::Responses | Self::ResponsesWebSocket => RouteBand::Responses,
+            Self::Models => RouteBand::Models,
+            Self::MemoriesTraceSummarize => RouteBand::MemoriesTraceSummarize,
+            Self::ResponsesCompact => RouteBand::ResponsesCompact,
+        }
+    }
+
+    /// Returns whether the route may carry previous-response affinity.
+    #[must_use]
+    pub const fn previous_response_affinity_capable(self) -> bool {
+        matches!(self, Self::Responses | Self::ResponsesWebSocket)
+    }
 }
 
 /// Route classification result.

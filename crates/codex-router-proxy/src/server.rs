@@ -11,11 +11,14 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
+use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
+use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
@@ -26,6 +29,7 @@ use crate::credential_runtime::ProxyCredentialResolver;
 use crate::credential_runtime::ProxyCredentialResolverOpenError;
 use crate::headers::Header;
 use crate::http_sse::AuthenticatedHttpProxyService;
+use crate::http_sse::HttpAffinitySecretProvider;
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::HttpProxyResponse;
@@ -39,6 +43,8 @@ use crate::local_auth::presented_local_token;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
+use crate::secret_store_factory::ProxyRuntimeSecretStore;
+use crate::secret_store_factory::open_proxy_secret_store;
 use crate::upstream::HttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
 use crate::websocket::BlockingWebSocketTunnel;
@@ -205,6 +211,7 @@ impl LoopbackRouterRuntimeConfig {
 pub struct LoopbackRouterRuntime {
     server: LoopbackServerRuntime,
     state_store: SqliteStateStore,
+    secret_store: ProxyRuntimeSecretStore,
     credential_resolver: ProxyCredentialResolver,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HttpUpstreamTransport,
@@ -220,6 +227,7 @@ impl LoopbackRouterRuntime {
     /// Opens router-owned state/secrets and binds the loopback listener.
     pub fn start(config: LoopbackRouterRuntimeConfig) -> Result<Self, LoopbackRouterRuntimeError> {
         let state_store = SqliteStateStore::open(&config.state_database_path)?;
+        let secret_store = open_proxy_secret_store(&config.secret_store_root)?;
         let credential_resolver = ProxyCredentialResolver::open(
             &config.state_database_path,
             &config.secret_store_root,
@@ -237,6 +245,7 @@ impl LoopbackRouterRuntime {
         Ok(Self {
             server,
             state_store,
+            secret_store,
             credential_resolver,
             auth_gate,
             upstream,
@@ -294,7 +303,8 @@ impl LoopbackRouterRuntime {
             &selector,
             &self.credential_resolver,
             &self.upstream,
-        );
+        )
+        .with_affinity_secret_provider(&self.secret_store);
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -377,6 +387,7 @@ impl LoopbackRouterRuntime {
                     self.websocket_revocations.clone(),
                     audit_sink,
                 )
+                .with_affinity_secret_provider(&self.secret_store)
             } else {
                 BlockingWebSocketTunnel::new_with_revocation_registry(
                     &self.auth_gate,
@@ -385,6 +396,7 @@ impl LoopbackRouterRuntime {
                     &protocol_router,
                     self.websocket_revocations.clone(),
                 )
+                .with_affinity_secret_provider(&self.secret_store)
             };
             let upstream_url = self
                 .upstream_endpoint
@@ -410,7 +422,8 @@ impl LoopbackRouterRuntime {
             &selector,
             &self.credential_resolver,
             &self.upstream,
-        );
+        )
+        .with_affinity_secret_provider(&self.secret_store);
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -500,6 +513,16 @@ fn path_without_query(path: &str) -> &str {
     path.split_once('?').map_or(path, |(path, _query)| path)
 }
 
+impl HttpAffinitySecretProvider for ProxyRuntimeSecretStore {
+    fn load_or_create_affinity_secret(&self) -> Result<RouterAffinityHashSecret, HttpProxyError> {
+        load_or_create_router_affinity_hash_secret(self)
+            .map(|loaded| loaded.secret().clone())
+            .map_err(|_error| HttpProxyError::Selection {
+                reason: crate::account_selection::QuotaAwareAccountSelectorError::SecretUnavailable,
+            })
+    }
+}
+
 fn write_websocket_rejection(
     mut stream: TcpStream,
     status: u16,
@@ -536,6 +559,9 @@ pub enum LoopbackRouterRuntimeError {
     /// Opening or reading SQLite state failed.
     #[error(transparent)]
     State(#[from] StateStoreError),
+    /// Opening or reading the router secret store failed.
+    #[error(transparent)]
+    SecretStore(#[from] SecretStoreError),
     /// Opening runtime credential state failed.
     #[error(transparent)]
     CredentialResolver(#[from] ProxyCredentialResolverOpenError),

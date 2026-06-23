@@ -6,8 +6,10 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use codex_router_core::affinity::PreviousResponseId;
+use codex_router_core::affinity::RouterAffinityHashSecret;
+use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::ids::AccountId;
-use codex_router_core::ids::AffinityKey;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::routes::RouteBand;
 use codex_router_quota::snapshot::SnapshotFreshness;
@@ -24,6 +26,7 @@ use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::burn_down::assess_route_band;
 use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 use codex_router_state::account::AccountStatus;
+use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::repositories::AffinityRepository;
@@ -33,7 +36,6 @@ use thiserror::Error;
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::routes::RouteClass;
-use crate::routes::RouteKind;
 use crate::routes::classify_route;
 
 /// Process-lifetime weighted state partitioned by route band.
@@ -99,6 +101,7 @@ pub trait AccountDecisionSelector {
         &self,
         request: &HttpProxyRequest,
         token_generation: TokenGeneration,
+        affinity_secret: Option<&RouterAffinityHashSecret>,
     ) -> Result<SelectedAccountDecision, HttpProxyError>;
 }
 
@@ -175,6 +178,7 @@ impl AccountDecisionSelector for QuotaAwareAccountSelector {
         &self,
         _request: &HttpProxyRequest,
         _token_generation: TokenGeneration,
+        _affinity_secret: Option<&RouterAffinityHashSecret>,
     ) -> Result<SelectedAccountDecision, HttpProxyError> {
         select_from_account_states(&self.accounts, &self.weighted_selector)
     }
@@ -251,6 +255,7 @@ where
         &self,
         request: &HttpProxyRequest,
         _token_generation: TokenGeneration,
+        affinity_secret: Option<&RouterAffinityHashSecret>,
     ) -> Result<SelectedAccountDecision, HttpProxyError> {
         let route_band = route_band_for_request(request)?;
         let now_unix_seconds = (self.clock)();
@@ -288,21 +293,39 @@ where
                 .map_err(|_error| HttpProxyError::Selection {
                     reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
                 })?;
-        if let Some(affinity_key) = previous_response_affinity_key(request)? {
-            let owner_account_id = self
+        if let Some(previous_response_id) = previous_response_id(request)? {
+            let affinity_secret = affinity_secret.ok_or(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            })?;
+            let affinity_key_hash =
+                hash_previous_response_id(affinity_secret, &previous_response_id).map_err(
+                    |_error| HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+                    },
+                )?;
+            let owner_lookup = self
                 .state_repository
-                .load_pin(&affinity_key)
+                .load_previous_response_owner(&affinity_key_hash, route_band.as_str())
                 .map_err(|_error| HttpProxyError::Selection {
                     reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                })?
-                .ok_or(HttpProxyError::Selection {
-                    reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing,
                 })?;
+            let owner = match owner_lookup {
+                PreviousResponseAffinityOwnerLookup::Found(owner) => owner,
+                PreviousResponseAffinityOwnerLookup::Missing => {
+                    return Err(HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing,
+                    });
+                }
+                PreviousResponseAffinityOwnerLookup::Ambiguous => {
+                    return Err(HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+                    });
+                }
+            };
             return select_affinity_owner(
                 route_band,
-                &owner_account_id,
+                owner.account_id(),
                 &assessment,
-                weighted_selector,
                 &mut account_holds,
                 now_unix_seconds,
             );
@@ -323,7 +346,6 @@ fn select_affinity_owner(
     route_band: RouteBand,
     owner_account_id: &AccountId,
     assessment: &BurnDownRouteBandAssessmentResult,
-    weighted_selector: &mut WeightedDeficitSelector,
     account_holds: &mut HashMap<String, AccountHold>,
     now_unix_seconds: u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
@@ -332,12 +354,6 @@ fn select_affinity_owner(
         .iter()
         .any(|(account_id, _weight)| account_id == owner_account_id)
     {
-        account_holds.remove(route_band.as_str());
-        return Err(HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
-        });
-    }
-    if !weighted_selector.record_selection(weighted_candidates, owner_account_id) {
         account_holds.remove(route_band.as_str());
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
@@ -521,14 +537,7 @@ fn route_band_for_request(request: &HttpProxyRequest) -> Result<RouteBand, HttpP
         classification_path,
         request.websocket_upgrade(),
     ) {
-        RouteClass::Supported(RouteKind::Responses | RouteKind::ResponsesWebSocket) => {
-            Ok(RouteBand::Responses)
-        }
-        RouteClass::Supported(RouteKind::Models) => Ok(RouteBand::Models),
-        RouteClass::Supported(RouteKind::MemoriesTraceSummarize) => {
-            Ok(RouteBand::MemoriesTraceSummarize)
-        }
-        RouteClass::Supported(RouteKind::ResponsesCompact) => Ok(RouteBand::ResponsesCompact),
+        RouteClass::Supported(route_kind) => Ok(route_kind.route_band()),
         RouteClass::Rejected { reason } => Err(HttpProxyError::Rejected { reason }),
     }
 }
@@ -538,9 +547,9 @@ fn path_without_query(path: &str) -> &str {
         .map_or(path, |(path_without_query, _query)| path_without_query)
 }
 
-fn previous_response_affinity_key(
+fn previous_response_id(
     request: &HttpProxyRequest,
-) -> Result<Option<AffinityKey>, HttpProxyError> {
+) -> Result<Option<PreviousResponseId>, HttpProxyError> {
     if !body_mentions_previous_response_id(request.body()) {
         return Ok(None);
     }
@@ -564,7 +573,11 @@ fn previous_response_affinity_key(
         });
     }
 
-    Ok(Some(AffinityKey::new(previous_response_id.to_owned())))
+    PreviousResponseId::new(previous_response_id.to_owned())
+        .map(Some)
+        .map_err(|_error| HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+        })
 }
 
 fn body_mentions_previous_response_id(body: &[u8]) -> bool {

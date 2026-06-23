@@ -33,6 +33,7 @@ mod tests {
     use crate::headers::HeaderCollection;
     use crate::http_sse::AuditFailureReporter;
     use crate::http_sse::AuthenticatedHttpProxyService;
+    use crate::http_sse::HttpAffinitySecretProvider;
     use crate::http_sse::HttpProxyError;
     use crate::http_sse::HttpProxyRequest;
     use crate::http_sse::HttpProxyResponse;
@@ -72,6 +73,9 @@ mod tests {
     use codex_router_auth::resolver::ProviderCredentialResolver;
     use codex_router_auth::resolver::ResolvedProviderCredential;
     use codex_router_auth::resolver::RouterCredentialResolver;
+    use codex_router_core::affinity::PreviousResponseId;
+    use codex_router_core::affinity::RouterAffinityHashSecret;
+    use codex_router_core::affinity::hash_previous_response_id;
     use codex_router_core::audit::AuditEvent;
     use codex_router_core::audit::AuditEventFields;
     use codex_router_core::audit::AuditFileSink;
@@ -80,7 +84,6 @@ mod tests {
     use codex_router_core::audit::ResponseCommitState;
     use codex_router_core::audit::RouteKind as AuditRouteKind;
     use codex_router_core::audit::TransportKind;
-    use codex_router_core::ids::AffinityKey;
     use codex_router_core::ids::RequestId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::local_auth::LocalAuthError;
@@ -94,6 +97,8 @@ mod tests {
     use codex_router_secret_store::file_backend::FileSecretStore;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
+    use codex_router_state::affinity_owner::AffinitySourceTransport;
+    use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
     use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
     use codex_router_state::quota_snapshot::QuotaSnapshotSource;
@@ -132,6 +137,18 @@ mod tests {
     use tungstenite::http::HeaderValue;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static TEST_AFFINITY_SECRET_PROVIDER: TestAffinitySecretProvider = TestAffinitySecretProvider;
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct TestAffinitySecretProvider;
+
+    impl HttpAffinitySecretProvider for TestAffinitySecretProvider {
+        fn load_or_create_affinity_secret(
+            &self,
+        ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
+            Ok(test_affinity_secret())
+        }
+    }
 
     #[test]
     fn reports_package_name() {
@@ -431,7 +448,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("resolved-upstream-token");
         let auth_gate = local_auth_gate();
         let service =
-            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         let response = must_ok(
             service.handle_request(
@@ -521,7 +539,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let service =
-            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         let error = match service.handle_request(
             HttpProxyRequest::new(Method::Post, "/v1/responses")
@@ -542,6 +561,39 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_http_proxy_requires_affinity_secret_before_response_selection() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"should-not-send".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+
+        let error = match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+        ) {
+            Ok(response) => panic!("missing affinity secret provider should reject: {response:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable
+            }
+        );
+        assert!(selector.take_recorded().is_empty());
+        assert!(resolver.take_recorded().is_empty());
+        assert!(upstream.take_recorded().is_empty());
+    }
+
+    #[test]
     fn authenticated_http_proxy_selects_after_auth_and_forwards_selected_token() {
         let upstream = RecordingUpstream::new(HttpProxyResponse::new(
             200,
@@ -552,7 +604,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let service =
-            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         let response = match service.handle_request(
             HttpProxyRequest::new(Method::Post, "/v1/responses?stream=true")
@@ -593,7 +646,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let service =
-            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         let response = match service.handle_request(
             HttpProxyRequest::new(Method::Post, "/v1/responses")
@@ -634,7 +688,8 @@ mod tests {
             RejectingProviderCredentialResolver::new(CredentialResolverError::RefreshUnavailable);
         let auth_gate = local_auth_gate();
         let service =
-            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         let error = match service.handle_request(
             HttpProxyRequest::new(Method::Post, "/v1/responses")
@@ -670,6 +725,7 @@ mod tests {
         let auth_gate = local_auth_gate();
         let service =
             AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
                 .with_audit_sink(&audit_sink);
 
         let error = match service.handle_request(
@@ -713,6 +769,7 @@ mod tests {
         let auth_gate = local_auth_gate();
         let service =
             AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
                 .with_audit_sink(&audit_sink);
 
         let error = match service.handle_request(
@@ -759,6 +816,7 @@ mod tests {
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("selector should choose eligible account: {error}"),
@@ -780,6 +838,7 @@ mod tests {
             selector.select_upstream_account(
                 &HttpProxyRequest::new(Method::Post, "/v1/responses"),
                 TokenGeneration::new(1),
+                None,
             ),
             Err(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
@@ -816,6 +875,7 @@ mod tests {
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("repository-backed selector should select account: {error}"),
@@ -949,6 +1009,7 @@ mod tests {
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Get, "/v1/models"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("models request should select from models quota: {error}"),
@@ -959,6 +1020,7 @@ mod tests {
             selector.select_upstream_account(
                 &HttpProxyRequest::new(Method::Post, "/v1/responses"),
                 TokenGeneration::new(1),
+                None,
             ),
             Err(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
@@ -1001,6 +1063,7 @@ mod tests {
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("repository-backed selector should select account: {error}"),
@@ -1045,6 +1108,7 @@ mod tests {
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("next normal request should select eligible account: {error}"),
@@ -1082,6 +1146,7 @@ mod tests {
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("unknown fallback account should be selected: {error}"),
@@ -1113,9 +1178,11 @@ mod tests {
             "responses",
             &[(18_000, 100, true), (604_800, 100, false)],
         );
-        if let Err(error) = AffinityRepository::pin_account(
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
             &state,
-            &AffinityKey::new("resp_beta"),
+            "resp_beta",
+            &affinity_secret,
             beta.account_id(),
         ) {
             panic!("affinity owner should persist: {error}");
@@ -1126,6 +1193,7 @@ mod tests {
             &HttpProxyRequest::new(Method::Post, "/v1/responses")
                 .with_body(br#"{"previous_response_id":"resp_beta"}"#.to_vec()),
             TokenGeneration::new(1),
+            Some(&affinity_secret),
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("affinity owner should select: {error}"),
@@ -1158,6 +1226,7 @@ mod tests {
                 &HttpProxyRequest::new(Method::Post, "/v1/responses")
                     .with_body(br#"{"previous_response_id":"resp_missing"}"#.to_vec()),
                 TokenGeneration::new(1),
+                Some(&test_affinity_secret()),
             ),
             Err(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing
@@ -1195,9 +1264,11 @@ mod tests {
             "responses",
             &[(18_000, 100, true), (604_800, 100, false)],
         );
-        if let Err(error) = AffinityRepository::pin_account(
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
             &state,
-            &AffinityKey::new("resp_exhausted"),
+            "resp_exhausted",
+            &affinity_secret,
             exhausted.account_id(),
         ) {
             panic!("affinity owner should persist: {error}");
@@ -1210,6 +1281,7 @@ mod tests {
                 &HttpProxyRequest::new(Method::Post, "/v1/responses")
                     .with_body(br#"{"previous_response_id":"resp_exhausted"}"#.to_vec()),
                 TokenGeneration::new(1),
+                Some(&affinity_secret),
             ),
             Err(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable
@@ -1240,6 +1312,7 @@ mod tests {
                 &HttpProxyRequest::new(Method::Post, "/v1/responses")
                     .with_body(br#"{"previous_response_id":42}"#.to_vec()),
                 TokenGeneration::new(1),
+                None,
             ),
             Err(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::MalformedAffinityKey
@@ -1288,6 +1361,7 @@ mod tests {
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("next normal request should select eligible account: {error}"),
@@ -1337,6 +1411,7 @@ mod tests {
         let first = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("first request should select account: {error}"),
@@ -1344,6 +1419,7 @@ mod tests {
         let second = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("second request should reuse held account: {error}"),
@@ -1395,6 +1471,7 @@ mod tests {
         let first = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("first request should select account: {error}"),
@@ -1406,6 +1483,7 @@ mod tests {
         let second = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("second request should rebalance after cooldown: {error}"),
@@ -1449,6 +1527,7 @@ mod tests {
         let first = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("first request should select account: {error}"),
@@ -1465,6 +1544,7 @@ mod tests {
         let second = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("second request should skip probe-required held account: {error}"),
@@ -1492,6 +1572,7 @@ mod tests {
         let selected_models = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Get, "/v1/models"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("models request should select account: {error}"),
@@ -1499,6 +1580,7 @@ mod tests {
         let selected_responses = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses"),
             TokenGeneration::new(1),
+            None,
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("responses request should select account: {error}"),
@@ -1592,7 +1674,8 @@ mod tests {
             let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
             let service =
-                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
             match LoopbackHttpAdapter::handle_connection(stream, &service) {
                 Ok(()) => {}
@@ -1665,7 +1748,8 @@ mod tests {
             let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
             let service =
-                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
             must_ok(LoopbackHttpAdapter::handle_connection(stream, &service));
         });
         assert!(selection_response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
@@ -1682,7 +1766,8 @@ mod tests {
             );
             let auth_gate = local_auth_gate();
             let service =
-                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
             must_ok(LoopbackHttpAdapter::handle_connection(stream, &service));
         });
         assert!(credential_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
@@ -1701,7 +1786,8 @@ mod tests {
             let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
             let service =
-                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
             must_ok(LoopbackHttpAdapter::handle_streaming_connection(
                 stream, &service,
             ));
@@ -1720,7 +1806,8 @@ mod tests {
             );
             let auth_gate = local_auth_gate();
             let service =
-                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
             must_ok(LoopbackHttpAdapter::handle_streaming_connection(
                 stream, &service,
             ));
@@ -1756,7 +1843,8 @@ mod tests {
             let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
             let service =
-                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
             match LoopbackHttpAdapter::handle_connection(stream, &service) {
                 Ok(()) => {}
@@ -1823,7 +1911,8 @@ mod tests {
             let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
             let auth_gate = local_auth_gate();
             let service =
-                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
             match LoopbackHttpServer::serve_connections(listener, &service, 2) {
                 Ok(handled) => handled,
@@ -3398,6 +3487,42 @@ mod tests {
         }
     }
 
+    fn persist_previous_response_owner(
+        state: &SqliteStateStore,
+        previous_response_id: &str,
+        affinity_secret: &RouterAffinityHashSecret,
+        account_id: &codex_router_core::ids::AccountId,
+    ) -> Result<(), codex_router_state::sqlite::StateStoreError> {
+        let previous_response_id = match PreviousResponseId::new(previous_response_id) {
+            Ok(previous_response_id) => previous_response_id,
+            Err(error) => panic!("previous response id should parse: {error}"),
+        };
+        let affinity_key_hash =
+            match hash_previous_response_id(affinity_secret, &previous_response_id) {
+                Ok(affinity_key_hash) => affinity_key_hash,
+                Err(error) => panic!("affinity hash should compute: {error}"),
+            };
+        let owner = PreviousResponseAffinityOwnerRecord::new(
+            affinity_key_hash,
+            account_id.clone(),
+            1,
+            codex_router_core::routes::RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            test_unix_seconds(),
+        );
+
+        AffinityRepository::write_previous_response_owner(state, &owner)
+    }
+
+    fn test_affinity_secret() -> RouterAffinityHashSecret {
+        match RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ) {
+            Ok(secret) => secret,
+            Err(error) => panic!("test affinity secret should parse: {error}"),
+        }
+    }
+
     fn account_id(value: &str) -> codex_router_core::ids::AccountId {
         match codex_router_core::ids::AccountId::new(value) {
             Ok(account_id) => account_id,
@@ -3571,6 +3696,7 @@ mod tests {
             &self,
             request: &HttpProxyRequest,
             token_generation: TokenGeneration,
+            _affinity_secret: Option<&RouterAffinityHashSecret>,
         ) -> Result<SelectedAccountDecision, HttpProxyError> {
             self.recorded
                 .borrow_mut()
@@ -3606,6 +3732,7 @@ mod tests {
             &self,
             request: &HttpProxyRequest,
             token_generation: TokenGeneration,
+            _affinity_secret: Option<&RouterAffinityHashSecret>,
         ) -> Result<SelectedAccountDecision, HttpProxyError> {
             self.recorded
                 .borrow_mut()
@@ -3908,9 +4035,11 @@ mod tests {
             "responses",
             &[(18_000, 100, true), (604_800, 100, false)],
         );
-        if let Err(error) = AffinityRepository::pin_account(
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
             &state,
-            &AffinityKey::new("resp_beta"),
+            "resp_beta",
+            &affinity_secret,
             beta.account_id(),
         ) {
             panic!("affinity owner should persist: {error}");
@@ -3921,7 +4050,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         let decision = match router.route_first_frame(
             WebSocketHandshakeRequest::new()
