@@ -25,6 +25,8 @@ mod tests {
     use crate::account_selection::QuotaAwareAccountSelectorError;
     use crate::account_selection::QuotaAwareAccountState;
     use crate::account_selection::RepositoryBackedAccountSelector;
+    use crate::account_selection::RouteBandAccountHolds;
+    use crate::account_selection::RouteBandWeightedSelectors;
     use crate::account_selection::SelectedAccountDecision;
     use crate::credential_runtime::ProxyCredentialResolver;
     use crate::headers::Header;
@@ -109,12 +111,16 @@ mod tests {
     use std::net::TcpStream;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
     use std::time::Instant;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
     use tungstenite::Message;
     use tungstenite::accept_hdr;
     use tungstenite::client::IntoClientRequest;
@@ -180,13 +186,19 @@ mod tests {
     fn upstream_request_strips_local_and_hop_headers_and_injects_auth_once() {
         let request = UpstreamRequestBuilder::new(RouteKind::Responses)
             .with_header(Header::new("X-Codex-Router-Token", "local-token-canary"))
+            .with_header(Header::new("Host", "127.0.0.1:8787"))
+            .with_header(Header::new("Content-Length", "42"))
             .with_header(Header::new("Connection", "upgrade"))
             .with_header(Header::new("Upgrade", "websocket"))
             .with_header(Header::new("Authorization", "Bearer user-supplied"))
+            .with_header(Header::new("ChatGPT-Account-Id", "hostile-account-id"))
             .with_header(Header::new("Cookie", "session=user-cookie"))
             .with_header(Header::new("OpenAI-Beta", "responses=v1"))
             .with_body(br#"{"model":"gpt-5","unknown_codex_field":{"kept":true}}"#.to_vec())
-            .build(SecretString::new("upstream-account-token"));
+            .build_with_chatgpt_account_id(
+                SecretString::new("upstream-account-token"),
+                Some("chatgpt-account-id-canary"),
+            );
 
         assert_eq!(request.route_kind(), RouteKind::Responses);
         assert_eq!(
@@ -198,7 +210,13 @@ mod tests {
             request.headers().values("authorization"),
             vec!["Bearer upstream-account-token"]
         );
+        assert_eq!(
+            request.headers().values("chatgpt-account-id"),
+            vec!["chatgpt-account-id-canary"]
+        );
         assert_eq!(request.headers().value("x-codex-router-token"), None);
+        assert_eq!(request.headers().value("host"), None);
+        assert_eq!(request.headers().value("content-length"), None);
         assert_eq!(request.headers().value("connection"), None);
         assert_eq!(request.headers().value("upgrade"), None);
         assert_eq!(request.headers().value("cookie"), None);
@@ -218,6 +236,27 @@ mod tests {
         assert_eq!(
             endpoint.url_for_path("v1/models"),
             "https://api.openai.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn upstream_endpoint_maps_chatgpt_backend_api_to_codex_runtime_paths() {
+        let endpoint = match UpstreamEndpoint::new("https://chatgpt.com/backend-api") {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("upstream endpoint should validate: {error}"),
+        };
+
+        assert_eq!(
+            endpoint.url_for_path("/v1/responses?stream=true&cursor=abc"),
+            "https://chatgpt.com/backend-api/codex/responses?stream=true&cursor=abc"
+        );
+        assert_eq!(
+            endpoint.url_for_path("/v1/responses/compact"),
+            "https://chatgpt.com/backend-api/codex/responses/compact"
+        );
+        assert_eq!(
+            endpoint.websocket_url_for_path("/v1/responses"),
+            "wss://chatgpt.com/backend-api/codex/responses"
         );
     }
 
@@ -264,6 +303,7 @@ mod tests {
                 .with_header(Header::new("OpenAI-Beta", "responses=v1"))
                 .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("HTTP upstream transport should forward request: {error}"),
@@ -300,6 +340,7 @@ mod tests {
         let error = match service.handle(
             HttpProxyRequest::new(Method::Get, "/v1/models"),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(_response) => panic!("closed local port should not produce a response"),
             Err(error) => error,
@@ -327,6 +368,7 @@ mod tests {
                 .with_header(Header::new("Authorization", "Bearer wrong"))
                 .with_body(Vec::new()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("models request should forward: {error}"),
@@ -361,6 +403,7 @@ mod tests {
                 .with_header(Header::new("Accept", "text/event-stream"))
                 .with_body(body.clone()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("responses request should forward: {error}"),
@@ -427,6 +470,7 @@ mod tests {
             HttpProxyRequest::new(Method::Post, "/v1/responses?stream=true&cursor=abc")
                 .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("responses request with query should forward: {error}"),
@@ -449,6 +493,7 @@ mod tests {
         let error = match service.handle(
             HttpProxyRequest::new(Method::Post, "/v1/realtime").with_body(Vec::new()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => panic!("unsupported path should fail closed: {response:?}"),
             Err(error) => error,
@@ -533,6 +578,46 @@ mod tests {
             vec!["Bearer selected-upstream-token"]
         );
         assert_eq!(recorded[0].headers().value("x-codex-router-token"), None);
+    }
+
+    #[test]
+    fn authenticated_http_proxy_accepts_codex_env_key_authorization_bearer() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"data: kept\n\n".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream);
+
+        let response = match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("Authorization", "Bearer current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+        ) {
+            Ok(response) => response,
+            Err(error) => panic!("authorization bearer should satisfy local auth: {error}"),
+        };
+
+        assert_eq!(response.body(), b"data: kept\n\n");
+        assert_eq!(
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
+        );
+        let recorded = upstream.take_recorded();
+        assert_eq!(
+            recorded[0].headers().values("authorization"),
+            vec!["Bearer selected-upstream-token"]
+        );
+        assert!(
+            !recorded[0]
+                .headers()
+                .values("authorization")
+                .contains(&"Bearer current-token")
+        );
     }
 
     #[test]
@@ -678,7 +763,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id().as_str(), "acct_fresh");
-        assert_eq!(selected.selection_reason(), "fresh_quota");
+        assert_eq!(selected.selection_reason(), "preferred_next");
     }
 
     #[test]
@@ -735,7 +820,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id().as_str(), "acct_alpha");
-        assert_eq!(selected.selection_reason(), "fresh_quota");
+        assert_eq!(selected.selection_reason(), "preferred_next");
     }
 
     #[test]
@@ -790,7 +875,18 @@ mod tests {
         )
         .with_remaining_headroom(0)
         .with_effective(true)
-        .with_observed_unix_seconds(1_000);
+        .with_observed_unix_seconds(test_unix_seconds())
+        .with_reset_unix_seconds(selector_reset_seconds(18_000));
+        let responses_weekly_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Ineligible,
+        )
+        .with_remaining_headroom(0)
+        .with_effective(false)
+        .with_observed_unix_seconds(test_unix_seconds())
+        .with_reset_unix_seconds(selector_reset_seconds(604_800));
         let models_window = PersistedSelectorQuotaWindow::new(
             account.account_id().clone(),
             "models",
@@ -799,15 +895,36 @@ mod tests {
         )
         .with_remaining_headroom(10)
         .with_effective(true)
-        .with_observed_unix_seconds(1_000);
+        .with_observed_unix_seconds(test_unix_seconds())
+        .with_reset_unix_seconds(selector_reset_seconds(18_000));
+        let models_weekly_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "models",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(10)
+        .with_effective(false)
+        .with_observed_unix_seconds(test_unix_seconds())
+        .with_reset_unix_seconds(selector_reset_seconds(604_800));
         if let Err(error) =
             SelectorQuotaRepository::upsert_selector_window(&state, &responses_window)
         {
             panic!("responses selector window should persist: {error}");
         }
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&state, &responses_weekly_window)
+        {
+            panic!("responses weekly selector window should persist: {error}");
+        }
         if let Err(error) = SelectorQuotaRepository::upsert_selector_window(&state, &models_window)
         {
             panic!("models selector window should persist: {error}");
+        }
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&state, &models_weekly_window)
+        {
+            panic!("models weekly selector window should persist: {error}");
         }
         let token_key = match account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,
@@ -888,7 +1005,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), weekly_healthy.account_id());
-        assert_eq!(selected.selection_reason(), "fresh_quota");
+        assert_eq!(selected.selection_reason(), "preferred_next");
     }
 
     #[test]
@@ -913,13 +1030,13 @@ mod tests {
             &state,
             &exhausted,
             "responses",
-            &[(18_000, 0, true)],
+            &[(18_000, 0, true), (604_800, 0, false)],
         );
         persist_account_with_selector_window_specs(
             &state,
             &eligible,
             "responses",
-            &[(18_000, 42, true)],
+            &[(18_000, 42, true), (604_800, 42, false)],
         );
 
         let selector = RepositoryBackedAccountSelector::new(&state);
@@ -932,7 +1049,43 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), eligible.account_id());
-        assert_eq!(selected.selection_reason(), "fresh_quota");
+        assert_eq!(selected.selection_reason(), "preferred_next");
+    }
+
+    #[test]
+    fn repository_backed_selector_fails_fast_when_all_accounts_need_probe() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_all_probe_required");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let unknown = AccountRecord::new(
+            account_id("acct_unknown"),
+            "unknown",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_status_specs(
+            &state,
+            &unknown,
+            "responses",
+            &[
+                (18_000, 100, true, SelectorQuotaWindowStatus::Unknown),
+                (604_800, 100, false, SelectorQuotaWindowStatus::Unknown),
+            ],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+
+        assert_eq!(
+            selector.select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+            ),
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+            })
+        );
     }
 
     #[test]
@@ -982,7 +1135,185 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), eligible.account_id());
-        assert_eq!(selected.selection_reason(), "fresh_quota");
+        assert_eq!(selected.selection_reason(), "preferred_next");
+    }
+
+    #[test]
+    fn repository_backed_selector_reuses_held_account_inside_cooldown() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_hold_cooldown");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+
+        let now = Arc::new(Mutex::new(test_unix_seconds()));
+        let clock_now = Arc::clone(&now);
+        let selector = RepositoryBackedAccountSelector::new_with_runtime(
+            &state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            120,
+            Arc::new(move || {
+                *clock_now
+                    .lock()
+                    .expect("test clock lock should be available")
+            }),
+        );
+
+        let first = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("first request should select account: {error}"),
+        };
+        let second = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("second request should reuse held account: {error}"),
+        };
+
+        assert_eq!(first.account_id(), alpha.account_id());
+        assert_eq!(first.selection_reason(), "preferred_next");
+        assert_eq!(second.account_id(), alpha.account_id());
+        assert_eq!(second.selection_reason(), "account_hold_cooldown");
+    }
+
+    #[test]
+    fn repository_backed_selector_rebalances_after_cooldown_expires() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_hold_expired");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+
+        let now = Arc::new(Mutex::new(test_unix_seconds()));
+        let clock_now = Arc::clone(&now);
+        let selector = RepositoryBackedAccountSelector::new_with_runtime(
+            &state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            120,
+            Arc::new(move || {
+                *clock_now
+                    .lock()
+                    .expect("test clock lock should be available")
+            }),
+        );
+
+        let first = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("first request should select account: {error}"),
+        };
+        {
+            let mut now = now.lock().expect("test clock lock should be available");
+            *now = now.saturating_add(121);
+        }
+        let second = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("second request should rebalance after cooldown: {error}"),
+        };
+
+        assert_eq!(first.account_id(), alpha.account_id());
+        assert_eq!(second.account_id(), beta.account_id());
+        assert_eq!(second.selection_reason(), "available");
+    }
+
+    #[test]
+    fn repository_backed_selector_breaks_hold_when_account_needs_probe() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_hold_probe_required");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new_with_runtime(
+            &state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            120,
+            Arc::new(test_unix_seconds),
+        );
+        let first = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("first request should select account: {error}"),
+        };
+        persist_account_with_selector_window_status_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[
+                (18_000, 100, true, SelectorQuotaWindowStatus::Unknown),
+                (604_800, 100, false, SelectorQuotaWindowStatus::Unknown),
+            ],
+        );
+        let second = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("second request should skip probe-required held account: {error}"),
+        };
+
+        assert_eq!(first.account_id(), alpha.account_id());
+        assert_eq!(second.account_id(), beta.account_id());
+        assert_eq!(second.selection_reason(), "preferred_next");
     }
 
     #[test]
@@ -1486,7 +1817,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_router_runtime_balances_across_connections_with_process_selector_state() {
+    fn loopback_router_runtime_reuses_held_account_inside_cooldown() {
         let temp_dir = ProxyTestTempDir::new("runtime_cross_connection_balance");
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
@@ -1595,7 +1926,7 @@ mod tests {
             Err(error) => panic!("second upstream auth should record: {error}"),
         };
         assert_eq!(first_authorization, "authorization: Bearer alpha-token");
-        assert_eq!(second_authorization, "authorization: Bearer beta-token");
+        assert_eq!(second_authorization, "authorization: Bearer alpha-token");
 
         match upstream_thread.join() {
             Ok(()) => {}
@@ -2760,10 +3091,30 @@ mod tests {
         )
         .with_remaining_headroom(remaining_headroom)
         .with_effective(true)
-        .with_observed_unix_seconds(1_000);
+        .with_observed_unix_seconds(test_unix_seconds())
+        .with_reset_unix_seconds(selector_reset_seconds(18_000));
         if let Err(error) = SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
         {
             panic!("selector quota window should persist: {error}");
+        }
+        let weekly_selector_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "responses",
+            604_800,
+            if remaining_headroom == 0 {
+                SelectorQuotaWindowStatus::Ineligible
+            } else {
+                SelectorQuotaWindowStatus::Eligible
+            },
+        )
+        .with_remaining_headroom(remaining_headroom)
+        .with_effective(false)
+        .with_observed_unix_seconds(test_unix_seconds())
+        .with_reset_unix_seconds(selector_reset_seconds(604_800));
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(state, &weekly_selector_window)
+        {
+            panic!("weekly selector quota window should persist: {error}");
         }
         let token_key = match account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,
@@ -2803,11 +3154,27 @@ mod tests {
             )
             .with_remaining_headroom(remaining_headroom)
             .with_effective(true)
-            .with_observed_unix_seconds(1_000);
+            .with_observed_unix_seconds(test_unix_seconds())
+            .with_reset_unix_seconds(selector_reset_seconds(18_000));
             if let Err(error) =
                 SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
             {
                 panic!("selector quota window should persist: {error}");
+            }
+            let weekly_selector_window = PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                *route_band,
+                604_800,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(remaining_headroom)
+            .with_effective(false)
+            .with_observed_unix_seconds(test_unix_seconds())
+            .with_reset_unix_seconds(selector_reset_seconds(604_800));
+            if let Err(error) =
+                SelectorQuotaRepository::upsert_selector_window(state, &weekly_selector_window)
+            {
+                panic!("weekly selector quota window should persist: {error}");
             }
         }
     }
@@ -2832,7 +3199,8 @@ mod tests {
             )
             .with_remaining_headroom(*remaining_headroom)
             .with_effective(*effective)
-            .with_observed_unix_seconds(1_000);
+            .with_observed_unix_seconds(test_unix_seconds())
+            .with_reset_unix_seconds(selector_reset_seconds(*limit_window_seconds));
             if let Err(error) =
                 SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
             {
@@ -2861,7 +3229,8 @@ mod tests {
             )
             .with_remaining_headroom(*remaining_headroom)
             .with_effective(*effective)
-            .with_observed_unix_seconds(1_000);
+            .with_observed_unix_seconds(test_unix_seconds())
+            .with_reset_unix_seconds(selector_reset_seconds(*limit_window_seconds));
             if let Err(error) =
                 SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
             {
@@ -2875,6 +3244,16 @@ mod tests {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
         }
+    }
+
+    fn test_unix_seconds() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs())
+    }
+
+    fn selector_reset_seconds(limit_window_seconds: u64) -> u64 {
+        test_unix_seconds().saturating_add(limit_window_seconds)
     }
 
     struct ProxyTestTempDir {
@@ -3219,12 +3598,16 @@ mod tests {
         let decision = match router.route_first_frame(
             WebSocketHandshakeRequest::new()
                 .with_header(Header::new("X-Codex-Router-Token", "local-token"))
+                .with_header(Header::new("Host", "127.0.0.1:8787"))
+                .with_header(Header::new("Sec-WebSocket-Key", "client-key"))
                 .with_header(Header::new("Authorization", "Bearer wrong"))
+                .with_header(Header::new("ChatGPT-Account-Id", "hostile-account-id"))
                 .with_header(Header::new("Connection", "upgrade"))
                 .with_header(Header::new("Upgrade", "websocket"))
                 .with_header(Header::new("OpenAI-Beta", "responses=v1")),
             frame.clone(),
             SecretString::new("selected-upstream-token"),
+            Some("chatgpt-account-id-canary"),
         ) {
             Ok(decision) => decision,
             Err(error) => panic!("valid first frame should route: {error:?}"),
@@ -3241,7 +3624,13 @@ mod tests {
             headers.values("authorization"),
             vec!["Bearer selected-upstream-token"]
         );
+        assert_eq!(
+            headers.value("chatgpt-account-id"),
+            Some("chatgpt-account-id-canary")
+        );
         assert_eq!(headers.value("x-codex-router-token"), None);
+        assert_eq!(headers.value("host"), None);
+        assert_eq!(headers.value("sec-websocket-key"), None);
         assert_eq!(headers.value("connection"), None);
         assert_eq!(headers.value("upgrade"), None);
     }
@@ -3472,6 +3861,40 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_websocket_router_accepts_codex_env_key_authorization_bearer() {
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("Authorization", "Bearer current-token")),
+            WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec()),
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("authorization bearer should satisfy local auth: {error:?}"),
+        };
+
+        assert_eq!(
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
+        );
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            token_generation,
+            headers,
+            ..
+        } = decision;
+        assert_eq!(token_generation, TokenGeneration::new(1));
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer selected-upstream-token"]
+        );
+    }
+
+    #[test]
     fn websocket_first_frame_rejects_hostile_preselection_cases() {
         let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(32));
 
@@ -3481,6 +3904,7 @@ mod tests {
                     WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Binary(vec![1, 2, 3]),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::UnsupportedFirstFrameType)
@@ -3491,6 +3915,7 @@ mod tests {
                     WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Text(br#"{"type":"not.response.create"}"#.to_vec()),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::UnexpectedFirstFrame)
@@ -3503,6 +3928,7 @@ mod tests {
                         br#"{"type":"response.create","padding":"too-large"}"#.to_vec()
                     ),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::FirstFrameTooLarge)
@@ -3513,6 +3939,7 @@ mod tests {
                     WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Text(br#"{"type":"#.to_vec()),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::MalformedFirstFrame)

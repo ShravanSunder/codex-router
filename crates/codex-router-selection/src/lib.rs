@@ -92,6 +92,19 @@ mod tests {
     }
 
     #[test]
+    fn weighted_deficit_records_forced_selection_for_future_fairness() {
+        let mut selector = WeightedDeficitSelector::default();
+        let account_a = account_id("acct_a");
+        let account_b = account_id("acct_b");
+        let accounts = [(account_a.clone(), 10_u32), (account_b.clone(), 10_u32)];
+
+        assert_eq!(selector.select(&accounts, 1), Some(account_a.clone()));
+        assert!(selector.record_selection(&accounts, &account_a));
+
+        assert_eq!(selector.select(&accounts, 1), Some(account_b));
+    }
+
+    #[test]
     fn reservations_reduce_immediate_headroom_until_released() {
         let mut reservations = ReservationBook::default();
         let account = account_id("acct_primary");

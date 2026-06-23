@@ -3,12 +3,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_quota::snapshot::SnapshotFreshness;
-use codex_router_selection::eligibility::Eligibility;
-use codex_router_selection::eligibility::SelectionCandidate;
+use codex_router_selection::burn_down::BurnDownAccountAssessment;
+use codex_router_selection::burn_down::BurnDownAccountInput;
+use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
+use codex_router_selection::burn_down::QuotaWindowFact;
+use codex_router_selection::burn_down::QuotaWindowStatus;
+use codex_router_selection::burn_down::RoutingReason;
+use codex_router_selection::burn_down::SelectedPool;
+use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
+use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
+use codex_router_selection::burn_down::assess_route_band;
 use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
@@ -24,6 +34,29 @@ use crate::routes::classify_route;
 
 /// Process-lifetime weighted state partitioned by route band.
 pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitSelector>>>;
+/// Process-lifetime account-hold state partitioned by route band.
+pub type RouteBandAccountHolds = Arc<Mutex<HashMap<String, AccountHold>>>;
+
+/// Default v1 minimum account reuse period for adjacent normal requests.
+pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
+
+type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// Process-local account hold for one route band.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountHold {
+    account_id: AccountId,
+    selected_unix_seconds: u64,
+}
+
+impl AccountHold {
+    fn new(account_id: AccountId, selected_unix_seconds: u64) -> Self {
+        Self {
+            account_id,
+            selected_unix_seconds,
+        }
+    }
+}
 
 /// Selected account material needed by the proxy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,13 +139,6 @@ pub enum QuotaAwareAccountSelectorError {
     SecretUnavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct WeightedAccountCandidate {
-    account_id: AccountId,
-    effective_headroom: u32,
-    selection_reason: &'static str,
-}
-
 /// Account selector adapter using quota freshness and weighted deficit state.
 #[derive(Debug)]
 pub struct QuotaAwareAccountSelector {
@@ -142,13 +168,15 @@ impl AccountDecisionSelector for QuotaAwareAccountSelector {
 }
 
 /// Selector that hydrates account state from repositories at request time.
-#[derive(Debug)]
 pub struct RepositoryBackedAccountSelector<'a, R>
 where
     R: SelectorQuotaRepository,
 {
     state_repository: &'a R,
     weighted_selectors: RouteBandWeightedSelectors,
+    account_holds: RouteBandAccountHolds,
+    minimum_account_hold_cooldown_seconds: u64,
+    clock: UnixClock,
 }
 
 impl<'a, R> RepositoryBackedAccountSelector<'a, R>
@@ -161,6 +189,9 @@ where
         Self {
             state_repository,
             weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
+            account_holds: Arc::new(Mutex::new(HashMap::new())),
+            minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            clock: Arc::new(current_unix_seconds),
         }
     }
 
@@ -169,10 +200,32 @@ where
     pub fn new_with_weighted_selector(
         state_repository: &'a R,
         weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
     ) -> Self {
         Self {
             state_repository,
             weighted_selectors,
+            account_holds,
+            minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            clock: Arc::new(current_unix_seconds),
+        }
+    }
+
+    /// Creates a repository-backed selector with process-lifetime runtime state.
+    #[must_use]
+    pub fn new_with_runtime(
+        state_repository: &'a R,
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        minimum_account_hold_cooldown_seconds: u64,
+        clock: UnixClock,
+    ) -> Self {
+        Self {
+            state_repository,
+            weighted_selectors,
+            account_holds,
+            minimum_account_hold_cooldown_seconds,
+            clock,
         }
     }
 }
@@ -193,10 +246,19 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
+        let now_unix_seconds = (self.clock)();
         let selector_accounts = selector_inputs
             .iter()
-            .filter_map(account_state_from_selector_input)
+            .map(account_input_from_selector_input)
             .collect::<Vec<_>>();
+        let assessment_input =
+            BurnDownRouteBandAssessmentInput::new(route_band, now_unix_seconds, selector_accounts);
+        let assessment = assess_route_band(assessment_input);
+        if assessment.selected_pool() == SelectedPool::None {
+            return Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+            });
+        }
 
         let mut weighted_selectors =
             self.weighted_selectors
@@ -207,7 +269,21 @@ where
         let weighted_selector = weighted_selectors
             .entry(route_band.to_owned())
             .or_insert_with(WeightedDeficitSelector::default);
-        select_from_account_states_with_selector(&selector_accounts, weighted_selector)
+        let mut account_holds =
+            self.account_holds
+                .lock()
+                .map_err(|_error| HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+                })?;
+
+        select_from_burn_down_assessment(
+            route_band,
+            &assessment,
+            weighted_selector,
+            &mut account_holds,
+            self.minimum_account_hold_cooldown_seconds,
+            now_unix_seconds,
+        )
     }
 }
 
@@ -228,68 +304,149 @@ fn select_from_account_states_with_selector(
     accounts: &[QuotaAwareAccountState],
     weighted_selector: &mut WeightedDeficitSelector,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
-    let known_fresh_account_exists = accounts.iter().any(|account| {
-        account.remaining_headroom > 0
-            && matches!(account.freshness, SnapshotFreshness::Fresh { .. })
-    });
-    let weighted_candidates = accounts
+    let account_inputs = accounts
         .iter()
-        .filter_map(|account| weighted_candidate_for_account(account, known_fresh_account_exists))
+        .map(|account| account_input_from_quota_state(account))
         .collect::<Vec<_>>();
-    let selector_input = weighted_candidates
-        .iter()
-        .map(|candidate| (candidate.account_id.clone(), candidate.effective_headroom))
-        .collect::<Vec<_>>();
+    let assessment_input =
+        BurnDownRouteBandAssessmentInput::new("responses", current_unix_seconds(), account_inputs);
+    let assessment = assess_route_band(assessment_input);
+    select_from_burn_down_assessment_without_hold(&assessment, weighted_selector)
+}
+
+fn select_from_burn_down_assessment_without_hold(
+    assessment: &codex_router_selection::burn_down::BurnDownRouteBandAssessment,
+    weighted_selector: &mut WeightedDeficitSelector,
+) -> Result<SelectedAccountDecision, HttpProxyError> {
+    if assessment.selected_pool() == SelectedPool::None {
+        return Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+        });
+    }
+    let weighted_candidates = assessment.weighted_candidates();
     let selected_account_id =
         weighted_selector
-            .select(&selector_input, 1)
+            .select(weighted_candidates, 1)
             .ok_or(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
             })?;
-    let selected_candidate = weighted_candidates
+    let selected_assessment = assessment
+        .accounts()
         .iter()
-        .find(|candidate| candidate.account_id == selected_account_id)
+        .find(|account| account.account_id() == &selected_account_id)
         .ok_or(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
         })?;
 
     Ok(SelectedAccountDecision::new(
         selected_account_id,
-        selected_candidate.selection_reason,
+        selection_reason_for_assessment(selected_assessment),
     ))
 }
 
-fn account_state_from_selector_input(input: &SelectorQuotaInput) -> Option<QuotaAwareAccountState> {
-    if input.account_status() != AccountStatus::Enabled {
-        return None;
+fn select_from_burn_down_assessment(
+    route_band: &str,
+    assessment: &codex_router_selection::burn_down::BurnDownRouteBandAssessment,
+    weighted_selector: &mut WeightedDeficitSelector,
+    account_holds: &mut HashMap<String, AccountHold>,
+    minimum_account_hold_cooldown_seconds: u64,
+    now_unix_seconds: u64,
+) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let weighted_candidates = assessment.weighted_candidates();
+    if weighted_candidates.is_empty() {
+        account_holds.remove(route_band);
+        return Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+        });
     }
-    input.active_credential_generation()?;
-    let effective_window = input.windows().iter().find(|window| window.effective())?;
-    if input
-        .windows()
-        .iter()
-        .any(|window| window.status() == SelectorQuotaWindowStatus::Ineligible)
-    {
-        return None;
-    }
-    let bottleneck_headroom = input
-        .windows()
-        .iter()
-        .map(|window| window.remaining_headroom())
-        .min()
-        .unwrap_or_else(|| effective_window.remaining_headroom());
-    let freshness = match effective_window.status() {
-        SelectorQuotaWindowStatus::Eligible => SnapshotFreshness::Fresh { age_seconds: 0 },
-        SelectorQuotaWindowStatus::Stale => SnapshotFreshness::StaleWithPenalty { age_seconds: 0 },
-        SelectorQuotaWindowStatus::Unknown => SnapshotFreshness::Unknown,
-        SelectorQuotaWindowStatus::Ineligible => return None,
-    };
 
-    Some(QuotaAwareAccountState::new(
-        input.account_id().clone(),
-        bottleneck_headroom,
-        freshness,
+    if let Some(held_account_id) = reusable_held_account_id(
+        route_band,
+        account_holds,
+        weighted_candidates,
+        minimum_account_hold_cooldown_seconds,
+        now_unix_seconds,
+    ) {
+        if weighted_selector.record_selection(weighted_candidates, &held_account_id) {
+            return Ok(SelectedAccountDecision::new(
+                held_account_id,
+                "account_hold_cooldown",
+            ));
+        }
+    }
+
+    let selected_account_id =
+        weighted_selector
+            .select(weighted_candidates, 1)
+            .ok_or(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+            })?;
+    let selected_assessment = assessment
+        .accounts()
+        .iter()
+        .find(|account| account.account_id() == &selected_account_id)
+        .ok_or(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+        })?;
+    account_holds.insert(
+        route_band.to_owned(),
+        AccountHold::new(selected_account_id.clone(), now_unix_seconds),
+    );
+
+    Ok(SelectedAccountDecision::new(
+        selected_account_id,
+        selection_reason_for_assessment(selected_assessment),
     ))
+}
+
+fn reusable_held_account_id(
+    route_band: &str,
+    account_holds: &mut HashMap<String, AccountHold>,
+    weighted_candidates: &[(AccountId, u32)],
+    minimum_account_hold_cooldown_seconds: u64,
+    now_unix_seconds: u64,
+) -> Option<AccountId> {
+    let hold = account_holds.get(route_band)?;
+    let hold_age_seconds = now_unix_seconds.saturating_sub(hold.selected_unix_seconds);
+    let reusable = hold_age_seconds < minimum_account_hold_cooldown_seconds
+        && weighted_candidates
+            .iter()
+            .any(|(account_id, _weight)| account_id == &hold.account_id);
+    if reusable {
+        Some(hold.account_id.clone())
+    } else {
+        account_holds.remove(route_band);
+        None
+    }
+}
+
+fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAccountInput {
+    let windows = input
+        .windows()
+        .iter()
+        .map(|window| {
+            let mut fact = QuotaWindowFact::new(
+                window.limit_window_seconds(),
+                quota_window_status_from_selector_status(window.status()),
+            )
+            .with_remaining_headroom(window.remaining_headroom())
+            .with_observed_unix_seconds(window.observed_unix_seconds())
+            .with_effective(window.effective());
+            if let Some(reset_unix_seconds) = window.reset_unix_seconds() {
+                fact = fact.with_reset_unix_seconds(reset_unix_seconds);
+            }
+            fact
+        })
+        .collect::<Vec<_>>();
+
+    BurnDownAccountInput::new(
+        input.account_id().clone(),
+        input.account_label(),
+        input.route_band(),
+        windows,
+    )
+    .with_account_enabled(input.account_status() == AccountStatus::Enabled)
+    .with_active_credential(input.active_credential_generation().is_some())
 }
 
 fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, HttpProxyError> {
@@ -314,34 +471,59 @@ fn path_without_query(path: &str) -> &str {
         .map_or(path, |(path_without_query, _query)| path_without_query)
 }
 
-fn weighted_candidate_for_account(
-    account: &QuotaAwareAccountState,
-    known_fresh_account_exists: bool,
-) -> Option<WeightedAccountCandidate> {
-    let candidate = SelectionCandidate::new(
+fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownAccountInput {
+    let status = quota_window_status_from_freshness(account.freshness);
+    let reset_base = current_unix_seconds();
+    let short_window = QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, status)
+        .with_remaining_headroom(account.remaining_headroom)
+        .with_reset_unix_seconds(reset_base)
+        .with_observed_unix_seconds(reset_base)
+        .with_effective(true);
+    let weekly_window = QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, status)
+        .with_remaining_headroom(account.remaining_headroom)
+        .with_reset_unix_seconds(reset_base)
+        .with_observed_unix_seconds(reset_base)
+        .with_effective(false);
+    BurnDownAccountInput::new(
         account.account_id.clone(),
-        account.remaining_headroom,
-        account.freshness,
-    );
-    match candidate.eligibility(known_fresh_account_exists) {
-        Eligibility::Eligible { headroom } => Some(WeightedAccountCandidate {
-            account_id: account.account_id.clone(),
-            effective_headroom: headroom,
-            selection_reason: selection_reason_for_freshness(account.freshness),
-        }),
-        Eligibility::Penalized { headroom, reason } => Some(WeightedAccountCandidate {
-            account_id: account.account_id.clone(),
-            effective_headroom: headroom,
-            selection_reason: reason,
-        }),
-        Eligibility::Ineligible { .. } => None,
+        account.account_id.as_str(),
+        "responses",
+        vec![short_window, weekly_window],
+    )
+}
+
+const fn quota_window_status_from_freshness(freshness: SnapshotFreshness) -> QuotaWindowStatus {
+    match freshness {
+        SnapshotFreshness::Fresh { .. } => QuotaWindowStatus::Eligible,
+        SnapshotFreshness::StaleWithPenalty { .. } => QuotaWindowStatus::Stale,
+        SnapshotFreshness::Unknown => QuotaWindowStatus::Unknown,
     }
 }
 
-const fn selection_reason_for_freshness(freshness: SnapshotFreshness) -> &'static str {
-    match freshness {
-        SnapshotFreshness::Fresh { .. } => "fresh_quota",
-        SnapshotFreshness::StaleWithPenalty { .. } => "stale_quota_fallback",
-        SnapshotFreshness::Unknown => "unknown_quota_fallback",
+const fn quota_window_status_from_selector_status(
+    status: SelectorQuotaWindowStatus,
+) -> QuotaWindowStatus {
+    match status {
+        SelectorQuotaWindowStatus::Eligible => QuotaWindowStatus::Eligible,
+        SelectorQuotaWindowStatus::Stale => QuotaWindowStatus::Stale,
+        SelectorQuotaWindowStatus::Unknown => QuotaWindowStatus::Unknown,
+        SelectorQuotaWindowStatus::Ineligible => QuotaWindowStatus::Ineligible,
     }
+}
+
+fn selection_reason_for_assessment(assessment: &BurnDownAccountAssessment) -> String {
+    match assessment.routing_reason() {
+        RoutingReason::PreferredNext => "preferred_next".to_owned(),
+        RoutingReason::Available => "available".to_owned(),
+        RoutingReason::Held => "held".to_owned(),
+        RoutingReason::Blocked => "blocked".to_owned(),
+        RoutingReason::NeedsProbe => "needs_probe".to_owned(),
+        RoutingReason::Excluded => "excluded".to_owned(),
+    }
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }

@@ -20,6 +20,7 @@ use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
 use crate::account_selection::RepositoryBackedAccountSelector;
+use crate::account_selection::RouteBandAccountHolds;
 use crate::account_selection::RouteBandWeightedSelectors;
 use crate::credential_runtime::ProxyCredentialResolver;
 use crate::credential_runtime::ProxyCredentialResolverOpenError;
@@ -211,6 +212,7 @@ pub struct LoopbackRouterRuntime {
     websocket_revocations: WebSocketRevocationRegistry,
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
+    account_holds: RouteBandAccountHolds,
 }
 
 impl LoopbackRouterRuntime {
@@ -242,6 +244,7 @@ impl LoopbackRouterRuntime {
             websocket_revocations: WebSocketRevocationRegistry::new(),
             audit_sink,
             weighted_selectors: Default::default(),
+            account_holds: Default::default(),
         })
     }
 
@@ -283,6 +286,7 @@ impl LoopbackRouterRuntime {
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
             Arc::clone(&self.weighted_selectors),
+            Arc::clone(&self.account_holds),
         );
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
@@ -357,6 +361,7 @@ impl LoopbackRouterRuntime {
             let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
                 &self.state_store,
                 Arc::clone(&self.weighted_selectors),
+                Arc::clone(&self.account_holds),
             );
             let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
             let tunnel = if let Some(audit_sink) = &self.audit_sink {
@@ -394,6 +399,7 @@ impl LoopbackRouterRuntime {
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
             Arc::clone(&self.weighted_selectors),
+            Arc::clone(&self.account_holds),
         );
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,

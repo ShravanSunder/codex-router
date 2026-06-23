@@ -96,4 +96,40 @@ impl WeightedDeficitSelector {
 
         Some(selected)
     }
+
+    /// Advances selector state as if `selected_account` won this round.
+    ///
+    /// This is used when a higher-level routing policy pins or temporarily
+    /// holds an account, while weighted deficit still needs to account for
+    /// that reuse in future fairness decisions.
+    pub fn record_selection(
+        &mut self,
+        accounts: &[(AccountId, u32)],
+        selected_account: &AccountId,
+    ) -> bool {
+        if accounts.is_empty() {
+            return false;
+        }
+        if !accounts
+            .iter()
+            .any(|(account_id, _weight)| account_id == selected_account)
+        {
+            return false;
+        }
+
+        let total_weight = accounts.iter().fold(0_i64, |total, (_account_id, weight)| {
+            total + i64::from(*weight)
+        });
+
+        for (account_id, weight) in accounts {
+            let current_weight = self.current_weights.entry(account_id.clone()).or_insert(0);
+            *current_weight += i64::from(*weight);
+        }
+
+        if let Some(current_weight) = self.current_weights.get_mut(selected_account) {
+            *current_weight -= total_weight;
+        }
+
+        true
+    }
 }

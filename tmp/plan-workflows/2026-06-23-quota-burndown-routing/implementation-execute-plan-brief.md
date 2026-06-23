@@ -75,3 +75,58 @@ Proof target:
 
 phase_result: complete
 evidence: `git status --short --branch`, `git diff --stat`, `tmp/plan-workflows/2026-06-23-quota-burndown-routing/implementation-plan.md`
+
+## T1 Checkpoint
+
+Commit: `8dde24f feat: add quota burn down assessment`
+
+Proof:
+
+- `cargo test -p codex-router-selection`
+  - result: pass
+  - count: 19 passed, 0 failed
+- `cargo fmt --all -- --check`
+  - result: pass
+
+## T2 Proxy Runtime Selection Checkpoint
+
+Implemented:
+
+- repository-backed proxy selection now adapts persisted SQLite
+  `SelectorQuotaInput` rows into `codex-router-selection::burn_down` DTOs
+- request-path selection feeds only burn-down `weighted_candidates` into
+  `WeightedDeficitSelector`
+- all-unknown / no verified usable accounts fail fast with
+  `NoEligibleAccounts`
+- process-lifetime route-band account-hold state reuses the selected account
+  for the 120 second default cooldown window
+- held reuse is recorded in weighted-deficit state so later choices remain fair
+- account hold breaks when the held account leaves the selected pool, including
+  when it becomes `probe_required`
+- server runtime shares both weighted selector state and account-hold state
+  across adjacent HTTP/SSE and WebSocket requests
+
+Touched T2 files:
+
+- `crates/codex-router-selection/src/weighted_deficit.rs`
+- `crates/codex-router-selection/src/lib.rs`
+- `crates/codex-router-proxy/src/account_selection.rs`
+- `crates/codex-router-proxy/src/server.rs`
+- `crates/codex-router-proxy/src/lib.rs`
+
+Proof:
+
+- `cargo fmt --all -- --check`
+  - result: pass
+- `cargo test -p codex-router-selection`
+  - result: pass
+  - count: 20 passed, 0 failed
+- `cargo test -p codex-router-proxy`
+  - result: pass
+  - count: 63 passed, 0 failed
+
+Remaining T2 gaps before declaring the whole T2 plan row fully complete:
+
+- previous-response affinity fail-closed request-path extraction/enforcement is
+  still pending
+- WebSocket first-frame affinity/pinning matrix is still pending in T3
