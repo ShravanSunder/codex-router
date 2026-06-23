@@ -219,6 +219,51 @@ The follow-up spec revision folds these in. Next hard gate remains:
 - rerun `shravan-dev-workflow:spec-review-swarm`
 - no `plan-creation-swarm` until review returns `phase_result: complete`
 
+## Current Phase Update: Plan Review Findings Folded Into Plan
+
+The `plan-review-swarm` lanes returned `needs revision`, and the parent accepted
+the material findings instead of proceeding directly to implementation.
+
+Accepted plan-review corrections now folded into the spec and plan:
+
+- Unknown/no-data probe handling is background-only in v1. Request routing does
+  not call provider quota/probe APIs, wait for probes, or create a new
+  proxy-to-worker probe queue.
+- Unknown/no-data/missing-reset accounts stay `probe_required` and unroutable
+  until prompt startup or periodic background refresh/probe persists verified
+  selector rows to SQLite.
+- OAuth account switching now has a route-band account-hold cooldown. The v1
+  default is 120 seconds, with immediate break for valid affinity, exhaustion,
+  blocked/probe-required state, disabled accounts, or missing active
+  credentials.
+- T0 is a hard dirty target-file gate. Planned target files must be clean before
+  coding, or each overlapping dirty file must be explicitly adopted.
+- CLI quota status implementation is gated on the real
+  `codex-router-selection::burn_down` DTO/API freeze and must not reimplement
+  routing math.
+- WebSocket proof now includes the full preselection failure matrix, zero
+  selector advance, zero credential resolution, zero upstream auth injection,
+  zero upstream open, allowlist/redaction canaries, and delayed/failing-refresh
+  non-blocking behavior.
+- Status proof now includes live CLI smoke for
+  `quota status --format table|plain|json`.
+- Installed Codex e2e now requires a multi-account reset-aware fixture,
+  status/routing agreement, selected safe label/hash, routing reason, and
+  WebSocket multi-turn pinning.
+
+Current artifacts:
+
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/plan-workflows/2026-06-23-quota-burndown-routing/implementation-plan.md`
+- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/plan-workflows/2026-06-23-quota-burndown-routing/plan-review/review-ledger.md`
+
+Next hard gate:
+
+- run `shravan-dev-workflow:implementation-execute-plan`
+- first action is T0 dirty target-file validation
+- do not edit implementation files unless T0 proves planned targets are clean
+  or explicitly adopted
+
 ## Requirements/proof matrix
 
 Requirement / claim:

@@ -126,8 +126,8 @@ burn-down assessment
 
 proxy account selection
   owns: route classification, account fact adaptation, previous-response
-        affinity resolution/enforcement, process-lifetime fairness state, and
-        runtime exact account choice
+        affinity resolution/enforcement, process-lifetime account-hold cooldown,
+        process-lifetime fairness state, and runtime exact account choice
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
   consumes: BurnDownRouteBandAssessment.weighted_candidates
   exposes: SelectedAccountDecision
@@ -166,8 +166,9 @@ Dependency contract:
 - Reimplementing pressure, reserve, unknown, or limiting-window math in the CLI
   or proxy is out of contract.
 - Request-path selection must not repair unknown quota by calling the provider.
-  It may only schedule or signal background probe work and then route from the
-  last-known verified SQLite state.
+  It routes from the last-known verified SQLite state and may only emit
+  audit-safe probe-required diagnostics. Prompt startup and periodic background
+  refresh/probe own provider calls.
 
 ## Burn-Down Assessment Contract
 
@@ -389,9 +390,10 @@ Pool order is normative:
 1. Build assessments for every enabled account with an active credential.
 2. If one or more `usable` accounts exist, select only from `usable`.
 3. Else if one or more `reserve` accounts exist, select only from `reserve`.
-4. Else return no eligible account. The proxy may schedule background probes for
-   `probe_required` accounts, but the current request fails fast rather than
-   blocking to probe live quota.
+4. Else return no eligible account. The current request fails fast rather than
+   blocking to probe live quota. Prompt startup and periodic background refresh
+   are the normal probe mechanisms; request handling must not introduce
+   synchronous provider I/O or proxy-to-worker coupling.
 
 Within the selected pool, candidates are ordered before they are passed to
 `WeightedDeficitSelector`. This order is part of the neutral selector contract:
@@ -451,7 +453,9 @@ For each `probe_required` account:
 - do not compute `routing_weight`
 - do not add it to `weighted_candidates`
 - emit a probe-required status/audit reason
-- enqueue or mark background probe work outside the request path
+- rely on prompt startup and periodic background refresh/probe work to verify
+  future use; request-path handling may only emit audit-safe probe-required
+  diagnostics
 - only a later persisted successful probe/refresh can make the account
   `usable` or `reserve`
 
@@ -465,11 +469,60 @@ For each `probe_required` account:
   `WeightedDeficitSelector`, so neutral status and neutral runtime selection
   cannot disagree on equal weights.
 - It is not the runtime-exact next request. The proxy may choose a different
-  account when previous-response affinity is present or when accumulated
-  weighted-deficit state rotates to a lower-weight account for fairness.
+  account when previous-response affinity is present, when an active
+  account-hold cooldown is still valid, or when accumulated weighted-deficit
+  state rotates to a lower-weight account for fairness.
 - Default status must label this as `preferred next`, not `selected next`.
-- Runtime audit may additionally log the actual selected account after affinity
-  and weighted-deficit selection.
+- Runtime audit may additionally log the actual selected account after affinity,
+  account-hold, and weighted-deficit selection.
+
+### Account-Hold Cooldown
+
+The proxy must avoid thrashing between OAuth accounts across adjacent normal
+requests. WebSocket lifetime pinning protects one stream; account-hold cooldown
+protects the next connection or request from immediately switching accounts
+unless the held account can no longer be used.
+
+Ownership:
+
+- `codex-router-proxy` owns process-lifetime hold state keyed by route band.
+- The hold state is intentionally not persisted. Restart clears the hold so
+  stale process memory never controls a new router instance.
+- The pure burn-down assessment owns candidate facts only; it does not know
+  cooldown state.
+- `WeightedDeficitSelector` remains generic, but the proxy must keep fairness
+  state coherent when a held account is reused during cooldown.
+
+Default v1 policy:
+
+- `minimum_account_switch_cooldown_seconds = 120`
+- tests may inject a shorter duration and deterministic clock
+- no user-facing command flag is required for v1 unless implementation already
+  has a clean runtime config path for it
+
+Selection order for non-affinity requests:
+
+1. Run route classification and local auth.
+2. Build the route-band burn-down assessment from last-known SQLite state.
+3. If no usable/reserve candidate exists, fail fast with
+   `no_verified_usable_account`.
+4. If a route-band hold exists, its age is below
+   `minimum_account_switch_cooldown_seconds`, and the held account is still in
+   the current selected pool's `weighted_candidates`, reuse that account with
+   `selection_reason=account_hold_cooldown`.
+5. Break the hold immediately when the held account is no longer in the current
+   selected pool, becomes blocked, probe-required, excluded, disabled, lacks an
+   active credential generation, or its relevant quota is exhausted.
+6. A valid previous-response affinity owner bypasses account-hold cooldown.
+   Affinity owner failure still fails closed before weighted fallback.
+7. When the hold is reused, account for that request in fairness state so the
+   held account does not receive untracked extra traffic after cooldown expires.
+8. When weighted selection chooses a new account, write a new route-band hold
+   timestamp for that selected account.
+
+The cooldown is a minimum stability window, not a quota override. It must never
+make an empty, blocked, unknown, disabled, credential-invalid, or
+probe-required account routable.
 
 Sign semantics:
 
@@ -630,8 +683,8 @@ B: unknown 5h and weekly
 ```
 
 Expected: no account is selected. The request fails fast with an audit-safe
-`no_verified_usable_account` class while background probe work is scheduled or
-signaled for A and B.
+`no_verified_usable_account` class. Prompt startup or periodic background probe
+work may later verify A or B and persist selector rows for future requests.
 
 Reason: request routing must not block on live provider quota probes.
 
@@ -1033,7 +1086,7 @@ The implementation plan must provide proof at these layers:
   `weighted_candidates`
 - tests proving empty/no-window accounts are `probe_required`, not normal usable
 - tests proving all-probe-required accounts fail fast without request-path
-  provider I/O and schedule or signal background probe work
+  provider I/O or request-path probe signaling
 - tests proving missing reset time is conservative and receives no salvage
 - tests proving mixed stale/unknown/ineligible collapse uses any-window conservative rules
 - tests proving route-band batch assessment returns the same account ordering,
@@ -1043,8 +1096,9 @@ The implementation plan must provide proof at these layers:
   `weighted_candidates`, `preferred_next`, and empty-state
   `WeightedDeficitSelector` agreement when accounts tie on weight and pressure
 - tests proving runtime exact selection may differ from `preferred_next` because
-  of previous-response affinity or accumulated weighted-deficit fairness state,
-  and that default status does not claim runtime-exact next use
+  of previous-response affinity, route-band account-hold cooldown, or
+  accumulated weighted-deficit fairness state, and that default status does not
+  claim runtime-exact next use
 - tests proving stale penalty division is applied only inside the selected pool
   and reclamped after division
 - tests proving canonical `account_id` order for deterministic selector inputs
@@ -1097,8 +1151,12 @@ The implementation plan must provide proof at these layers:
   block the first valid `/v1/responses` route after bounded first-frame parsing,
   and that selection uses persisted selector rows on that path
 - background probe proof that unknown/no-data accounts are checked outside the
-  startup/request path and that successful probe results become persisted
-  selector rows used by later requests
+  request path, after startup/listen readiness, and that successful probe
+  results become persisted selector rows used by later requests
+- account-hold cooldown proof that adjacent normal requests reuse the held
+  route-band account during the minimum cooldown, affinity bypasses the hold,
+  and exhausted, blocked, disabled, credential-invalid, or probe-required held
+  accounts are not reused
 - security call-order tests proving every row in the WebSocket preselection
   failure matrix makes zero selector-state advances, zero credential resolver
   calls, zero upstream auth injections, and zero upstream opens
