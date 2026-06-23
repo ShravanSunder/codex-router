@@ -1116,7 +1116,7 @@ fn join_result<T>(handle: thread::JoinHandle<Result<T, String>>, label: &str) ->
 }
 
 fn parse_posix_token_assignment(assignment: &str) -> Result<String, String> {
-    let prefix = "CODEX_ROUTER_TOKEN='";
+    let prefix = "export CODEX_ROUTER_TOKEN='";
     let suffix = "'\n";
     if !assignment.starts_with(prefix) || !assignment.ends_with(suffix) {
         return Err("token export assignment did not use expected POSIX shape".to_owned());

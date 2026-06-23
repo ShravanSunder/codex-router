@@ -45,6 +45,11 @@ impl UpstreamEndpoint {
     #[must_use]
     pub fn url_for_path(&self, request_path: &str) -> String {
         let relative_path = request_path.trim_start_matches('/');
+        if self.base_url.ends_with("/backend-api")
+            && let Some(mapped_path) = chatgpt_backend_codex_path(relative_path)
+        {
+            return format!("{}{mapped_path}", self.base_url);
+        }
         let upstream_path = relative_path
             .strip_prefix("v1/")
             .or_else(|| relative_path.strip_prefix("v1?"))
@@ -111,12 +116,26 @@ impl StreamingUpstreamHttpTransport for HttpUpstreamTransport {
         &self,
         request: UpstreamHttpRequest,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
+        if self.endpoint.base_url.ends_with("/backend-api")
+            && request.route_kind() == RouteKind::Models
+        {
+            return Ok(chatgpt_backend_models_response());
+        }
+
         if self.endpoint.base_url.starts_with("https://") {
             return send_https_request(&self.endpoint, request);
         }
 
         send_http_request(&self.endpoint, request)
     }
+}
+
+fn chatgpt_backend_models_response() -> StreamingHttpProxyResponse {
+    StreamingHttpProxyResponse::new(
+        200,
+        HeaderCollection::new(vec![Header::new("Content-Type", "application/json")]),
+        Box::new(Cursor::new(br#"{"models":[]}"#.to_vec())),
+    )
 }
 
 fn send_http_request(
@@ -399,11 +418,36 @@ impl UpstreamRequestBuilder {
     /// Builds the upstream request.
     #[must_use]
     pub fn build(self, upstream_auth_token: SecretString) -> UpstreamRequest {
+        self.build_with_chatgpt_account_id(upstream_auth_token, None)
+    }
+
+    /// Builds the upstream request with optional ChatGPT account affinity.
+    #[must_use]
+    pub fn build_with_chatgpt_account_id(
+        self,
+        upstream_auth_token: SecretString,
+        chatgpt_account_id: Option<&str>,
+    ) -> UpstreamRequest {
         UpstreamRequest {
             route_kind: self.route_kind,
-            headers: sanitize_headers_for_upstream(self.headers, upstream_auth_token),
+            headers: sanitize_headers_for_upstream(
+                self.headers,
+                upstream_auth_token,
+                chatgpt_account_id,
+            ),
             body: self.body,
         }
+    }
+}
+
+fn chatgpt_backend_codex_path(relative_path: &str) -> Option<&'static str> {
+    let path_without_query = relative_path
+        .split_once('?')
+        .map_or(relative_path, |(path, _)| path);
+    match path_without_query.trim_start_matches('/') {
+        "v1/responses" | "responses" => Some("/codex/responses"),
+        "v1/responses/compact" | "responses/compact" => Some("/codex/responses/compact"),
+        _ => None,
     }
 }
 

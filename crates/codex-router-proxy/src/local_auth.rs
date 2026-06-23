@@ -48,3 +48,26 @@ impl ProxyLocalAuthGate {
             .unwrap_or(false)
     }
 }
+
+/// Returns the local router token from Codex-compatible request headers.
+#[must_use]
+pub fn presented_local_token<'a>(
+    explicit_router_token: Option<&'a str>,
+    authorization: Option<&'a str>,
+) -> Option<&'a str> {
+    explicit_router_token.or_else(|| bearer_token_from_authorization(authorization))
+}
+
+fn bearer_token_from_authorization(authorization: Option<&str>) -> Option<&str> {
+    let authorization = authorization?.trim();
+    let (scheme, token) = authorization.split_once(char::is_whitespace)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    Some(token)
+}

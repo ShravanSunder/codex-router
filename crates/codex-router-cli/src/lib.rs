@@ -1226,11 +1226,11 @@ mod tests {
         let assignment =
             export_token_assignment("CODEX_ROUTER_TOKEN", "quote'and\nnewline", Shell::Posix);
 
-        assert!(assignment.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(assignment.starts_with("export CODEX_ROUTER_TOKEN='"));
         assert!(assignment.ends_with("'\n"));
         assert_eq!(assignment.matches("CODEX_ROUTER_TOKEN=").count(), 1);
         assert!(assignment.contains("'\\''"));
-        assert!(!assignment.contains("export "));
+        assert_eq!(assignment.matches("export ").count(), 1);
     }
 
     #[test]
@@ -1286,9 +1286,7 @@ mod tests {
         assert!(rendered.contains("wire_api = \"responses\"\n"));
         assert!(rendered.contains("requires_openai_auth = false\n"));
         assert!(rendered.contains("supports_websockets = true\n"));
-        assert!(rendered.contains(
-            "env_http_headers = { \"X-Codex-Router-Token\" = \"CODEX_ROUTER_TOKEN\" }\n"
-        ));
+        assert!(rendered.contains("env_key = \"CODEX_ROUTER_TOKEN\"\n"));
         assert!(!rendered.contains("sk-"));
         assert!(!rendered.contains("oauth"));
     }
@@ -1420,7 +1418,11 @@ mod tests {
             )]),
         );
 
-        assert!(export_output.stdout.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(
+            export_output
+                .stdout
+                .starts_with("export CODEX_ROUTER_TOKEN='")
+        );
         assert!(
             doctor_output
                 .stdout
@@ -1837,9 +1839,7 @@ mod tests {
         assert!(output.contains("wire_api = \"responses\"\n"));
         assert!(output.contains("requires_openai_auth = false\n"));
         assert!(output.contains("supports_websockets = true\n"));
-        assert!(output.contains(
-            "env_http_headers = { \"X-Codex-Router-Token\" = \"CODEX_ROUTER_TOKEN\" }\n"
-        ));
+        assert!(output.contains("env_key = \"CODEX_ROUTER_TOKEN\"\n"));
         assert!(!output.contains("sk-"));
         assert!(!output.contains("oauth"));
     }
@@ -3412,7 +3412,11 @@ exit 42
             ],
             CliContext::new(Vec::new()),
         );
-        assert!(first_export.stdout.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(
+            first_export
+                .stdout
+                .starts_with("export CODEX_ROUTER_TOKEN='")
+        );
 
         let rotate_output = run_cli(
             [
@@ -3438,7 +3442,11 @@ exit 42
             ],
             CliContext::new(Vec::new()),
         );
-        assert!(second_export.stdout.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(
+            second_export
+                .stdout
+                .starts_with("export CODEX_ROUTER_TOKEN='")
+        );
         assert_ne!(first_export.stdout, second_export.stdout);
     }
 

@@ -19,4 +19,4 @@ httparse.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tungstenite = "0.28.0"
+tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }

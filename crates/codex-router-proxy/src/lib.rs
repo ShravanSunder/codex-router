@@ -219,6 +219,23 @@ mod tests {
             endpoint.url_for_path("v1/models"),
             "https://api.openai.com/v1/models"
         );
+
+        let chatgpt_endpoint = match UpstreamEndpoint::new("https://chatgpt.com/backend-api") {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("ChatGPT upstream endpoint should validate: {error}"),
+        };
+        assert_eq!(
+            chatgpt_endpoint.url_for_path("/v1/responses?stream=true&cursor=abc"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            chatgpt_endpoint.websocket_url_for_path("/v1/responses"),
+            "wss://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            chatgpt_endpoint.url_for_path("/v1/responses/compact"),
+            "https://chatgpt.com/backend-api/codex/responses/compact"
+        );
     }
 
     #[test]
@@ -264,6 +281,7 @@ mod tests {
                 .with_header(Header::new("OpenAI-Beta", "responses=v1"))
                 .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("HTTP upstream transport should forward request: {error}"),
@@ -300,6 +318,7 @@ mod tests {
         let error = match service.handle(
             HttpProxyRequest::new(Method::Get, "/v1/models"),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(_response) => panic!("closed local port should not produce a response"),
             Err(error) => error,
@@ -311,6 +330,32 @@ mod tests {
             }
             other => panic!("expected upstream error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn http_upstream_transport_returns_codex_models_catalog_for_chatgpt_backend_api() {
+        let endpoint = match UpstreamEndpoint::new("https://chatgpt.com/backend-api") {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("ChatGPT backend endpoint should validate: {error}"),
+        };
+        let upstream = HttpUpstreamTransport::new(endpoint);
+        let service = HttpProxyService::new(&upstream);
+
+        let response = match service.handle(
+            HttpProxyRequest::new(Method::Get, "/v1/models"),
+            SecretString::new("selected-upstream-token"),
+            None,
+        ) {
+            Ok(response) => response,
+            Err(error) => panic!("models request should be handled locally: {error}"),
+        };
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers().value("content-type"),
+            Some("application/json")
+        );
+        assert_eq!(response.body(), br#"{"models":[]}"#);
     }
 
     #[test]
@@ -327,6 +372,7 @@ mod tests {
                 .with_header(Header::new("Authorization", "Bearer wrong"))
                 .with_body(Vec::new()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("models request should forward: {error}"),
@@ -361,6 +407,7 @@ mod tests {
                 .with_header(Header::new("Accept", "text/event-stream"))
                 .with_body(body.clone()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("responses request should forward: {error}"),
@@ -427,6 +474,7 @@ mod tests {
             HttpProxyRequest::new(Method::Post, "/v1/responses?stream=true&cursor=abc")
                 .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => response,
             Err(error) => panic!("responses request with query should forward: {error}"),
@@ -449,6 +497,7 @@ mod tests {
         let error = match service.handle(
             HttpProxyRequest::new(Method::Post, "/v1/realtime").with_body(Vec::new()),
             SecretString::new("selected-upstream-token"),
+            None,
         ) {
             Ok(response) => panic!("unsupported path should fail closed: {response:?}"),
             Err(error) => error,
@@ -2015,8 +2064,8 @@ mod tests {
                     Err(error) => panic!("local websocket request should build: {error}"),
                 };
             request.headers_mut().insert(
-                "X-Codex-Router-Token",
-                HeaderValue::from_static("current-token"),
+                "Authorization",
+                HeaderValue::from_static("Bearer current-token"),
             );
             let (mut client, _response) = match connect(request) {
                 Ok(connection) => connection,
@@ -3225,6 +3274,7 @@ mod tests {
                 .with_header(Header::new("OpenAI-Beta", "responses=v1")),
             frame.clone(),
             SecretString::new("selected-upstream-token"),
+            Some("chatgpt-account-id-canary"),
         ) {
             Ok(decision) => decision,
             Err(error) => panic!("valid first frame should route: {error:?}"),
@@ -3240,6 +3290,10 @@ mod tests {
         assert_eq!(
             headers.values("authorization"),
             vec!["Bearer selected-upstream-token"]
+        );
+        assert_eq!(
+            headers.value("chatgpt-account-id"),
+            Some("chatgpt-account-id-canary")
         );
         assert_eq!(headers.value("x-codex-router-token"), None);
         assert_eq!(headers.value("connection"), None);
@@ -3481,6 +3535,7 @@ mod tests {
                     WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Binary(vec![1, 2, 3]),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::UnsupportedFirstFrameType)
@@ -3491,6 +3546,7 @@ mod tests {
                     WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Text(br#"{"type":"not.response.create"}"#.to_vec()),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::UnexpectedFirstFrame)
@@ -3503,6 +3559,7 @@ mod tests {
                         br#"{"type":"response.create","padding":"too-large"}"#.to_vec()
                     ),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::FirstFrameTooLarge)
@@ -3513,6 +3570,7 @@ mod tests {
                     WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Text(br#"{"type":"#.to_vec()),
                     SecretString::new("selected-upstream-token"),
+                    None,
                 )
                 .err(),
             Some(WebSocketCloseReason::MalformedFirstFrame)

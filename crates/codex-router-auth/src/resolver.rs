@@ -73,6 +73,7 @@ impl Eq for CredentialResolverError {}
 pub struct ResolvedProviderCredential {
     account_id: AccountId,
     access_token: SecretString,
+    chatgpt_account_id: Option<String>,
 }
 
 impl ResolvedProviderCredential {
@@ -82,6 +83,7 @@ impl ResolvedProviderCredential {
         Self {
             account_id,
             access_token,
+            chatgpt_account_id: None,
         }
     }
 
@@ -96,6 +98,19 @@ impl ResolvedProviderCredential {
     pub const fn access_token(&self) -> &SecretString {
         &self.access_token
     }
+
+    /// Returns the ChatGPT account id for ChatGPT backend requests.
+    #[must_use]
+    pub fn chatgpt_account_id(&self) -> Option<&str> {
+        self.chatgpt_account_id.as_deref()
+    }
+
+    /// Sets the ChatGPT account id for ChatGPT backend requests.
+    #[must_use]
+    pub fn with_chatgpt_account_id(mut self, chatgpt_account_id: Option<&str>) -> Self {
+        self.chatgpt_account_id = chatgpt_account_id.map(str::to_owned);
+        self
+    }
 }
 
 impl fmt::Debug for ResolvedProviderCredential {
@@ -104,6 +119,7 @@ impl fmt::Debug for ResolvedProviderCredential {
             .debug_struct("ResolvedProviderCredential")
             .field("account_id", &self.account_id)
             .field("access_token", &"<redacted>")
+            .field("chatgpt_account_id", &self.chatgpt_account_id)
             .finish()
     }
 }
@@ -380,9 +396,14 @@ where
         let refresh_token = bundle
             .refresh_token()
             .ok_or(CredentialResolverError::RefreshUnavailable)?;
-        let refreshed = self
+        let mut refreshed = self
             .refresh_client
             .refresh_credentials(account_id, refresh_token)?;
+        if refreshed.chatgpt_account_id().is_none()
+            && let Some(chatgpt_account_id) = bundle.chatgpt_account_id()
+        {
+            refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
+        }
         let refreshed_generation = self
             .state_repository
             .next_credential_generation(account_id)
@@ -431,13 +452,14 @@ where
             return Ok(ResolvedProviderCredential::new(
                 account_id.clone(),
                 refreshed.access_token().clone(),
-            ));
+            )
+            .with_chatgpt_account_id(refreshed.chatgpt_account_id()));
         }
 
-        Ok(ResolvedProviderCredential::new(
-            account_id.clone(),
-            bundle.access_token().clone(),
-        ))
+        Ok(
+            ResolvedProviderCredential::new(account_id.clone(), bundle.access_token().clone())
+                .with_chatgpt_account_id(bundle.chatgpt_account_id()),
+        )
     }
 }
 

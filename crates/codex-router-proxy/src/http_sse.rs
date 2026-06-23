@@ -27,6 +27,7 @@ use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::local_auth::ProxyLocalAuthGate;
+use crate::local_auth::presented_local_token;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::RouteKind;
@@ -367,8 +368,9 @@ where
         &self,
         request: HttpProxyRequest,
         provider_bearer_token: SecretString,
+        chatgpt_account_id: Option<&str>,
     ) -> Result<HttpProxyResponse, HttpProxyError> {
-        self.build_upstream_request(request, provider_bearer_token)
+        self.build_upstream_request(request, provider_bearer_token, chatgpt_account_id)
             .and_then(|request| self.upstream.send(request))
     }
 
@@ -376,6 +378,7 @@ where
         &self,
         request: HttpProxyRequest,
         provider_bearer_token: SecretString,
+        chatgpt_account_id: Option<&str>,
     ) -> Result<UpstreamHttpRequest, HttpProxyError> {
         let original_path = request.path.clone();
         let classification_path = path_without_query(&request.path);
@@ -395,7 +398,7 @@ where
                 |builder, header| builder.with_header(header),
             )
             .with_body(request.body)
-            .build(provider_bearer_token);
+            .build_with_chatgpt_account_id(provider_bearer_token, chatgpt_account_id);
 
         Ok(UpstreamHttpRequest {
             method: request.method,
@@ -416,8 +419,9 @@ where
         &self,
         request: HttpProxyRequest,
         provider_bearer_token: SecretString,
+        chatgpt_account_id: Option<&str>,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
-        self.build_upstream_request(request, provider_bearer_token)
+        self.build_upstream_request(request, provider_bearer_token, chatgpt_account_id)
             .and_then(|request| self.upstream.send_streaming(request))
     }
 }
@@ -485,10 +489,10 @@ where
         request: HttpProxyRequest,
     ) -> Result<HttpProxyResponse, HttpProxyError> {
         let audit_route_kind = audit_route_kind_for_request(&request);
-        let token_generation = match self
-            .auth_gate
-            .authorize(request.header_value("x-codex-router-token"))
-        {
+        let token_generation = match self.auth_gate.authorize(presented_local_token(
+            request.header_value("x-codex-router-token"),
+            request.header_value("authorization"),
+        )) {
             Ok(generation) => generation,
             Err(reason) => {
                 self.emit_audit_event(local_auth_rejection_audit_event(
@@ -517,9 +521,11 @@ where
                 HttpProxyError::ProviderCredential { reason }
             })?;
 
-        let response = self
-            .proxy
-            .handle(request, resolved.access_token().clone())?;
+        let response = self.proxy.handle(
+            request,
+            resolved.access_token().clone(),
+            resolved.chatgpt_account_id(),
+        )?;
         self.emit_audit_event(allowed_audit_event(
             TransportKind::Http,
             audit_route_kind,
@@ -541,10 +547,10 @@ where
         request: HttpProxyRequest,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
         let audit_route_kind = audit_route_kind_for_request(&request);
-        let token_generation = match self
-            .auth_gate
-            .authorize(request.header_value("x-codex-router-token"))
-        {
+        let token_generation = match self.auth_gate.authorize(presented_local_token(
+            request.header_value("x-codex-router-token"),
+            request.header_value("authorization"),
+        )) {
             Ok(generation) => generation,
             Err(reason) => {
                 self.emit_audit_event(local_auth_rejection_audit_event(
@@ -573,9 +579,11 @@ where
                 HttpProxyError::ProviderCredential { reason }
             })?;
 
-        let response = self
-            .proxy
-            .handle_streaming(request, resolved.access_token().clone())?;
+        let response = self.proxy.handle_streaming(
+            request,
+            resolved.access_token().clone(),
+            resolved.chatgpt_account_id(),
+        )?;
         self.emit_audit_event(allowed_audit_event(
             TransportKind::Http,
             audit_route_kind,

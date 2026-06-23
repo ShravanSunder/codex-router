@@ -8,6 +8,8 @@ use std::process::Command;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_router_core::ids::AccountId;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
@@ -287,12 +289,15 @@ fn import_codex_auth_text(
     let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
     let secrets = FileSecretStore::open(router_root.join("secrets"))?;
 
-    let request = AccountImportRequest::new(
+    let mut request = AccountImportRequest::new(
         account_id.clone(),
         trimmed_label.clone(),
         imported_auth.access_token,
     )
     .with_optional_refresh_token(imported_auth.refresh_token);
+    if let Some(chatgpt_account_id) = imported_auth.chatgpt_account_id {
+        request = request.with_chatgpt_account_id(chatgpt_account_id);
+    }
     import_codex_auth_from_request(&state, &secrets, request)?;
 
     match output_mode {
@@ -411,6 +416,7 @@ pub struct AccountImportRequest {
     label: String,
     access_token: String,
     refresh_token: Option<String>,
+    chatgpt_account_id: Option<String>,
 }
 
 impl AccountImportRequest {
@@ -426,6 +432,7 @@ impl AccountImportRequest {
             label: label.into(),
             access_token: access_token.into(),
             refresh_token: None,
+            chatgpt_account_id: None,
         }
     }
 
@@ -440,6 +447,16 @@ impl AccountImportRequest {
     #[must_use]
     pub fn with_optional_refresh_token(mut self, refresh_token: Option<String>) -> Self {
         self.refresh_token = refresh_token;
+        self
+    }
+
+    /// Sets the ChatGPT account id.
+    #[must_use]
+    pub fn with_chatgpt_account_id(mut self, chatgpt_account_id: impl Into<String>) -> Self {
+        let chatgpt_account_id = chatgpt_account_id.into();
+        if !chatgpt_account_id.trim().is_empty() {
+            self.chatgpt_account_id = Some(chatgpt_account_id);
+        }
         self
     }
 }
@@ -459,8 +476,11 @@ pub fn import_codex_auth_from_request(
     AccountStateRepository::upsert_account(state, &disabled_account)?;
     let bundle_key =
         account_credential_bundle_key(&request.account_id, active_credential_generation)?;
-    let bundle =
+    let mut bundle =
         AccountCredentialBundle::imported_codex_auth(request.access_token, request.refresh_token);
+    if let Some(chatgpt_account_id) = request.chatgpt_account_id {
+        bundle = bundle.with_chatgpt_account_id(chatgpt_account_id);
+    }
     secrets.write_secret(&bundle_key, &bundle.to_secret_string()?)?;
     state.activate_account_credential_generation_and_invalidate_quota(
         &request.account_id,
@@ -529,6 +549,7 @@ fn account_id_from_label(label: &str) -> Result<AccountId, AccountCommandError> 
 struct ImportedCodexAuth {
     access_token: String,
     refresh_token: Option<String>,
+    chatgpt_account_id: Option<String>,
 }
 
 impl ImportedCodexAuth {
@@ -567,12 +588,30 @@ impl ImportedCodexAuth {
             .map(str::trim)
             .filter(|token| !token.is_empty())
             .map(str::to_owned);
+        let chatgpt_account_id = tokens
+            .get("id_token")
+            .and_then(serde_json::Value::as_str)
+            .and_then(chatgpt_account_id_from_id_token);
 
         Ok(Self {
             access_token,
             refresh_token,
+            chatgpt_account_id,
         })
     }
+}
+
+fn chatgpt_account_id_from_id_token(id_token: &str) -> Option<String> {
+    let payload_segment = id_token.split('.').nth(1)?;
+    let payload = URL_SAFE_NO_PAD.decode(payload_segment).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    value
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|account_id| !account_id.is_empty())
+        .map(str::to_owned)
 }
 
 fn normalize_auth_mode(value: &str) -> String {
