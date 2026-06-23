@@ -1136,3 +1136,29 @@ Next hard gate:
 Run focused `shravan-dev-workflow:spec-review-swarm` against R20. Do not
 proceed to `plan-creation-swarm` until that review returns a parent-verified
 `ready` verdict.
+
+## R20 Spec Review
+
+Date: 2026-06-23
+
+Phase:
+spec-review-swarm focused review of R20.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r20/review-ledger.md`
+
+Phase result:
+ready
+
+Review result:
+
+- the focused review accepted no blockers
+- R20 closed the stale `BurnDownRouteBandAssessment.*` public-reference issue
+- R20 closed the HTTP/SSE and WebSocket selector-order issue by requiring
+  shared assessment before optional route-scoped affinity
+- remaining gates are implementation proof gates, not spec-review blockers
+
+Next hard gate:
+Run `shravan-dev-workflow:plan-creation-swarm` and produce a plan that maps the
+accepted spec to explicit unit, integration, smoke, installed-Codex HTTP, and
+installed-Codex WebSocket proof gates before implementation begins.
