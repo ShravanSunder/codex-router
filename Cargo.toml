@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/codex-router-auth",
+    "crates/codex-router-cli",
+    "crates/codex-router-core",
+    "crates/codex-router-proxy",
+    "crates/codex-router-quota",
+    "crates/codex-router-secret-store",
+    "crates/codex-router-selection",
+    "crates/codex-router-state",
+    "crates/codex-router-test-support",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+codex-router-core = { path = "crates/codex-router-core", version = "0.1.0" }
+codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.0" }
+base64 = "0.22.1"
+hmac = "0.12.1"
+httparse = "1.10.1"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+await_holding_invalid_type = "deny"
+await_holding_lock = "deny"
+expect_used = "deny"
+manual_ok_or = "deny"
+manual_unwrap_or = "deny"
+needless_collect = "deny"
+redundant_clone = "deny"
+uninlined_format_args = "deny"
+unwrap_used = "deny"
