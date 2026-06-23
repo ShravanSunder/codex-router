@@ -504,3 +504,47 @@ Notes:
 - This checkpoint proves WebSocket owner-record writes and runtime recorder
   wiring. Secret-loss/replacement recovery proof remains a later T6/T7-adjacent
   gate before final completion.
+
+## T6 Secret Replacement Recovery Proof
+
+Plan rows:
+
+- If the affinity secret is missing, unreadable, or replaced during a
+  continuation, fail closed and ignore stale owner rows.
+- Never silently trust previous-response owner rows under a regenerated or
+  replaced affinity hash secret.
+
+Files changed:
+
+- `crates/codex-router-proxy/src/lib.rs`
+
+Implemented:
+
+- Added a selector-level proof that an owner row written with the original
+  affinity hash secret is ignored when continuation selection uses a replacement
+  secret.
+- Added a WebSocket router proof that missing affinity-secret provider fails
+  before selector advancement and credential resolution.
+- Added a WebSocket router proof that continuation with a replaced affinity
+  secret fails closed before credential resolution.
+
+Proof:
+
+- `cargo test -p codex-router-proxy affinity -- --nocapture` passed:
+  9 focused affinity tests.
+- `cargo test -p codex-router-proxy websocket -- --nocapture` passed:
+  24 focused WebSocket tests.
+- `cargo fmt --all -- --check` passed.
+- `git diff --check` passed.
+- `cargo test -p codex-router-proxy` passed: 87 tests.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 87, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- This closes the remaining T6 secret-loss/replacement proof row at the proxy
+  and selector boundary. Installed-Codex transport e2e gates are still ahead in
+  T9/T10.

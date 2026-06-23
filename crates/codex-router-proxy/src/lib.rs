@@ -155,6 +155,25 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct FixedAffinitySecretProvider {
+        secret: RouterAffinityHashSecret,
+    }
+
+    impl FixedAffinitySecretProvider {
+        fn new(secret: RouterAffinityHashSecret) -> Self {
+            Self { secret }
+        }
+    }
+
+    impl HttpAffinitySecretProvider for FixedAffinitySecretProvider {
+        fn load_or_create_affinity_secret(
+            &self,
+        ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
+            Ok(self.secret.clone())
+        }
+    }
+
     #[derive(Clone, Debug, Default)]
     struct RecordingAffinityOwnerRecorder {
         records: Arc<Mutex<Vec<PreviousResponseAffinityOwnerRecord>>>,
@@ -1475,6 +1494,46 @@ mod tests {
                     .with_body(br#"{"previous_response_id":"resp_missing"}"#.to_vec()),
                 TokenGeneration::new(1),
                 Some(&test_affinity_secret()),
+            ),
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing
+            })
+        );
+    }
+
+    #[test]
+    fn repository_backed_selector_affinity_replaced_secret_ignores_stale_owner() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_replaced_secret");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let original_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
+            &state,
+            "resp_old_secret",
+            &original_secret,
+            alpha.account_id(),
+        ) {
+            panic!("affinity owner should persist with original secret: {error}");
+        }
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+
+        assert_eq!(
+            selector.select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_body(br#"{"previous_response_id":"resp_old_secret"}"#.to_vec()),
+                TokenGeneration::new(1),
+                Some(&replacement_affinity_secret()),
             ),
             Err(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing
@@ -3860,6 +3919,15 @@ mod tests {
         }
     }
 
+    fn replacement_affinity_secret() -> RouterAffinityHashSecret {
+        match RouterAffinityHashSecret::new(
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        ) {
+            Ok(secret) => secret,
+            Err(error) => panic!("replacement affinity secret should parse: {error}"),
+        }
+    }
+
     fn account_id(value: &str) -> codex_router_core::ids::AccountId {
         match codex_router_core::ids::AccountId::new(value) {
             Ok(account_id) => account_id,
@@ -4405,6 +4473,27 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_websocket_router_requires_affinity_secret_before_selection() {
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+
+        assert_eq!(
+            router.route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec()),
+            ),
+            Err(WebSocketCloseReason::Selection)
+        );
+        assert!(selector.take_recorded().is_empty());
+        assert!(resolver.take_recorded().is_empty());
+    }
+
+    #[test]
     fn authenticated_websocket_router_routes_previous_response_affinity_owner() {
         let temp_dir = ProxyTestTempDir::new("websocket-router-affinity");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -4458,6 +4547,52 @@ mod tests {
             headers.values("authorization"),
             vec!["Bearer selected-upstream-token"]
         );
+    }
+
+    #[test]
+    fn authenticated_websocket_router_replaced_affinity_secret_fails_continuation_closed() {
+        let temp_dir = ProxyTestTempDir::new("websocket-router-replaced-affinity-secret");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = must_ok(SqliteStateStore::open(&database_path));
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let original_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
+            &state,
+            "resp_old_secret",
+            &original_secret,
+            alpha.account_id(),
+        ) {
+            panic!("affinity owner should persist with original secret: {error}");
+        }
+
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let replacement_secret_provider =
+            FixedAffinitySecretProvider::new(replacement_affinity_secret());
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&replacement_secret_provider);
+
+        assert_eq!(
+            router.route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                WebSocketFrame::Text(
+                    br#"{"type":"response.create","previous_response_id":"resp_old_secret"}"#
+                        .to_vec(),
+                ),
+            ),
+            Err(WebSocketCloseReason::Selection)
+        );
+        assert!(resolver.take_recorded().is_empty());
     }
 
     #[test]

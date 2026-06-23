@@ -1286,7 +1286,43 @@ Evidence:
 
 Remaining before terminal completion:
 
-- secret-loss/replacement recovery proof
+- route-native black-box proof for all routed APIs
+- installed-Codex HTTP/SSE e2e
+- installed-Codex WebSocket e2e
+- implementation review and PR-ready wrapup
+
+## Implementation Checkpoint: T6 Secret Replacement
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan checkpoint.
+
+Checkpoint result:
+complete for T6 secret-unavailable and replacement-secret recovery proof.
+
+Evidence:
+
+- `repository_backed_selector_affinity_replaced_secret_ignores_stale_owner`
+  proves stale owner rows hashed under the original secret are not trusted when
+  selection uses a replacement secret.
+- `authenticated_websocket_router_requires_affinity_secret_before_selection`
+  proves WebSocket fails before selector advancement and credential resolution
+  when the affinity secret provider is unavailable.
+- `authenticated_websocket_router_replaced_affinity_secret_fails_continuation_closed`
+  proves WebSocket continuation fails closed before credential resolution when
+  the affinity secret changes.
+- `cargo test -p codex-router-proxy affinity -- --nocapture`: 9 passed.
+- `cargo test -p codex-router-proxy websocket -- --nocapture`: 24 passed.
+- `cargo test -p codex-router-proxy`: 87 passed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed; 2 installed-Codex smoke tests remain
+  ignored by design and require the smoke script gate.
+
+Remaining before terminal completion:
+
 - route-native black-box proof for all routed APIs
 - installed-Codex HTTP/SSE e2e
 - installed-Codex WebSocket e2e
