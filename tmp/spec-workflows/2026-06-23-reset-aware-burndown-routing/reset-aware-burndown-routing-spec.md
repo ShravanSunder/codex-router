@@ -374,11 +374,14 @@ account exists, `reserve` accounts may enter. `blocked` accounts never enter.
 
 Pool order is normative:
 
-1. Build assessments for every enabled account with an active credential.
-2. If one or more `usable` accounts exist, select only from `usable`.
-3. Else if one or more `reserve` accounts exist, select only from `reserve`.
-4. Else if one or more `unknown` accounts exist, select only from `unknown`.
-5. Else return no eligible account.
+1. Build assessments for every supplied route-band account fact row, including
+   disabled accounts and accounts without an active credential generation.
+2. `excluded` and `blocked` assessments remain in `accounts` for status, JSON,
+   logs, and proof, but never enter `weighted_candidates`.
+3. If one or more `usable` accounts exist, select only from `usable`.
+4. Else if one or more `reserve` accounts exist, select only from `reserve`.
+5. Else if one or more `unknown` accounts exist, select only from `unknown`.
+6. Else return no eligible account.
 
 Within the selected pool, candidates are ordered before they are passed to
 `WeightedDeficitSelector`. This order is part of the neutral selector contract:
@@ -637,7 +640,10 @@ does not expose account id, raw score, tokens, or auth material.
 `--format json` is the explicit machine/debug format. It may include raw
 `account_id` for local scripts, but default logs, smoke transcripts, and human
 output must not copy raw `account_id` unless they are explicitly redacted or
-hashed.
+hashed. Raw local JSON stdout is allowed to contain `account_id`; any persisted
+or shared artifact that captures JSON output, including logs, traces, smoke
+transcripts, PR evidence, and review attachments, must redact or hash
+`account_id`.
 
 Default columns:
 
@@ -761,31 +767,51 @@ ssdev    enabled  ██████████ 100% left        ██░░�
 
 JSON output schema:
 
-- `route_band`
-- `selected_pool`
-- `weighted_candidates`
-- `account_id`
-- `safe_account_label`
-- `availability`
-- `freshness`
-- `routing_exclusion`
-- `next_use`
-- `limiting_window`
-- `quota_evidence_reason`
-- `short_pressure`
-- `long_pressure`
-- `short_salvage`
-- `long_salvage`
-- `salvage_tie_key`
-- `routing_reason`
-- `routing_weight`
-- `preferred_next`
-- `window_slots`
-- `windows`
+```text
+{
+  "route_band": "responses",
+  "selected_pool": "usable | reserve | unknown | none",
+  "preferred_next_account_id": "acct_..." | null,
+  "weighted_candidates": [
+    { "account_id": "acct_...", "routing_weight": 1..100 }
+  ],
+  "accounts": [
+    {
+      "account_id": "acct_...",
+      "safe_account_label": "askluna",
+      "availability": "usable | reserve | blocked | unknown | excluded",
+      "freshness": "fresh | stale | unknown",
+      "routing_exclusion": "none | disabled | missing_credential",
+      "next_use": "preferred | available | held | blocked | needs_refresh | fallback",
+      "limiting_window": "5h | weekly | unknown | none",
+      "quota_evidence_reason": "needs_quota_refresh | missing_expected_window | window_ineligible | window_exhausted | unknown_quota_window | missing_reset_time | none",
+      "short_pressure": 0..100 | null,
+      "long_pressure": 0..100 | null,
+      "short_salvage": 0..100 | null,
+      "long_salvage": 0..100 | null,
+      "salvage_tie_key": { "reset_unix_seconds": 0, "window_seconds": 18000 } | null,
+      "routing_reason": "preferred_weekly_healthier | preferred_short_reset_soon | preferred_highest_weight | available_same_pool | held_reserve | held_unknown | unknown_fallback_preferred | unknown_fallback_available | excluded_disabled | excluded_missing_credential | blocked_window_exhausted | blocked_window_ineligible | unknown_quota_window | missing_reset_time | missing_expected_window | needs_quota_refresh",
+      "routing_weight": 1..100 | null,
+      "preferred_next": true | false,
+      "window_slots": {
+        "5h": { "slot": "5h", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 18000 | null, "display_note": "string", "source_window_ids": ["string"] },
+        "weekly": { "slot": "weekly", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 604800 | null, "display_note": "string", "source_window_ids": ["string"] }
+      },
+      "windows": [
+        { "window_seconds": 18000, "status": "eligible | stale | unknown | ineligible", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "observed_unix_seconds": 0 | null, "effective": true | false, "pressure_percent": 0..100 | null, "surplus_percent": 0..100 | null, "contributed_to_salvage": true | false }
+      ]
+    }
+  ]
+}
+```
 
 JSON output may expose scores. Default table/plain output must not. The JSON
 schema must use stable enums for availability, limiting window, freshness, and
-routing reason.
+routing reason. Route-level fields are top-level. Per-account fields live only
+inside `accounts[]`, except that `weighted_candidates[]` repeats local
+`account_id` plus `routing_weight` so scripts can reproduce selector inputs.
+`preferred_next_account_id` is the route-level neutral projection;
+`accounts[].preferred_next` is the per-account boolean projection.
 
 `window_slots` contains the exact human-display slot inputs for `5h` and
 `weekly`: slot label, evidence state `known | unknown | no_data`, optional
@@ -803,6 +829,12 @@ looks like an email address, provider-derived identity, token, auth header, or
 secret-store material, the renderer must replace it with a deterministic safe
 hash/tag. Raw configured labels are not emitted by default status, logs, traces,
 or smoke transcripts.
+
+Default quota status is account-centric for the user quota route. It must not
+emit separate route-band rows such as `models`, `code_review`, or
+`memories_trace_summarize` unless an explicit future debug/multi-route mode is
+specified. Structural guardrails must assert one logical row per account, with
+only an optional blank-account continuation line for the second physical line.
 
 ## Security And Trust Context
 
@@ -872,6 +904,47 @@ Ownership:
 - weighted burn-down fallback is allowed only when no previous-response
   affinity key is present
 
+Owner record:
+
+```text
+PreviousResponseOwnerRecord {
+  affinity_key_hash,
+  account_id,
+  credential_generation,
+  route_band,
+  source_transport: http_sse | websocket,
+  created_unix_seconds
+}
+```
+
+The raw previous response id and raw canonical affinity key are sensitive
+routing metadata and must not be emitted in logs, traces, status, smoke
+transcripts, or review artifacts. The durable lookup key is
+`affinity_key_hash = hash("previous_response_id:<value>")`. The record stores
+the selected account id and the selected account's active credential generation
+at the time the upstream response id was observed.
+
+Owner record creation:
+
+- HTTP/SSE: after the proxy has selected an account and receives an upstream
+  response object or SSE event for that account, it may inspect only the
+  upstream response identifier field needed to build the affinity key. In v1,
+  the allowed field is top-level `id` on the upstream response object/event
+  data. If no valid response id is observed, no owner record is written.
+- WebSocket: after the proxy has selected and pinned an account for the
+  connection, it may inspect only the upstream response identifier field needed
+  to build the affinity key. In v1, the allowed field is top-level
+  `response.id` on an upstream response event. If no valid response id is
+  observed, no owner record is written.
+- Owner record writes happen after upstream account selection and must not feed
+  the current request's account choice.
+- Owner record writes must never log or persist raw request bodies, raw response
+  bodies, full WebSocket frames, prompts, tool arguments, or raw previous
+  response ids.
+- A later continuation owner hit is valid only when the stored account is still
+  enabled, has an active credential, the active credential generation equals the
+  stored `credential_generation`, and the account is route-eligible.
+
 Owner resolution:
 
 - affinity extraction reads only the top-level JSON field
@@ -897,6 +970,9 @@ Owner resolution:
 
 Proof must cover:
 
+- HTTP/SSE owner-record creation from the allowlisted upstream response id field
+- WebSocket owner-record creation from the allowlisted upstream response id
+  field after account pinning
 - HTTP/SSE continuation owner hit
 - WebSocket continuation owner hit
 - restart/durable owner lookup
@@ -1035,13 +1111,25 @@ The implementation plan must provide proof at these layers:
   `unknown`, never normal usable, and render the missing slot as `no data`
 - tests proving unknown, missing-reset, and no-window human slots never render
   fake `0% left`
+- tests proving disabled and missing-active-credential accounts are returned in
+  `BurnDownRouteBandAssessment.accounts` as `availability=excluded`, never enter
+  `weighted_candidates`, map to `excluded_disabled` or
+  `excluded_missing_credential`, and render as blocked without leaking unsafe
+  labels or secret material
 - CLI renderer tests proving status uses the same assessment reason and limiting-window semantics as routing
 - JSON schema tests for stable machine fields and enum values
+- JSON envelope tests proving route-level fields, `weighted_candidates[]`,
+  `accounts[]`, per-account `window_slots.{5h,weekly}`, and per-account
+  `windows[]` use the normative shape above
 - JSON schema tests proving `safe_account_label` is sanitized/hash-tagged and
   no unsafe configured label is emitted
 - JSON schema tests proving machine output contains selected pool, next use,
   window slots, all relevant windows, reset metadata, and enough safe fields to
   reconstruct the default human status explanation
+- JSON capture redaction tests proving raw local JSON stdout may contain
+  `account_id`, but any persisted/shared smoke transcript, log, trace, PR
+  evidence, or review artifact containing JSON output redacts or hashes
+  `account_id`
 - plain renderer tests proving ASCII bars, no raw scores, no account ids, and
   the same routing phrases as table mode
 - reason mapping tests from stable enum to human phrase
@@ -1054,6 +1142,8 @@ The implementation plan must provide proof at these layers:
   - unknown or partial data
   - blocked, reserve, usable, and unknown accounts
   - colorless/plain terminal mode
+  - one logical row per account with at most one blank-account continuation line
+  - no unrelated route-band rows or labels in default status output
   - negative assertions for `pp`, `bottleneck`, default `account_id`, raw score, and token-like strings
 - live-safe CLI smoke proof over persisted router state for emitted `table`,
   `plain`, and `json` status output, including redaction and negative
@@ -1065,6 +1155,10 @@ The implementation plan must provide proof at these layers:
   wrong-type first frame failure, oversized first frame failure, first-frame
   timeout failure, malformed affinity failure, and local-auth pre-upgrade
   failure before selection
+- HTTP/SSE and WebSocket affinity pin-write tests proving owner records are
+  created only from allowlisted upstream response id fields, store
+  `credential_generation`, and never emit raw previous response ids, raw
+  affinity keys, raw bodies, prompts, tool args, or full WebSocket frames
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload

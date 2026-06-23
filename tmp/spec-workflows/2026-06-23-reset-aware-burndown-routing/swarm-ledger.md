@@ -139,6 +139,25 @@ Rejected or deferred evidence:
     selection-owned pure exclusion/classification. Disabled and
     missing-credential accounts are returned as `excluded` for status, never
     selected.
+36. Build burn-down assessments for every supplied route-band account fact row,
+    then filter selected pools after classification. `excluded` and `blocked`
+    rows remain in `accounts` for status, JSON, logs, and proof but never enter
+    `weighted_candidates`.
+37. Define previous-response owner records and pin-write semantics: durable
+    affinity uses a hashed canonical key, selected account id, credential
+    generation, route band, source transport, and creation time; HTTP/SSE and
+    WebSocket pin writes may inspect only allowlisted upstream response id
+    fields and must not emit raw ids or raw bodies.
+38. Make JSON status a normative envelope with top-level route fields,
+    `preferred_next_account_id`, `weighted_candidates[]`, `accounts[]`, and
+    per-account `window_slots` and `windows`.
+39. Split raw local `--format json` stdout from shared artifacts: local JSON may
+    expose `account_id`, but logs, traces, smoke transcripts, PR evidence, and
+    review artifacts must redact or hash it.
+40. Add structural status guardrails: default status is account-centric for the
+    user quota route, has one logical row per account with only an optional
+    blank-account continuation line, and excludes unrelated route-band rows or
+    labels unless a future explicit debug/multi-route mode exists.
 
 ## Open Decisions
 

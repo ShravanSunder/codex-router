@@ -400,3 +400,39 @@ allows only top-level `type` and top-level `previous_response_id` first-frame
 reads before selection, splits `quota_evidence_reason` from final
 `routing_reason`, defines `missing_expected_window`, and separates proxy fact
 adaptation/runtime enforcement from pure burn-down exclusion/classification.
+
+## R7 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`5dd58c8259c30bdce0da84a28aa9704492379584`
+
+Review worktree:
+`/tmp/codex-router-r7-review.8GCXy0`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1151 lines before R7 fixes and was
+read in chunks 1-230, 231-460, 461-690, 691-920, and 921-1151.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r7/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- assessment inclusion contradicted excluded-account status rows
+- previous-response affinity lacked an owner-record creation/version contract
+- JSON status contract was a field inventory, not a normative envelope
+- raw local JSON `account_id` conflicted with shared-artifact redaction proof
+- status proof lacked structural guardrails for one logical row per account and
+  no unrelated route-band noise
+
+Revision applied:
+The spec now builds assessments for every supplied account fact row, keeps
+excluded/blocked rows out of `weighted_candidates`, defines previous-response
+owner-record shape and pin-write rules, distinguishes raw local JSON from
+redacted shared artifacts, defines a normative JSON envelope, and adds structural
+status proof guardrails.
