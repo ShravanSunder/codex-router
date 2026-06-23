@@ -1004,7 +1004,7 @@ commands:
   account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account list [--router-root <path>]
   quota refresh [--router-root <path>] [--base-url <url>]
-  quota status [--router-root <path>] [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]
+  quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -1209,7 +1209,7 @@ mod tests {
             "account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets",
             "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
             "quota refresh [--router-root <path>] [--base-url <url>]",
-            "quota status [--router-root <path>] [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]",
+            "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]",
             "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>]",
         ] {
             assert!(
@@ -1226,11 +1226,10 @@ mod tests {
         let assignment =
             export_token_assignment("CODEX_ROUTER_TOKEN", "quote'and\nnewline", Shell::Posix);
 
-        assert!(assignment.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(assignment.starts_with("export CODEX_ROUTER_TOKEN='"));
         assert!(assignment.ends_with("'\n"));
         assert_eq!(assignment.matches("CODEX_ROUTER_TOKEN=").count(), 1);
         assert!(assignment.contains("'\\''"));
-        assert!(!assignment.contains("export "));
     }
 
     #[test]
@@ -1286,9 +1285,8 @@ mod tests {
         assert!(rendered.contains("wire_api = \"responses\"\n"));
         assert!(rendered.contains("requires_openai_auth = false\n"));
         assert!(rendered.contains("supports_websockets = true\n"));
-        assert!(rendered.contains(
-            "env_http_headers = { \"X-Codex-Router-Token\" = \"CODEX_ROUTER_TOKEN\" }\n"
-        ));
+        assert!(rendered.contains("env_key = \"CODEX_ROUTER_TOKEN\"\n"));
+        assert!(!rendered.contains("env_http_headers"));
         assert!(!rendered.contains("sk-"));
         assert!(!rendered.contains("oauth"));
     }
@@ -1420,7 +1418,11 @@ mod tests {
             )]),
         );
 
-        assert!(export_output.stdout.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(
+            export_output
+                .stdout
+                .starts_with("export CODEX_ROUTER_TOKEN='")
+        );
         assert!(
             doctor_output
                 .stdout
@@ -1837,9 +1839,8 @@ mod tests {
         assert!(output.contains("wire_api = \"responses\"\n"));
         assert!(output.contains("requires_openai_auth = false\n"));
         assert!(output.contains("supports_websockets = true\n"));
-        assert!(output.contains(
-            "env_http_headers = { \"X-Codex-Router-Token\" = \"CODEX_ROUTER_TOKEN\" }\n"
-        ));
+        assert!(output.contains("env_key = \"CODEX_ROUTER_TOKEN\"\n"));
+        assert!(!output.contains("env_http_headers"));
         assert!(!output.contains("sk-"));
         assert!(!output.contains("oauth"));
     }
@@ -1850,10 +1851,11 @@ mod tests {
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
         let auth_json = test_root.path().join("auth.json");
-        must_ok(fs::write(
-            &auth_json,
-            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"access-token-canary","refresh_token":"refresh-token-canary"}}"#,
-        ));
+        let id_token = fake_id_token_with_chatgpt_account_id("chatgpt-account-id-canary");
+        let auth_json_text = format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"access-token-canary","refresh_token":"refresh-token-canary","id_token":"{id_token}"}}}}"#
+        );
+        must_ok(fs::write(&auth_json, &auth_json_text));
 
         let output = run_cli(
             [
@@ -1888,6 +1890,10 @@ mod tests {
         assert_eq!(
             bundle.refresh_token().map(SecretString::expose_secret),
             Some("refresh-token-canary")
+        );
+        assert_eq!(
+            bundle.chatgpt_account_id(),
+            Some("chatgpt-account-id-canary")
         );
         assert!(output.stdout.contains("logged in account: primary\n"));
         assert!(output.stdout.contains("account_id: acct_primary\n"));
@@ -2050,10 +2056,11 @@ exit 42
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
         let auth_json = test_root.path().join("auth.json");
-        must_ok(fs::write(
-            &auth_json,
-            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"access-token-canary","refresh_token":"refresh-token-canary"}}"#,
-        ));
+        let id_token = fake_id_token_with_chatgpt_account_id("chatgpt-account-id-canary");
+        let auth_json_text = format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"access-token-canary","refresh_token":"refresh-token-canary","id_token":"{id_token}"}}}}"#
+        );
+        must_ok(fs::write(&auth_json, &auth_json_text));
 
         let output = run_cli(
             [
@@ -2089,15 +2096,16 @@ exit 42
             bundle.refresh_token().map(SecretString::expose_secret),
             Some("refresh-token-canary")
         );
+        assert_eq!(
+            bundle.chatgpt_account_id(),
+            Some("chatgpt-account-id-canary")
+        );
         assert!(output.stdout.contains("imported account: primary\n"));
         assert!(output.stdout.contains("account_id: acct_primary\n"));
         assert!(!output.stdout.contains("access-token-canary"));
         assert!(!output.stdout.contains("refresh-token-canary"));
         assert!(output.stderr.is_empty());
-        assert_eq!(
-            must_ok(fs::read_to_string(&auth_json)),
-            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"access-token-canary","refresh_token":"refresh-token-canary"}}"#
-        );
+        assert_eq!(must_ok(fs::read_to_string(&auth_json)), auth_json_text);
     }
 
     #[test]
@@ -2269,7 +2277,8 @@ exit 42
             account_id("acct_primary"),
             "primary",
             AccountStatus::Enabled,
-        );
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(
             &state,
             &primary_account,
@@ -2310,11 +2319,13 @@ exit 42
         assert!(output.stdout.contains("account"));
         assert!(output.stdout.contains("primary"));
         assert!(output.stdout.contains("72%"));
-        assert!(output.stdout.contains("✓ ready"));
+        assert!(output.stdout.contains("needs probe"));
         assert!(!output.stdout.contains("acct_primary"));
         assert!(!output.stdout.contains("responses"));
         assert!(!output.stdout.contains("models"));
         assert!(!output.stdout.contains("44%"));
+        assert!(!output.stdout.contains("pp"));
+        assert!(!output.stdout.contains("bottleneck"));
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));
         assert!(output.stderr.is_empty());
@@ -2331,7 +2342,8 @@ exit 42
             account_id("acct_snapshot_pace"),
             "snapshot",
             AccountStatus::Enabled,
-        );
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(
             &state,
             &primary_account,
@@ -2364,19 +2376,12 @@ exit 42
         );
 
         let lines = output.stdout.lines().collect::<Vec<_>>();
-        assert_eq!(
-            lines[0],
-            "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
-        );
+        assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t5h\t75%\tin 2h 46m\t▼ 19pp under\tin 6h 40m\t✓ ready"
+            "snapshot\tenabled\t[########--] 75% resets in 2h 46m\t[----------] - needs probe\t↻ needs probe 5h 75%\tno"
         );
-        assert_eq!(
-            lines[2],
-            "snapshot\tenabled\tweekly\t-\t-\t-\t-\t↻ needs refresh"
-        );
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
         assert!(output.stderr.is_empty());
     }
 
@@ -2391,7 +2396,8 @@ exit 42
             account_id("acct_primary"),
             "primary",
             AccountStatus::Enabled,
-        );
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(
             &state,
             &primary_account,
@@ -2441,21 +2447,100 @@ exit 42
         );
 
         let lines = output.stdout.lines().collect::<Vec<_>>();
-        assert_eq!(
-            lines[0],
-            "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
-        );
+        assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "primary\tenabled\t5h\t25%\tin 2h 30m\t▲ 25pp over\tin 50m\t✓ ready"
+            "primary\tenabled\t[###-------] 25% resets in 2h 30m\t[########--] 80% resets in 6d 23h\t✓ preferred 5h 25%\tnext"
         );
-        assert_eq!(
-            lines[2],
-            "primary\tenabled\tweekly\t80%\tin 6d 23h\t▲ 20pp over\tin 1h 6m\t✓ ready"
-        );
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
         assert!(!output.stdout.contains("acct_primary"));
         assert!(!output.stdout.contains("responses"));
+        assert!(!output.stdout.contains("pp"));
+        assert!(!output.stdout.contains("bottleneck"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
+        let test_root = TestRoot::new("quota-status-json");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let primary_account = AccountRecord::new(
+            account_id("acct_primary"),
+            "primary",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        let five_hour_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary"),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(25)
+        .with_reset_unix_seconds(20_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(10_000);
+        must_ok(SelectorQuotaRepository::upsert_selector_window(
+            &state,
+            &five_hour_window,
+        ));
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary"),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(614_800)
+        .with_observed_unix_seconds(10_000);
+        must_ok(SelectorQuotaRepository::upsert_selector_window(
+            &state,
+            &weekly_window,
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "json",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let parsed: serde_json::Value = must_ok(serde_json::from_str(&output.stdout));
+        assert_eq!(parsed["route_band"], "responses");
+        assert_eq!(parsed["selected_pool"], "usable");
+        assert_eq!(parsed["preferred_next_account_id"], "acct_primary");
+        assert_eq!(parsed["accounts"][0]["account_id"], "acct_primary");
+        assert_eq!(parsed["accounts"][0]["safe_account_label"], "primary");
+        assert_eq!(parsed["accounts"][0]["availability"], "usable");
+        assert_eq!(parsed["accounts"][0]["freshness"], "fresh");
+        assert_eq!(parsed["accounts"][0]["routing_reason"], "preferred_next");
+        assert_eq!(parsed["accounts"][0]["preferred_next"], true);
+        assert_eq!(parsed["accounts"][0]["next_use"], "next");
+        assert_eq!(parsed["accounts"][0]["short_pressure_percent"], 25);
+        assert_eq!(parsed["accounts"][0]["weekly_pressure_percent"], 20);
+        assert_eq!(parsed["accounts"][0]["limiting_window"]["label"], "5h");
+        assert_eq!(parsed["accounts"][0]["windows"][0]["remaining_percent"], 25);
+        assert_eq!(parsed["accounts"][0]["windows"][1]["remaining_percent"], 80);
+        assert!(!output.stdout.contains("access-token"));
+        assert!(!output.stdout.contains("refresh-token"));
+        assert!(!output.stdout.contains("authorization"));
+        assert!(!output.stdout.contains("bottleneck"));
+        assert!(!output.stdout.contains("pp"));
         assert!(output.stderr.is_empty());
     }
 
@@ -3412,7 +3497,11 @@ exit 42
             ],
             CliContext::new(Vec::new()),
         );
-        assert!(first_export.stdout.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(
+            first_export
+                .stdout
+                .starts_with("export CODEX_ROUTER_TOKEN='")
+        );
 
         let rotate_output = run_cli(
             [
@@ -3438,7 +3527,11 @@ exit 42
             ],
             CliContext::new(Vec::new()),
         );
-        assert!(second_export.stdout.starts_with("CODEX_ROUTER_TOKEN='"));
+        assert!(
+            second_export
+                .stdout
+                .starts_with("export CODEX_ROUTER_TOKEN='")
+        );
         assert_ne!(first_export.stdout, second_export.stdout);
     }
 
@@ -4156,6 +4249,21 @@ exit 42
         }
     }
 
+    fn fake_id_token_with_chatgpt_account_id(account_id: &str) -> String {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id
+            }
+        });
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(payload.to_string())
+        )
+    }
+
     fn remove_dir_all(path: &Path) {
         if let Err(error) = fs::remove_dir_all(path) {
             panic!(
@@ -4216,18 +4324,32 @@ exit 42
         route_band: &str,
         remaining_headroom: u32,
     ) {
-        let selector_window = PersistedSelectorQuotaWindow::new(
+        let short_window = PersistedSelectorQuotaWindow::new(
             account_id.clone(),
             route_band,
             18_000,
             SelectorQuotaWindowStatus::Eligible,
         )
         .with_remaining_headroom(remaining_headroom)
+        .with_reset_unix_seconds(18_000)
         .with_effective(true)
         .with_observed_unix_seconds(1_000);
         must_ok(SelectorQuotaRepository::upsert_selector_window(
             state,
-            &selector_window,
+            &short_window,
+        ));
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            route_band,
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(100)
+        .with_reset_unix_seconds(604_800)
+        .with_observed_unix_seconds(1_000);
+        must_ok(SelectorQuotaRepository::upsert_selector_window(
+            state,
+            &weekly_window,
         ));
     }
 

@@ -192,3 +192,45 @@ Proof:
 - `cargo test -p codex-router-proxy`
   - result: pass
   - count: 70 passed, 0 failed
+
+## T4 Quota Status UX Checkpoint
+
+Implemented:
+
+- `codex-router quota status` now renders one account-centric row per account
+  with `5h`, `weekly`, `routing`, and `next use` columns.
+- table mode uses Unicode quota bars and multi-line cells; plain mode uses
+  ASCII bars and tab-separated fields.
+- human output omits account ids, raw scores, `pp`, and `bottleneck` wording.
+- status rendering consumes `codex-router-selection::burn_down` assessment
+  output instead of duplicating routing math in the CLI.
+- JSON status format was added as a secondary debug/proof surface with selected
+  pool, preferred account id, stable enum strings, per-window reset metadata,
+  pressure/salvage percentages, routing weight, and limiting-window fields.
+- `tests/smoke/quota_status_fixture.sh` seeds persisted SQLite selector rows
+  and runs the real CLI for `table`, `plain`, and `json` output with leak/noise
+  assertions.
+- serve/WebSocket CLI smoke fixtures now seed both 5h and weekly selector
+  windows with reset metadata so they exercise the new fail-closed quota
+  contract.
+
+Proof:
+
+- `cargo fmt --all -- --check`
+  - result: pass
+- `cargo test -p codex-router-cli quota_status -- --nocapture`
+  - result: pass
+  - count: 5 passed, 0 failed
+- `cargo test -p codex-router-cli`
+  - result: pass
+  - count: 57 passed, 0 failed
+- `tests/smoke/quota_status_fixture.sh`
+  - result: pass
+  - artifact root from run:
+    `/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T//codex-router-quota-status.U6bYkb`
+
+Remaining T4 caveat:
+
+- `--all-limits` is still accepted for compatibility, but the product status
+  view intentionally renders the user quota route band (`responses`) because
+  the spec centers the concise account-use decision.
