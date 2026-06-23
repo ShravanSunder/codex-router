@@ -127,6 +127,18 @@ Rejected or deferred evidence:
     WebSocket transport, reset-aware multi-account choice, status agreement,
     pinning, and redacted transcripts. Live OAuth/quota remains separate and
     approval-gated.
+32. Treat WebSocket `/v1/responses` route band as path-derived in v1; before
+    selection the router may read only top-level `type` and top-level
+    `previous_response_id` from the first frame.
+33. Split raw quota evidence from final public/audit routing explanation:
+    `quota_evidence_reason` records evidence before pool choice, while
+    `routing_reason` is assigned after selected-pool mapping.
+34. Missing exactly one expected v1 response window, 5h or weekly, makes the
+    account `unknown` and renders the missing slot as `no data`.
+35. Separate proxy-owned account fact adaptation/runtime enforcement from
+    selection-owned pure exclusion/classification. Disabled and
+    missing-credential accounts are returned as `excluded` for status, never
+    selected.
 
 ## Open Decisions
 

@@ -366,3 +366,37 @@ The spec now defines fallback next-use semantics, exact salvage tie key,
 unknown/no-data placeholders, expanded JSON audit shape, exact
 `previous_response_id` affinity extraction, WebSocket preselection failure
 matrix, and installed-Codex-through-router e2e acceptance.
+
+## R6 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`8dab4631a8f2cdabfaaedb0be233f633f15fa04d`
+
+Review worktree:
+`/tmp/codex-router-r6-review.8EyxlP`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1106 lines and was read in chunks
+1-200, 201-400, 401-600, 601-800, 801-1000, and 1001-1106.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r6/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- WebSocket first-frame local field allowlist was not exact
+- account eligibility ownership was overloaded
+- unknown fallback final `routing_reason` conflicted with raw evidence reason
+- partial v1 5h/weekly window sets were not normatively collapsed
+
+Revision applied:
+The spec now makes `/v1/responses` route band path-derived before selection,
+allows only top-level `type` and top-level `previous_response_id` first-frame
+reads before selection, splits `quota_evidence_reason` from final
+`routing_reason`, defines `missing_expected_window`, and separates proxy fact
+adaptation/runtime enforcement from pure burn-down exclusion/classification.

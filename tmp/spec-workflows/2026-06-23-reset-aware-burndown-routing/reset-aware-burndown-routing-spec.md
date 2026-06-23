@@ -111,15 +111,17 @@ persisted selector quota windows
   exposes: SelectorQuotaRepository::selector_inputs_for_route_band(route_band)
 
 burn-down assessment
-  owns: reset-aware pressure math and structured explanation
+  owns: reset-aware pressure math, pure routability/exclusion classification
+        from supplied facts, and structured explanation
   crate: codex-router-selection::burn_down
   inputs: BurnDownRouteBandAssessmentInput, fixed v1 route band policy
   exposes: BurnDownRouteBandAssessment { accounts, selected_pool, weighted_candidates, preferred_next }
   must not depend on: codex-router-state, codex-router-proxy, codex-router-cli
 
 proxy account selection
-  owns: route classification, account eligibility, previous-response affinity,
-        process-lifetime fairness state, and runtime exact account choice
+  owns: route classification, account fact adaptation, previous-response
+        affinity resolution/enforcement, process-lifetime fairness state, and
+        runtime exact account choice
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
   consumes: BurnDownRouteBandAssessment.weighted_candidates
   exposes: SelectedAccountDecision
@@ -147,8 +149,12 @@ Dependency contract:
 - `codex-router-state` remains the source of persisted selector rows and must
   not depend on selection, proxy, or CLI crates.
 - `codex-router-proxy` owns the runtime adapter from `SelectorQuotaInput` to
-  `BurnDownRouteBandAssessmentInput`, then feeds the selected pool's positive
-  scalar weights into `WeightedDeficitSelector`.
+  `BurnDownRouteBandAssessmentInput`, including supplying account admin and
+  active-credential-generation facts. It then feeds the selected pool's
+  positive scalar weights into `WeightedDeficitSelector`.
+- `codex-router-selection` may classify a supplied account as excluded from
+  routing from those facts, but it must not resolve credentials, read secret
+  stores, or decide whether a credential can be refreshed.
 - `codex-router-cli` may depend on `codex-router-selection` so status and
   routing share the same assessment output. It owns formatting only.
 - Reimplementing pressure, reserve, unknown, or limiting-window math in the CLI
@@ -262,31 +268,46 @@ For windows with missing reset:
 
 ### Account-Level Collapse
 
-The assessment first applies account and window collapse before weight math:
+The assessment first applies account and window collapse before weight math.
+`quota_evidence_reason` records raw quota evidence before route-band pool
+selection. Final `routing_reason` is assigned only after selected-pool/public
+mapping, so unknown fallback rows can render `fallback` without losing the raw
+reason that quota evidence is incomplete.
 
-1. If the account is not enabled, exclude it from routing. This is not a quota
-   availability class.
-2. If there is no active credential generation, exclude it from routing. This
-   is not a quota availability class.
+1. If the account is not enabled, return `availability=excluded`,
+   `routing_exclusion=disabled`, and omit it from selected pools. This is not a
+   quota availability class, but it is still returned in `accounts` so status
+   can render it without reimplementing eligibility.
+2. If there is no active credential generation, return `availability=excluded`,
+   `routing_exclusion=missing_credential`, and omit it from selected pools. This
+   is not a quota availability class, but it is still returned in `accounts`.
 3. If there are no relevant route-band windows, return `unknown` with
-   `routing_weight = 1` and reason `needs_quota_refresh`.
-4. If any relevant window is `Ineligible`, return `blocked` with reason
-   `window_ineligible`.
-5. If any relevant window has `remaining_headroom == 0`, return `blocked` with
-   reason `window_exhausted`.
-6. If any relevant window is `Unknown`, return `unknown` with reason
-   `unknown_quota_window`.
-7. If any relevant non-blocked window has no reset time, return `unknown` with
-   reason `missing_reset_time`.
-8. If at least one relevant window is `Stale` and none are blocked or unknown,
+   `routing_weight = 1` and `quota_evidence_reason=needs_quota_refresh`.
+4. In v1, the expected public response quota shape is one 5h window
+   (`window_seconds=18_000`) and one weekly window
+   (`window_seconds=604_800`). If only one of those expected windows is present
+   for the route band, return `unknown` with
+   `quota_evidence_reason=missing_expected_window`; the present window may
+   provide conservative partial-headroom ordering inside the all-unknown pool,
+   but the account must not compete with known `usable` or `reserve` accounts.
+5. If any relevant window is `Ineligible`, return `blocked` with
+   `quota_evidence_reason=window_ineligible`.
+6. If any relevant window has `remaining_headroom == 0`, return `blocked` with
+   `quota_evidence_reason=window_exhausted`.
+7. If any relevant window is `Unknown`, return `unknown` with
+   `quota_evidence_reason=unknown_quota_window`.
+8. If any relevant non-blocked window has no reset time, return `unknown` with
+   `quota_evidence_reason=missing_reset_time`.
+9. If at least one relevant window is `Stale` and none are blocked or unknown,
    compute burn-down normally and mark freshness as `stale`.
-9. If every relevant window is `Eligible`, compute burn-down normally and mark
+10. If every relevant window is `Eligible`, compute burn-down normally and mark
    freshness as `fresh`.
 
 Freshness collapse is any-window conservative:
 
 - one stale window makes the account stale
 - one unknown or missing-reset window makes the account unknown
+- one missing expected v1 5h or weekly window makes the account unknown
 - one ineligible or exhausted window blocks the account
 - the `effective` marker never overrides a worse relevant window
 
@@ -294,6 +315,8 @@ Freshness collapse is any-window conservative:
 
 The assessment returns exactly one availability class:
 
+- `excluded`: account is disabled or lacks an active credential generation; it
+  is returned for status only and never enters any selected pool.
 - `blocked`: at least one relevant window is ineligible or exhausted.
 - `reserve`: account is not exhausted, but long-window pressure is dangerous enough that it should be used only when no normal account is available.
 - `usable`: account can be selected normally.
@@ -332,9 +355,11 @@ accounts.
 
 - `account_id`
 - `account_label`
-- `availability`
+- `availability: usable | reserve | blocked | unknown | excluded`
 - `freshness: fresh | stale | unknown`
+- `routing_exclusion: none | disabled | missing_credential`
 - `limiting_window`
+- `quota_evidence_reason`
 - `short_pressure`
 - `long_pressure`
 - `short_salvage`
@@ -409,7 +434,7 @@ Then:
 
 For each selectable `unknown` account:
 
-- `routing_reason = needs_quota_refresh`
+- preserve the `quota_evidence_reason` from account-level collapse
 - unknown candidates never receive reset-salvage bonus
 - if at least one known relevant window has headroom, compute
   `routing_weight = clamp(min_known_headroom - reserve_pressure_threshold, 1..100)`
@@ -664,6 +689,7 @@ Normative vocabulary:
 | `reserve` | held while a usable account exists | `availability=reserve` |
 | `blocked` | cannot be selected for this route band | `availability=blocked` |
 | `unknown` | needs refresh; fallback only | `availability=unknown` |
+| `excluded` | not routable because account is disabled or has no active credential | `availability=excluded` |
 | `limiting window` | the 5h or weekly window driving the decision | `limiting_window` |
 | `pressure` | quota is being spent faster than reset pace | `pressure_percent` |
 | `preferred next` | this account is the neutral next normal candidate, before affinity or accumulated fairness state | `preferred_next=true` |
@@ -683,10 +709,13 @@ Stable routing reason enum:
 | `held_unknown` | `held: needs refresh` |
 | `unknown_fallback_preferred` | `fallback: needs refresh` |
 | `unknown_fallback_available` | `fallback: same unknown pool` |
+| `excluded_disabled` | `blocked: disabled` |
+| `excluded_missing_credential` | `blocked: missing credential` |
 | `blocked_window_exhausted` | `blocked: quota empty` |
 | `blocked_window_ineligible` | `blocked: quota ineligible` |
 | `unknown_quota_window` | `needs refresh: unknown quota` |
 | `missing_reset_time` | `needs refresh: missing reset` |
+| `missing_expected_window` | `needs refresh: missing 5h or weekly` |
 | `needs_quota_refresh` | `needs refresh` |
 
 Public reason mapping:
@@ -701,10 +730,13 @@ Public reason mapping:
 | unknown account while usable or reserve pool exists | `held_unknown` | `held: needs refresh` | `held` |
 | preferred unknown account when selected pool is unknown | `unknown_fallback_preferred` | `fallback: needs refresh` | `fallback` |
 | non-preferred unknown account when selected pool is unknown | `unknown_fallback_available` | `fallback: same unknown pool` | `fallback` |
+| disabled account | `excluded_disabled` | `blocked: disabled` | `blocked` |
+| account with no active credential generation | `excluded_missing_credential` | `blocked: missing credential` | `blocked` |
 | exhausted relevant window | `blocked_window_exhausted` | `blocked: quota empty` | `blocked` |
 | ineligible relevant window | `blocked_window_ineligible` | `blocked: quota ineligible` | `blocked` |
 | unknown relevant window | `unknown_quota_window` | `needs refresh: unknown quota` | `needs refresh` |
 | missing reset time | `missing_reset_time` | `needs refresh: missing reset` | `needs refresh` |
+| exactly one expected v1 5h or weekly window missing | `missing_expected_window` | `needs refresh: missing 5h or weekly` | `needs refresh` |
 | no relevant route-band windows | `needs_quota_refresh` | `needs refresh` | `needs refresh` |
 
 Default human output must not contain:
@@ -736,8 +768,10 @@ JSON output schema:
 - `safe_account_label`
 - `availability`
 - `freshness`
+- `routing_exclusion`
 - `next_use`
 - `limiting_window`
+- `quota_evidence_reason`
 - `short_pressure`
 - `long_pressure`
 - `short_salvage`
@@ -894,8 +928,10 @@ WebSocket routing order is normative:
    - maximum first frame size: 1 MiB
    - maximum wait for first frame: 250 ms
    - accepted first frame type: `response.create`
-   - locally read fields: `type`, route-band metadata needed for `responses`,
-     and previous-response affinity metadata
+   - locally read fields before selection: top-level `type` and top-level
+     `previous_response_id` only
+   - no route-band field is read from the first-frame body in v1; the
+     `/v1/responses` WebSocket path fixes the route band to `responses`
    - full request-schema validation remains upstream-owned
 5. Parse only the routing metadata needed for route-band assessment from the
    first frame; do not log the full payload.
@@ -947,8 +983,11 @@ Required WebSocket proof:
 - malformed, wrong-type, oversized, timed-out, unsupported, auth-failed, and
   affinity-failed paths show zero selector advance, zero credential resolver
   calls, zero upstream auth injection, and zero upstream opens
-- a local-field allowlist canary proves first-frame parsing reads only `type`,
-  route-band metadata, and previous-response affinity metadata before selection
+- a local-field allowlist canary proves first-frame parsing reads only top-level
+  `type` and top-level `previous_response_id` before selection; any
+  non-allowlisted body field, including `model`, `input`, `metadata`, `tools`,
+  prompt text, or request body content, must not affect route-band selection,
+  logs, traces, or audit records before upstream-owned validation
 
 Allowed and forbidden emission surfaces:
 
@@ -992,6 +1031,8 @@ The implementation plan must provide proof at these layers:
   all-unknown fallback pool
 - tests proving all-unknown fallback emits `fallback` next-use rows without
   implying healthy quota
+- tests proving accounts with exactly one expected v1 window missing are
+  `unknown`, never normal usable, and render the missing slot as `no data`
 - tests proving unknown, missing-reset, and no-window human slots never render
   fake `0% left`
 - CLI renderer tests proving status uses the same assessment reason and limiting-window semantics as routing
@@ -1027,6 +1068,10 @@ The implementation plan must provide proof at these layers:
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload
+- WebSocket first-frame allowlist proof with canary values in non-allowlisted
+  fields such as `model`, `input`, `metadata`, `tools`, and prompt text,
+  proving only top-level `type` and top-level `previous_response_id` are read
+  before selection
 - WebSocket non-blocking proof that delayed or failing quota refresh does not
   block the first valid `/v1/responses` route after bounded first-frame parsing,
   and that selection uses persisted selector rows on that path
