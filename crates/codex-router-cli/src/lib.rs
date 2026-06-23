@@ -2310,9 +2310,9 @@ exit 42
         assert!(output.stdout.contains("account"));
         assert!(output.stdout.contains("primary"));
         assert!(output.stdout.contains("72%"));
-        assert!(output.stdout.contains("✓ ready"));
+        assert!(output.stdout.contains("███████░░░ 72%"));
+        assert!(output.stdout.contains("↻ needs refresh"));
         assert!(!output.stdout.contains("acct_primary"));
-        assert!(!output.stdout.contains("responses"));
         assert!(!output.stdout.contains("models"));
         assert!(!output.stdout.contains("44%"));
         assert!(!output.stdout.contains("access-token"));
@@ -2364,24 +2364,21 @@ exit 42
         );
 
         let lines = output.stdout.lines().collect::<Vec<_>>();
-        assert_eq!(
-            lines[0],
-            "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
-        );
+        assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t5h\t75%\tin 2h 46m\t▼ 19pp under\tin 6h 40m\t✓ ready"
+            "snapshot\tenabled\t████████░░ 75% resets in 2h 46m\t░░░░░░░░░░ - needs refresh\t↻ needs refresh\tno"
         );
         assert_eq!(
             lines[2],
-            "snapshot\tenabled\tweekly\t-\t-\t-\t-\t↻ needs refresh"
+            "responses route\tnext: none\twhy: no usable accounts"
         );
         assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
     }
 
     #[test]
-    fn quota_status_shows_two_user_quota_windows_per_account() {
+    fn quota_status_shows_one_unicode_bar_row_per_account_with_selector_summary() {
         let test_root = TestRoot::new("quota-status-all-limits");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
@@ -2441,21 +2438,18 @@ exit 42
         );
 
         let lines = output.stdout.lines().collect::<Vec<_>>();
-        assert_eq!(
-            lines[0],
-            "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
-        );
+        assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "primary\tenabled\t5h\t25%\tin 2h 30m\t▲ 25pp over\tin 50m\t✓ ready"
+            "primary\tenabled\t███░░░░░░░ 25% resets in 2h 30m\t████████░░ 80% resets in 6d 23h\t✓ usable bottleneck 25%\tnext"
         );
         assert_eq!(
             lines[2],
-            "primary\tenabled\tweekly\t80%\tin 6d 23h\t▲ 20pp over\tin 1h 6m\t✓ ready"
+            "responses route\tnext: primary\twhy: highest usable bottleneck 25%"
         );
         assert_eq!(lines.len(), 3);
         assert!(!output.stdout.contains("acct_primary"));
-        assert!(!output.stdout.contains("responses"));
+        assert!(!output.stdout.contains("pp"));
         assert!(output.stderr.is_empty());
     }
 

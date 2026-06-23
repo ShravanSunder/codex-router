@@ -783,20 +783,10 @@ fn quota_status_rows(
             .iter()
             .find(|input| input.account_id() == account.account_id());
         if let Some(selector_input) = selector_input {
-            for window_seconds in USER_QUOTA_WINDOWS {
-                let window = selector_input
-                    .windows()
-                    .iter()
-                    .find(|window| window.limit_window_seconds() == window_seconds);
-                rows.push(match window {
-                    Some(window) => QuotaStatusRow::from_selector_window(
-                        selector_input,
-                        window,
-                        now_unix_seconds,
-                    ),
-                    None => QuotaStatusRow::missing_selector_window(account, window_seconds),
-                });
-            }
+            rows.push(QuotaStatusRow::from_selector_input(
+                selector_input,
+                now_unix_seconds,
+            ));
             continue;
         }
 
@@ -808,22 +798,13 @@ fn quota_status_rows(
             rows.push(QuotaStatusRow::from_snapshot(
                 account,
                 &snapshot,
-                USER_QUOTA_WINDOWS[0],
                 now_unix_seconds,
             ));
-            rows.push(QuotaStatusRow::missing_selector_window(
-                account,
-                USER_QUOTA_WINDOWS[1],
-            ));
         } else {
-            for window_seconds in USER_QUOTA_WINDOWS {
-                rows.push(QuotaStatusRow::missing_selector_window(
-                    account,
-                    window_seconds,
-                ));
-            }
+            rows.push(QuotaStatusRow::missing(account));
         }
     }
+    mark_next_usable_account(&mut rows);
 
     Ok(rows)
 }
@@ -834,190 +815,331 @@ fn write_quota_table(
 ) -> Result<(), QuotaCommandError> {
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header([
-        "account", "status", "window", "left", "resets", "pace", "runout", "note",
-    ]);
+    table.set_header(["account", "status", "5h", "weekly", "routing", "next use"]);
     for row in rows {
         table.add_row([
             row.account_label.as_str(),
             row.account_status.as_str(),
-            row.window.as_str(),
-            row.quota_left.as_str(),
-            row.reset.as_str(),
-            row.pace.as_str(),
-            row.runout.as_str(),
-            row.note.as_str(),
+            row.five_hour.as_str(),
+            row.weekly.as_str(),
+            row.routing.as_str(),
+            row.next_use.as_str(),
         ]);
     }
 
-    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)
+    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)?;
+    write_selector_summary_table(stdout, rows)
 }
 
 fn write_quota_plain(
     stdout: &mut impl Write,
     rows: &[QuotaStatusRow],
 ) -> Result<(), QuotaCommandError> {
-    writeln!(
-        stdout,
-        "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
-    )
-    .map_err(QuotaCommandError::Stdout)?;
+    writeln!(stdout, "account\tstatus\t5h\tweekly\trouting\tnext use")
+        .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
             row.account_status,
-            row.window,
-            row.quota_left,
-            row.reset,
-            row.pace,
-            row.runout,
-            row.note,
+            row.five_hour,
+            row.weekly,
+            row.routing,
+            row.next_use,
         )
         .map_err(QuotaCommandError::Stdout)?;
     }
 
-    Ok(())
+    write_selector_summary_plain(stdout, rows)
+}
+
+fn write_selector_summary_table(
+    stdout: &mut impl Write,
+    rows: &[QuotaStatusRow],
+) -> Result<(), QuotaCommandError> {
+    let summary = selector_summary(rows);
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["route", "next", "why"]);
+    table.add_row(["responses", summary.next.as_str(), summary.why.as_str()]);
+    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)
+}
+
+fn write_selector_summary_plain(
+    stdout: &mut impl Write,
+    rows: &[QuotaStatusRow],
+) -> Result<(), QuotaCommandError> {
+    let summary = selector_summary(rows);
+    writeln!(
+        stdout,
+        "responses route\tnext: {}\twhy: {}",
+        summary.next, summary.why
+    )
+    .map_err(QuotaCommandError::Stdout)
+}
+
+fn selector_summary(rows: &[QuotaStatusRow]) -> QuotaSelectorSummary {
+    if let Some(row) = rows.iter().find(|row| row.next_use == "next") {
+        return QuotaSelectorSummary {
+            next: row.account_label.clone(),
+            why: format!(
+                "highest usable bottleneck {}%",
+                row.bottleneck_headroom.unwrap_or(0)
+            ),
+        };
+    }
+
+    QuotaSelectorSummary {
+        next: "none".to_owned(),
+        why: "no usable accounts".to_owned(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuotaSelectorSummary {
+    next: String,
+    why: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QuotaStatusRow {
     account_label: String,
     account_status: String,
-    window: String,
-    quota_left: String,
-    reset: String,
-    pace: String,
-    runout: String,
-    note: String,
+    five_hour: String,
+    weekly: String,
+    routing: String,
+    next_use: String,
+    bottleneck_headroom: Option<u32>,
 }
 
 impl QuotaStatusRow {
-    fn from_snapshot(
-        account: &AccountRecord,
-        snapshot: &PersistedQuotaSnapshot,
-        window_seconds: u64,
-        now_unix_seconds: u64,
-    ) -> Self {
-        let reset = snapshot.reset_unix_seconds().map_or_else(
-            || "-".to_owned(),
-            |reset| format_relative_time(reset, now_unix_seconds),
-        );
-        let math = QuotaStatusMath::unknown();
-        Self {
-            account_label: account.label().to_owned(),
-            account_status: account.status().as_str().to_owned(),
-            window: quota_window_label(window_seconds).to_owned(),
-            quota_left: format_percent(snapshot.remaining_headroom()),
-            reset,
-            pace: math.pace,
-            runout: math.runout,
-            note: if snapshot.stale_penalty() {
-                "↻ needs refresh".to_owned()
-            } else {
-                "• snapshot".to_owned()
-            },
-        }
-    }
+    fn from_selector_input(input: &SelectorQuotaInput, now_unix_seconds: u64) -> Self {
+        let five_hour = input
+            .windows()
+            .iter()
+            .find(|window| window.limit_window_seconds() == USER_QUOTA_WINDOWS[0])
+            .map(|window| QuotaWindowCell::from_selector_window(window, now_unix_seconds))
+            .unwrap_or_else(QuotaWindowCell::missing);
+        let weekly = input
+            .windows()
+            .iter()
+            .find(|window| window.limit_window_seconds() == USER_QUOTA_WINDOWS[1])
+            .map(|window| QuotaWindowCell::from_selector_window(window, now_unix_seconds))
+            .unwrap_or_else(QuotaWindowCell::missing);
+        let routing = AccountRoutingStatus::from_windows(&five_hour, &weekly);
 
-    fn from_selector_window(
-        input: &SelectorQuotaInput,
-        window: &PersistedSelectorQuotaWindow,
-        now_unix_seconds: u64,
-    ) -> Self {
-        let reset = window.reset_unix_seconds().map_or_else(
-            || "-".to_owned(),
-            |reset| format_relative_time(reset, now_unix_seconds),
-        );
-        let math = window.reset_unix_seconds().map_or_else(
-            QuotaStatusMath::unknown,
-            |reset_unix_seconds| {
-                QuotaStatusMath::from_window(
-                    window.remaining_headroom(),
-                    now_unix_seconds,
-                    reset_unix_seconds.saturating_sub(window.limit_window_seconds()),
-                    reset_unix_seconds,
-                )
-            },
-        );
         Self {
             account_label: input.account_label().to_owned(),
             account_status: input.account_status().as_str().to_owned(),
-            window: quota_window_label(window.limit_window_seconds()).to_owned(),
-            quota_left: format_percent(window.remaining_headroom()),
-            reset,
-            pace: math.pace,
-            runout: math.runout,
-            note: quota_window_note(window).to_owned(),
+            five_hour: five_hour.render(),
+            weekly: weekly.render(),
+            routing: routing.render(),
+            next_use: if routing.usable { "backup" } else { "no" }.to_owned(),
+            bottleneck_headroom: routing.bottleneck_headroom,
         }
     }
 
-    fn missing_selector_window(account: &AccountRecord, window_seconds: u64) -> Self {
-        let math = QuotaStatusMath::unknown();
+    fn from_snapshot(
+        account: &AccountRecord,
+        snapshot: &PersistedQuotaSnapshot,
+        now_unix_seconds: u64,
+    ) -> Self {
+        let five_hour = QuotaWindowCell::from_snapshot(snapshot, now_unix_seconds);
+        let weekly = QuotaWindowCell::missing();
+        let routing = AccountRoutingStatus::from_windows(&five_hour, &weekly);
+
         Self {
             account_label: account.label().to_owned(),
             account_status: account.status().as_str().to_owned(),
-            window: quota_window_label(window_seconds).to_owned(),
-            quota_left: "-".to_owned(),
-            reset: "-".to_owned(),
-            pace: math.pace,
-            runout: math.runout,
-            note: "↻ needs refresh".to_owned(),
+            five_hour: five_hour.render(),
+            weekly: weekly.render(),
+            routing: routing.render(),
+            next_use: "no".to_owned(),
+            bottleneck_headroom: routing.bottleneck_headroom,
+        }
+    }
+
+    fn missing(account: &AccountRecord) -> Self {
+        let five_hour = QuotaWindowCell::missing();
+        let weekly = QuotaWindowCell::missing();
+        let routing = AccountRoutingStatus::from_windows(&five_hour, &weekly);
+
+        Self {
+            account_label: account.label().to_owned(),
+            account_status: account.status().as_str().to_owned(),
+            five_hour: five_hour.render(),
+            weekly: weekly.render(),
+            routing: routing.render(),
+            next_use: "no".to_owned(),
+            bottleneck_headroom: None,
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct QuotaStatusMath {
-    pace: String,
-    runout: String,
+struct QuotaWindowCell {
+    remaining_headroom: Option<u32>,
+    reset: Option<String>,
+    state: QuotaWindowCellState,
 }
 
-impl QuotaStatusMath {
-    fn unknown() -> Self {
+impl QuotaWindowCell {
+    fn from_selector_window(window: &PersistedSelectorQuotaWindow, now_unix_seconds: u64) -> Self {
         Self {
-            pace: "-".to_owned(),
-            runout: "-".to_owned(),
+            remaining_headroom: Some(window.remaining_headroom()),
+            reset: window
+                .reset_unix_seconds()
+                .map(|reset| format_relative_time(reset, now_unix_seconds)),
+            state: QuotaWindowCellState::from_selector_window(window),
         }
     }
 
-    fn from_window(
-        remaining_headroom: u32,
-        now_unix_seconds: u64,
-        window_start_unix_seconds: u64,
-        reset_unix_seconds: u64,
-    ) -> Self {
-        let window_seconds = reset_unix_seconds.saturating_sub(window_start_unix_seconds);
-        if window_seconds == 0 {
-            return Self::unknown();
+    fn from_snapshot(snapshot: &PersistedQuotaSnapshot, now_unix_seconds: u64) -> Self {
+        let state = if snapshot.stale_penalty() {
+            QuotaWindowCellState::NeedsRefresh
+        } else if snapshot.remaining_headroom() == 0 {
+            QuotaWindowCellState::Empty
+        } else {
+            QuotaWindowCellState::Ready
+        };
+        Self {
+            remaining_headroom: Some(snapshot.remaining_headroom()),
+            reset: snapshot
+                .reset_unix_seconds()
+                .map(|reset| format_relative_time(reset, now_unix_seconds)),
+            state,
         }
+    }
 
-        let elapsed_seconds = now_unix_seconds
-            .saturating_sub(window_start_unix_seconds)
-            .min(window_seconds);
-        let used_percent = 100_u32.saturating_sub(remaining_headroom.min(100));
-        let expected_used_percent = (elapsed_seconds.saturating_mul(100) / window_seconds).min(100);
-        let pace_points =
-            i64::from(used_percent) - i64::try_from(expected_used_percent).unwrap_or(0);
-        let pace = format_pace(pace_points);
-        let runout = projected_runout_duration(used_percent, remaining_headroom, elapsed_seconds);
+    const fn missing() -> Self {
+        Self {
+            remaining_headroom: None,
+            reset: None,
+            state: QuotaWindowCellState::NeedsRefresh,
+        }
+    }
 
-        Self { pace, runout }
+    fn render(&self) -> String {
+        match self.remaining_headroom {
+            Some(remaining_headroom) => {
+                let reset = self.reset.as_ref().map_or_else(
+                    || "reset unknown".to_owned(),
+                    |reset| format!("resets {reset}"),
+                );
+                format!(
+                    "{} {} {reset}",
+                    quota_bar(remaining_headroom),
+                    format_percent(remaining_headroom)
+                )
+            }
+            None => format!("{} - needs refresh", quota_bar(0)),
+        }
+    }
+
+    const fn usable(&self) -> bool {
+        matches!(self.state, QuotaWindowCellState::Ready)
+            && matches!(self.remaining_headroom, Some(remaining_headroom) if remaining_headroom > 0)
     }
 }
 
-fn projected_runout_duration(
-    used_percent: u32,
-    remaining_headroom: u32,
-    elapsed_seconds: u64,
-) -> String {
-    if used_percent == 0 || remaining_headroom == 0 || elapsed_seconds == 0 {
-        return "-".to_owned();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuotaWindowCellState {
+    Ready,
+    Empty,
+    NeedsRefresh,
+}
+
+impl QuotaWindowCellState {
+    const fn from_selector_window(window: &PersistedSelectorQuotaWindow) -> Self {
+        if window.observed_unix_seconds() == 0 {
+            Self::NeedsRefresh
+        } else if window.remaining_headroom() == 0 {
+            Self::Empty
+        } else {
+            match window.status() {
+                SelectorQuotaWindowStatus::Eligible => Self::Ready,
+                SelectorQuotaWindowStatus::Ineligible => Self::Empty,
+                SelectorQuotaWindowStatus::Stale | SelectorQuotaWindowStatus::Unknown => {
+                    Self::NeedsRefresh
+                }
+            }
+        }
     }
-    let seconds =
-        u64::from(remaining_headroom).saturating_mul(elapsed_seconds) / u64::from(used_percent);
-    format!("in {}", format_duration(seconds))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AccountRoutingStatus {
+    usable: bool,
+    bottleneck_headroom: Option<u32>,
+    reason: String,
+}
+
+impl AccountRoutingStatus {
+    fn from_windows(five_hour: &QuotaWindowCell, weekly: &QuotaWindowCell) -> Self {
+        if !five_hour.usable() {
+            return Self::blocked("5h", five_hour.state);
+        }
+        if !weekly.usable() {
+            return Self::blocked("weekly", weekly.state);
+        }
+        let bottleneck_headroom = five_hour
+            .remaining_headroom
+            .zip(weekly.remaining_headroom)
+            .map(|(five_hour, weekly)| five_hour.min(weekly));
+        Self {
+            usable: true,
+            bottleneck_headroom,
+            reason: format!("✓ usable bottleneck {}%", bottleneck_headroom.unwrap_or(0)),
+        }
+    }
+
+    fn blocked(window_label: &str, state: QuotaWindowCellState) -> Self {
+        let reason = match state {
+            QuotaWindowCellState::Empty => format!("× {window_label} empty"),
+            QuotaWindowCellState::NeedsRefresh => "↻ needs refresh".to_owned(),
+            QuotaWindowCellState::Ready => format!("× {window_label} unavailable"),
+        };
+        Self {
+            usable: false,
+            bottleneck_headroom: None,
+            reason,
+        }
+    }
+
+    fn render(&self) -> String {
+        self.reason.clone()
+    }
+}
+
+fn mark_next_usable_account(rows: &mut [QuotaStatusRow]) {
+    let next_index = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| row.bottleneck_headroom.map(|headroom| (index, headroom)))
+        .max_by_key(|(_index, headroom)| *headroom)
+        .map(|(index, _headroom)| index);
+    for (index, row) in rows.iter_mut().enumerate() {
+        if row.bottleneck_headroom.is_some() {
+            row.next_use = if Some(index) == next_index {
+                "next".to_owned()
+            } else {
+                "backup".to_owned()
+            };
+        }
+    }
+}
+
+fn quota_bar(value: u32) -> String {
+    let filled = ((value.min(100) + 5) / 10).min(10);
+    let mut output = String::with_capacity(30);
+    for _index in 0..filled {
+        output.push('█');
+    }
+    for _index in filled..10 {
+        output.push('░');
+    }
+    output
 }
 
 fn format_percent(value: u32) -> String {
@@ -1069,36 +1191,6 @@ fn format_duration(seconds: u64) -> String {
         }
     } else {
         format!("{seconds}s")
-    }
-}
-
-fn format_pace(pace_points: i64) -> String {
-    match pace_points.cmp(&0) {
-        std::cmp::Ordering::Greater => format!("▲ {pace_points}pp over"),
-        std::cmp::Ordering::Equal => "◆ on pace".to_owned(),
-        std::cmp::Ordering::Less => format!("▼ {}pp under", pace_points.abs()),
-    }
-}
-
-fn quota_window_note(window: &PersistedSelectorQuotaWindow) -> &'static str {
-    if window.observed_unix_seconds() == 0 {
-        "↻ needs refresh"
-    } else if window.status() == SelectorQuotaWindowStatus::Eligible {
-        "✓ ready"
-    } else if window.remaining_headroom() == 0 {
-        "× empty"
-    } else {
-        "! unusable"
-    }
-}
-
-fn quota_window_label(limit_window_seconds: u64) -> &'static str {
-    match limit_window_seconds {
-        18_000 => "5h",
-        86_400 => "daily",
-        604_800 => "weekly",
-        2_592_000 => "monthly",
-        _ => "window",
     }
 }
 
