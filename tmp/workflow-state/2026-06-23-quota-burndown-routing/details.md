@@ -771,3 +771,48 @@ adds refresh repository operation/state-transition proof rows.
 Next hard gate:
 Run `shravan-dev-workflow:spec-review-swarm` against R15. Do not proceed to
 `plan-creation-swarm` until that review passes.
+
+## R15 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`aa1ed57`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` is 1936 lines and was read by the parent
+in chunks 1-400, 401-800, 801-1200, 1201-1600, and 1601-1936. Four review
+lanes also reported full assigned coverage.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r15/review-ledger.md`
+
+Verdict:
+needs revision
+
+Accepted blockers:
+
+- refresh staleness has no canonical read path, formula, API owner, or
+  consumer for `last_error_class`
+- previous-response affinity contradicts cooldown/pinning for reserve owners
+- WebSocket request-body token rejection contradicts the non-allowlisted
+  first-frame parsing rule
+- workflow/source-of-truth details still contain stale required-reading and
+  generated-profile auth guidance
+
+Accepted important findings:
+
+- route-result envelope still differs across supported, unsupported, JSON,
+  status, and runtime surfaces
+- current-state WebSocket evidence overstates the implementation delta
+- mixed-carrier local auth needs a carrier-preserving input boundary
+- installed-Codex transcript redaction needs explicit cutover language
+- generated-profile bearer-auth e2e proof needs a named safe observable or an
+  explicit split between ingress tests and e2e proof
+- tail workflow wording should use parent-verified spec-review verdict
+  `ready`, not `phase_result: complete`
+
+Next hard gate:
+Return to `shravan-dev-workflow:spec-creation-swarm`; do not proceed to
+`plan-creation-swarm` until the spec is revised and another spec review returns
+a parent-verified `ready` verdict.
