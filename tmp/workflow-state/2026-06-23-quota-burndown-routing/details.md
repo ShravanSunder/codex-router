@@ -1162,3 +1162,39 @@ Next hard gate:
 Run `shravan-dev-workflow:plan-creation-swarm` and produce a plan that maps the
 accepted spec to explicit unit, integration, smoke, installed-Codex HTTP, and
 installed-Codex WebSocket proof gates before implementation begins.
+
+## Plan Creation
+
+Date: 2026-06-23
+
+Phase:
+plan-creation-swarm from the R20 accepted spec.
+
+Plan artifacts:
+`tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/implementation-plan.md`
+`tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/plan-ledger.md`
+
+Lane artifacts:
+
+- `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/lanes/codebase-boundary.md`
+- `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/lanes/validation-proof.md`
+- `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/lanes/execution-order.md`
+- `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/lanes/security-reliability.md`
+
+Phase result:
+complete
+
+Plan result:
+
+- implementation sequence is split into core, assessment, state/secret,
+  proxy/HTTP, CLI status, WebSocket, non-blocking, route-native black-box,
+  installed-Codex HTTP/SSE, installed-Codex WebSocket, and final redaction gates
+- route-native black-box and installed-Codex WebSocket e2e are hard completion
+  gates, not optional follow-up
+- current runtime is still not considered fully proven; only baseline
+  `cargo check --workspace` and spec/plan artifact checks have passed
+
+Next hard gate:
+Run `shravan-dev-workflow:plan-review-swarm` against the implementation plan.
+Do not start implementation until accepted plan review findings are folded in
+or explicitly rejected with evidence.
