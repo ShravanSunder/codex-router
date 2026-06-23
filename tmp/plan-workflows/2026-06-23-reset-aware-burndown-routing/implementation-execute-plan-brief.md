@@ -275,3 +275,51 @@ Notes:
   capture slice.
 - Legacy raw affinity repository methods and SQLite table still exist for now,
   but proxy runtime selection no longer calls them.
+
+## T3b HTTP/SSE Owner Record Capture
+
+Plan rows:
+
+- RP-09 successful response IDs become HMAC-hashed owner rows and raw response
+  IDs are not persisted.
+- RP-10 HTTP/SSE owner writes use already-selected account metadata and the
+  resolved credential generation.
+
+Files changed:
+
+- `crates/codex-router-auth/src/resolver.rs`
+- `crates/codex-router-proxy/src/http_sse.rs`
+- `crates/codex-router-proxy/src/server.rs`
+- `crates/codex-router-proxy/src/lib.rs`
+
+Implemented:
+
+- `ResolvedProviderCredential` now carries the credential generation that
+  actually produced the upstream access token, including refresh paths.
+- HTTP/SSE service records owner rows from allowlisted top-level upstream
+  response `id` fields only.
+- Nested response/body IDs are ignored.
+- Streaming/SSE responses are not pre-buffered; the response body is wrapped and
+  records after EOF while bytes pass through to the client.
+- Production loopback runtime uses an owned SQLite recorder that opens the
+  state DB at record time, avoiding a long-lived SQLite connection inside the
+  streaming body.
+- Assembled runtime proof verifies a streamed SSE response creates a hashed
+  `previous_response_affinity_owners` row.
+
+Proof:
+
+- `cargo test -p codex-router-auth -p codex-router-proxy` passed:
+  auth 13 tests, proxy 75 tests.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 75, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- WebSocket owner-record writes from upstream `response.id` frames remain in
+  the T6 WebSocket capture slice.
+- Legacy raw affinity repository methods and SQLite table still exist, but the
+  proxy HTTP/SSE selection and owner-write path use hash-owner records.

@@ -33,6 +33,7 @@ mod tests {
     use crate::headers::HeaderCollection;
     use crate::http_sse::AuditFailureReporter;
     use crate::http_sse::AuthenticatedHttpProxyService;
+    use crate::http_sse::HttpAffinityOwnerRecorder;
     use crate::http_sse::HttpAffinitySecretProvider;
     use crate::http_sse::HttpProxyError;
     use crate::http_sse::HttpProxyRequest;
@@ -40,6 +41,7 @@ mod tests {
     use crate::http_sse::HttpProxyService;
     use crate::http_sse::HttpRequestHandler;
     use crate::http_sse::StreamingHttpProxyResponse;
+    use crate::http_sse::StreamingHttpRequestHandler;
     use crate::http_sse::StreamingUpstreamHttpTransport;
     use crate::http_sse::UpstreamHttpRequest;
     use crate::http_sse::UpstreamHttpTransport;
@@ -94,10 +96,12 @@ mod tests {
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+    use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
     use codex_router_secret_store::file_backend::FileSecretStore;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::affinity_owner::AffinitySourceTransport;
+    use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
     use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
@@ -147,6 +151,34 @@ mod tests {
             &self,
         ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
             Ok(test_affinity_secret())
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingAffinityOwnerRecorder {
+        records: Arc<Mutex<Vec<PreviousResponseAffinityOwnerRecord>>>,
+    }
+
+    impl RecordingAffinityOwnerRecorder {
+        fn take_records(&self) -> Vec<PreviousResponseAffinityOwnerRecord> {
+            self.records
+                .lock()
+                .expect("test recorder lock should be available")
+                .drain(..)
+                .collect()
+        }
+    }
+
+    impl HttpAffinityOwnerRecorder for RecordingAffinityOwnerRecorder {
+        fn record_affinity_owner(
+            &self,
+            owner: &PreviousResponseAffinityOwnerRecord,
+        ) -> Result<(), HttpProxyError> {
+            self.records
+                .lock()
+                .expect("test recorder lock should be available")
+                .push(owner.clone());
+            Ok(())
         }
     }
 
@@ -633,6 +665,114 @@ mod tests {
             vec!["Bearer selected-upstream-token"]
         );
         assert_eq!(recorded[0].headers().value("x-codex-router-token"), None);
+    }
+
+    #[test]
+    fn authenticated_http_proxy_records_top_level_response_id_owner() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            br#"{"id":"resp_top_level","output":[{"id":"resp_nested"}]}"#.to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let recorder = RecordingAffinityOwnerRecorder::default();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
+                .with_affinity_owner_recorder(Arc::new(recorder.clone()));
+
+        let response = must_ok(
+            service.handle_request(
+                HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+            ),
+        );
+
+        assert_eq!(response.status(), 200);
+        let records = recorder.take_records();
+        assert_eq!(records.len(), 1);
+        let owner = &records[0];
+        assert_eq!(owner.account_id().as_str(), "acct_selected");
+        assert_eq!(owner.credential_generation(), 1);
+        assert_eq!(
+            owner.route_band(),
+            codex_router_core::routes::RouteBand::Responses
+        );
+        assert_eq!(owner.source_transport(), AffinitySourceTransport::HttpSse);
+        let expected_hash = must_ok(hash_previous_response_id(
+            &test_affinity_secret(),
+            &must_ok(PreviousResponseId::new("resp_top_level")),
+        ));
+        assert_eq!(owner.affinity_key_hash(), &expected_hash);
+        assert_ne!(owner.affinity_key_hash().as_str(), "resp_top_level");
+    }
+
+    #[test]
+    fn authenticated_http_proxy_ignores_nested_response_ids() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            br#"{"output":[{"id":"resp_nested"}]}"#.to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let recorder = RecordingAffinityOwnerRecorder::default();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
+                .with_affinity_owner_recorder(Arc::new(recorder.clone()));
+
+        let response = must_ok(
+            service.handle_request(
+                HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+            ),
+        );
+
+        assert_eq!(response.status(), 200);
+        assert!(recorder.take_records().is_empty());
+    }
+
+    #[test]
+    fn authenticated_http_proxy_records_streaming_sse_response_id_after_body_read() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::new(vec![Header::new("Content-Type", "text/event-stream")]),
+            b"data: {\"id\":\"resp_stream\"}\n\ndata: [DONE]\n\n".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let recorder = RecordingAffinityOwnerRecorder::default();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
+                .with_affinity_owner_recorder(Arc::new(recorder.clone()));
+
+        let mut response = must_ok(
+            service.handle_streaming_request(
+                HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_body(br#"{"model":"gpt-5","stream":true}"#.to_vec()),
+            ),
+        );
+        assert!(recorder.take_records().is_empty());
+        let mut body = Vec::new();
+        must_ok(response.body_mut().read_to_end(&mut body));
+
+        assert_eq!(body, b"data: {\"id\":\"resp_stream\"}\n\ndata: [DONE]\n\n");
+        let records = recorder.take_records();
+        assert_eq!(records.len(), 1);
+        let expected_hash = must_ok(hash_previous_response_id(
+            &test_affinity_secret(),
+            &must_ok(PreviousResponseId::new("resp_stream")),
+        ));
+        assert_eq!(records[0].affinity_key_hash(), &expected_hash);
     }
 
     #[test]
@@ -1976,6 +2116,9 @@ mod tests {
             70,
             "runtime-upstream-token",
         );
+        let affinity_secret = must_ok(load_or_create_router_affinity_hash_secret(&secrets))
+            .secret()
+            .clone();
 
         let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
@@ -1998,9 +2141,15 @@ mod tests {
             if let Err(error) = upstream_sender.send(request) {
                 panic!("mock upstream request should record: {error}");
             }
-            if let Err(error) = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10\r\n\r\ndata: ok\n\n",
+            let response_body = b"data: {\"id\":\"resp_runtime\"}\n\n";
+            if let Err(error) = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                response_body.len()
             ) {
+                panic!("mock upstream should write response headers: {error}");
+            }
+            if let Err(error) = stream.write_all(response_body) {
                 panic!("mock upstream should write response: {error}");
             }
         });
@@ -2015,7 +2164,7 @@ mod tests {
         let config = LoopbackRouterRuntimeConfig::new(
             bind_address,
             endpoint,
-            database_path,
+            database_path.clone(),
             secret_path,
             LocalRouterTokenRecord::new(
                 SecretString::new("current-token"),
@@ -2047,7 +2196,7 @@ mod tests {
             Err(error) => panic!("client thread panicked: {error:?}"),
         };
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(response.ends_with("\r\ndata: ok\n\n"));
+        assert!(response.ends_with("\r\ndata: {\"id\":\"resp_runtime\"}\n\n"));
 
         let upstream_request = match upstream_receiver.recv() {
             Ok(request) => request,
@@ -2062,6 +2211,22 @@ mod tests {
             Ok(()) => {}
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
         }
+
+        let owner_hash = must_ok(hash_previous_response_id(
+            &affinity_secret,
+            &must_ok(PreviousResponseId::new("resp_runtime")),
+        ));
+        let runtime_state = must_ok(SqliteStateStore::open(&database_path));
+        let owner_lookup = must_ok(AffinityRepository::load_previous_response_owner(
+            &runtime_state,
+            &owner_hash,
+            codex_router_core::routes::RouteBand::Responses.as_str(),
+        ));
+        let PreviousResponseAffinityOwnerLookup::Found(owner) = owner_lookup else {
+            panic!("runtime should persist response owner row: {owner_lookup:?}");
+        };
+        assert_eq!(owner.account_id(), account.account_id());
+        assert_eq!(owner.credential_generation(), 1);
     }
 
     #[test]
@@ -3772,6 +3937,7 @@ mod tests {
             Ok(ResolvedProviderCredential::new(
                 account_id.clone(),
                 self.access_token.clone(),
+                1,
             ))
         }
     }

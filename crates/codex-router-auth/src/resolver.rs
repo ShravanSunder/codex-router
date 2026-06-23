@@ -74,16 +74,22 @@ pub struct ResolvedProviderCredential {
     account_id: AccountId,
     access_token: SecretString,
     chatgpt_account_id: Option<String>,
+    credential_generation: u64,
 }
 
 impl ResolvedProviderCredential {
     /// Creates a resolved provider credential.
     #[must_use]
-    pub const fn new(account_id: AccountId, access_token: SecretString) -> Self {
+    pub const fn new(
+        account_id: AccountId,
+        access_token: SecretString,
+        credential_generation: u64,
+    ) -> Self {
         Self {
             account_id,
             access_token,
             chatgpt_account_id: None,
+            credential_generation,
         }
     }
 
@@ -103,6 +109,12 @@ impl ResolvedProviderCredential {
     #[must_use]
     pub fn chatgpt_account_id(&self) -> Option<&str> {
         self.chatgpt_account_id.as_deref()
+    }
+
+    /// Returns the credential generation that produced this access token.
+    #[must_use]
+    pub const fn credential_generation(&self) -> u64 {
+        self.credential_generation
     }
 
     /// Sets the ChatGPT account id for ChatGPT backend requests.
@@ -359,7 +371,7 @@ where
     fn read_active_bundle(
         &self,
         account_id: &AccountId,
-    ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
         let account = self
             .state_repository
             .load_account(account_id)
@@ -374,12 +386,14 @@ where
         let bundle_key = account_credential_bundle_key(account_id, active_generation)
             .map_err(map_secret_error)?;
 
-        AccountCredentialBundle::from_secret_string(
+        let bundle = AccountCredentialBundle::from_secret_string(
             self.secret_store
                 .read_secret(&bundle_key)
                 .map_err(map_secret_error)?,
         )
-        .map_err(map_secret_error)
+        .map_err(map_secret_error)?;
+
+        Ok((active_generation, bundle))
     }
 
     fn bundle_is_expired(&self, bundle: &AccountCredentialBundle) -> bool {
@@ -392,7 +406,7 @@ where
         &self,
         account_id: &AccountId,
         bundle: &AccountCredentialBundle,
-    ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
         let refresh_token = bundle
             .refresh_token()
             .ok_or(CredentialResolverError::RefreshUnavailable)?;
@@ -424,7 +438,7 @@ where
             )
             .map_err(map_state_error)?;
 
-        Ok(refreshed)
+        Ok((refreshed_generation, refreshed))
     }
 }
 
@@ -437,29 +451,32 @@ where
         &self,
         account_id: &AccountId,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        let bundle = self.read_active_bundle(account_id)?;
+        let (active_generation, bundle) = self.read_active_bundle(account_id)?;
         if self.bundle_is_expired(&bundle) {
             let lease = self.refresh_leases.lease_for(account_id);
             let _guard = lease
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let current_bundle = self.read_active_bundle(account_id)?;
-            let refreshed = if self.bundle_is_expired(&current_bundle) {
+            let (current_generation, current_bundle) = self.read_active_bundle(account_id)?;
+            let (resolved_generation, refreshed) = if self.bundle_is_expired(&current_bundle) {
                 self.refresh_expired_bundle(account_id, &current_bundle)?
             } else {
-                current_bundle
+                (current_generation, current_bundle)
             };
             return Ok(ResolvedProviderCredential::new(
                 account_id.clone(),
                 refreshed.access_token().clone(),
+                resolved_generation,
             )
             .with_chatgpt_account_id(refreshed.chatgpt_account_id()));
         }
 
-        Ok(
-            ResolvedProviderCredential::new(account_id.clone(), bundle.access_token().clone())
-                .with_chatgpt_account_id(bundle.chatgpt_account_id()),
+        Ok(ResolvedProviderCredential::new(
+            account_id.clone(),
+            bundle.access_token().clone(),
+            active_generation,
         )
+        .with_chatgpt_account_id(bundle.chatgpt_account_id()))
     }
 }
 

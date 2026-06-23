@@ -19,6 +19,8 @@ use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
 use codex_router_secret_store::model::SecretStoreError;
+use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
@@ -29,6 +31,7 @@ use crate::credential_runtime::ProxyCredentialResolver;
 use crate::credential_runtime::ProxyCredentialResolverOpenError;
 use crate::headers::Header;
 use crate::http_sse::AuthenticatedHttpProxyService;
+use crate::http_sse::HttpAffinityOwnerRecorder;
 use crate::http_sse::HttpAffinitySecretProvider;
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
@@ -207,11 +210,11 @@ impl LoopbackRouterRuntimeConfig {
 }
 
 /// Assembled loopback router runtime for HTTP/SSE forwarding.
-#[derive(Debug)]
 pub struct LoopbackRouterRuntime {
     server: LoopbackServerRuntime,
     state_store: SqliteStateStore,
     secret_store: ProxyRuntimeSecretStore,
+    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
     credential_resolver: ProxyCredentialResolver,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HttpUpstreamTransport,
@@ -228,6 +231,9 @@ impl LoopbackRouterRuntime {
     pub fn start(config: LoopbackRouterRuntimeConfig) -> Result<Self, LoopbackRouterRuntimeError> {
         let state_store = SqliteStateStore::open(&config.state_database_path)?;
         let secret_store = open_proxy_secret_store(&config.secret_store_root)?;
+        let affinity_owner_recorder = Arc::new(SqliteAffinityOwnerRecorder::new(
+            config.state_database_path.clone(),
+        ));
         let credential_resolver = ProxyCredentialResolver::open(
             &config.state_database_path,
             &config.secret_store_root,
@@ -246,6 +252,7 @@ impl LoopbackRouterRuntime {
             server,
             state_store,
             secret_store,
+            affinity_owner_recorder,
             credential_resolver,
             auth_gate,
             upstream,
@@ -304,7 +311,8 @@ impl LoopbackRouterRuntime {
             &self.credential_resolver,
             &self.upstream,
         )
-        .with_affinity_secret_provider(&self.secret_store);
+        .with_affinity_secret_provider(&self.secret_store)
+        .with_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -423,7 +431,8 @@ impl LoopbackRouterRuntime {
             &self.credential_resolver,
             &self.upstream,
         )
-        .with_affinity_secret_provider(&self.secret_store);
+        .with_affinity_secret_provider(&self.secret_store)
+        .with_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -520,6 +529,37 @@ impl HttpAffinitySecretProvider for ProxyRuntimeSecretStore {
             .map_err(|_error| HttpProxyError::Selection {
                 reason: crate::account_selection::QuotaAwareAccountSelectorError::SecretUnavailable,
             })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SqliteAffinityOwnerRecorder {
+    state_database_path: PathBuf,
+}
+
+impl SqliteAffinityOwnerRecorder {
+    fn new(state_database_path: PathBuf) -> Self {
+        Self {
+            state_database_path,
+        }
+    }
+}
+
+impl HttpAffinityOwnerRecorder for SqliteAffinityOwnerRecorder {
+    fn record_affinity_owner(
+        &self,
+        owner: &PreviousResponseAffinityOwnerRecord,
+    ) -> Result<(), HttpProxyError> {
+        let state_store = SqliteStateStore::open(&self.state_database_path).map_err(|_error| {
+            HttpProxyError::Selection {
+                reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
+            }
+        })?;
+        AffinityRepository::write_previous_response_owner(&state_store, owner).map_err(|_error| {
+            HttpProxyError::Selection {
+                reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
+            }
+        })
     }
 }
 

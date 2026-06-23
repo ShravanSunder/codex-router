@@ -2,7 +2,9 @@
 
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_core::affinity::PreviousResponseId;
 use codex_router_core::affinity::RouterAffinityHashSecret;
+use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::audit::AuditEvent;
 use codex_router_core::audit::AuditEventFields;
 use codex_router_core::audit::AuditFileSink;
@@ -16,11 +18,18 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::ids::RequestId;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::redaction::SecretString;
+use codex_router_core::routes::RouteBand;
+use codex_router_state::affinity_owner::AffinitySourceTransport;
+use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::io;
 use std::io::Cursor;
 use std::io::Read;
+use std::sync::Arc;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
 use crate::account_selection::AccountDecisionSelector;
@@ -357,6 +366,15 @@ pub trait HttpAffinitySecretProvider {
     fn load_or_create_affinity_secret(&self) -> Result<RouterAffinityHashSecret, HttpProxyError>;
 }
 
+/// Records successful upstream response ids as previous-response owners.
+pub trait HttpAffinityOwnerRecorder: Send + Sync {
+    /// Persists one owner row.
+    fn record_affinity_owner(
+        &self,
+        owner: &PreviousResponseAffinityOwnerRecord,
+    ) -> Result<(), HttpProxyError>;
+}
+
 /// HTTP/SSE proxy service.
 #[derive(Clone, Copy, Debug)]
 pub struct HttpProxyService<'a, T>
@@ -440,7 +458,7 @@ where
 }
 
 /// HTTP/SSE service that composes local auth, account selection, and forwarding.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AuthenticatedHttpProxyService<'a, T, S, C>
 where
     T: UpstreamHttpTransport,
@@ -453,6 +471,7 @@ where
     proxy: HttpProxyService<'a, T>,
     audit_sink: Option<&'a AuditFileSink>,
     affinity_secret_provider: Option<&'a dyn HttpAffinitySecretProvider>,
+    affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
 }
 
 impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C>
@@ -476,6 +495,7 @@ where
             proxy: HttpProxyService::new(upstream),
             audit_sink: None,
             affinity_secret_provider: None,
+            affinity_owner_recorder: None,
         }
     }
 
@@ -493,6 +513,16 @@ where
         affinity_secret_provider: &'a dyn HttpAffinitySecretProvider,
     ) -> Self {
         self.affinity_secret_provider = Some(affinity_secret_provider);
+        self
+    }
+
+    /// Adds the response owner recorder.
+    #[must_use]
+    pub fn with_affinity_owner_recorder(
+        mut self,
+        affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+    ) -> Self {
+        self.affinity_owner_recorder = Some(affinity_owner_recorder);
         self
     }
 
@@ -544,15 +574,10 @@ where
                 return Err(HttpProxyError::LocalAuth { reason });
             }
         };
+        let affinity_secret = self.load_affinity_secret_for_request(&request)?;
         let selected = self
-            .load_affinity_secret_for_request(&request)
-            .and_then(|affinity_secret| {
-                self.selector.select_upstream_account(
-                    &request,
-                    token_generation,
-                    affinity_secret.as_ref(),
-                )
-            })
+            .selector
+            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
             .inspect_err(|_error| {
                 self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
             })?;
@@ -572,6 +597,12 @@ where
             request,
             resolved.access_token().clone(),
             resolved.chatgpt_account_id(),
+        )?;
+        self.record_buffered_response_owner(
+            &response,
+            affinity_secret.as_ref(),
+            selected.account_id(),
+            resolved.credential_generation(),
         )?;
         self.emit_audit_event(allowed_audit_event(
             TransportKind::Http,
@@ -608,15 +639,10 @@ where
                 return Err(HttpProxyError::LocalAuth { reason });
             }
         };
+        let affinity_secret = self.load_affinity_secret_for_request(&request)?;
         let selected = self
-            .load_affinity_secret_for_request(&request)
-            .and_then(|affinity_secret| {
-                self.selector.select_upstream_account(
-                    &request,
-                    token_generation,
-                    affinity_secret.as_ref(),
-                )
-            })
+            .selector
+            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
             .inspect_err(|_error| {
                 self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
             })?;
@@ -637,6 +663,12 @@ where
             resolved.access_token().clone(),
             resolved.chatgpt_account_id(),
         )?;
+        let response = self.wrap_streaming_response_owner_recorder(
+            response,
+            affinity_secret,
+            selected.account_id().clone(),
+            resolved.credential_generation(),
+        );
         self.emit_audit_event(allowed_audit_event(
             TransportKind::Http,
             audit_route_kind,
@@ -644,6 +676,155 @@ where
         ));
 
         Ok(response)
+    }
+}
+
+impl<T, S, C> AuthenticatedHttpProxyService<'_, T, S, C>
+where
+    T: UpstreamHttpTransport,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
+{
+    fn record_buffered_response_owner(
+        &self,
+        response: &HttpProxyResponse,
+        affinity_secret: Option<&RouterAffinityHashSecret>,
+        account_id: &AccountId,
+        credential_generation: u64,
+    ) -> Result<(), HttpProxyError> {
+        let Some(affinity_secret) = affinity_secret else {
+            return Ok(());
+        };
+        let Some(response_id) = extract_response_id_from_body(response.body())? else {
+            return Ok(());
+        };
+        self.record_response_id_owner(
+            affinity_secret,
+            &response_id,
+            account_id,
+            credential_generation,
+        )
+    }
+
+    fn wrap_streaming_response_owner_recorder(
+        &self,
+        response: StreamingHttpProxyResponse,
+        affinity_secret: Option<RouterAffinityHashSecret>,
+        account_id: AccountId,
+        credential_generation: u64,
+    ) -> StreamingHttpProxyResponse {
+        let Some(affinity_secret) = affinity_secret else {
+            return response;
+        };
+        let Some(recorder) = self.affinity_owner_recorder.as_ref() else {
+            return response;
+        };
+
+        StreamingHttpProxyResponse::new(
+            response.status,
+            response.headers,
+            Box::new(AffinityOwnerRecordingBody::new(
+                response.body,
+                Arc::clone(recorder),
+                affinity_secret,
+                account_id,
+                credential_generation,
+            )),
+        )
+    }
+
+    fn record_response_id_owner(
+        &self,
+        affinity_secret: &RouterAffinityHashSecret,
+        response_id: &PreviousResponseId,
+        account_id: &AccountId,
+        credential_generation: u64,
+    ) -> Result<(), HttpProxyError> {
+        let Some(recorder) = self.affinity_owner_recorder.as_ref() else {
+            return Ok(());
+        };
+        let affinity_key_hash =
+            hash_previous_response_id(affinity_secret, response_id).map_err(|_error| {
+                HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+                }
+            })?;
+        let owner = PreviousResponseAffinityOwnerRecord::new(
+            affinity_key_hash,
+            account_id.clone(),
+            credential_generation,
+            RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            current_unix_seconds(),
+        );
+        recorder.record_affinity_owner(&owner)
+    }
+}
+
+struct AffinityOwnerRecordingBody {
+    inner: Box<dyn Read + Send>,
+    recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+    affinity_secret: RouterAffinityHashSecret,
+    account_id: AccountId,
+    credential_generation: u64,
+    buffered: Vec<u8>,
+    recorded: bool,
+}
+
+impl AffinityOwnerRecordingBody {
+    fn new(
+        inner: Box<dyn Read + Send>,
+        recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+        affinity_secret: RouterAffinityHashSecret,
+        account_id: AccountId,
+        credential_generation: u64,
+    ) -> Self {
+        Self {
+            inner,
+            recorder,
+            affinity_secret,
+            account_id,
+            credential_generation,
+            buffered: Vec::new(),
+            recorded: false,
+        }
+    }
+
+    fn record_if_needed(&mut self) -> io::Result<()> {
+        if self.recorded {
+            return Ok(());
+        }
+        self.recorded = true;
+        let Some(response_id) = extract_response_id_from_body(&self.buffered)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let affinity_key_hash = hash_previous_response_id(&self.affinity_secret, &response_id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let owner = PreviousResponseAffinityOwnerRecord::new(
+            affinity_key_hash,
+            self.account_id.clone(),
+            self.credential_generation,
+            RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            current_unix_seconds(),
+        );
+        self.recorder
+            .record_affinity_owner(&owner)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+}
+
+impl Read for AffinityOwnerRecordingBody {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read == 0 {
+            self.record_if_needed()?;
+            return Ok(0);
+        }
+        self.buffered.extend_from_slice(&buffer[..read]);
+        Ok(read)
     }
 }
 
@@ -750,6 +931,66 @@ fn audit_route_kind_for_request(request: &HttpProxyRequest) -> AuditRouteKind {
         },
         Err(_error) => AuditRouteKind::Responses,
     }
+}
+
+fn extract_response_id_from_body(
+    body: &[u8],
+) -> Result<Option<PreviousResponseId>, HttpProxyError> {
+    if let Some(response_id) = extract_json_response_id(body)? {
+        return Ok(Some(response_id));
+    }
+
+    for line in body.split(|byte| *byte == b'\n') {
+        let line = trim_ascii(line);
+        let Some(data) = line.strip_prefix(b"data:") else {
+            continue;
+        };
+        let data = trim_ascii(data);
+        if data == b"[DONE]" || data.is_empty() {
+            continue;
+        }
+        if let Some(response_id) = extract_json_response_id(data)? {
+            return Ok(Some(response_id));
+        }
+    }
+
+    Ok(None)
+}
+
+fn extract_json_response_id(body: &[u8]) -> Result<Option<PreviousResponseId>, HttpProxyError> {
+    let value = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(value) => value,
+        Err(_error) => return Ok(None),
+    };
+    let Some(response_id) = value.get("id").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    if response_id.is_empty() {
+        return Ok(None);
+    }
+    PreviousResponseId::new(response_id.to_owned())
+        .map(Some)
+        .map_err(|_error| HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+        })
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    &bytes[start..end]
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn request_route_kind(request: &HttpProxyRequest) -> Result<RouteKind, HttpProxyError> {
