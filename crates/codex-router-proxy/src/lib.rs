@@ -487,7 +487,7 @@ mod tests {
             service.handle_request(
                 HttpProxyRequest::new(Method::Post, "/v1/responses")
                     .with_header(Header::new("X-Codex-Router-Token", "current-token"))
-                    .with_header(Header::new("Authorization", "Bearer stale-token-canary"))
+                    .with_header(Header::new("Authorization", "Bearer current-token"))
                     .with_body(br#"{"input":"hi"}"#.to_vec()),
             ),
         );
@@ -642,7 +642,7 @@ mod tests {
         let response = match service.handle_request(
             HttpProxyRequest::new(Method::Post, "/v1/responses?stream=true")
                 .with_header(Header::new("X-Codex-Router-Token", "current-token"))
-                .with_header(Header::new("Authorization", "Bearer wrong"))
+                .with_header(Header::new("Authorization", "Bearer current-token"))
                 .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
         ) {
             Ok(response) => response,
@@ -813,6 +813,113 @@ mod tests {
                 .headers()
                 .values("authorization")
                 .contains(&"Bearer current-token")
+        );
+    }
+
+    #[test]
+    fn authenticated_http_proxy_accepts_equal_mixed_local_auth_carriers() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"data: kept\n\n".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+
+        let response = match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_header(Header::new("Authorization", "Bearer current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+        ) {
+            Ok(response) => response,
+            Err(error) => panic!("equal local auth carriers should satisfy auth: {error}"),
+        };
+
+        assert_eq!(response.body(), b"data: kept\n\n");
+        assert_eq!(
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
+        );
+    }
+
+    #[test]
+    fn authenticated_http_proxy_rejects_forbidden_local_auth_carriers_before_selection() {
+        let cases = [
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_header(Header::new("Authorization", "Bearer wrong"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+            HttpProxyRequest::new(Method::Post, "/v1/responses?token=current-token")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_header(Header::new("Cookie", "router-token=current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(br#"{"model":"gpt-5","x-codex-router-token":"current-token"}"#.to_vec()),
+        ];
+
+        for request in cases {
+            let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+                200,
+                HeaderCollection::default(),
+                b"should-not-send".to_vec(),
+            ));
+            let selector = RecordingSelector::new();
+            let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+            let auth_gate = local_auth_gate();
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+
+            assert_eq!(
+                service.handle_request(request),
+                Err(HttpProxyError::LocalAuth {
+                    reason: LocalAuthError::Wrong
+                })
+            );
+            assert!(selector.take_recorded().is_empty());
+            assert!(upstream.take_recorded().is_empty());
+        }
+    }
+
+    #[test]
+    fn authenticated_http_proxy_allows_nested_local_auth_body_canaries() {
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"data: kept\n\n".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+
+        match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(
+                    br#"{"model":"gpt-5","input":[{"x-codex-router-token":"nested"}]}"#.to_vec(),
+                ),
+        ) {
+            Ok(_response) => {}
+            Err(error) => {
+                panic!("nested local auth canary should not be treated as carrier: {error}")
+            }
+        }
+
+        assert_eq!(
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
         );
     }
 
@@ -1831,7 +1938,7 @@ mod tests {
             "POST /v1/responses?stream=true HTTP/1.1\r\n",
             "Host: 127.0.0.1\r\n",
             "X-Codex-Router-Token: current-token\r\n",
-            "Authorization: Bearer wrong\r\n",
+            "Authorization: Bearer current-token\r\n",
             "Accept: text/event-stream\r\n",
             "Content-Length: 17\r\n",
             "\r\n",
@@ -3012,6 +3119,70 @@ mod tests {
     }
 
     #[test]
+    fn loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_accept() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_subprotocol_auth");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new("http://127.0.0.1:1/v1") {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        );
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let server_thread = thread::spawn(move || match runtime.serve_protocol_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve rejected websocket: {error}"),
+        });
+
+        let mut request = match format!("ws://{router_address}/v1/responses").into_client_request()
+        {
+            Ok(request) => request,
+            Err(error) => panic!("local websocket request should build: {error}"),
+        };
+        request.headers_mut().insert(
+            "X-Codex-Router-Token",
+            HeaderValue::from_static("current-token"),
+        );
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_static("bearer-current-token"),
+        );
+        let connect_succeeded = match connect(request) {
+            Ok((client, _response)) => {
+                drop(client);
+                true
+            }
+            Err(_error) => false,
+        };
+
+        match server_thread.join() {
+            Ok(handled) => assert_eq!(handled, 1),
+            Err(error) => panic!("server thread panicked: {error:?}"),
+        }
+        assert!(
+            !connect_succeeded,
+            "subprotocol token smuggling should fail before local accept"
+        );
+    }
+
+    #[test]
     fn loopback_router_runtime_rejects_unsupported_websocket_path_before_accept() {
         let temp_dir = ProxyTestTempDir::new("runtime_websocket_unsupported_path");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -4137,7 +4308,7 @@ mod tests {
         let decision = match router.route_first_frame(
             WebSocketHandshakeRequest::new()
                 .with_header(Header::new("X-Codex-Router-Token", "current-token"))
-                .with_header(Header::new("Authorization", "Bearer wrong")),
+                .with_header(Header::new("Authorization", "Bearer current-token")),
             frame.clone(),
         ) {
             Ok(decision) => decision,
@@ -4159,6 +4330,52 @@ mod tests {
             vec!["Bearer selected-upstream-token"]
         );
         assert_eq!(headers.value("x-codex-router-token"), None);
+    }
+
+    #[test]
+    fn authenticated_websocket_router_rejects_mismatched_local_auth_carriers() {
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+
+        assert_eq!(
+            router.route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_header(Header::new("Authorization", "Bearer wrong")),
+                WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec()),
+            ),
+            Err(WebSocketCloseReason::LocalAuth {
+                reason: LocalAuthError::Wrong
+            })
+        );
+        assert!(selector.take_recorded().is_empty());
+    }
+
+    #[test]
+    fn authenticated_websocket_router_rejects_first_frame_auth_smuggling_before_selection() {
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+
+        assert_eq!(
+            router.route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                WebSocketFrame::Text(
+                    br#"{"type":"response.create","authorization":"Bearer current-token"}"#
+                        .to_vec()
+                ),
+            ),
+            Err(WebSocketCloseReason::UnexpectedFirstFrame)
+        );
+        assert!(selector.take_recorded().is_empty());
     }
 
     #[test]
@@ -4284,10 +4501,7 @@ mod tests {
         let decision = match router.route_first_frame(
             WebSocketHandshakeRequest::new()
                 .with_header(Header::new("X-Codex-Router-Token", "current-token"))
-                .with_header(Header::new(
-                    "Authorization",
-                    "Bearer stale-websocket-access-token",
-                )),
+                .with_header(Header::new("Authorization", "Bearer current-token")),
             frame,
         ) {
             Ok(decision) => decision,
@@ -4609,7 +4823,7 @@ mod tests {
         );
         request.headers_mut().insert(
             "Authorization",
-            HeaderValue::from_static("Bearer hostile-client-auth"),
+            HeaderValue::from_static("Bearer current-token"),
         );
         let (mut client, _response) = match connect(request) {
             Ok(connection) => connection,

@@ -15,6 +15,7 @@ use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
+use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
@@ -42,7 +43,7 @@ use crate::http_sse::StreamingHttpProxyResponse;
 use crate::http_sse::StreamingHttpRequestHandler;
 use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::local_auth_rejection_audit_event;
-use crate::local_auth::presented_local_token;
+use crate::local_auth::extract_presented_local_token_from_request;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
@@ -350,10 +351,26 @@ impl LoopbackRouterRuntime {
         stream: TcpStream,
     ) -> Result<(), LoopbackRouterRuntimeError> {
         if let Some(preflight) = websocket_handshake_preflight(&stream)? {
-            match self
-                .auth_gate
-                .authorize(preflight.presented_token.as_deref())
-            {
+            let presented_token = match preflight.presented_token.as_ref().map(Option::as_deref) {
+                Ok(presented_token) => presented_token,
+                Err(reason) => {
+                    if let Some(audit_sink) = &self.audit_sink {
+                        let event = local_auth_rejection_audit_event(
+                            TransportKind::WebSocket,
+                            AuditRouteKind::ResponsesWebSocket,
+                            *reason,
+                        );
+                        append_audit_event_with_reporter(
+                            audit_sink,
+                            &event,
+                            &StderrAuditFailureReporter,
+                        );
+                    }
+                    write_websocket_rejection(stream, 401, "Unauthorized")?;
+                    return Ok(());
+                }
+            };
+            match self.auth_gate.authorize(presented_token) {
                 Ok(_generation) => {}
                 Err(reason) => {
                     if let Some(audit_sink) = &self.audit_sink {
@@ -472,7 +489,7 @@ impl LocalAuthReloader {
 #[derive(Debug)]
 struct WebSocketHandshakePreflight {
     path: String,
-    presented_token: Option<String>,
+    presented_token: Result<Option<String>, LocalAuthError>,
 }
 
 fn websocket_handshake_preflight(
@@ -509,13 +526,44 @@ fn websocket_handshake_preflight(
         .find(|header| header.name.eq_ignore_ascii_case("authorization"))
         .and_then(|header| std::str::from_utf8(header.value).ok())
         .map(str::to_owned);
-    let presented_token =
-        presented_local_token(router_token.as_deref(), authorization.as_deref()).map(str::to_owned);
+    let cookie = parsed_request
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("cookie"))
+        .and_then(|header| std::str::from_utf8(header.value).ok())
+        .map(str::to_owned);
+    let subprotocol = parsed_request
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("sec-websocket-protocol"))
+        .and_then(|header| std::str::from_utf8(header.value).ok())
+        .map(str::to_owned);
+    let presented_token = if subprotocol
+        .as_deref()
+        .is_some_and(has_forbidden_websocket_subprotocol_auth_carrier)
+    {
+        Err(LocalAuthError::Wrong)
+    } else {
+        extract_presented_local_token_from_request(
+            router_token.as_deref(),
+            authorization.as_deref(),
+            cookie.as_deref(),
+            &path,
+            &[],
+            false,
+        )
+        .map(|token| token.map(str::to_owned))
+    };
 
     Ok(Some(WebSocketHandshakePreflight {
         path,
         presented_token,
     }))
+}
+
+fn has_forbidden_websocket_subprotocol_auth_carrier(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("token") || value.contains("bearer") || value.contains("authorization")
 }
 
 fn path_without_query(path: &str) -> &str {

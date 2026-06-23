@@ -49,17 +49,41 @@ impl ProxyLocalAuthGate {
     }
 }
 
-/// Extracts the local router token from supported Codex provider auth headers.
-#[must_use]
-pub(crate) fn presented_local_token<'a>(
+/// Extracts the local router token from supported local auth carriers.
+pub(crate) fn extract_presented_local_token<'a>(
     router_token_header: Option<&'a str>,
     authorization_header: Option<&'a str>,
-) -> Option<&'a str> {
-    if router_token_header.is_some() {
-        return router_token_header;
+) -> Result<Option<&'a str>, LocalAuthError> {
+    let router_token = non_empty_trimmed(router_token_header);
+    let bearer_token = authorization_header.and_then(bearer_token_from_authorization);
+    match (router_token, bearer_token) {
+        (Some(router_token), Some(bearer_token)) if router_token != bearer_token => {
+            Err(LocalAuthError::Wrong)
+        }
+        (Some(router_token), Some(_)) => Ok(Some(router_token)),
+        (Some(router_token), None) => Ok(Some(router_token)),
+        (None, Some(bearer_token)) => Ok(Some(bearer_token)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Extracts local auth and rejects forbidden smuggling carriers.
+pub(crate) fn extract_presented_local_token_from_request<'a>(
+    router_token_header: Option<&'a str>,
+    authorization_header: Option<&'a str>,
+    cookie_header: Option<&str>,
+    path: &str,
+    body: &[u8],
+    inspect_json_body: bool,
+) -> Result<Option<&'a str>, LocalAuthError> {
+    if has_forbidden_query_auth_carrier(path)
+        || has_forbidden_cookie_auth_carrier(cookie_header)
+        || (inspect_json_body && has_forbidden_top_level_json_auth_carrier(body))
+    {
+        return Err(LocalAuthError::Wrong);
     }
 
-    bearer_token_from_authorization(authorization_header?)
+    extract_presented_local_token(router_token_header, authorization_header)
 }
 
 fn bearer_token_from_authorization(value: &str) -> Option<&str> {
@@ -77,28 +101,87 @@ fn bearer_token_from_authorization(value: &str) -> Option<&str> {
     Some(token)
 }
 
+fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
+    let value = value?.trim();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn has_forbidden_query_auth_carrier(path: &str) -> bool {
+    let Some((_path, query)) = path.split_once('?') else {
+        return false;
+    };
+
+    query.split('&').any(|pair| {
+        let name = pair
+            .split_once('=')
+            .map_or(pair, |(name, _value)| name)
+            .to_ascii_lowercase();
+        is_forbidden_auth_field_name(&name)
+    })
+}
+
+fn has_forbidden_cookie_auth_carrier(cookie_header: Option<&str>) -> bool {
+    let Some(cookie_header) = cookie_header else {
+        return false;
+    };
+    !cookie_header.trim().is_empty()
+}
+
+pub(crate) fn has_forbidden_top_level_json_auth_carrier(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+
+    object
+        .keys()
+        .map(|key| key.to_ascii_lowercase())
+        .any(|key| is_forbidden_auth_field_name(&key))
+}
+
+fn is_forbidden_auth_field_name(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "x-codex-router-token"
+            | "codex-router-token"
+            | "codex_router_token"
+            | "access_token"
+            | "api_key"
+            | "token"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::bearer_token_from_authorization;
-    use super::presented_local_token;
+    use super::extract_presented_local_token;
+    use super::extract_presented_local_token_from_request;
+    use codex_router_core::local_auth::LocalAuthError;
 
     #[test]
-    fn presented_local_token_prefers_explicit_router_token_header() {
+    fn presented_local_token_accepts_equal_mixed_carriers() {
         assert_eq!(
-            presented_local_token(Some("router-token"), Some("Bearer authorization-token")),
-            Some("router-token")
+            extract_presented_local_token(Some("router-token"), Some("Bearer router-token")),
+            Ok(Some("router-token"))
+        );
+        assert_eq!(
+            extract_presented_local_token(Some("router-token"), Some("Bearer other")),
+            Err(LocalAuthError::Wrong)
         );
     }
 
     #[test]
     fn presented_local_token_accepts_authorization_bearer() {
         assert_eq!(
-            presented_local_token(None, Some("Bearer router-token")),
-            Some("router-token")
+            extract_presented_local_token(None, Some("Bearer router-token")),
+            Ok(Some("router-token"))
         );
         assert_eq!(
-            presented_local_token(None, Some("bearer router-token")),
-            Some("router-token")
+            extract_presented_local_token(None, Some("bearer router-token")),
+            Ok(Some("router-token"))
         );
     }
 
@@ -107,5 +190,57 @@ mod tests {
         assert_eq!(bearer_token_from_authorization("Basic abc"), None);
         assert_eq!(bearer_token_from_authorization("Bearer"), None);
         assert_eq!(bearer_token_from_authorization("Bearer "), None);
+    }
+
+    #[test]
+    fn request_local_auth_rejects_forbidden_smuggling_carriers() {
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses?token=router-token",
+                b"{}",
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                Some("session=router-token"),
+                "/v1/responses",
+                b"{}",
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#"{"x-codex-router-token":"router-token"}"#,
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+    }
+
+    #[test]
+    fn request_local_auth_allows_nested_prompt_canaries() {
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#"{"prompt":{"x-codex-router-token":"nested-token"}}"#,
+                true,
+            ),
+            Ok(Some("router-token"))
+        );
     }
 }

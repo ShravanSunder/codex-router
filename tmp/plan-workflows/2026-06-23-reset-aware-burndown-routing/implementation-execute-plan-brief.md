@@ -398,3 +398,60 @@ Notes:
   clock, so reset durations are inspection-only and not a freshness claim.
 - The table still preserves comfy-table box drawing; this slice intentionally
   did not remove or replace the table library.
+
+## T5 Shared Local Auth Contract
+
+Plan rows:
+
+- Structured accepted-carrier extraction for `Authorization: Bearer` and
+  `X-Codex-Router-Token` shared by HTTP/SSE and WebSocket.
+- Mixed-carrier equality validation for every transport.
+- Rejection for query, cookie, top-level HTTP JSON body, WebSocket
+  subprotocol, and first-frame auth-smuggling carriers before selection or
+  upstream open.
+- Strip local auth carriers and hop-by-hop headers before upstream open.
+
+Files changed:
+
+- `crates/codex-router-proxy/src/local_auth.rs`
+- `crates/codex-router-proxy/src/http_sse.rs`
+- `crates/codex-router-proxy/src/websocket.rs`
+- `crates/codex-router-proxy/src/server.rs`
+- `crates/codex-router-proxy/src/lib.rs`
+
+Implemented:
+
+- Added shared local-auth extraction that accepts either bearer or
+  `X-Codex-Router-Token`, accepts equal mixed carriers, and rejects mismatched
+  mixed carriers with `LocalAuthError::Wrong`.
+- Added shared query, cookie, and top-level JSON auth-smuggling rejection.
+- HTTP/SSE auth now uses the shared extractor before account selection,
+  credential resolution, auth injection, or upstream open.
+- WebSocket first-frame routing now uses the same extractor for handshake
+  carriers and rejects top-level first-frame auth-smuggling before selection.
+- Loopback WebSocket preflight now rejects forbidden query/cookie/subprotocol
+  carriers before accepting the upgrade.
+- Existing stripping proof remains in `sanitize_headers_for_upstream`; fixtures
+  that previously used conflicting local auth canaries were updated because
+  mismatched mixed carriers now intentionally fail closed.
+
+Proof:
+
+- `cargo test -p codex-router-proxy local_auth -- --nocapture` passed:
+  9 focused tests before the full matrix was added.
+- `cargo test -p codex-router-proxy` passed: 83 tests.
+- `cargo fmt --all -- --check` passed.
+- `git diff --check` passed.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 83, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- `LocalAuthError::Wrong` is used for mismatched and forbidden carrier cases so
+  existing audit shape stays stable while still failing before selector,
+  credential, auth injection, and upstream open.
+- T6 still needs WebSocket owner-record writes from upstream `response.id`
+  frames and secret-loss/replacement recovery proof.

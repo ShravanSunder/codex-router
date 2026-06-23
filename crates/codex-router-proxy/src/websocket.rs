@@ -45,7 +45,8 @@ use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::http_sse::redacted_account_hash;
 use crate::local_auth::ProxyLocalAuthGate;
-use crate::local_auth::presented_local_token;
+use crate::local_auth::extract_presented_local_token_from_request;
+use crate::local_auth::has_forbidden_top_level_json_auth_carrier;
 use crate::routes::Method;
 
 /// WebSocket frame subset needed before upstream connection opens.
@@ -170,6 +171,9 @@ impl WebSocketProtocolRouter {
         }
         let payload = serde_json::from_slice::<serde_json::Value>(first_frame_bytes)
             .map_err(|_| WebSocketCloseReason::MalformedFirstFrame)?;
+        if has_forbidden_top_level_json_auth_carrier(first_frame_bytes) {
+            return Err(WebSocketCloseReason::UnexpectedFirstFrame);
+        }
         if let Some(frame_type) = payload.get("type").and_then(serde_json::Value::as_str) {
             if frame_type != "response.create" {
                 return Err(WebSocketCloseReason::UnexpectedFirstFrame);
@@ -285,10 +289,25 @@ where
         handshake: WebSocketHandshakeRequest,
         first_frame: WebSocketFrame,
     ) -> Result<WebSocketFirstFrameDecision, WebSocketCloseReason> {
-        let token_generation = match self.auth_gate.authorize(presented_local_token(
+        let presented_token = match extract_presented_local_token_from_request(
             handshake.header_value("x-codex-router-token"),
             handshake.header_value("authorization"),
-        )) {
+            handshake.header_value("cookie"),
+            "",
+            &[],
+            false,
+        ) {
+            Ok(presented_token) => presented_token,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::WebSocket,
+                    AuditRouteKind::ResponsesWebSocket,
+                    reason,
+                ));
+                return Err(WebSocketCloseReason::LocalAuth { reason });
+            }
+        };
+        let token_generation = match self.auth_gate.authorize(presented_token) {
             Ok(generation) => generation,
             Err(reason) => {
                 self.emit_audit_event(local_auth_rejection_audit_event(

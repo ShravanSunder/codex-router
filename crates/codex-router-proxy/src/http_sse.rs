@@ -37,7 +37,7 @@ use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::local_auth::ProxyLocalAuthGate;
-use crate::local_auth::presented_local_token;
+use crate::local_auth::extract_presented_local_token_from_request;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::RouteKind;
@@ -560,10 +560,25 @@ where
         request: HttpProxyRequest,
     ) -> Result<HttpProxyResponse, HttpProxyError> {
         let audit_route_kind = audit_route_kind_for_request(&request);
-        let token_generation = match self.auth_gate.authorize(presented_local_token(
+        let presented_token = match extract_presented_local_token_from_request(
             request.header_value("x-codex-router-token"),
             request.header_value("authorization"),
-        )) {
+            request.header_value("cookie"),
+            request.path(),
+            request.body(),
+            true,
+        ) {
+            Ok(presented_token) => presented_token,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::Http,
+                    audit_route_kind,
+                    reason,
+                ));
+                return Err(HttpProxyError::LocalAuth { reason });
+            }
+        };
+        let token_generation = match self.auth_gate.authorize(presented_token) {
             Ok(generation) => generation,
             Err(reason) => {
                 self.emit_audit_event(local_auth_rejection_audit_event(
@@ -625,10 +640,25 @@ where
         request: HttpProxyRequest,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
         let audit_route_kind = audit_route_kind_for_request(&request);
-        let token_generation = match self.auth_gate.authorize(presented_local_token(
+        let presented_token = match extract_presented_local_token_from_request(
             request.header_value("x-codex-router-token"),
             request.header_value("authorization"),
-        )) {
+            request.header_value("cookie"),
+            request.path(),
+            request.body(),
+            true,
+        ) {
+            Ok(presented_token) => presented_token,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::Http,
+                    audit_route_kind,
+                    reason,
+                ));
+                return Err(HttpProxyError::LocalAuth { reason });
+            }
+        };
+        let token_generation = match self.auth_gate.authorize(presented_token) {
             Ok(generation) => generation,
             Err(reason) => {
                 self.emit_audit_event(local_auth_rejection_audit_event(
