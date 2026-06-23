@@ -1,7 +1,7 @@
 # Reset-Aware Burn-Down Routing Spec Ledger
 
 Date: 2026-06-23
-Status: parent synthesis
+Status: revised parent synthesis after spec-review findings
 
 ## Source Inputs
 
@@ -14,6 +14,8 @@ Status: parent synthesis
 - `docs/specs/2026-06-20-codex-router-greenfield-spec.md`
 - `docs/plans/2026-06-22-codex-router-plan-1b-quota-runtime-status-selection.md`
 - `MEMORY.md:2455-2541` for recovered prior context; treated as secondary to live repo evidence
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/*.md`
 
 ## Lanes Run
 
@@ -35,12 +37,18 @@ Accepted direct observations:
 - CLI status already computes pace and runout from reset time. Source: `crates/codex-router-cli/src/quota.rs:924-1007`.
 - existing spec already constrains weekly quota protection and selection-visible reset timing. Source: `docs/specs/2026-06-20-codex-router-greenfield-spec.md:147-151`.
 - existing plan already identifies long-window pressure ahead of reset urgency. Source: `docs/plans/2026-06-22-codex-router-plan-1b-quota-runtime-status-selection.md:322-338`.
+- spec review found the first draft under-specified across scoring, dependency
+  ownership, thresholds, mixed-window collapse, human status output,
+  non-blocking proof, and redaction proof. Source:
+  `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`.
 
 Rejected or deferred evidence:
 
 - "earliest reset wins" is rejected as the primary policy because it can over-route nearly empty or weekly-dangerous accounts.
 - external README/issues from the UX/pragmatic lanes were not accepted as source of truth for this repo. They only support product intuition.
-- exact threshold constants remain open decisions for spec review.
+- the dedicated security review lane crashed; the revised spec adds
+  surface-by-surface redaction expectations, but the next `spec-review-swarm`
+  should rerun a dedicated security/trust-boundary lane.
 
 ## Accepted Design Decisions
 
@@ -51,16 +59,36 @@ Rejected or deferred evidence:
 5. Allow bounded reset salvage for soon-reset windows only when durable-budget risk is not dangerous, or when the long window itself is imminently resetting.
 6. Use structured routing reasons shared by runtime audit and quota status display.
 7. Keep default human quota output account-centric and avoid internal score jargon.
+8. Put pure assessment in `codex-router-selection::burn_down`; proxy and CLI
+   adapt state DTOs into pure assessment DTOs.
+9. Use fixed v1 policy constants for near-reset thresholds, reserve thresholds,
+   pressure multiplier, salvage caps, and weight clamps.
+10. Classify mixed windows with any-window conservative collapse:
+    ineligible/exhausted blocks, unknown or missing reset becomes fallback,
+    stale marks stale, and `effective` is only an explanation hint.
+11. Route by availability pool before weighted fairness:
+    `usable`, then `reserve`, then `unknown`, never `blocked`.
+12. Make default human status output strict: account label only, Unicode bars
+    when supported, no `pp`, no `bottleneck`, no raw score, and selected-next
+    explanation when routing is shown.
+13. Require black-box non-blocking proof for boot/listen, first routed request,
+    and quota status render.
+14. Require end-to-end Codex-through-router proof, including WebSocket behavior,
+    before implementation completion can be claimed.
 
 ## Open Decisions
 
-- weekly near-reset threshold: 12h vs 24h
-- reserve behavior: zero normal traffic vs tiny trickle
-- module home: `codex-router-selection` module vs new crate
-- human display of risk score: default hidden vs debug only
+No product decisions remain open before the next spec review. The next review
+may still reject decisions, but plan creation must not reopen them silently.
 
 ## Next Route
 
 Recommended next skill: `shravan-dev-workflow:spec-review-swarm`.
 
-After review acceptance, route to `shravan-dev-workflow:plan-creation-swarm`.
+Only after review acceptance should orchestrator route to
+`shravan-dev-workflow:plan-creation-swarm`.
+
+phase_result: complete
+evidence: `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`, `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/swarm-ledger.md`
+recommended_next_workflow: `shravan-dev-workflow:spec-review-swarm`
+recommended_transition_reason: Revised spec folds in accepted review findings; next hard gate is adversarial spec review before planning.

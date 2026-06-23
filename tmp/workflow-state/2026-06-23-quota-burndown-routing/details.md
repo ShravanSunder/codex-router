@@ -66,6 +66,28 @@ The current spec is not accepted. The review found these required fixes:
 7. Define redaction and observability proof across status rows, selection
    explanations, refresh errors, traces/logs, and smoke transcripts.
 
+## Current Phase Update: Revised Spec Ready For Review
+
+The spec-creation pass revised the primary spec to fold in the accepted
+spec-review blockers:
+
+- deterministic burn-down score and selector weight contract
+- fixed v1 threshold and salvage constants
+- explicit crate ownership and dependency rules
+- conservative mixed-window collapse
+- strict human and machine quota status contracts
+- black-box non-blocking proof expectations
+- surface-by-surface redaction proof expectations
+- end-to-end Codex-through-router WebSocket proof as an implementation gate
+
+Next hard gate:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- the dedicated security/trust-boundary lane should be rerun because the prior
+  security lane crashed
+- do not route to `plan-creation-swarm` unless spec review returns
+  `phase_result: complete`
+
 ## Requirements/proof matrix
 
 Requirement / claim:
