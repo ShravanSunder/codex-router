@@ -127,6 +127,28 @@ Proof:
 
 Remaining T2 gaps before declaring the whole T2 plan row fully complete:
 
-- previous-response affinity fail-closed request-path extraction/enforcement is
-  still pending
 - WebSocket first-frame affinity/pinning matrix is still pending in T3
+
+## T2 Affinity Checkpoint
+
+Implemented:
+
+- HTTP/SSE request-path selection extracts top-level `previous_response_id`
+  only when the body mentions that field
+- durable affinity owner lookup uses `AffinityRepository`
+- affinity owner selection bypasses account-hold cooldown and weighted fallback
+- missing owner, malformed `previous_response_id`, and unroutable owner fail
+  closed with audit-safe selection errors
+- forced affinity selection is recorded in weighted-deficit state and refreshes
+  the route-band hold to the affinity owner
+
+Proof:
+
+- `cargo test -p codex-router-proxy`
+  - result: pass
+  - count: 67 passed, 0 failed
+- `cargo test -p codex-router-selection`
+  - result: pass
+  - count: 20 passed, 0 failed
+- `cargo fmt --all -- --check`
+  - result: pass after rustfmt cleanup

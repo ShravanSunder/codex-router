@@ -80,6 +80,7 @@ mod tests {
     use codex_router_core::audit::ResponseCommitState;
     use codex_router_core::audit::RouteKind as AuditRouteKind;
     use codex_router_core::audit::TransportKind;
+    use codex_router_core::ids::AffinityKey;
     use codex_router_core::ids::RequestId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::local_auth::LocalAuthError;
@@ -98,6 +99,7 @@ mod tests {
     use codex_router_state::quota_snapshot::QuotaSnapshotSource;
     use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
     use codex_router_state::repositories::AccountStateRepository;
+    use codex_router_state::repositories::AffinityRepository;
     use codex_router_state::repositories::QuotaSnapshotRepository;
     use codex_router_state::repositories::SelectorQuotaRepository;
     use codex_router_state::sqlite::SqliteStateStore;
@@ -1084,6 +1086,162 @@ mod tests {
             ),
             Err(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+            })
+        );
+    }
+
+    #[test]
+    fn repository_backed_selector_affinity_owner_bypasses_hold_and_weighted_choice() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_owner_hit");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        if let Err(error) = AffinityRepository::pin_account(
+            &state,
+            &AffinityKey::new("resp_beta"),
+            beta.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_body(br#"{"previous_response_id":"resp_beta"}"#.to_vec()),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("affinity owner should select: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), beta.account_id());
+        assert_eq!(selected.selection_reason(), "previous_response_affinity");
+    }
+
+    #[test]
+    fn repository_backed_selector_affinity_missing_owner_fails_closed() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_missing_owner");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+
+        assert_eq!(
+            selector.select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_body(br#"{"previous_response_id":"resp_missing"}"#.to_vec()),
+                TokenGeneration::new(1),
+            ),
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing
+            })
+        );
+    }
+
+    #[test]
+    fn repository_backed_selector_affinity_ineligible_owner_fails_closed() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_owner_ineligible");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let exhausted = AccountRecord::new(
+            account_id("acct_exhausted"),
+            "exhausted",
+            AccountStatus::Enabled,
+        );
+        let eligible = AccountRecord::new(
+            account_id("acct_eligible"),
+            "eligible",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &exhausted,
+            "responses",
+            &[(18_000, 0, true), (604_800, 0, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &eligible,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        if let Err(error) = AffinityRepository::pin_account(
+            &state,
+            &AffinityKey::new("resp_exhausted"),
+            exhausted.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+
+        assert_eq!(
+            selector.select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_body(br#"{"previous_response_id":"resp_exhausted"}"#.to_vec()),
+                TokenGeneration::new(1),
+            ),
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable
+            })
+        );
+    }
+
+    #[test]
+    fn repository_backed_selector_malformed_affinity_key_fails_closed() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_malformed");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+
+        assert_eq!(
+            selector.select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_body(br#"{"previous_response_id":42}"#.to_vec()),
+                TokenGeneration::new(1),
+            ),
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::MalformedAffinityKey
             })
         );
     }

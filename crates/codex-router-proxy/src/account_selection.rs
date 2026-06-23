@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::ids::AffinityKey;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_quota::snapshot::SnapshotFreshness;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
@@ -23,6 +24,7 @@ use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
+use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use thiserror::Error;
 
@@ -137,6 +139,15 @@ pub enum QuotaAwareAccountSelectorError {
     /// Secret store could not be read.
     #[error("secret store unavailable")]
     SecretUnavailable,
+    /// Previous-response affinity key was malformed.
+    #[error("malformed affinity key")]
+    MalformedAffinityKey,
+    /// Previous-response affinity owner was missing.
+    #[error("affinity owner missing")]
+    AffinityOwnerMissing,
+    /// Previous-response affinity owner is not currently routable.
+    #[error("affinity owner unavailable")]
+    AffinityOwnerUnavailable,
 }
 
 /// Account selector adapter using quota freshness and weighted deficit state.
@@ -170,7 +181,7 @@ impl AccountDecisionSelector for QuotaAwareAccountSelector {
 /// Selector that hydrates account state from repositories at request time.
 pub struct RepositoryBackedAccountSelector<'a, R>
 where
-    R: SelectorQuotaRepository,
+    R: AffinityRepository + SelectorQuotaRepository,
 {
     state_repository: &'a R,
     weighted_selectors: RouteBandWeightedSelectors,
@@ -181,7 +192,7 @@ where
 
 impl<'a, R> RepositoryBackedAccountSelector<'a, R>
 where
-    R: SelectorQuotaRepository,
+    R: AffinityRepository + SelectorQuotaRepository,
 {
     /// Creates a repository-backed selector.
     #[must_use]
@@ -232,7 +243,7 @@ where
 
 impl<R> AccountDecisionSelector for RepositoryBackedAccountSelector<'_, R>
 where
-    R: SelectorQuotaRepository,
+    R: AffinityRepository + SelectorQuotaRepository,
 {
     fn select_upstream_account(
         &self,
@@ -275,6 +286,25 @@ where
                 .map_err(|_error| HttpProxyError::Selection {
                     reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
                 })?;
+        if let Some(affinity_key) = previous_response_affinity_key(request)? {
+            let owner_account_id = self
+                .state_repository
+                .load_pin(&affinity_key)
+                .map_err(|_error| HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                })?
+                .ok_or(HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing,
+                })?;
+            return select_affinity_owner(
+                route_band,
+                &owner_account_id,
+                &assessment,
+                weighted_selector,
+                &mut account_holds,
+                now_unix_seconds,
+            );
+        }
 
         select_from_burn_down_assessment(
             route_band,
@@ -285,6 +315,41 @@ where
             now_unix_seconds,
         )
     }
+}
+
+fn select_affinity_owner(
+    route_band: &str,
+    owner_account_id: &AccountId,
+    assessment: &codex_router_selection::burn_down::BurnDownRouteBandAssessment,
+    weighted_selector: &mut WeightedDeficitSelector,
+    account_holds: &mut HashMap<String, AccountHold>,
+    now_unix_seconds: u64,
+) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let weighted_candidates = assessment.weighted_candidates();
+    if !weighted_candidates
+        .iter()
+        .any(|(account_id, _weight)| account_id == owner_account_id)
+    {
+        account_holds.remove(route_band);
+        return Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+        });
+    }
+    if !weighted_selector.record_selection(weighted_candidates, owner_account_id) {
+        account_holds.remove(route_band);
+        return Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+        });
+    }
+
+    account_holds.insert(
+        route_band.to_owned(),
+        AccountHold::new(owner_account_id.clone(), now_unix_seconds),
+    );
+    Ok(SelectedAccountDecision::new(
+        owner_account_id.clone(),
+        "previous_response_affinity",
+    ))
 }
 
 fn select_from_account_states(
@@ -469,6 +534,40 @@ fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, Ht
 fn path_without_query(path: &str) -> &str {
     path.split_once('?')
         .map_or(path, |(path_without_query, _query)| path_without_query)
+}
+
+fn previous_response_affinity_key(
+    request: &HttpProxyRequest,
+) -> Result<Option<AffinityKey>, HttpProxyError> {
+    if !body_mentions_previous_response_id(request.body()) {
+        return Ok(None);
+    }
+
+    let value = serde_json::from_slice::<serde_json::Value>(request.body()).map_err(|_error| {
+        HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+        }
+    })?;
+    let Some(previous_response_id) = value.get("previous_response_id") else {
+        return Ok(None);
+    };
+    let previous_response_id = previous_response_id
+        .as_str()
+        .ok_or(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+        })?;
+    if previous_response_id.is_empty() {
+        return Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+        });
+    }
+
+    Ok(Some(AffinityKey::new(previous_response_id.to_owned())))
+}
+
+fn body_mentions_previous_response_id(body: &[u8]) -> bool {
+    body.windows(b"previous_response_id".len())
+        .any(|window| window == b"previous_response_id")
 }
 
 fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownAccountInput {
