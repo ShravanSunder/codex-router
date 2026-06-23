@@ -92,6 +92,7 @@ mod tests {
     use codex_router_core::local_auth::LocalRouterAuth;
     use codex_router_core::local_auth::LocalRouterTokenRecord;
     use codex_router_core::redaction::SecretString;
+    use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
@@ -4302,7 +4303,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
         let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
 
         let decision = match router.route_first_frame(
@@ -4339,7 +4341,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         assert_eq!(
             router.route_first_frame(
@@ -4362,7 +4365,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         assert_eq!(
             router.route_first_frame(
@@ -4385,7 +4389,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         assert_eq!(
             router.route_first_frame(
@@ -4495,7 +4500,8 @@ mod tests {
         let selector = RecordingSelector::new();
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
         let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
 
         let decision = match router.route_first_frame(
@@ -4603,7 +4609,8 @@ mod tests {
         let selector = RecordingSelector::new();
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         assert_eq!(
             router.route_first_frame(
@@ -4626,7 +4633,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         assert_eq!(
             router.route_first_frame(
@@ -4647,7 +4655,8 @@ mod tests {
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
         let router =
-            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
         let decision = match router.route_first_frame(
             WebSocketHandshakeRequest::new()
@@ -4805,7 +4814,8 @@ mod tests {
                 Err(error) => panic!("router websocket should accept local client: {error}"),
             };
             let tunnel =
-                BlockingWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router);
+                BlockingWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
             match tunnel.handle_connection(stream, upstream_url.as_str(), 1) {
                 Ok(()) => {}
                 Err(error) => panic!("websocket tunnel should complete: {error}"),
@@ -4859,6 +4869,136 @@ mod tests {
             Ok(()) => {}
             Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
         }
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn blocking_websocket_tunnel_records_top_level_response_owner() {
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket =
+                match accept_hdr(stream, |_request: &Request, response: Response| {
+                    Ok(response)
+                }) {
+                    Ok(websocket) => websocket,
+                    Err(error) => {
+                        panic!("mock websocket upstream handshake should accept: {error}")
+                    }
+                };
+            if let Err(error) = websocket.read() {
+                panic!("mock websocket upstream should read first frame: {error}");
+            }
+            if let Err(error) = websocket.send(Message::text(
+                r#"{"body":{"response":{"id":"resp_nested"}}}"#,
+            )) {
+                panic!("mock websocket upstream should send nested non-owner response: {error}");
+            }
+            if let Err(error) = websocket.send(Message::text(
+                r#"{"type":"response.created","response":{"id":"resp_ws_owner"}}"#,
+            )) {
+                panic!("mock websocket upstream should send owner response: {error}");
+            }
+            if let Err(error) = websocket.send(Message::text(r#"{"type":"response.completed"}"#)) {
+                panic!("mock websocket upstream should complete response: {error}");
+            }
+        });
+
+        let router_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("router websocket listener should bind: {error}"),
+        };
+        let router_address = match router_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("router websocket address should read: {error}"),
+        };
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let recorder = RecordingAffinityOwnerRecorder::default();
+        let recorder_for_thread = recorder.clone();
+        let upstream_url = format!("ws://{upstream_address}/v1/responses");
+        let router_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match router_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("router websocket should accept local client: {error}"),
+            };
+            let tunnel =
+                BlockingWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
+                    .with_affinity_owner_recorder(&recorder_for_thread);
+            match tunnel.handle_connection(stream, upstream_url.as_str(), 3) {
+                Ok(()) => {}
+                Err(error) => panic!("websocket tunnel should complete: {error}"),
+            }
+        });
+
+        let mut request = match format!("ws://{router_address}/v1/responses").into_client_request()
+        {
+            Ok(request) => request,
+            Err(error) => panic!("local websocket request should build: {error}"),
+        };
+        request.headers_mut().insert(
+            "X-Codex-Router-Token",
+            HeaderValue::from_static("current-token"),
+        );
+        let (mut client, _response) = match connect(request) {
+            Ok(connection) => connection,
+            Err(error) => panic!("local websocket client should connect: {error}"),
+        };
+        if let Err(error) = client.send(Message::text(r#"{"type":"response.create"}"#)) {
+            panic!("local websocket client should send first frame: {error}");
+        }
+        for expected_response in [
+            r#"{"body":{"response":{"id":"resp_nested"}}}"#,
+            r#"{"type":"response.created","response":{"id":"resp_ws_owner"}}"#,
+            r#"{"type":"response.completed"}"#,
+        ] {
+            let response = match client.read() {
+                Ok(message) => message,
+                Err(error) => panic!("local websocket client should read response: {error}"),
+            };
+            assert_eq!(response.to_string(), expected_response);
+        }
+
+        match router_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("router websocket thread panicked: {error:?}"),
+        }
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
+        }
+
+        let records = recorder.take_records();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.account_id().as_str(), "acct_selected");
+        assert_eq!(record.credential_generation(), 1);
+        assert_eq!(record.route_band(), RouteBand::Responses);
+        assert_eq!(
+            record.source_transport(),
+            AffinitySourceTransport::WebSocket
+        );
+        assert_eq!(
+            record.affinity_key_hash(),
+            &must_ok(hash_previous_response_id(
+                &test_affinity_secret(),
+                &must_ok(PreviousResponseId::new("resp_ws_owner")),
+            ))
+        );
+        assert_ne!(record.affinity_key_hash().as_str(), "resp_ws_owner");
     }
 
     #[test]
@@ -4932,7 +5072,8 @@ mod tests {
                 Err(error) => panic!("router websocket should accept local client: {error}"),
             };
             let tunnel =
-                BlockingWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router);
+                BlockingWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
+                    .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
             match tunnel.handle_connection(stream, upstream_url.as_str(), 1) {
                 Ok(()) => {}
                 Err(error) => panic!("websocket tunnel should complete: {error}"),

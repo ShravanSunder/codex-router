@@ -455,3 +455,52 @@ Notes:
   credential, auth injection, and upstream open.
 - T6 still needs WebSocket owner-record writes from upstream `response.id`
   frames and secret-loss/replacement recovery proof.
+
+## T6 WebSocket Owner-Record Writes
+
+Plan rows:
+
+- WebSocket routing uses the same affinity hash secret as HTTP/SSE before
+  account selection.
+- WebSocket tunnels persist previous-response owner records from upstream
+  top-level `response.id` frames using hashed ids only.
+- Nested response-id canaries do not create affinity owners.
+- Runtime WebSocket dispatch wires the production SQLite owner recorder into
+  both normal and revocation-aware tunnel constructors.
+
+Files changed:
+
+- `crates/codex-router-proxy/src/websocket.rs`
+- `crates/codex-router-proxy/src/server.rs`
+- `crates/codex-router-proxy/src/lib.rs`
+
+Implemented:
+
+- `AuthenticatedWebSocketRouter` now always loads the router affinity hash
+  secret before selector evaluation, matching the shared assessment and
+  previous-response-affinity contract.
+- WebSocket first-frame decisions carry safe affinity-owner context for the
+  selected account and credential generation.
+- `BlockingWebSocketTunnel` can receive an `HttpAffinityOwnerRecorder` and
+  records hashed owner rows while forwarding upstream frames.
+- Owner extraction is restricted to top-level upstream `response.id`; nested
+  canary ids and non-text/malformed frames are ignored.
+
+Proof:
+
+- `cargo test -p codex-router-proxy websocket -- --nocapture` passed:
+  22 focused WebSocket tests.
+- `cargo test -p codex-router-proxy` passed: 84 tests.
+- `cargo fmt --all -- --check` passed.
+- `git diff --check` passed.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 84, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- This checkpoint proves WebSocket owner-record writes and runtime recorder
+  wiring. Secret-loss/replacement recovery proof remains a later T6/T7-adjacent
+  gate before final completion.

@@ -413,6 +413,7 @@ impl LoopbackRouterRuntime {
                     audit_sink,
                 )
                 .with_affinity_secret_provider(&self.secret_store)
+                .with_affinity_owner_recorder(self.affinity_owner_recorder.as_ref())
             } else {
                 BlockingWebSocketTunnel::new_with_revocation_registry(
                     &self.auth_gate,
@@ -422,6 +423,7 @@ impl LoopbackRouterRuntime {
                     self.websocket_revocations.clone(),
                 )
                 .with_affinity_secret_provider(&self.secret_store)
+                .with_affinity_owner_recorder(self.affinity_owner_recorder.as_ref())
             };
             let upstream_url = self
                 .upstream_endpoint

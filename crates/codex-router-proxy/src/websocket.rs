@@ -8,9 +8,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_core::affinity::PreviousResponseId;
 use codex_router_core::affinity::RouterAffinityHashSecret;
+use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::audit::AuditEvent;
 use codex_router_core::audit::AuditEventFields;
 use codex_router_core::audit::AuditFileSink;
@@ -19,9 +23,13 @@ use codex_router_core::audit::LocalAuthAuditResult;
 use codex_router_core::audit::ResponseCommitState;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
+use codex_router_core::ids::AccountId;
 use codex_router_core::ids::RequestId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::redaction::SecretString;
+use codex_router_core::routes::RouteBand;
+use codex_router_state::affinity_owner::AffinitySourceTransport;
+use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use thiserror::Error;
 use tungstenite::Message;
 use tungstenite::WebSocket;
@@ -37,6 +45,7 @@ use crate::account_selection::AccountDecisionSelector;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
+use crate::http_sse::HttpAffinityOwnerRecorder;
 use crate::http_sse::HttpAffinitySecretProvider;
 use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::StderrAuditFailureReporter;
@@ -118,7 +127,31 @@ pub enum WebSocketFirstFrameDecision {
         headers: HeaderCollection,
         /// First frame to forward unchanged.
         first_frame: WebSocketFrame,
+        /// Context for recording upstream response owners.
+        affinity_owner_context: Option<WebSocketAffinityOwnerContext>,
     },
+}
+
+/// Safe metadata needed to record WebSocket previous-response owners.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebSocketAffinityOwnerContext {
+    affinity_secret: RouterAffinityHashSecret,
+    account_id: AccountId,
+    credential_generation: u64,
+}
+
+impl WebSocketAffinityOwnerContext {
+    fn new(
+        affinity_secret: RouterAffinityHashSecret,
+        account_id: AccountId,
+        credential_generation: u64,
+    ) -> Self {
+        Self {
+            affinity_secret,
+            account_id,
+            credential_generation,
+        }
+    }
 }
 
 /// Local close reason before upstream is opened.
@@ -206,6 +239,7 @@ impl WebSocketProtocolRouter {
                 chatgpt_account_id,
             ),
             first_frame,
+            affinity_owner_context: None,
         })
     }
 }
@@ -328,22 +362,13 @@ where
         let selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
             .with_websocket_upgrade(true)
             .with_body(first_frame_bytes);
-        let affinity_secret = if first_frame_mentions_previous_response_id(selection_request.body())
-        {
-            Some(self.load_affinity_secret().map_err(|_reason| {
-                self.emit_audit_event(websocket_selection_rejection_audit_event());
-                WebSocketCloseReason::Selection
-            })?)
-        } else {
-            None
-        };
+        let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
+            self.emit_audit_event(websocket_selection_rejection_audit_event());
+            WebSocketCloseReason::Selection
+        })?;
         let selected = self
             .selector
-            .select_upstream_account(
-                &selection_request,
-                token_generation,
-                affinity_secret.as_ref(),
-            )
+            .select_upstream_account(&selection_request, token_generation, Some(&affinity_secret))
             .map_err(|_error| {
                 self.emit_audit_event(websocket_selection_rejection_audit_event());
                 WebSocketCloseReason::Selection
@@ -382,11 +407,17 @@ where
             WebSocketFirstFrameDecision::OpenUpstream {
                 headers,
                 first_frame,
+                affinity_owner_context: _,
                 ..
             } => WebSocketFirstFrameDecision::OpenUpstream {
                 token_generation,
                 headers,
                 first_frame,
+                affinity_owner_context: Some(WebSocketAffinityOwnerContext::new(
+                    affinity_secret,
+                    selected.account_id().clone(),
+                    resolved.credential_generation(),
+                )),
             },
         })
     }
@@ -399,11 +430,6 @@ where
             .load_or_create_affinity_secret()
             .map_err(|_error| WebSocketCloseReason::Selection)
     }
-}
-
-fn first_frame_mentions_previous_response_id(body: &[u8]) -> bool {
-    body.windows(b"previous_response_id".len())
-        .any(|window| window == b"previous_response_id")
 }
 
 fn websocket_selection_rejection_audit_event() -> AuditEvent {
@@ -505,6 +531,7 @@ where
 {
     router: AuthenticatedWebSocketRouter<'a, S, C>,
     revocations: WebSocketRevocationRegistry,
+    affinity_owner_recorder: Option<&'a dyn HttpAffinityOwnerRecorder>,
 }
 
 impl<'a, S, C> BlockingWebSocketTunnel<'a, S, C>
@@ -528,6 +555,7 @@ where
                 protocol_router,
             ),
             revocations: WebSocketRevocationRegistry::new(),
+            affinity_owner_recorder: None,
         }
     }
 
@@ -548,6 +576,7 @@ where
                 protocol_router,
             ),
             revocations,
+            affinity_owner_recorder: None,
         }
     }
 
@@ -570,6 +599,7 @@ where
             )
             .with_audit_sink(audit_sink),
             revocations,
+            affinity_owner_recorder: None,
         }
     }
 
@@ -582,6 +612,16 @@ where
         self.router = self
             .router
             .with_affinity_secret_provider(affinity_secret_provider);
+        self
+    }
+
+    /// Adds the previous-response owner recorder.
+    #[must_use]
+    pub fn with_affinity_owner_recorder(
+        mut self,
+        affinity_owner_recorder: &'a dyn HttpAffinityOwnerRecorder,
+    ) -> Self {
+        self.affinity_owner_recorder = Some(affinity_owner_recorder);
         self
     }
 
@@ -630,6 +670,7 @@ where
             token_generation,
             headers,
             first_frame,
+            affinity_owner_context,
         } = decision;
         self.revocations
             .register(token_generation, local_websocket.get_ref())?;
@@ -642,6 +683,8 @@ where
             &mut upstream_websocket,
             &mut local_websocket,
             max_upstream_messages,
+            self.affinity_owner_recorder,
+            affinity_owner_context.as_ref(),
         )?;
         local_websocket
             .get_mut()
@@ -670,6 +713,8 @@ where
                 &mut upstream_websocket,
                 &mut local_websocket,
                 max_upstream_messages,
+                self.affinity_owner_recorder,
+                affinity_owner_context.as_ref(),
             )?;
         }
     }
@@ -679,11 +724,18 @@ fn forward_upstream_response(
     upstream_websocket: &mut WebSocket<impl std::io::Read + std::io::Write>,
     local_websocket: &mut WebSocket<impl std::io::Read + std::io::Write>,
     max_upstream_messages: usize,
+    affinity_owner_recorder: Option<&dyn HttpAffinityOwnerRecorder>,
+    affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
 ) -> Result<(), WebSocketTunnelError> {
     for _ in 0..max_upstream_messages {
         let upstream_message = upstream_websocket.read()?;
         let is_close = matches!(upstream_message, Message::Close(_));
         let is_completed = is_response_completed(&upstream_message);
+        record_websocket_affinity_owner(
+            &upstream_message,
+            affinity_owner_recorder,
+            affinity_owner_context,
+        );
         local_websocket.send(upstream_message)?;
         if is_close || is_completed {
             return Ok(());
@@ -693,6 +745,49 @@ fn forward_upstream_response(
     upstream_websocket.close(None)?;
 
     Ok(())
+}
+
+fn record_websocket_affinity_owner(
+    upstream_message: &Message,
+    affinity_owner_recorder: Option<&dyn HttpAffinityOwnerRecorder>,
+    affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
+) {
+    let (Some(recorder), Some(context)) = (affinity_owner_recorder, affinity_owner_context) else {
+        return;
+    };
+    let Some(previous_response_id) = extract_websocket_response_id(upstream_message) else {
+        return;
+    };
+    let Ok(affinity_key_hash) =
+        hash_previous_response_id(&context.affinity_secret, &previous_response_id)
+    else {
+        return;
+    };
+    let owner = PreviousResponseAffinityOwnerRecord::new(
+        affinity_key_hash,
+        context.account_id.clone(),
+        context.credential_generation,
+        RouteBand::Responses,
+        AffinitySourceTransport::WebSocket,
+        current_unix_seconds(),
+    );
+    let _result = recorder.record_affinity_owner(&owner);
+}
+
+fn extract_websocket_response_id(message: &Message) -> Option<PreviousResponseId> {
+    let Message::Text(text) = message else {
+        return None;
+    };
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let response_id = value
+        .get("response")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|response| response.get("id"))
+        .and_then(serde_json::Value::as_str)?;
+    if response_id.is_empty() {
+        return None;
+    }
+    PreviousResponseId::new(response_id.to_owned()).ok()
 }
 
 fn is_response_completed(message: &Message) -> bool {
@@ -709,6 +804,12 @@ fn is_response_completed(message: &Message) -> bool {
         })
         .as_deref()
         == Some("response.completed")
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 #[allow(clippy::result_large_err)]

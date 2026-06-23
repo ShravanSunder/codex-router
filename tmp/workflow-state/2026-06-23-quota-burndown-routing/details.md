@@ -1256,3 +1256,38 @@ Next hard gate:
 Run `shravan-dev-workflow:plan-review-swarm` against the implementation plan.
 Do not start implementation until accepted plan review findings are folded in
 or explicitly rejected with evidence.
+
+## Implementation Checkpoint: T6 WebSocket Owner Records
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan checkpoint.
+
+Checkpoint result:
+complete for WebSocket owner-record writes.
+
+Evidence:
+
+- `crates/codex-router-proxy/src/websocket.rs` records hashed owner rows from
+  upstream top-level `response.id` frames while forwarding WebSocket responses.
+- `crates/codex-router-proxy/src/server.rs` wires the production affinity owner
+  recorder into WebSocket tunnels.
+- `crates/codex-router-proxy/src/lib.rs` adds tunnel-level proof that nested
+  response-id canaries are ignored and the selected account/generation is
+  recorded with `AffinitySourceTransport::WebSocket`.
+- `cargo test -p codex-router-proxy websocket -- --nocapture`: 22 passed.
+- `cargo test -p codex-router-proxy`: 84 passed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed; 2 installed-Codex smoke tests remain
+  ignored by design and require the smoke script gate.
+
+Remaining before terminal completion:
+
+- secret-loss/replacement recovery proof
+- route-native black-box proof for all routed APIs
+- installed-Codex HTTP/SSE e2e
+- installed-Codex WebSocket e2e
+- implementation review and PR-ready wrapup
