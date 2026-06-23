@@ -152,3 +152,29 @@ Proof:
   - count: 20 passed, 0 failed
 - `cargo fmt --all -- --check`
   - result: pass after rustfmt cleanup
+
+## T3 WebSocket Preselection / Affinity Checkpoint
+
+Implemented:
+
+- authenticated WebSocket routing now validates the first frame before account
+  selection or credential resolution
+- first-frame validation continues to allow only a text JSON
+  `type=response.create` frame before upstream open
+- the exact first-frame bytes are supplied to the selector as the request body,
+  allowing top-level `previous_response_id` affinity enforcement without
+  logging or interpreting prompts
+- WebSocket `previous_response_id` routes to the durable affinity owner and
+  fails before weighted fallback through the shared selector contract
+- first-frame rejection before selection proves zero selector calls and zero
+  credential resolver calls
+
+Proof:
+
+- `cargo test -p codex-router-proxy`
+  - result: pass
+  - count: 69 passed, 0 failed
+
+Remaining T3 gap:
+
+- add explicit multi-turn WebSocket same-connection pinning proof

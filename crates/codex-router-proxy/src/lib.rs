@@ -3831,6 +3831,80 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_websocket_router_rejects_first_frame_before_selection_or_credentials() {
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+
+        assert_eq!(
+            router.route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                WebSocketFrame::Text(br#"{"type":"not.response.create"}"#.to_vec()),
+            ),
+            Err(WebSocketCloseReason::UnexpectedFirstFrame)
+        );
+        assert!(selector.take_recorded().is_empty());
+        assert!(resolver.take_recorded().is_empty());
+    }
+
+    #[test]
+    fn authenticated_websocket_router_routes_previous_response_affinity_owner() {
+        let temp_dir = ProxyTestTempDir::new("websocket-router-affinity");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = must_ok(SqliteStateStore::open(&database_path));
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        if let Err(error) = AffinityRepository::pin_account(
+            &state,
+            &AffinityKey::new("resp_beta"),
+            beta.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router);
+
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+            WebSocketFrame::Text(
+                br#"{"type":"response.create","previous_response_id":"resp_beta"}"#.to_vec(),
+            ),
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("websocket affinity owner should route: {error:?}"),
+        };
+
+        assert_eq!(resolver.take_recorded(), vec!["acct_beta".to_owned()]);
+        let WebSocketFirstFrameDecision::OpenUpstream { headers, .. } = decision;
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer selected-upstream-token"]
+        );
+    }
+
+    #[test]
     fn authenticated_websocket_router_refreshes_expired_access_token_before_upstream_open() {
         let temp_dir = ProxyTestTempDir::new("websocket-router-refresh");
         let state = must_ok(SqliteStateStore::open(

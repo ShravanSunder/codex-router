@@ -43,6 +43,7 @@ use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::http_sse::redacted_account_hash;
 use crate::local_auth::ProxyLocalAuthGate;
+use crate::local_auth::presented_local_token;
 use crate::routes::Method;
 
 /// WebSocket frame subset needed before upstream connection opens.
@@ -154,14 +155,12 @@ impl WebSocketProtocolRouter {
         Self { first_frame_policy }
     }
 
-    /// Routes the first frame, returning either sanitized upstream open data or a local close reason.
-    pub fn route_first_frame(
+    /// Validates the first frame before account selection or upstream open.
+    pub fn validate_first_frame<'a>(
         &self,
-        handshake: WebSocketHandshakeRequest,
-        first_frame: WebSocketFrame,
-        provider_bearer_token: SecretString,
-    ) -> Result<WebSocketFirstFrameDecision, WebSocketCloseReason> {
-        let WebSocketFrame::Text(first_frame_bytes) = &first_frame else {
+        first_frame: &'a WebSocketFrame,
+    ) -> Result<&'a [u8], WebSocketCloseReason> {
+        let WebSocketFrame::Text(first_frame_bytes) = first_frame else {
             return Err(WebSocketCloseReason::UnsupportedFirstFrameType);
         };
         if first_frame_bytes.len() > self.first_frame_policy.max_first_frame_bytes {
@@ -177,9 +176,26 @@ impl WebSocketProtocolRouter {
             return Err(WebSocketCloseReason::UnexpectedFirstFrame);
         }
 
+        Ok(first_frame_bytes)
+    }
+
+    /// Routes the first frame, returning either sanitized upstream open data or a local close reason.
+    pub fn route_first_frame(
+        &self,
+        handshake: WebSocketHandshakeRequest,
+        first_frame: WebSocketFrame,
+        provider_bearer_token: SecretString,
+        chatgpt_account_id: Option<&str>,
+    ) -> Result<WebSocketFirstFrameDecision, WebSocketCloseReason> {
+        self.validate_first_frame(&first_frame)?;
+
         Ok(WebSocketFirstFrameDecision::OpenUpstream {
             token_generation: TokenGeneration::new(0),
-            headers: sanitize_headers_for_upstream(handshake.headers, provider_bearer_token),
+            headers: sanitize_headers_for_upstream(
+                handshake.headers,
+                provider_bearer_token,
+                chatgpt_account_id,
+            ),
             first_frame,
         })
     }
@@ -240,10 +256,10 @@ where
         handshake: WebSocketHandshakeRequest,
         first_frame: WebSocketFrame,
     ) -> Result<WebSocketFirstFrameDecision, WebSocketCloseReason> {
-        let token_generation = match self
-            .auth_gate
-            .authorize(handshake.header_value("x-codex-router-token"))
-        {
+        let token_generation = match self.auth_gate.authorize(presented_local_token(
+            handshake.header_value("x-codex-router-token"),
+            handshake.header_value("authorization"),
+        )) {
             Ok(generation) => generation,
             Err(reason) => {
                 self.emit_audit_event(local_auth_rejection_audit_event(
@@ -254,8 +270,16 @@ where
                 return Err(WebSocketCloseReason::LocalAuth { reason });
             }
         };
-        let selection_request =
-            HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true);
+        let first_frame_bytes = self
+            .protocol_router
+            .validate_first_frame(&first_frame)
+            .inspect_err(|_reason| {
+                self.emit_audit_event(websocket_first_frame_rejection_audit_event(None));
+            })?
+            .to_vec();
+        let selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
+            .with_websocket_upgrade(true)
+            .with_body(first_frame_bytes);
         let selected = self
             .selector
             .select_upstream_account(&selection_request, token_generation)
@@ -276,11 +300,16 @@ where
 
         let decision = self
             .protocol_router
-            .route_first_frame(handshake, first_frame, resolved.access_token().clone())
+            .route_first_frame(
+                handshake,
+                first_frame,
+                resolved.access_token().clone(),
+                resolved.chatgpt_account_id(),
+            )
             .inspect_err(|_reason| {
-                self.emit_audit_event(websocket_first_frame_rejection_audit_event(
+                self.emit_audit_event(websocket_first_frame_rejection_audit_event(Some(
                     account_hash.clone(),
-                ));
+                )));
             })?;
         self.emit_audit_event(allowed_audit_event(
             TransportKind::WebSocket,
@@ -316,7 +345,7 @@ fn websocket_selection_rejection_audit_event() -> AuditEvent {
     })
 }
 
-fn websocket_first_frame_rejection_audit_event(account_hash: String) -> AuditEvent {
+fn websocket_first_frame_rejection_audit_event(account_hash: Option<String>) -> AuditEvent {
     AuditEvent::proxy_decision(AuditEventFields {
         request_id: RequestId::new("local_proxy_request"),
         route_kind: AuditRouteKind::ResponsesWebSocket,
@@ -325,7 +354,7 @@ fn websocket_first_frame_rejection_audit_event(account_hash: String) -> AuditEve
         outcome: AuditOutcome::Rejected,
         decision_reason: "first_frame_rejected",
         response_commit_state: ResponseCommitState::NotCommitted,
-        account_hash: Some(account_hash),
+        account_hash,
         error_class: Some("websocket_first_frame"),
     })
 }
