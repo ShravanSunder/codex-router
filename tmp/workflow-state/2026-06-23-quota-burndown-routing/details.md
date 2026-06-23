@@ -736,3 +736,38 @@ Accepted findings:
 Next hard gate:
 Return to `shravan-dev-workflow:spec-creation-swarm`; do not proceed to
 `plan-creation-swarm` until the spec is revised and another spec review passes.
+
+## R15 Spec Revision
+
+Date: 2026-06-23
+
+Phase:
+spec-creation-swarm revision after R14.
+
+Revision artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r15/swarm-ledger.md`
+
+Lanes:
+
+- auth/profile compatibility: generated Codex profile remains
+  `env_key = "CODEX_ROUTER_TOKEN"`; installed Codex authenticates to the local
+  router with `Authorization: Bearer` for HTTP/SSE and WebSocket
+- selection envelope and cooldown: route-level output now uses one canonical
+  `route_result`, `selected_pool`, `selected_pool_reason`,
+  `preferred_next_account_id`, `weighted_candidates`, and `accounts` shape;
+  runtime holds/affinity survive only when the account remains in current
+  `weighted_candidates`
+- status, refresh, and transcript safety: refresh success/failure repository
+  operations are explicit, failed refresh preserves last-known selector rows,
+  and smoke transcripts forbid raw or derived non-allowlisted first-frame fields
+
+Revision applied:
+The spec now corrects the installed-Codex local-auth/profile contract, allows
+bounded direct WebSocket response-create first-frame structural checks without
+logging raw values, makes unknown fallback and unsupported route-band payloads
+first-class in the route result contract, adds cooldown/pinning proof rows, and
+adds refresh repository operation/state-transition proof rows.
+
+Next hard gate:
+Run `shravan-dev-workflow:spec-review-swarm` against R15. Do not proceed to
+`plan-creation-swarm` until that review passes.

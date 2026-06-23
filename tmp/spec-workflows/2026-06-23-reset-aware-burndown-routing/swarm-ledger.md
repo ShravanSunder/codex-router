@@ -195,8 +195,10 @@ Rejected or deferred evidence:
 51. Define deterministic public `routing_reason` precedence for overlapping
     preferred-account explanations.
 52. Pin installed-Codex e2e profile local auth to
-    `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }` and
-    reject `env_key` or Authorization-bearer fallback for this goal.
+    `env_key = "CODEX_ROUTER_TOKEN"`, proving installed Codex sends
+    `Authorization: Bearer` to the local router for HTTP/SSE and WebSocket.
+    Keep `X-Codex-Router-Token` as accepted manual/compatibility ingress and
+    reject mismatched mixed-carrier requests.
 53. Add `preferred_weekly_reset_soon` so long-window near-reset salvage can be
     explained directly in default status, JSON, runtime audit, and tests.
 54. Forbid persisted/shared smoke transcripts from emitting individual raw
@@ -208,6 +210,17 @@ Rejected or deferred evidence:
 56. Define `codex-router-core::routes::RouteBand` as the shared route-band
     identity used by proxy classification, selection policy lookup, and CLI
     status adapters.
+57. Normalize route-level assessment output around `route_result`,
+    `selected_pool`, `selected_pool_reason`, `preferred_next_account_id`,
+    `weighted_candidates`, and `accounts` so supported, unsupported, status,
+    runtime audit, and tests consume one shape.
+58. Accept installed-Codex direct WebSocket response-create first frames through
+    bounded structural booleans while forbidding raw `model`, `input`, `stream`,
+    prompt, tool, metadata, or body values from influencing selection or
+    appearing in persisted/shared proof artifacts.
+59. Define runtime cooldown/pinning as a proxy-owned wrapper over the pure
+    assessment: holds and affinity survive only when the account remains in the
+    current `weighted_candidates`.
 57. Define affinity hash-secret storage as
     `load_or_create_router_affinity_hash_secret`, stable key
     `router_affinity_hash_secret.v1`, 32 random bytes, 64-lowercase-hex
