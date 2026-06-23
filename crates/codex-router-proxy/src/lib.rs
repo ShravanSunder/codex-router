@@ -963,7 +963,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id().as_str(), "acct_fresh");
-        assert_eq!(selected.selection_reason(), "preferred_next");
+        assert_eq!(selected.selection_reason(), "preferred_weekly_reset_soon");
     }
 
     #[test]
@@ -1022,7 +1022,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id().as_str(), "acct_alpha");
-        assert_eq!(selected.selection_reason(), "preferred_next");
+        assert_eq!(selected.selection_reason(), "preferred_weekly_healthier");
     }
 
     #[test]
@@ -1210,7 +1210,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), weekly_healthy.account_id());
-        assert_eq!(selected.selection_reason(), "preferred_next");
+        assert_eq!(selected.selection_reason(), "preferred_weekly_healthier");
     }
 
     #[test]
@@ -1255,7 +1255,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), eligible.account_id());
-        assert_eq!(selected.selection_reason(), "preferred_next");
+        assert_eq!(selected.selection_reason(), "preferred_highest_weight");
     }
 
     #[test]
@@ -1293,7 +1293,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), unknown.account_id());
-        assert_eq!(selected.selection_reason(), "fallback");
+        assert_eq!(selected.selection_reason(), "unknown_fallback_preferred");
     }
 
     #[test]
@@ -1508,7 +1508,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), eligible.account_id());
-        assert_eq!(selected.selection_reason(), "preferred_next");
+        assert_eq!(selected.selection_reason(), "preferred_highest_weight");
     }
 
     #[test]
@@ -1566,7 +1566,7 @@ mod tests {
         };
 
         assert_eq!(first.account_id(), alpha.account_id());
-        assert_eq!(first.selection_reason(), "preferred_next");
+        assert_eq!(first.selection_reason(), "preferred_highest_weight");
         assert_eq!(second.account_id(), alpha.account_id());
         assert_eq!(second.selection_reason(), "account_hold_cooldown");
     }
@@ -1631,7 +1631,7 @@ mod tests {
 
         assert_eq!(first.account_id(), alpha.account_id());
         assert_eq!(second.account_id(), beta.account_id());
-        assert_eq!(second.selection_reason(), "available");
+        assert_eq!(second.selection_reason(), "available_same_pool");
     }
 
     #[test]
@@ -1692,7 +1692,7 @@ mod tests {
 
         assert_eq!(first.account_id(), alpha.account_id());
         assert_eq!(second.account_id(), beta.account_id());
-        assert_eq!(second.selection_reason(), "preferred_next");
+        assert_eq!(second.selection_reason(), "preferred_highest_weight");
     }
 
     #[test]

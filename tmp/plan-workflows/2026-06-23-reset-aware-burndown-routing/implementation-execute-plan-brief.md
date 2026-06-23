@@ -323,3 +323,78 @@ Notes:
   the T6 WebSocket capture slice.
 - Legacy raw affinity repository methods and SQLite table still exist, but the
   proxy HTTP/SSE selection and owner-write path use hash-owner records.
+
+## T4a Quota Status Public Reasons And Human UX
+
+Plan rows:
+
+- T4 status renderer consumes shared burn-down assessment output instead of
+  inventing separate routing phrases.
+- Default table uses comfy-table, one logical row per account, Unicode bars,
+  safe labels, no raw account ids, no `pp`, and no `bottleneck`.
+- Plain output uses ASCII bars and the same stable wording.
+- JSON output uses route-level fields, weighted candidates, stable routing
+  reason codes, and `window_slots`.
+
+Files changed:
+
+- `crates/codex-router-selection/src/burn_down.rs`
+- `crates/codex-router-cli/src/quota.rs`
+- `crates/codex-router-cli/src/lib.rs`
+- `crates/codex-router-proxy/src/account_selection.rs`
+- `crates/codex-router-proxy/src/lib.rs`
+
+Implemented:
+
+- Replaced coarse public routing reasons with stable spec reasons such as
+  `preferred_weekly_healthier`, `held_unknown`,
+  `unknown_fallback_preferred`, `blocked_window_exhausted`, and
+  `excluded_missing_credential`.
+- Added shared `RoutingReason::as_str()` and `RoutingReason::human_phrase()` so
+  proxy audit strings, JSON, table, and plain output use one vocabulary.
+- Added deterministic routing-reason precedence in the selection crate for
+  weekly reset, weekly health, short reset, same-pool availability, held
+  reserve, held unknown, fallback, blocked, and excluded outcomes.
+- Quota status table now shows `<percent>% left`, `no data`, `unknown`, `reset
+  unknown`, `needs refresh`, `limiting window`, and spec `next use` values:
+  `preferred`, `available`, `held`, `blocked`, or `fallback`.
+- Plain mode now uses ASCII bars (`#`/`-`) instead of Unicode.
+- Human status rows now display the assessment's safe account label rather than
+  raw account metadata.
+- JSON status now includes `route_result`, `selected_pool_reason`,
+  `weighted_candidates`, stable `routing_reason`, `limiting_window`, pressure
+  and salvage fields, `window_slots`, and per-window safe metadata.
+
+Proof:
+
+- `cargo test -p codex-router-selection` passed: 21 tests.
+- `cargo test -p codex-router-cli quota_status -- --nocapture` passed:
+  5 focused quota status tests.
+- `cargo test -p codex-router-proxy -p codex-router-cli -p codex-router-selection`
+  passed: CLI 60, proxy 75, selection 21.
+- Live render inspection:
+  `cargo run -q -p codex-router-cli -- quota status --format table
+  --now-unix-seconds 1700000000` showed one account row plus one continuation
+  line, Unicode bars, `left`, stable routing phrases, and no raw account ids in
+  human output.
+- Live render inspection:
+  `cargo run -q -p codex-router-cli -- quota status --format plain
+  --now-unix-seconds 1700000000` showed ASCII bars and the same phrases.
+- Live render inspection:
+  `cargo run -q -p codex-router-cli -- quota status --format json
+  --now-unix-seconds 1700000000` showed route-level fields,
+  `weighted_candidates`, stable reasons, and `window_slots`.
+- `cargo fmt --all -- --check` passed.
+- `git diff --check` passed.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 75, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- The live render used the current local router root and a fixed historical
+  clock, so reset durations are inspection-only and not a freshness claim.
+- The table still preserves comfy-table box drawing; this slice intentionally
+  did not remove or replace the table library.

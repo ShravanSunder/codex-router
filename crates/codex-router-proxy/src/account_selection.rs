@@ -19,7 +19,6 @@ use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentResult;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
-use codex_router_selection::burn_down::RoutingReason;
 use codex_router_selection::burn_down::SelectedPool;
 use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
 use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
@@ -625,15 +624,7 @@ const fn quota_window_status_from_selector_status(
 }
 
 fn selection_reason_for_assessment(assessment: &BurnDownAccountAssessment) -> String {
-    match assessment.routing_reason() {
-        RoutingReason::PreferredNext => "preferred_next".to_owned(),
-        RoutingReason::Available => "available".to_owned(),
-        RoutingReason::Held => "held".to_owned(),
-        RoutingReason::Fallback => "fallback".to_owned(),
-        RoutingReason::Unknown => "unknown".to_owned(),
-        RoutingReason::Blocked => "blocked".to_owned(),
-        RoutingReason::Excluded => "excluded".to_owned(),
-    }
+    assessment.routing_reason().as_str().to_owned()
 }
 
 fn current_unix_seconds() -> u64 {

@@ -845,7 +845,14 @@ fn render_quota_status(
 ) -> Result<(), QuotaCommandError> {
     let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
-    let report = quota_status_report(&state, &accounts, all_limits, now_unix_seconds, true)?;
+    let unicode_bars = format != QuotaStatusFormat::Plain;
+    let report = quota_status_report(
+        &state,
+        &accounts,
+        all_limits,
+        now_unix_seconds,
+        unicode_bars,
+    )?;
     match format {
         QuotaStatusFormat::Table => write_quota_table(stdout, report.rows()),
         QuotaStatusFormat::Plain => write_quota_plain(stdout, report.rows()),
@@ -923,7 +930,9 @@ fn quota_status_report(
     Ok(QuotaStatusReport {
         route_band: USER_QUOTA_ROUTE_BAND.to_owned(),
         selected_pool,
+        weighted_candidates: assessment.weighted_candidates().to_vec(),
         preferred_next_account_id,
+        now_unix_seconds,
         rows,
     })
 }
@@ -1031,7 +1040,9 @@ fn write_quota_json(
 struct QuotaStatusReport {
     route_band: String,
     selected_pool: SelectedPool,
+    weighted_candidates: Vec<(AccountId, u32)>,
     preferred_next_account_id: Option<AccountId>,
+    now_unix_seconds: u64,
     rows: Vec<QuotaStatusRow>,
 }
 
@@ -1082,7 +1093,7 @@ impl QuotaStatusRow {
     ) -> Self {
         Self {
             account_id: input.account_id.clone(),
-            account_label: input.account_label.clone(),
+            account_label: assessment.account_label().to_owned(),
             account_status: input.account_status.clone(),
             short_window: format_window_cell(
                 &input.windows,
@@ -1194,24 +1205,13 @@ fn format_window_cell(
         .iter()
         .find(|window| window.window_seconds == window_seconds)
     else {
-        return format!("{} -\nneeds probe", quota_bar(0, unicode));
+        return format!("{} no data\nneeds refresh", quota_bar(0, unicode));
     };
-    let reset = window.reset_unix_seconds.map_or_else(
-        || "needs probe".to_owned(),
-        |reset| format!("resets {}", format_relative_time(reset, now_unix_seconds)),
-    );
-    let note = match window.status {
-        QuotaWindowStatus::Eligible | QuotaWindowStatus::Stale => reset,
-        QuotaWindowStatus::Unknown => "needs probe".to_owned(),
-        QuotaWindowStatus::Ineligible if window.remaining_headroom == 0 => "empty".to_owned(),
-        QuotaWindowStatus::Ineligible => "blocked".to_owned(),
-    };
-
     format!(
-        "{} {}\n{}",
+        "{} {} left\n{}",
         quota_bar(window.remaining_headroom, unicode),
         format_percent(window.remaining_headroom),
-        note
+        window_display_note(window, now_unix_seconds)
     )
 }
 
@@ -1221,23 +1221,15 @@ fn quota_bar(percent: u32, unicode: bool) -> String {
     if unicode {
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
     } else {
-        format!("[{}{}]", "#".repeat(filled), "-".repeat(empty))
+        format!("{}{}", "#".repeat(filled), "-".repeat(empty))
     }
 }
 
 fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
-    let first_line = match assessment.routing_reason() {
-        RoutingReason::PreferredNext => "✓ preferred",
-        RoutingReason::Available => "✓ available",
-        RoutingReason::Held => "◌ held",
-        RoutingReason::Fallback => "↻ fallback",
-        RoutingReason::Unknown => "↻ unknown",
-        RoutingReason::Blocked => "× blocked",
-        RoutingReason::Excluded => "× excluded",
-    };
+    let first_line = assessment.routing_reason().human_phrase();
     if let Some(limiting_window) = assessment.limiting_window() {
         format!(
-            "{first_line}\n{} {}",
+            "{first_line}\nlimiting window: {} {} left",
             quota_window_label(limiting_window.window_seconds()),
             format_percent(limiting_window.remaining_headroom())
         )
@@ -1247,14 +1239,20 @@ fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
 }
 
 fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
-    if assessment.preferred_next() {
-        return "next";
-    }
-    match assessment.availability() {
-        AccountAvailability::Usable => "available",
-        AccountAvailability::Reserve => "backup",
-        AccountAvailability::Unknown => "fallback",
-        AccountAvailability::Blocked | AccountAvailability::Excluded => "no",
+    match assessment.routing_reason() {
+        RoutingReason::PreferredWeeklyHealthier
+        | RoutingReason::PreferredWeeklyResetSoon
+        | RoutingReason::PreferredShortResetSoon
+        | RoutingReason::PreferredHighestWeight => "preferred",
+        RoutingReason::AvailableSamePool => "available",
+        RoutingReason::HeldReserve | RoutingReason::HeldUnknown => "held",
+        RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
+            "fallback"
+        }
+        RoutingReason::ExcludedDisabled
+        | RoutingReason::ExcludedMissingCredential
+        | RoutingReason::BlockedWindowExhausted
+        | RoutingReason::BlockedWindowIneligible => "blocked",
     }
 }
 
@@ -1264,123 +1262,199 @@ fn format_percent(value: u32) -> String {
 
 #[derive(Serialize)]
 struct JsonQuotaStatusReport {
+    route_result: &'static str,
     route_band: String,
     selected_pool: &'static str,
+    selected_pool_reason: &'static str,
     preferred_next_account_id: Option<String>,
+    weighted_candidates: Vec<JsonWeightedCandidate>,
     accounts: Vec<JsonQuotaStatusAccount>,
 }
 
 impl JsonQuotaStatusReport {
     fn from_report(report: &QuotaStatusReport) -> Self {
         Self {
+            route_result: "ok",
             route_band: report.route_band.clone(),
             selected_pool: selected_pool_json(report.selected_pool),
+            selected_pool_reason: selected_pool_reason_json(report.selected_pool),
             preferred_next_account_id: report
                 .preferred_next_account_id
                 .as_ref()
                 .map(|account_id| account_id.as_str().to_owned()),
+            weighted_candidates: report
+                .weighted_candidates
+                .iter()
+                .map(|(account_id, routing_weight)| JsonWeightedCandidate {
+                    account_id: account_id.as_str().to_owned(),
+                    routing_weight: *routing_weight,
+                })
+                .collect(),
             accounts: report
                 .rows
                 .iter()
-                .map(JsonQuotaStatusAccount::from_row)
+                .map(|row| JsonQuotaStatusAccount::from_row(row, report.now_unix_seconds))
                 .collect(),
         }
     }
+}
+
+#[derive(Serialize)]
+struct JsonWeightedCandidate {
+    account_id: String,
+    routing_weight: u32,
 }
 
 #[derive(Serialize)]
 struct JsonQuotaStatusAccount {
     account_id: String,
     safe_account_label: String,
-    status: String,
     availability: &'static str,
     freshness: &'static str,
     routing_exclusion: &'static str,
+    next_use: String,
+    limiting_window: &'static str,
     quota_evidence_reason: &'static str,
+    short_pressure: Option<u32>,
+    long_pressure: Option<u32>,
+    short_salvage: Option<u32>,
+    long_salvage: Option<u32>,
+    salvage_tie_key: Option<JsonSalvageTieKey>,
     routing_reason: &'static str,
     routing_weight: Option<u32>,
     preferred_next: bool,
-    next_use: String,
-    short_pressure_percent: u32,
-    weekly_pressure_percent: u32,
-    short_salvage_percent: u32,
-    weekly_salvage_percent: u32,
-    limiting_window: Option<JsonLimitingWindow>,
+    window_slots: JsonWindowSlots,
     windows: Vec<JsonQuotaWindow>,
 }
 
 impl JsonQuotaStatusAccount {
-    fn from_row(row: &QuotaStatusRow) -> Self {
+    fn from_row(row: &QuotaStatusRow, now_unix_seconds: u64) -> Self {
         Self {
             account_id: row.account_id.as_str().to_owned(),
             safe_account_label: row.account_label.clone(),
-            status: row.account_status.clone(),
             availability: availability_json(row.availability),
             freshness: freshness_json(row.freshness),
             routing_exclusion: routing_exclusion_json(row.routing_exclusion),
+            next_use: row.next_use.clone(),
+            limiting_window: row
+                .limiting_window
+                .map_or("none", |window| quota_window_label(window.window_seconds())),
             quota_evidence_reason: quota_evidence_reason_json(row.quota_evidence_reason),
+            short_pressure: Some(row.short_pressure),
+            long_pressure: Some(row.long_pressure),
+            short_salvage: Some(row.short_salvage),
+            long_salvage: Some(row.long_salvage),
+            salvage_tie_key: None,
             routing_reason: routing_reason_json(row.routing_reason),
             routing_weight: row.routing_weight,
             preferred_next: row.preferred_next,
-            next_use: row.next_use.clone(),
-            short_pressure_percent: row.short_pressure,
-            weekly_pressure_percent: row.long_pressure,
-            short_salvage_percent: row.short_salvage,
-            weekly_salvage_percent: row.long_salvage,
-            limiting_window: row
-                .limiting_window
-                .map(JsonLimitingWindow::from_limiting_window),
+            window_slots: JsonWindowSlots::from_windows(&row.windows, now_unix_seconds),
             windows: row
                 .windows
                 .iter()
-                .map(JsonQuotaWindow::from_window)
+                .map(|window| JsonQuotaWindow::from_window(window, now_unix_seconds))
                 .collect(),
         }
     }
 }
 
 #[derive(Serialize)]
-struct JsonQuotaWindow {
-    label: &'static str,
+struct JsonSalvageTieKey {
+    reset_unix_seconds: u64,
     window_seconds: u64,
-    status: &'static str,
-    remaining_percent: u32,
-    reset_unix_seconds: Option<u64>,
-    observed_unix_seconds: u64,
-    effective: bool,
 }
 
-impl JsonQuotaWindow {
-    fn from_window(window: &DisplayQuotaWindow) -> Self {
+#[derive(Serialize)]
+struct JsonWindowSlots {
+    #[serde(rename = "5h")]
+    short: JsonWindowSlot,
+    weekly: JsonWindowSlot,
+}
+
+impl JsonWindowSlots {
+    fn from_windows(windows: &[DisplayQuotaWindow], now_unix_seconds: u64) -> Self {
         Self {
-            label: quota_window_label(window.window_seconds),
-            window_seconds: window.window_seconds,
-            status: quota_window_status_json(window.status),
-            remaining_percent: window.remaining_headroom,
-            reset_unix_seconds: window.reset_unix_seconds,
-            observed_unix_seconds: window.observed_unix_seconds,
-            effective: window.effective,
+            short: JsonWindowSlot::from_windows(windows, V1_SHORT_WINDOW_SECONDS, now_unix_seconds),
+            weekly: JsonWindowSlot::from_windows(
+                windows,
+                V1_WEEKLY_WINDOW_SECONDS,
+                now_unix_seconds,
+            ),
         }
     }
 }
 
 #[derive(Serialize)]
-struct JsonLimitingWindow {
-    label: &'static str,
-    window_seconds: u64,
-    remaining_percent: u32,
-    pressure_percent: u32,
+struct JsonWindowSlot {
+    slot: &'static str,
+    evidence_state: &'static str,
+    remaining_headroom: Option<u32>,
     reset_unix_seconds: Option<u64>,
+    reset_duration_seconds: Option<u64>,
+    display_note: String,
 }
 
-impl JsonLimitingWindow {
-    fn from_limiting_window(window: LimitingWindow) -> Self {
+impl JsonWindowSlot {
+    fn from_windows(
+        windows: &[DisplayQuotaWindow],
+        window_seconds: u64,
+        now_unix_seconds: u64,
+    ) -> Self {
+        let Some(window) = windows
+            .iter()
+            .find(|window| window.window_seconds == window_seconds)
+        else {
+            return Self {
+                slot: quota_window_label(window_seconds),
+                evidence_state: "no_data",
+                remaining_headroom: None,
+                reset_unix_seconds: None,
+                reset_duration_seconds: None,
+                display_note: "needs refresh".to_owned(),
+            };
+        };
+        let reset_duration_seconds = window
+            .reset_unix_seconds
+            .map(|reset_unix_seconds| reset_unix_seconds.saturating_sub(now_unix_seconds));
+        let display_note = window_display_note(window, now_unix_seconds);
         Self {
-            label: quota_window_label(window.window_seconds()),
-            window_seconds: window.window_seconds(),
-            remaining_percent: window.remaining_headroom(),
-            pressure_percent: window.pressure(),
-            reset_unix_seconds: window.reset_unix_seconds(),
+            slot: quota_window_label(window_seconds),
+            evidence_state: window_evidence_state(window.status),
+            remaining_headroom: window_known_headroom(window),
+            reset_unix_seconds: window.reset_unix_seconds,
+            reset_duration_seconds,
+            display_note,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonQuotaWindow {
+    window_seconds: u64,
+    status: &'static str,
+    remaining_headroom: Option<u32>,
+    reset_unix_seconds: Option<u64>,
+    observed_unix_seconds: Option<u64>,
+    effective: bool,
+    pressure_percent: Option<u32>,
+    surplus_percent: Option<u32>,
+    contributed_to_salvage: bool,
+}
+
+impl JsonQuotaWindow {
+    fn from_window(window: &DisplayQuotaWindow, now_unix_seconds: u64) -> Self {
+        let (pressure_percent, surplus_percent) =
+            window_pressure_and_surplus(window, now_unix_seconds);
+        Self {
+            window_seconds: window.window_seconds,
+            status: quota_window_status_json(window.status),
+            remaining_headroom: window_known_headroom(window),
+            reset_unix_seconds: window.reset_unix_seconds,
+            observed_unix_seconds: Some(window.observed_unix_seconds),
+            effective: window.effective,
+            pressure_percent,
+            surplus_percent,
+            contributed_to_salvage: surplus_percent.is_some_and(|surplus| surplus > 0),
         }
     }
 }
@@ -1391,6 +1465,15 @@ const fn selected_pool_json(value: SelectedPool) -> &'static str {
         SelectedPool::Reserve => "reserve",
         SelectedPool::Unknown => "unknown",
         SelectedPool::None => "none",
+    }
+}
+
+const fn selected_pool_reason_json(value: SelectedPool) -> &'static str {
+    match value {
+        SelectedPool::Usable => "usable_available",
+        SelectedPool::Reserve => "reserve_only",
+        SelectedPool::Unknown => "unknown_fallback_only",
+        SelectedPool::None => "none_available",
     }
 }
 
@@ -1422,8 +1505,8 @@ const fn routing_exclusion_json(value: RoutingExclusion) -> &'static str {
 
 const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'static str {
     match value {
-        QuotaEvidenceReason::Ok => "ok",
-        QuotaEvidenceReason::NeedsQuotaProbe => "needs_quota_probe",
+        QuotaEvidenceReason::Ok => "none",
+        QuotaEvidenceReason::NeedsQuotaProbe => "needs_quota_refresh",
         QuotaEvidenceReason::MissingExpectedWindow => "missing_expected_window",
         QuotaEvidenceReason::WindowIneligible => "window_ineligible",
         QuotaEvidenceReason::WindowExhausted => "window_exhausted",
@@ -1435,15 +1518,7 @@ const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'static str 
 }
 
 const fn routing_reason_json(value: RoutingReason) -> &'static str {
-    match value {
-        RoutingReason::PreferredNext => "preferred_next",
-        RoutingReason::Available => "available",
-        RoutingReason::Held => "held",
-        RoutingReason::Fallback => "fallback",
-        RoutingReason::Unknown => "unknown",
-        RoutingReason::Blocked => "blocked",
-        RoutingReason::Excluded => "excluded",
-    }
+    value.as_str()
 }
 
 const fn quota_window_status_json(value: QuotaWindowStatus) -> &'static str {
@@ -1453,6 +1528,66 @@ const fn quota_window_status_json(value: QuotaWindowStatus) -> &'static str {
         QuotaWindowStatus::Unknown => "unknown",
         QuotaWindowStatus::Ineligible => "ineligible",
     }
+}
+
+const fn window_evidence_state(value: QuotaWindowStatus) -> &'static str {
+    match value {
+        QuotaWindowStatus::Eligible | QuotaWindowStatus::Stale | QuotaWindowStatus::Ineligible => {
+            "known"
+        }
+        QuotaWindowStatus::Unknown => "unknown",
+    }
+}
+
+fn window_known_headroom(window: &DisplayQuotaWindow) -> Option<u32> {
+    match window.status {
+        QuotaWindowStatus::Unknown => None,
+        QuotaWindowStatus::Eligible | QuotaWindowStatus::Stale | QuotaWindowStatus::Ineligible => {
+            Some(window.remaining_headroom)
+        }
+    }
+}
+
+fn window_display_note(window: &DisplayQuotaWindow, now_unix_seconds: u64) -> String {
+    let reset = window.reset_unix_seconds.map_or_else(
+        || "reset unknown".to_owned(),
+        |reset| format!("resets {}", format_relative_time(reset, now_unix_seconds)),
+    );
+    match window.status {
+        QuotaWindowStatus::Eligible => reset,
+        QuotaWindowStatus::Stale => format!("{reset}; needs refresh"),
+        QuotaWindowStatus::Unknown => "unknown; needs refresh".to_owned(),
+        QuotaWindowStatus::Ineligible if window.remaining_headroom == 0 => "empty".to_owned(),
+        QuotaWindowStatus::Ineligible => "quota ineligible".to_owned(),
+    }
+}
+
+fn window_pressure_and_surplus(
+    window: &DisplayQuotaWindow,
+    now_unix_seconds: u64,
+) -> (Option<u32>, Option<u32>) {
+    if window.status == QuotaWindowStatus::Unknown {
+        return (None, None);
+    }
+    let Some(reset_unix_seconds) = window.reset_unix_seconds else {
+        return (None, None);
+    };
+    let time_left_seconds = reset_unix_seconds
+        .saturating_sub(now_unix_seconds)
+        .min(window.window_seconds);
+    let expected_remaining_percent = time_left_seconds
+        .saturating_mul(100)
+        .saturating_add(window.window_seconds.saturating_sub(1))
+        / window.window_seconds;
+    let expected_remaining_percent = u32::try_from(expected_remaining_percent)
+        .unwrap_or(u32::MAX)
+        .min(100);
+    let remaining_headroom = window.remaining_headroom.min(100);
+
+    (
+        Some(expected_remaining_percent.saturating_sub(remaining_headroom)),
+        Some(remaining_headroom.saturating_sub(expected_remaining_percent)),
+    )
 }
 
 fn format_relative_time(target_unix_seconds: u64, now_unix_seconds: u64) -> String {

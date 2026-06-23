@@ -447,20 +447,74 @@ pub enum QuotaEvidenceReason {
 /// Public routing reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingReason {
-    /// Preferred normal candidate.
-    PreferredNext,
+    /// Preferred because weekly quota is healthier than alternatives.
+    PreferredWeeklyHealthier,
+    /// Preferred because weekly reset is near.
+    PreferredWeeklyResetSoon,
+    /// Preferred because the short window reset is near.
+    PreferredShortResetSoon,
+    /// Preferred by neutral quota weight.
+    PreferredHighestWeight,
     /// Same-pool selectable account.
-    Available,
-    /// Selectable only after higher-priority pool empties.
-    Held,
-    /// Unknown-quota fallback candidate.
-    Fallback,
-    /// Unknown quota evidence is held behind a known selectable pool.
-    Unknown,
-    /// Blocked due to known quota.
-    Blocked,
-    /// Excluded by account metadata.
-    Excluded,
+    AvailableSamePool,
+    /// Reserve account held behind usable accounts.
+    HeldReserve,
+    /// Unknown account held behind known accounts.
+    HeldUnknown,
+    /// Preferred fallback account that needs refresh.
+    UnknownFallbackPreferred,
+    /// Non-preferred fallback account in the unknown pool.
+    UnknownFallbackAvailable,
+    /// Excluded because the account is disabled.
+    ExcludedDisabled,
+    /// Excluded because the account has no active credential.
+    ExcludedMissingCredential,
+    /// Blocked because quota is exhausted.
+    BlockedWindowExhausted,
+    /// Blocked because quota is ineligible.
+    BlockedWindowIneligible,
+}
+
+impl RoutingReason {
+    /// Returns the stable machine code for this public routing reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreferredWeeklyHealthier => "preferred_weekly_healthier",
+            Self::PreferredWeeklyResetSoon => "preferred_weekly_reset_soon",
+            Self::PreferredShortResetSoon => "preferred_short_reset_soon",
+            Self::PreferredHighestWeight => "preferred_highest_weight",
+            Self::AvailableSamePool => "available_same_pool",
+            Self::HeldReserve => "held_reserve",
+            Self::HeldUnknown => "held_unknown",
+            Self::UnknownFallbackPreferred => "unknown_fallback_preferred",
+            Self::UnknownFallbackAvailable => "unknown_fallback_available",
+            Self::ExcludedDisabled => "excluded_disabled",
+            Self::ExcludedMissingCredential => "excluded_missing_credential",
+            Self::BlockedWindowExhausted => "blocked_window_exhausted",
+            Self::BlockedWindowIneligible => "blocked_window_ineligible",
+        }
+    }
+
+    /// Returns the stable human phrase for this public routing reason.
+    #[must_use]
+    pub const fn human_phrase(self) -> &'static str {
+        match self {
+            Self::PreferredWeeklyHealthier => "preferred next: weekly healthier",
+            Self::PreferredWeeklyResetSoon => "preferred next: weekly reset soon",
+            Self::PreferredShortResetSoon => "preferred next: 5h reset soon",
+            Self::PreferredHighestWeight => "preferred next: safest quota",
+            Self::AvailableSamePool => "available: same pool",
+            Self::HeldReserve => "held: reserve",
+            Self::HeldUnknown => "held: needs refresh",
+            Self::UnknownFallbackPreferred => "fallback: needs refresh",
+            Self::UnknownFallbackAvailable => "fallback: same unknown pool",
+            Self::ExcludedDisabled => "blocked: disabled",
+            Self::ExcludedMissingCredential => "blocked: missing credential",
+            Self::BlockedWindowExhausted => "blocked: quota empty",
+            Self::BlockedWindowIneligible => "blocked: quota ineligible",
+        }
+    }
 }
 
 /// Limiting window explanation.
@@ -594,9 +648,9 @@ pub fn assess_route_band(
             account.preferred_next = &account.account_id == preferred_next;
         }
     }
-    let selected_pool_for_reason = selected_pool;
+    let reason_context = RoutingReasonContext::from_accounts(&accounts, selected_pool);
     for account in &mut accounts {
-        account.routing_reason = routing_reason_for_account(account, selected_pool_for_reason);
+        account.routing_reason = routing_reason_for_account(account, reason_context);
     }
 
     BurnDownRouteBandAssessmentResult {
@@ -629,7 +683,7 @@ fn assess_account(
         short_salvage: 0,
         long_salvage: 0,
         routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
-        routing_reason: RoutingReason::Unknown,
+        routing_reason: RoutingReason::UnknownFallbackAvailable,
         preferred_next: false,
         salvage_sort_key: None,
     };
@@ -639,7 +693,7 @@ fn assess_account(
             availability: AccountAvailability::Excluded,
             routing_exclusion: RoutingExclusion::Disabled,
             quota_evidence_reason: QuotaEvidenceReason::AccountDisabled,
-            routing_reason: RoutingReason::Excluded,
+            routing_reason: RoutingReason::ExcludedDisabled,
             routing_weight: None,
             ..base
         };
@@ -649,7 +703,7 @@ fn assess_account(
             availability: AccountAvailability::Excluded,
             routing_exclusion: RoutingExclusion::MissingCredential,
             quota_evidence_reason: QuotaEvidenceReason::MissingCredential,
-            routing_reason: RoutingReason::Excluded,
+            routing_reason: RoutingReason::ExcludedMissingCredential,
             routing_weight: None,
             ..base
         };
@@ -679,7 +733,7 @@ fn assess_account(
             freshness: freshness_for_windows(&windows),
             limiting_window: limiting_window(&windows),
             quota_evidence_reason: QuotaEvidenceReason::WindowIneligible,
-            routing_reason: RoutingReason::Blocked,
+            routing_reason: RoutingReason::BlockedWindowIneligible,
             routing_weight: None,
             ..base
         };
@@ -700,7 +754,7 @@ fn assess_account(
             freshness: freshness_for_windows(&windows),
             limiting_window: limiting_window(&windows),
             quota_evidence_reason: QuotaEvidenceReason::WindowExhausted,
-            routing_reason: RoutingReason::Blocked,
+            routing_reason: RoutingReason::BlockedWindowExhausted,
             routing_weight: None,
             ..base
         };
@@ -778,7 +832,7 @@ fn assess_account(
         long_salvage,
         routing_weight: Some(routing_weight),
         salvage_sort_key: salvage_sort_key(&windows, short_salvage, long_salvage, policy),
-        routing_reason: RoutingReason::Available,
+        routing_reason: RoutingReason::AvailableSamePool,
         ..base
     }
 }
@@ -934,25 +988,97 @@ fn selected_pool_weight(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RoutingReasonContext {
+    selected_pool: SelectedPool,
+    preferred_long_pressure: u32,
+    has_worse_known_selected_pool_long_pressure: bool,
+    has_held_reserve_account: bool,
+}
+
+impl RoutingReasonContext {
+    fn from_accounts(accounts: &[BurnDownAccountAssessment], selected_pool: SelectedPool) -> Self {
+        let preferred_long_pressure = accounts
+            .iter()
+            .find(|account| account.preferred_next)
+            .map_or(0, |account| account.long_pressure);
+        let has_worse_known_selected_pool_long_pressure = accounts.iter().any(|account| {
+            selected_pool_matches(selected_pool, account.availability)
+                && matches!(
+                    account.availability,
+                    AccountAvailability::Usable | AccountAvailability::Reserve
+                )
+                && !account.preferred_next
+                && account.long_pressure > preferred_long_pressure
+        });
+        let has_held_reserve_account = selected_pool == SelectedPool::Usable
+            && accounts
+                .iter()
+                .any(|account| account.availability == AccountAvailability::Reserve);
+
+        Self {
+            selected_pool,
+            preferred_long_pressure,
+            has_worse_known_selected_pool_long_pressure,
+            has_held_reserve_account,
+        }
+    }
+}
+
 fn routing_reason_for_account(
     account: &BurnDownAccountAssessment,
-    selected_pool: SelectedPool,
+    context: RoutingReasonContext,
 ) -> RoutingReason {
-    match account.availability {
-        AccountAvailability::Excluded => RoutingReason::Excluded,
-        AccountAvailability::Blocked => RoutingReason::Blocked,
-        AccountAvailability::Unknown if selected_pool == SelectedPool::Unknown => {
-            RoutingReason::Fallback
-        }
-        AccountAvailability::Unknown => RoutingReason::Unknown,
-        AccountAvailability::Usable | AccountAvailability::Reserve if account.preferred_next => {
-            RoutingReason::PreferredNext
-        }
-        AccountAvailability::Reserve if selected_pool == SelectedPool::Usable => {
-            RoutingReason::Held
-        }
-        AccountAvailability::Usable | AccountAvailability::Reserve => RoutingReason::Available,
+    match account.routing_exclusion {
+        RoutingExclusion::Disabled => return RoutingReason::ExcludedDisabled,
+        RoutingExclusion::MissingCredential => return RoutingReason::ExcludedMissingCredential,
+        RoutingExclusion::None => {}
     }
+
+    match account.quota_evidence_reason {
+        QuotaEvidenceReason::WindowExhausted => return RoutingReason::BlockedWindowExhausted,
+        QuotaEvidenceReason::WindowIneligible => return RoutingReason::BlockedWindowIneligible,
+        QuotaEvidenceReason::Ok
+        | QuotaEvidenceReason::NeedsQuotaProbe
+        | QuotaEvidenceReason::MissingExpectedWindow
+        | QuotaEvidenceReason::UnknownQuotaWindow
+        | QuotaEvidenceReason::MissingResetTime
+        | QuotaEvidenceReason::AccountDisabled
+        | QuotaEvidenceReason::MissingCredential => {}
+    }
+
+    match account.availability {
+        AccountAvailability::Unknown if context.selected_pool != SelectedPool::Unknown => {
+            return RoutingReason::HeldUnknown;
+        }
+        AccountAvailability::Reserve if context.selected_pool == SelectedPool::Usable => {
+            return RoutingReason::HeldReserve;
+        }
+        AccountAvailability::Unknown if !account.preferred_next => {
+            return RoutingReason::UnknownFallbackAvailable;
+        }
+        AccountAvailability::Unknown => return RoutingReason::UnknownFallbackPreferred,
+        AccountAvailability::Usable | AccountAvailability::Reserve if !account.preferred_next => {
+            return RoutingReason::AvailableSamePool;
+        }
+        AccountAvailability::Usable | AccountAvailability::Reserve => {}
+        AccountAvailability::Blocked => return RoutingReason::BlockedWindowIneligible,
+        AccountAvailability::Excluded => return RoutingReason::ExcludedDisabled,
+    }
+
+    if account.long_salvage > 0 {
+        return RoutingReason::PreferredWeeklyResetSoon;
+    }
+    if account.long_pressure == context.preferred_long_pressure
+        && (context.has_worse_known_selected_pool_long_pressure || context.has_held_reserve_account)
+    {
+        return RoutingReason::PreferredWeeklyHealthier;
+    }
+    if account.short_salvage > 0 {
+        return RoutingReason::PreferredShortResetSoon;
+    }
+
+    RoutingReason::PreferredHighestWeight
 }
 
 fn compare_salvage_key(
@@ -1063,6 +1189,14 @@ mod tests {
         assert_eq!(assessment.weighted_candidates()[0].0.as_str(), "acct_a");
         assert_account(&assessment, "acct_a", AccountAvailability::Usable, Some(9));
         assert_account(&assessment, "acct_b", AccountAvailability::Reserve, Some(1));
+        assert_eq!(
+            account_assessment(&assessment, "acct_a").routing_reason(),
+            RoutingReason::PreferredWeeklyHealthier
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_b").routing_reason(),
+            RoutingReason::HeldReserve
+        );
     }
 
     #[test]
@@ -1085,6 +1219,10 @@ mod tests {
         );
         assert_account(&assessment, "acct_a", AccountAvailability::Usable, Some(9));
         assert_account(&assessment, "acct_b", AccountAvailability::Usable, Some(39));
+        assert_eq!(
+            account_assessment(&assessment, "acct_b").routing_reason(),
+            RoutingReason::PreferredWeeklyResetSoon
+        );
     }
 
     #[test]
@@ -1113,6 +1251,10 @@ mod tests {
         );
         assert_account(&assessment, "acct_a", AccountAvailability::Blocked, None);
         assert_account(&assessment, "acct_b", AccountAvailability::Reserve, Some(1));
+        assert_eq!(
+            account_assessment(&assessment, "acct_a").routing_reason(),
+            RoutingReason::BlockedWindowExhausted
+        );
     }
 
     #[test]
@@ -1137,6 +1279,10 @@ mod tests {
         );
         assert_account(&assessment, "acct_a", AccountAvailability::Usable, Some(40));
         assert_account(&assessment, "acct_b", AccountAvailability::Usable, Some(1));
+        assert_eq!(
+            account_assessment(&assessment, "acct_a").routing_reason(),
+            RoutingReason::PreferredShortResetSoon
+        );
     }
 
     #[test]
@@ -1166,7 +1312,7 @@ mod tests {
         let unknown = account_assessment(&assessment, "acct_b");
         assert_eq!(unknown.availability(), AccountAvailability::Unknown);
         assert_eq!(unknown.routing_weight(), Some(1));
-        assert_eq!(unknown.routing_reason(), RoutingReason::Unknown);
+        assert_eq!(unknown.routing_reason(), RoutingReason::HeldUnknown);
         assert_eq!(
             unknown.quota_evidence_reason(),
             QuotaEvidenceReason::UnknownQuotaWindow
@@ -1196,11 +1342,11 @@ mod tests {
         assert_account(&assessment, "acct_b", AccountAvailability::Unknown, Some(1));
         assert_eq!(
             account_assessment(&assessment, "acct_a").routing_reason(),
-            RoutingReason::Fallback
+            RoutingReason::UnknownFallbackPreferred
         );
         assert_eq!(
             account_assessment(&assessment, "acct_b").routing_reason(),
-            RoutingReason::Fallback
+            RoutingReason::UnknownFallbackAvailable
         );
     }
 

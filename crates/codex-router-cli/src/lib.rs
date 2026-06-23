@@ -2320,7 +2320,7 @@ exit 42
         assert!(output.stdout.contains("account"));
         assert!(output.stdout.contains("primary"));
         assert!(output.stdout.contains("72%"));
-        assert!(output.stdout.contains("needs probe"));
+        assert!(output.stdout.contains("needs refresh"));
         assert!(!output.stdout.contains("acct_primary"));
         assert!(output.stdout.contains("responses"));
         assert!(output.stdout.contains("why"));
@@ -2328,6 +2328,7 @@ exit 42
         assert!(!output.stdout.contains("44%"));
         assert!(!output.stdout.contains("pp"));
         assert!(!output.stdout.contains("bottleneck"));
+        assert!(!output.stdout.contains("0% left"));
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));
         assert!(output.stderr.is_empty());
@@ -2381,11 +2382,11 @@ exit 42
         assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t████████░░ 75% resets in 2h 46m\t░░░░░░░░░░ - needs probe\t↻ fallback 5h 75%\tnext"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
         );
         assert_eq!(
             lines[2],
-            "responses route\tnext: snapshot\twhy: ↻ fallback 5h 75%"
+            "responses route\tnext: snapshot\twhy: fallback: needs refresh limiting window: 5h 75% left"
         );
         assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
@@ -2458,11 +2459,11 @@ exit 42
         assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "primary\tenabled\t███░░░░░░░ 25% resets in 2h 30m\t████████░░ 80% resets in 6d 23h\t✓ preferred 5h 25%\tnext"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
         );
         assert_eq!(
             lines[2],
-            "responses route\tnext: primary\twhy: ✓ preferred 5h 25%"
+            "responses route\tnext: primary\twhy: preferred next: safest quota limiting window: 5h 25% left"
         );
         assert_eq!(lines.len(), 3);
         assert!(!output.stdout.contains("acct_primary"));
@@ -2534,21 +2535,49 @@ exit 42
         );
 
         let parsed: serde_json::Value = must_ok(serde_json::from_str(&output.stdout));
+        assert_eq!(parsed["route_result"], "ok");
         assert_eq!(parsed["route_band"], "responses");
         assert_eq!(parsed["selected_pool"], "usable");
+        assert_eq!(parsed["selected_pool_reason"], "usable_available");
         assert_eq!(parsed["preferred_next_account_id"], "acct_primary");
+        assert_eq!(
+            parsed["weighted_candidates"][0]["account_id"],
+            "acct_primary"
+        );
+        assert_eq!(parsed["weighted_candidates"][0]["routing_weight"], 1);
         assert_eq!(parsed["accounts"][0]["account_id"], "acct_primary");
         assert_eq!(parsed["accounts"][0]["safe_account_label"], "primary");
         assert_eq!(parsed["accounts"][0]["availability"], "usable");
         assert_eq!(parsed["accounts"][0]["freshness"], "fresh");
-        assert_eq!(parsed["accounts"][0]["routing_reason"], "preferred_next");
+        assert_eq!(
+            parsed["accounts"][0]["routing_reason"],
+            "preferred_highest_weight"
+        );
         assert_eq!(parsed["accounts"][0]["preferred_next"], true);
-        assert_eq!(parsed["accounts"][0]["next_use"], "next");
-        assert_eq!(parsed["accounts"][0]["short_pressure_percent"], 25);
-        assert_eq!(parsed["accounts"][0]["weekly_pressure_percent"], 20);
-        assert_eq!(parsed["accounts"][0]["limiting_window"]["label"], "5h");
-        assert_eq!(parsed["accounts"][0]["windows"][0]["remaining_percent"], 25);
-        assert_eq!(parsed["accounts"][0]["windows"][1]["remaining_percent"], 80);
+        assert_eq!(parsed["accounts"][0]["next_use"], "preferred");
+        assert_eq!(parsed["accounts"][0]["short_pressure"], 25);
+        assert_eq!(parsed["accounts"][0]["long_pressure"], 20);
+        assert_eq!(parsed["accounts"][0]["limiting_window"], "5h");
+        assert_eq!(
+            parsed["accounts"][0]["window_slots"]["5h"]["evidence_state"],
+            "known"
+        );
+        assert_eq!(
+            parsed["accounts"][0]["window_slots"]["5h"]["remaining_headroom"],
+            25
+        );
+        assert_eq!(
+            parsed["accounts"][0]["window_slots"]["weekly"]["remaining_headroom"],
+            80
+        );
+        assert_eq!(
+            parsed["accounts"][0]["windows"][0]["remaining_headroom"],
+            25
+        );
+        assert_eq!(
+            parsed["accounts"][0]["windows"][1]["remaining_headroom"],
+            80
+        );
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));
         assert!(!output.stdout.contains("authorization"));
@@ -3335,14 +3364,14 @@ exit 42
             CliContext::new(Vec::new()),
         );
         assert!(status_output.stdout.contains("partial"));
-        assert!(status_output.stdout.contains("needs probe"));
+        assert!(status_output.stdout.contains("needs refresh"));
         assert!(
             status_output
                 .stdout
                 .lines()
-                .any(|line| line.ends_with("\tnext"))
+                .any(|line| line.ends_with("\tfallback"))
         );
-        assert!(status_output.stdout.contains("↻ fallback"));
+        assert!(status_output.stdout.contains("fallback: needs refresh"));
         assert!(
             status_output
                 .stdout
@@ -3421,14 +3450,14 @@ exit 42
             CliContext::new(Vec::new()),
         );
         assert!(status_output.stdout.contains("missing-reset"));
-        assert!(status_output.stdout.contains("needs probe"));
+        assert!(status_output.stdout.contains("needs refresh"));
         assert!(
             status_output
                 .stdout
                 .lines()
-                .any(|line| line.ends_with("\tnext"))
+                .any(|line| line.ends_with("\tfallback"))
         );
-        assert!(status_output.stdout.contains("↻ fallback"));
+        assert!(status_output.stdout.contains("fallback: needs refresh"));
         assert!(
             status_output
                 .stdout
