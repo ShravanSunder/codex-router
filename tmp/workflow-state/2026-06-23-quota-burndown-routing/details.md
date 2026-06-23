@@ -698,3 +698,41 @@ The spec now defines selection-owned `assess_route_band(...)`,
 `UnsupportedRouteBandAssessment`, `quota_refresh_status`, v1 `window_slots`
 without source ids, mixed-carrier auth failure, HTTP/SSE routing order, tighter
 WebSocket preselection wording, and proof rows for each contract.
+
+## R14 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`f104ff9`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` is 1788 lines and was read by the parent
+in chunks 1-320, 321-640, 641-960, 961-1280, 1281-1600, and 1601-1788. Three
+review lanes also reported coverage across their assigned surfaces.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r14/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- top-level requirement trace is incomplete for local auth, generated profile,
+  affinity-secret, WebSocket preselection, and smoke-redaction cutovers
+- local-auth/profile contract contradicts the current installed Codex path:
+  the spec requires `env_http_headers` with `X-Codex-Router-Token`, while
+  current code/tests still use or accept `env_key`/`Authorization`
+- WebSocket preselection wording conflicts with the current direct-payload
+  branch that reads fields such as `model`, `input`, and `stream`
+- unknown-quota fallback/probe semantics are not first-class in the route
+  result contract or selected-pool model
+- route-level result fields are inconsistent across `preferred_next`,
+  `preferred_next_account_id`, `route_result`, and unsupported-band payloads
+- refresh staleness, status/JSON DTO ownership, smoke transcript redaction, and
+  affinity-secret cutover order need sharper proofable contracts
+
+Next hard gate:
+Return to `shravan-dev-workflow:spec-creation-swarm`; do not proceed to
+`plan-creation-swarm` until the spec is revised and another spec review passes.
