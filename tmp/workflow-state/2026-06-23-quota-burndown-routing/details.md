@@ -27,7 +27,7 @@ In scope:
 - human quota/status UX with concise account-centric rows, Unicode bars, and
   explicit preferred-next explanation
 - non-blocking startup and request behavior using persisted quota state
-- background refresh/probe behavior and stale/unknown/ineligible handling
+- background refresh behavior and stale/unknown/ineligible handling
 - proof gates across unit, integration, smoke, and end-to-end runtime paths
 
 Out of scope unless explicitly brought back into this goal:
@@ -39,13 +39,16 @@ Out of scope unless explicitly brought back into this goal:
 
 ## Required Reading
 
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/algorithm-prior-art-crux.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/contract-architecture-difference.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/planning-adversarial-crux.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/requirements-validation.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/ux-progressive-guardrails.md`
+Resolve these paths in the current checkout or review worktree for the git
+commit being reviewed:
+
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r12/review-ledger.md`
+- `tmp/workflow-state/2026-06-23-quota-burndown-routing/details.md`
+- `tmp/workflow-state/2026-06-23-quota-burndown-routing/events.jsonl`
+
+Earlier review ledgers remain historical context only. The latest review ledger
+is authoritative for the next workflow transition.
 
 ## Accepted Spec Review Findings
 
@@ -91,8 +94,8 @@ Next hard gate:
 ## Current Phase Update: Second Review Findings Folded Into Spec
 
 The second `spec-review-swarm` pass did not accept the first revision. It found
-additional blockers around route-band batch assessment ownership, then-unknown
-selection semantics, WebSocket routing/security order, machine/plain status
+additional blockers around route-band batch assessment ownership, unknown
+fallback semantics, WebSocket routing/security order, machine/plain status
 surfaces, safe account display, smoke/log redaction, and deterministic scenario
 coverage.
 
@@ -101,9 +104,9 @@ spec:
 
 - `BurnDownRouteBandAssessment` owns selected pool, weighted candidates, and
   neutral `preferred_next` for CLI status.
-- Unknown quota is not fallback capacity. It is `probe_required`, never enters
-  weighted routing, and may only become usable after background probe or refresh
-  writes verified quota to SQLite.
+- Unknown quota is fallback-only; it never competes with known `usable` or
+  `reserve` accounts, but it may preserve conservative partial-headroom ordering
+  inside the all-unknown pool.
 - `/v1/responses` WebSocket support is explicit, uses the `responses` route
   band, and fails closed for unsupported routes before selection or upstream
   open.
@@ -118,7 +121,7 @@ spec:
   full WebSocket first frames, prompts, memory traces, tool args, unsafe labels,
   tokens, auth headers, and secret-store material.
 - Scenario D now includes weekly reset facts and numeric expected scoring.
-- Scenario E is probe-required isolation, not same-pool unknown weighting.
+- Scenario E is fallback isolation, not same-pool unknown weighting.
 
 Next hard gate:
 
@@ -150,7 +153,7 @@ Accepted important fixes:
 - collapse unsupported WebSocket route taxonomy to an explicit v1
   `unsupported_path` class
 - replace ambiguous `account_label` machine output with `safe_account_label`
-- resolve unknown behavior when all accounts require probe
+- resolve unknown fallback ordering when all accounts are unknown
 - add live CLI smoke proof for `table`, `plain`, and `json`
 - add delayed/failing-refresh proof for first `/v1/responses` WebSocket
 - make the default human table invariant explicit
@@ -178,8 +181,8 @@ The spec-creation pass after R3 folded in accepted review findings:
 - All non-`/v1/responses` WebSocket paths collapse to `unsupported_path`.
 - JSON status uses `safe_account_label`, and unsafe configured labels degrade to
   deterministic safe hash/tag.
-- Unknown/no-data accounts are probe-required, never weighted fallback, and
-  background probe must not block startup or request routing.
+- Unknown fallback preserves conservative partial-headroom ordering inside the
+  all-unknown pool while never competing with known usable/reserve accounts.
 - Live-safe CLI status smoke is required for `table`, `plain`, and `json`.
 - First valid `/v1/responses` WebSocket routing must prove non-blocking behavior
   under delayed or failing quota refresh.
@@ -219,51 +222,6 @@ The follow-up spec revision folds these in. Next hard gate remains:
 - rerun `shravan-dev-workflow:spec-review-swarm`
 - no `plan-creation-swarm` until review returns `phase_result: complete`
 
-## Current Phase Update: Plan Review Findings Folded Into Plan
-
-The `plan-review-swarm` lanes returned `needs revision`, and the parent accepted
-the material findings instead of proceeding directly to implementation.
-
-Accepted plan-review corrections now folded into the spec and plan:
-
-- Unknown/no-data probe handling is background-only in v1. Request routing does
-  not call provider quota/probe APIs, wait for probes, or create a new
-  proxy-to-worker probe queue.
-- Unknown/no-data/missing-reset accounts stay `probe_required` and unroutable
-  until prompt startup or periodic background refresh/probe persists verified
-  selector rows to SQLite.
-- OAuth account switching now has a route-band account-hold cooldown. The v1
-  default is 120 seconds, with immediate break for valid affinity, exhaustion,
-  blocked/probe-required state, disabled accounts, or missing active
-  credentials.
-- T0 is a hard dirty target-file gate. Planned target files must be clean before
-  coding, or each overlapping dirty file must be explicitly adopted.
-- CLI quota status implementation is gated on the real
-  `codex-router-selection::burn_down` DTO/API freeze and must not reimplement
-  routing math.
-- WebSocket proof now includes the full preselection failure matrix, zero
-  selector advance, zero credential resolution, zero upstream auth injection,
-  zero upstream open, allowlist/redaction canaries, and delayed/failing-refresh
-  non-blocking behavior.
-- Status proof now includes live CLI smoke for
-  `quota status --format table|plain|json`.
-- Installed Codex e2e now requires a multi-account reset-aware fixture,
-  status/routing agreement, selected safe label/hash, routing reason, and
-  WebSocket multi-turn pinning.
-
-Current artifacts:
-
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/plan-workflows/2026-06-23-quota-burndown-routing/implementation-plan.md`
-- `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/plan-workflows/2026-06-23-quota-burndown-routing/plan-review/review-ledger.md`
-
-Next hard gate:
-
-- run `shravan-dev-workflow:implementation-execute-plan`
-- first action is T0 dirty target-file validation
-- do not edit implementation files unless T0 proves planned targets are clean
-  or explicitly adopted
-
 ## Requirements/proof matrix
 
 Requirement / claim:
@@ -300,18 +258,27 @@ Requirement / claim:
 Runtime routing uses reset-aware burn-down assessment, not minimum-headroom-only
 selection.
 Proof source:
-must be defined by plan-creation-swarm.
+unit tests for per-window math, account collapse, selected pool choice,
+neutral selector ordering, `preferred_next`, route-level
+`unsupported_route_band`, previous-response affinity fail-closed paths, and
+proxy integration tests proving runtime selection consumes
+`BurnDownRouteBandAssessmentResult.weighted_candidates`.
 evidence source:
-unit tests, integration tests, implementation review, and parent command output.
+unit/integration command output, implementation review, and parent inspection of
+changed proxy/selection boundaries.
 freshness guard:
 Tests must run against the implementation branch after final fixes.
 
 Requirement / claim:
 Quota status is concise and useful for humans.
 Proof source:
-must be defined by plan-creation-swarm.
+CLI renderer golden/snapshot tests for table and plain output, JSON schema tests
+for machine output, and live-safe CLI smoke over persisted state. Required bad
+case negatives: noisy per-route rows, `pp`, `bottleneck`, default `account_id`,
+raw scores, token-like strings, and missing preferred-next explanation.
 evidence source:
-snapshot/golden tests and manual CLI output inspection.
+snapshot/golden output, JSON assertion output, smoke transcript, and parent
+manual CLI inspection.
 freshness guard:
 Golden output must include historical bad cases: noisy per-route rows, `pp`,
 `bottleneck`, account ids, and missing preferred-next explanation.
@@ -319,7 +286,10 @@ Golden output must include historical bad cases: noisy per-route rows, `pp`,
 Requirement / claim:
 Startup and normal requests do not block on live provider quota refresh.
 Proof source:
-must be defined by plan-creation-swarm.
+black-box smoke proving server boot/listen readiness while refresh is delayed or
+failing, first routed HTTP/SSE and WebSocket requests using persisted selector
+rows while refresh is delayed or failing, and `quota status` rendering
+last-known state immediately with needs-refresh/stale indications.
 evidence source:
 smoke test, runtime logs, and parent command output.
 freshness guard:
@@ -328,19 +298,28 @@ Proof must include boot/listen, first routed request, and quota status render.
 Requirement / claim:
 Codex can communicate through the router end to end, including WebSocket.
 Proof source:
-must be defined by plan-creation-swarm.
+installed Codex CLI e2e against a served local router and mock upstream with a
+generated codex-router profile using
+`env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`. The
+fixture must exercise HTTP/SSE and WebSocket `/v1/responses`, reset-aware
+account choice, WebSocket selected-account pinning, local auth stripping before
+upstream open, and redacted transcript artifacts.
 evidence source:
-e2e command transcript using real Codex profile against local router, plus
-server logs showing WebSocket path, selected account pinning, and fail-fast
-behavior when no verified usable account exists.
+e2e command transcript, mock upstream assertions, router logs, and redacted
+smoke artifact inspection.
 freshness guard:
-Must run after implementation fixes in the current repo state.
+Must run after implementation fixes in the current repo state. WebSocket is not
+optional for this proof gate.
 
 Requirement / claim:
 Sensitive account/token material is not leaked in user output, logs, traces, or
 test transcripts.
 Proof source:
-must be defined by plan-creation-swarm.
+safe-label helper tests, JSON redaction tests, log/trace canary tests, WebSocket
+first-frame/body canary tests, local-auth negative tests, affinity-secret
+redaction tests, and smoke transcript negative assertions for tokens, auth
+headers, account ids where forbidden, unsafe labels, prompts, tool args, raw
+bodies, and secret-store material.
 evidence source:
 implementation review, redaction tests, log/trace inspection, and smoke
 transcript inspection.
@@ -398,8 +377,7 @@ needs_revision
 
 Accepted findings:
 
-- all-unknown fallback was previously considered but is rejected by the current
-  product decision; unknown/no-data is `probe_required`
+- all-unknown fallback is routable but not publicly mapped
 - salvage tie ordering is not deterministic enough
 - Codex-through-router e2e acceptance is under-specified
 - WebSocket preselection failure proof needs a closed matrix
@@ -408,8 +386,8 @@ Accepted findings:
 - JSON status schema is too small to audit the table/routing contract
 
 Revision applied:
-The spec now defines probe-required next-use semantics, exact salvage tie key,
-unknown/no-data placeholders, expanded JSON debug/proof shape, exact
+The spec now defines fallback next-use semantics, exact salvage tie key,
+unknown/no-data placeholders, expanded JSON audit shape, exact
 `previous_response_id` affinity extraction, WebSocket preselection failure
 matrix, and installed-Codex-through-router e2e acceptance.
 
@@ -437,7 +415,7 @@ Accepted findings:
 
 - WebSocket first-frame local field allowlist was not exact
 - account eligibility ownership was overloaded
-- old unknown fallback final `routing_reason` conflicted with raw evidence reason
+- unknown fallback final `routing_reason` conflicted with raw evidence reason
 - partial v1 5h/weekly window sets were not normatively collapsed
 
 Revision applied:
@@ -447,49 +425,276 @@ reads before selection, splits `quota_evidence_reason` from final
 `routing_reason`, defines `missing_expected_window`, and separates proxy fact
 adaptation/runtime enforcement from pure burn-down exclusion/classification.
 
-## Product Correction: Unknown Means Probe Required
+## R7 Spec Review
 
 Date: 2026-06-23
 
-The user clarified that unknown quota, no quota data, missing reset evidence, or
-failed auth evidence must not be treated as fallback capacity. Unknown means the
-router needs to probe the account, but that probe must run in the background.
-Startup and normal Codex request routing must not block on the probe.
+Reviewed baseline:
+`5dd58c8259c30bdce0da84a28aa9704492379584`
 
-Accepted correction:
+Review worktree:
+`/tmp/codex-router-r7-review.8GCXy0`
 
-- unknown/no-data/missing-reset accounts are `probe_required`
-- `probe_required` accounts never enter weighted routing
-- if every account is `probe_required`, the request fails fast with no verified
-  usable account instead of probing inline
-- background probe/refresh may later write verified quota rows to SQLite
-- later requests may use the account only after persisted quota proves it usable
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1151 lines before R7 fixes and was
+read in chunks 1-230, 231-460, 461-690, 691-920, and 921-1151.
 
-Spec artifacts updated:
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r7/review-ledger.md`
 
-- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
-- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/swarm-ledger.md`
+Phase result:
+needs_revision
 
-## Implementation Plan
+Accepted findings:
+
+- assessment inclusion contradicted excluded-account status rows
+- previous-response affinity lacked an owner-record creation/version contract
+- JSON status contract was a field inventory, not a normative envelope
+- raw local JSON `account_id` conflicted with shared-artifact redaction proof
+- status proof lacked structural guardrails for one logical row per account and
+  no unrelated route-band noise
+
+Revision applied:
+The spec now builds assessments for every supplied account fact row, keeps
+excluded/blocked rows out of `weighted_candidates`, defines previous-response
+owner-record shape and pin-write rules, distinguishes raw local JSON from
+redacted shared artifacts, defines a normative JSON envelope, and adds structural
+status proof guardrails.
+
+## R8 Spec Review
 
 Date: 2026-06-23
 
-Plan artifacts:
+Reviewed baseline:
+`c8c02e1886d06c344aa55d35288cf844daacb23b`
 
-- `tmp/plan-workflows/2026-06-23-quota-burndown-routing/implementation-plan.md`
-- `tmp/plan-workflows/2026-06-23-quota-burndown-routing/plan-ledger.md`
+Review worktree:
+`/tmp/codex-router-r8-review.RBmbZ8`
 
-Plan summary:
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1245 lines before R8 fixes and was
+read in chunks 1-250, 251-500, 501-750, 751-1000, and 1001-1245.
 
-- pure burn-down assessment in `codex-router-selection`
-- proxy adapter/runtime selection in `codex-router-proxy`
-- WebSocket route-band selection and pinning proof
-- quota status UX in `codex-router-cli`
-- background probe/refresh persistence proof
-- installed Codex e2e proof over HTTP/SSE and WebSocket
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r8/review-ledger.md`
 
-Next hard gate:
+Phase result:
+needs_revision
 
-- run `shravan-dev-workflow:plan-review-swarm`
-- do not route to implementation until plan review has no accepted blockers or
-  accepted findings are folded back into this plan
+Accepted findings:
+
+- `affinity_key_hash` algorithm, encoding, keyedness, truncation, and collision
+  behavior were underspecified
+- previous-response owner route eligibility was not mapped to burn-down
+  availability classes
+
+Revision applied:
+The spec now defines full-length lowercase-hex HMAC-SHA-256 affinity hashes
+using router-owned secret material, one shared helper before storage/logging/
+tracing/audit, hard schema cutover with no raw-key fallback, duplicate ambiguity
+fail-closed behavior, and continuation owner validity limited to `usable` or
+`reserve` owners.
+
+## R9 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`5e39282dea9defdfabff60af07593e0605f5592e`
+
+Review worktree:
+`/tmp/codex-router-r9-review.68OnKV`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1277 lines before R9 fixes and was
+read in chunks 1-260, 261-520, 521-780, 781-1040, and 1041-1277.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r9/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted finding:
+
+- `router_affinity_hash_secret` lifecycle and rotation behavior were
+  underspecified for durable owner lookup
+
+Revision applied:
+The spec now generates the affinity hash secret once per router root, persists it
+independently from bearer/account credential rotation, forbids v1 rotation,
+keeps it stable across restarts and refreshes, and requires owner rows to be
+ignored or purged with continuations failing closed when the secret is missing,
+unreadable, or replaced.
+
+## R10 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`71487af`
+
+Review worktree:
+`/tmp/codex-router-r10-review.lHVDkc`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1294 lines before R10 fixes and was
+read in chunks 1-260, 261-520, 521-780, 781-1040, and 1041-1294.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r10/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- previous-response affinity needed concrete core/secret-store/state/proxy API
+  ownership for hash-secret storage, HMAC construction, repository methods, and
+  schema cutover
+- route-band policy needed a selection-owned registry covering every currently
+  classified route band
+- `accounts[]` ordering and `weighted_candidates[]` ordering contradicted each
+  other and needed separate contracts
+- safe account label/hash sanitization needed one shared owner
+- `router_affinity_hash_secret` needed to be in global security assets,
+  forbidden emission surfaces, and proof expectations
+- public `routing_reason` needed deterministic precedence when preferred
+  explanation predicates overlap
+- secret-unavailable behavior for response-creating routes needed to be explicit
+- installed-Codex e2e needed to pin generated profile local auth to
+  `env_http_headers`, not `env_key` or Authorization fallback
+
+Revision applied:
+The spec now defines core-owned safe-label and affinity helpers,
+secret-store-owned hash-secret loading, state-owned hashed owner records,
+proxy-owned affinity orchestration, route-band policy registry, split output
+ordering, routing-reason precedence, affinity-secret-unavailable failure,
+hash-secret redaction proof, and generated-profile local auth proof.
+
+## R11 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`66dfe14`
+
+Review worktree:
+`/tmp/codex-router-r11-review.8XkrYg`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1447 lines before R11 fixes and was
+read in chunks 1-300, 301-600, 601-900, 901-1200, and 1201-1447.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r11/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- public `routing_reason` lacked a weekly-reset-imminent reason for
+  long-window salvage, so Scenario B could hide why the preferred account won
+- smoke transcript redaction still allowed individual non-allowlisted
+  WebSocket first-frame/body fields to leak
+- previous-response affinity needed an explicit cutover away from
+  `codex-router-selection::affinity` and raw `AffinityKey`
+- route-band identity needed a shared source of truth between proxy route
+  classification and selection policy lookup
+- affinity hash-secret storage needed concrete secret-store API, stable key,
+  entropy/encoding, typed return, and redacted error contract
+- safe-label helper needed concrete unsafe predicates and redacted tag format
+
+Revision applied:
+The spec now defines `preferred_weekly_reset_soon`, smoke transcript
+first-frame/body field allowlisting, previous-response raw-key cutover,
+core-owned `RouteBand`, affinity secret-store API/key/encoding/error contract,
+and `SafeAccountLabel` semantics with deterministic redacted tag format.
+
+## R12 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`195cb74`
+
+Review worktree:
+`/tmp/codex-router-r12-review.8otShY`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1545 lines before R12 fixes and was
+read by the parent in chunks 1-320, 321-640, 641-960, 961-1120, 1121-1280,
+1281-1440, and 1441-1545. Three review lanes also reported full-read coverage.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r12/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- local router auth needed an explicit accepted `X-Codex-Router-Token` surface
+  and forbidden fallback surfaces for HTTP/SSE, WebSocket, and generated Codex
+  profiles
+- WebSocket routing needed to load/create `router_affinity_hash_secret.v1`
+  before selection because `/v1/responses` can create previous-response owner
+  records even when the first request has no incoming affinity
+- unknown fallback reason precedence made fallback reasons unreachable
+- shared assessment output needed to carry status presentation fields instead
+  of leaving CLI/JSON to rederive routing semantics
+- route-band policy lookup needed a route-level unsupported-band result surface
+- quota refresh lifecycle needed normative startup, scheduling, failure, and
+  persistence ownership rules
+- goal details needed current required-reading paths and concrete proof rows
+
+Revision applied:
+The spec now defines `BurnDownRouteBandAssessmentResult`, selection-owned
+presentation fields, selected-pool-aware fallback reason precedence, a quota
+refresh lifecycle, local-auth ingress contract, WebSocket affinity-secret
+preselection, and the required proof rows. Goal details now point at current
+checkout-relative sources and concrete proof families.
+
+## R13 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`5e5a1c4`
+
+Review worktree:
+`/tmp/codex-router-r13-review.jSdi0u`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1665 lines before R13 fixes and was
+read by the parent in chunks 1-280, 281-560, 561-840, 841-1120, 1121-1400, and
+1401-1665. Three review lanes also reported full-read coverage.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r13/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- local-auth rejection needed to reject mixed-carrier requests even when the
+  accepted `X-Codex-Router-Token` header is present
+- HTTP/SSE response-creating and previous-response-capable routes needed an
+  explicit affinity-secret preselection order
+- WebSocket preselection wording needed to forbid parsing any additional
+  first-frame/body fields before selection
+- route-band policy lookup needed one owner: selection, not caller-supplied
+  `route_band_policy`
+- unsupported route-band result needed a stable payload and machine reason
+- refresh persistence needed a durable `quota_refresh_status` shape and
+  success/failure transition rules
+- `window_slots.source_window_ids` had no input contract and needed removal from
+  v1
+
+Revision applied:
+The spec now defines selection-owned `assess_route_band(...)`,
+`UnsupportedRouteBandAssessment`, `quota_refresh_status`, v1 `window_slots`
+without source ids, mixed-carrier auth failure, HTTP/SSE routing order, tighter
+WebSocket preselection wording, and proof rows for each contract.

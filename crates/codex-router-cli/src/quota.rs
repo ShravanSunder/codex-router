@@ -779,13 +779,7 @@ fn render_quota_status(
 ) -> Result<(), QuotaCommandError> {
     let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
-    let report = quota_status_report(
-        &state,
-        &accounts,
-        all_limits,
-        now_unix_seconds,
-        format == QuotaStatusFormat::Table,
-    )?;
+    let report = quota_status_report(&state, &accounts, all_limits, now_unix_seconds, true)?;
     match format {
         QuotaStatusFormat::Table => write_quota_table(stdout, report.rows()),
         QuotaStatusFormat::Plain => write_quota_plain(stdout, report.rows()),
@@ -883,7 +877,8 @@ fn write_quota_table(
         ]);
     }
 
-    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)
+    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)?;
+    write_selector_summary_table(stdout, rows)
 }
 
 fn write_quota_plain(
@@ -906,7 +901,48 @@ fn write_quota_plain(
         .map_err(QuotaCommandError::Stdout)?;
     }
 
-    Ok(())
+    write_selector_summary_plain(stdout, rows)
+}
+
+fn write_selector_summary_table(
+    stdout: &mut impl Write,
+    rows: &[QuotaStatusRow],
+) -> Result<(), QuotaCommandError> {
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["route", "next", "why"]);
+    let next = selected_account_label(rows).to_owned();
+    let summary = selector_summary(rows);
+    table.add_row(["responses".to_owned(), next, summary]);
+
+    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)
+}
+
+fn write_selector_summary_plain(
+    stdout: &mut impl Write,
+    rows: &[QuotaStatusRow],
+) -> Result<(), QuotaCommandError> {
+    writeln!(
+        stdout,
+        "responses route\tnext: {}\twhy: {}",
+        selected_account_label(rows),
+        selector_summary(rows)
+    )
+    .map_err(QuotaCommandError::Stdout)
+}
+
+fn selected_account_label(rows: &[QuotaStatusRow]) -> &str {
+    rows.iter()
+        .find(|row| row.preferred_next)
+        .map(|row| row.account_label.as_str())
+        .unwrap_or("none")
+}
+
+fn selector_summary(rows: &[QuotaStatusRow]) -> String {
+    let Some(selected_row) = rows.iter().find(|row| row.preferred_next) else {
+        return "no usable accounts".to_owned();
+    };
+    selected_row.routing.replace('\n', " ")
 }
 
 fn write_quota_json(

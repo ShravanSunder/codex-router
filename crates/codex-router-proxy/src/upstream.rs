@@ -65,10 +65,10 @@ impl UpstreamEndpoint {
     }
 
     fn chatgpt_backend_url_for_path(&self, request_path: &str) -> String {
-        let (path, query) = request_path.trim_start_matches('/').split_once('?').map_or(
-            (request_path.trim_start_matches('/'), None),
-            |(path, query)| (path, Some(query)),
-        );
+        let normalized_path = request_path.trim_start_matches('/');
+        let (path, query) = normalized_path
+            .split_once('?')
+            .map_or((normalized_path, None), |(path, query)| (path, Some(query)));
         let upstream_path = match path {
             "v1/responses" => "codex/responses",
             "v1/responses/compact" => "codex/responses/compact",
@@ -137,12 +137,26 @@ impl StreamingUpstreamHttpTransport for HttpUpstreamTransport {
         &self,
         request: UpstreamHttpRequest,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
+        if self.endpoint.base_url.ends_with("/backend-api")
+            && request.route_kind() == RouteKind::Models
+        {
+            return Ok(chatgpt_backend_models_response());
+        }
+
         if self.endpoint.base_url.starts_with("https://") {
             return send_https_request(&self.endpoint, request);
         }
 
         send_http_request(&self.endpoint, request)
     }
+}
+
+fn chatgpt_backend_models_response() -> StreamingHttpProxyResponse {
+    StreamingHttpProxyResponse::new(
+        200,
+        HeaderCollection::new(vec![Header::new("Content-Type", "application/json")]),
+        Box::new(Cursor::new(br#"{"models":[]}"#.to_vec())),
+    )
 }
 
 fn send_http_request(
@@ -428,7 +442,7 @@ impl UpstreamRequestBuilder {
         self.build_with_chatgpt_account_id(upstream_auth_token, None)
     }
 
-    /// Builds the upstream request with a ChatGPT account id header.
+    /// Builds the upstream request with optional ChatGPT account affinity.
     #[must_use]
     pub fn build_with_chatgpt_account_id(
         self,

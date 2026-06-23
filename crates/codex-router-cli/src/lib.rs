@@ -2322,7 +2322,8 @@ exit 42
         assert!(output.stdout.contains("72%"));
         assert!(output.stdout.contains("needs probe"));
         assert!(!output.stdout.contains("acct_primary"));
-        assert!(!output.stdout.contains("responses"));
+        assert!(output.stdout.contains("responses"));
+        assert!(output.stdout.contains("why"));
         assert!(!output.stdout.contains("models"));
         assert!(!output.stdout.contains("44%"));
         assert!(!output.stdout.contains("pp"));
@@ -2380,9 +2381,13 @@ exit 42
         assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t[########--] 75% resets in 2h 46m\t[----------] - needs probe\t↻ needs probe 5h 75%\tno"
+            "snapshot\tenabled\t████████░░ 75% resets in 2h 46m\t░░░░░░░░░░ - needs probe\t↻ needs probe 5h 75%\tno"
         );
-        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[2],
+            "responses route\tnext: none\twhy: no usable accounts"
+        );
+        assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
     }
 
@@ -2451,11 +2456,14 @@ exit 42
         assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "primary\tenabled\t[###-------] 25% resets in 2h 30m\t[########--] 80% resets in 6d 23h\t✓ preferred 5h 25%\tnext"
+            "primary\tenabled\t███░░░░░░░ 25% resets in 2h 30m\t████████░░ 80% resets in 6d 23h\t✓ preferred 5h 25%\tnext"
         );
-        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[2],
+            "responses route\tnext: primary\twhy: ✓ preferred 5h 25%"
+        );
+        assert_eq!(lines.len(), 3);
         assert!(!output.stdout.contains("acct_primary"));
-        assert!(!output.stdout.contains("responses"));
         assert!(!output.stdout.contains("pp"));
         assert!(!output.stdout.contains("bottleneck"));
         assert!(output.stderr.is_empty());
@@ -3322,7 +3330,13 @@ exit 42
         );
         assert!(status_output.stdout.contains("partial"));
         assert!(status_output.stdout.contains("needs probe"));
-        assert!(status_output.stdout.ends_with("\tno\n"));
+        assert!(
+            status_output
+                .stdout
+                .lines()
+                .any(|line| line.ends_with("\tno"))
+        );
+        assert!(status_output.stdout.contains("responses route\tnext: none"));
         assert!(!status_output.stdout.contains("partial-quota-token"));
         assert!(status_output.stderr.is_empty());
     }
@@ -3397,7 +3411,13 @@ exit 42
         );
         assert!(status_output.stdout.contains("missing-reset"));
         assert!(status_output.stdout.contains("needs probe"));
-        assert!(status_output.stdout.ends_with("\tno\n"));
+        assert!(
+            status_output
+                .stdout
+                .lines()
+                .any(|line| line.ends_with("\tno"))
+        );
+        assert!(status_output.stdout.contains("responses route\tnext: none"));
         assert!(!status_output.stdout.contains("missing-reset-quota-token"));
         assert!(status_output.stderr.is_empty());
     }

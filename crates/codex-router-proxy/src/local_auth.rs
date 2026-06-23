@@ -69,7 +69,12 @@ fn bearer_token_from_authorization(value: &str) -> Option<&str> {
         return None;
     }
 
-    Some(token.trim())
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    Some(token)
 }
 
 #[cfg(test)]
@@ -101,5 +106,6 @@ mod tests {
     fn bearer_token_from_authorization_ignores_non_bearer_auth() {
         assert_eq!(bearer_token_from_authorization("Basic abc"), None);
         assert_eq!(bearer_token_from_authorization("Bearer"), None);
+        assert_eq!(bearer_token_from_authorization("Bearer "), None);
     }
 }

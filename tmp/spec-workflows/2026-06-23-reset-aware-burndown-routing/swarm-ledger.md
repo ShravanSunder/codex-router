@@ -71,12 +71,10 @@ Rejected or deferred evidence:
 9. Use fixed v1 policy constants for near-reset thresholds, reserve thresholds,
    pressure multiplier, salvage caps, and weight clamps.
 10. Classify mixed windows with any-window conservative collapse:
-    ineligible/exhausted blocks, unknown or missing reset becomes
-    `probe_required`, stale marks stale, and `effective` is only an explanation
-    hint.
+    ineligible/exhausted blocks, unknown or missing reset becomes fallback,
+    stale marks stale, and `effective` is only an explanation hint.
 11. Route by availability pool before weighted fairness:
-    `usable`, then `reserve`; `probe_required`, `excluded`, and `blocked` never
-    enter weighted routing.
+    `usable`, then `reserve`, then `unknown`, never `blocked`.
 12. Make default human status output strict: safe account label only, Unicode
     bars when supported, no `pp`, no `bottleneck`, no raw score, and
     preferred-next explanation when routing is shown.
@@ -87,9 +85,9 @@ Rejected or deferred evidence:
 15. Make route-band batch assessment the selector-facing contract so one pure
     assessment owns selected pool, weighted candidates, and neutral
     `preferred_next`.
-16. Make unknown quota probe-required, not fallback capacity; remove the legacy
-    same-pool unknown freshness penalty and require background probe before
-    later requests can use the account.
+16. Make unknown quota fallback-only; remove the legacy same-pool unknown
+    freshness penalty from v1 selection semantics, but preserve conservative
+    partial-headroom ordering inside the all-unknown fallback pool.
 17. Define `/v1/responses` WebSocket support as a first-class route using the
     `responses` route band, with local auth and first-frame validation before
     selection, credential resolution, or upstream open.
@@ -108,8 +106,9 @@ Rejected or deferred evidence:
     `plain`, and `json`.
 24. Require delayed/failing-refresh proof for first valid `/v1/responses`
     WebSocket routing.
-25. Define all-probe-required output as explicit `needs probe` rows so unknown
-    quota never looks healthy and is never treated as request-path fallback.
+25. Define all-unknown fallback as explicit `fallback` next-use output so
+    unknown quota never looks healthy while still showing the account the router
+    may try when every known pool is empty.
 26. Replace prose salvage tiebreaking with an exact salvage tie key shared by
     assessment, status, proxy adapter, and deterministic tests.
 27. Forbid fake `0% left` placeholders for unknown, missing-reset, and no-data
@@ -135,14 +134,86 @@ Rejected or deferred evidence:
     `quota_evidence_reason` records evidence before pool choice, while
     `routing_reason` is assigned after selected-pool mapping.
 34. Missing exactly one expected v1 response window, 5h or weekly, makes the
-    account `probe_required` and renders the missing slot as `no data`.
+    account `unknown` and renders the missing slot as `no data`.
 35. Separate proxy-owned account fact adaptation/runtime enforcement from
     selection-owned pure exclusion/classification. Disabled and
     missing-credential accounts are returned as `excluded` for status, never
     selected.
-36. Keep provider quota probe off the request path. Startup and normal routing
-    use only last-known persisted selector rows; background probe may later
-    promote an account from `probe_required` after verified quota is persisted.
+36. Build burn-down assessments for every supplied route-band account fact row,
+    then filter selected pools after classification. `excluded` and `blocked`
+    rows remain in `accounts` for status, JSON, logs, and proof but never enter
+    `weighted_candidates`.
+37. Define previous-response owner records and pin-write semantics: durable
+    affinity uses a hashed canonical key, selected account id, credential
+    generation, route band, source transport, and creation time; HTTP/SSE and
+    WebSocket pin writes may inspect only allowlisted upstream response id
+    fields and must not emit raw ids or raw bodies.
+38. Make JSON status a normative envelope with top-level route fields,
+    `preferred_next_account_id`, `weighted_candidates[]`, `accounts[]`, and
+    per-account `window_slots` and `windows`.
+39. Split raw local `--format json` stdout from shared artifacts: local JSON may
+    expose `account_id`, but logs, traces, smoke transcripts, PR evidence, and
+    review artifacts must redact or hash it.
+40. Add structural status guardrails: default status is account-centric for the
+    user quota route, has one logical row per account with only an optional
+    blank-account continuation line, and excludes unrelated route-band rows or
+    labels unless a future explicit debug/multi-route mode exists.
+41. Define durable previous-response owner lookup keys as full-length lowercase
+    hex HMAC-SHA-256 over the domain-separated canonical previous-response key,
+    using router-owned secret material. Raw keys are never persisted, helper use
+    is centralized before storage/logging/tracing/audit, and duplicate or
+    ambiguous owner records fail closed.
+42. Hard-cut over affinity storage: existing raw-key rows are discarded or
+    ignored during schema replacement, and no raw-key fallback remains.
+43. Map previous-response owner route eligibility to burn-down availability:
+    `usable` and `reserve` owners are valid; `unknown`, `blocked`, and
+    `excluded` owners fail closed before weighted fallback.
+44. Define `router_affinity_hash_secret` lifecycle: generated once per router
+    root, persisted independently from bearer/account credential rotation,
+    stable across restart and refresh, and non-rotating in v1. If it is missing,
+    unreadable, or replaced, existing owner rows are ignored or purged and
+    continuations fail closed.
+45. Define concrete previous-response affinity boundaries: core owns typed
+    affinity/HMAC helpers, secret-store owns `router_affinity_hash_secret`,
+    state stores only hashed owner records, and proxy owns edge extraction,
+    secret loading, lookup/write orchestration, and fail-closed enforcement.
+46. Define affinity repository cutover APIs for hashed owner records and forbid
+    state repository methods from accepting raw previous-response ids, raw
+    canonical affinity keys, request bodies, or response bodies.
+47. Add `router_affinity_hash_secret` to security assets, forbidden emission
+    surfaces, and proof expectations, including storage identifier and derived
+    secret material redaction.
+48. Define `affinity_secret_unavailable` fail-closed behavior for
+    response-creating HTTP/SSE and WebSocket routes when the hash secret cannot
+    be loaded or created.
+49. Make `codex-router-selection::burn_down` own the v1 route-band policy
+    registry for all currently classified route bands, with unknown route bands
+    failing closed before weighted selection.
+50. Split deterministic output ordering: `accounts[]` is sorted by
+    `account_id`, while `weighted_candidates[]` is sorted by neutral selector
+    order.
+51. Define deterministic public `routing_reason` precedence for overlapping
+    preferred-account explanations.
+52. Pin installed-Codex e2e profile local auth to
+    `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }` and
+    reject `env_key` or Authorization-bearer fallback for this goal.
+53. Add `preferred_weekly_reset_soon` so long-window near-reset salvage can be
+    explained directly in default status, JSON, runtime audit, and tests.
+54. Forbid persisted/shared smoke transcripts from emitting individual raw
+    non-allowlisted WebSocket first-frame/body fields such as `model`, `input`,
+    `metadata`, `tools`, prompt text, or request body content.
+55. Cut previous-response routing away from `codex-router-selection::affinity`
+    and raw `AffinityKey`; no v1 previous-response path may import or call that
+    old raw-key surface.
+56. Define `codex-router-core::routes::RouteBand` as the shared route-band
+    identity used by proxy classification, selection policy lookup, and CLI
+    status adapters.
+57. Define affinity hash-secret storage as
+    `load_or_create_router_affinity_hash_secret`, stable key
+    `router_affinity_hash_secret.v1`, 32 random bytes, 64-lowercase-hex
+    persisted encoding, typed core return, and redacted errors.
+58. Define `SafeAccountLabel` helper semantics, minimum unsafe predicates, and
+    `acct-<12 lowercase hex chars>` deterministic redacted tag format.
 
 ## Open Decisions
 
@@ -151,15 +222,12 @@ may still reject decisions, but plan creation must not reopen them silently.
 
 ## Next Route
 
-Recommended next skill: `shravan-dev-workflow:plan-review-swarm`.
+Recommended next skill: `shravan-dev-workflow:spec-review-swarm`.
 
-Review the corrected spec together with:
-`tmp/plan-workflows/2026-06-23-quota-burndown-routing/implementation-plan.md`.
-
-Only after plan review acceptance should orchestrator route to
-`shravan-dev-workflow:implementation-execute-plan`.
+Only after review acceptance should orchestrator route to
+`shravan-dev-workflow:plan-creation-swarm`.
 
 phase_result: complete
 evidence: `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`, `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/swarm-ledger.md`
-recommended_next_workflow: `shravan-dev-workflow:plan-review-swarm`
-recommended_transition_reason: Corrected spec and implementation plan are ready for adversarial plan review before implementation.
+recommended_next_workflow: `shravan-dev-workflow:spec-review-swarm`
+recommended_transition_reason: Revised spec folds in accepted review findings; next hard gate is adversarial spec review before planning.

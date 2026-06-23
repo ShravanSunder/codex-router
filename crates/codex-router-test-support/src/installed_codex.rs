@@ -1671,7 +1671,7 @@ mod tests {
     fn valid_quota_status() -> SmokeQuotaStatus {
         SmokeQuotaStatus {
             table: "matches 5h weekly routing next use\n".to_owned(),
-            plain: "account\tstatus\t5h\tweekly\trouting\tnext use\nmatches\tenabled\t[#########-] 91% resets in 4h\t[######----] 54% resets in 6d\t✓ preferred 5h 91%\tnext\n".to_owned(),
+            plain: "account\tstatus\t5h\tweekly\trouting\tnext use\nmatches\tenabled\t██████████ 91% resets in 4h\t██████░░░░ 54% resets in 6d\t✓ preferred 5h 91%\tnext\nresponses route\tnext: matches\twhy: ✓ preferred 5h 91%\n".to_owned(),
             json: r#"{"preferred_next_account_id":"acct_matches","accounts":[{"account_id":"acct_matches","safe_account_label":"matches"}]}"#.to_owned(),
         }
     }

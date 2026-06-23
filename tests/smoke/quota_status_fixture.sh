@@ -100,7 +100,11 @@ grep -q "askluna" "${table_output}"
 grep -q "matches" "${table_output}"
 grep -q "ssdev" "${table_output}"
 grep -Eq "preferred|available|blocked|needs probe" "${table_output}"
-grep -q "\\[" "${plain_output}"
+grep -q "█" "${plain_output}"
+if grep -q "\\[" "${plain_output}"; then
+  echo "plain quota status used legacy ASCII bars" >&2
+  exit 1
+fi
 grep -q "selected_pool" "${json_output}"
 
 for forbidden in "acct_" "pp" "bottleneck" "access-token" "refresh-token" "authorization" "X-Codex-Router-Token"; do
