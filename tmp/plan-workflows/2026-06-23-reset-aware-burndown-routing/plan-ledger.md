@@ -55,6 +55,11 @@ Head at plan creation: `0bde7ae`
    T2a/T2b/T2c for state/affinity/secret, T8a/T8b for harness/route-native
    proof, serialized T3 -> T5 -> T6, and transport-specific installed-Codex
    proof for HTTP/SSE and WebSocket.
+10. Focused plan review returned narrow `needs revision` findings. Revision 2
+    serialized T7 after T6 and T9 before T10, made T5 checkpoint
+    self-contained, corrected the WebSocket failure-boundary proof, added
+    `--list` inventory preflights for grouped cargo filters, and expanded
+    affinity secret-store redaction canaries.
 
 ## Accepted Plan Artifact
 
@@ -71,3 +76,6 @@ Recommended transition reason: the first plan-review pass found accepted
 blockers/important findings; revision 1 folds them into task ownership, DAG
 order, proof commands, and write-scope gates. A focused review should verify
 closure before implementation.
+
+Latest recommendation: run parent artifact checks on Revision 2, then transition
+to `shravan-dev-workflow:implementation-execute-plan` if no new blocker remains.

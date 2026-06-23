@@ -59,7 +59,7 @@ the installed Codex HTTP and WebSocket paths end to end.
 
 - Spec: 1971 lines, loaded in chunks 1-500, 501-1000, 1001-1500,
   1501-1971.
-- R20 review ledger: 67 lines, loaded.
+- R20 review ledger: 68 lines, loaded.
 - Workflow details and transition log loaded after R20.
 - Parent live repo inspection covered selection, state, proxy HTTP/SSE,
   WebSocket, local auth, CLI status, profile, secret-store, test-support, and
@@ -103,11 +103,11 @@ the installed Codex HTTP and WebSocket paths end to end.
 | RP-08 | Route result and unknown fallback are first-class flat contracts | R10 | T1, T3, T4 | unit + integration | flat envelope JSON/status/runtime tests |
 | RP-09 | Previous-response affinity is HMAC hashed, durable, fail-closed, owner rows are written from allowlisted upstream response IDs, and raw keys are never persisted | affinity contract | T0, T2b, T2c, T3, T6 | unit + integration + security | core/state/secret/proxy affinity tests, HTTP/SSE pin-write proof, WebSocket pin-write proof |
 | RP-10 | HTTP/SSE order is local auth, route, assessment, affinity-secret gate when previous-response-capable, optional affinity, credential, auth injection, strip, upstream | HTTP/SSE contract | T3, T5 | integration/security | call-order counters and negative side-effect tests including `affinity_secret_unavailable` |
-| RP-11 | WebSocket invalid auth, unsupported paths, forbidden subprotocol token smuggling, and invalid first frames fail before local upgrade/upstream open | WebSocket contract | T6, T8b | black-box/security | non-101 pre-upgrade proof |
+| RP-11 | WebSocket invalid auth, unsupported paths, and forbidden subprotocol token smuggling fail before local upgrade; invalid first frames fail after local upgrade but before selector, credential, auth injection, or upstream open | WebSocket contract | T6, T8b | black-box/security | non-101 pre-upgrade proof plus post-upgrade zero-side-effect first-frame matrix |
 | RP-12 | Status table/plain/json use safe labels, one logical row per account, bars, reasons, next-use, no account ids, no raw scores, no `pp`, no `bottleneck`, and no unrelated route rows by default | status contract | T4 | unit + smoke | table/plain/json snapshots and negative searches |
 | RP-13 | Every routed API has route-native success and fail-closed proof through a stable harness command | route inventory | T8a, T8b | route-native black-box | `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture` |
 | RP-14 | Installed Codex HTTP/SSE and WebSocket both work through router with transport-specific proof commands | proof expectations | T9, T10 | installed-Codex e2e | `installed_codex_http_sse_` and `installed_codex_websocket_` ignored test receipts |
-| RP-15 | Logs/traces/audit/status/smoke/review artifacts redact tokens, headers, raw body/frame, prompts, unsafe labels, affinity secrets, raw previous-response IDs, and shared JSON `account_id` leakage | security context | T11 | security + smoke | canary negative searches over captured artifacts and review/receipt paths |
+| RP-15 | Logs/traces/audit/status/smoke/review artifacts redact tokens, headers, raw body/frame, prompts, unsafe labels, affinity secrets, affinity secret-store identifiers, derived secret material, raw previous-response IDs, and shared JSON `account_id` leakage | security context | T11 | security + smoke | canary negative searches over captured artifacts and review/receipt paths |
 
 Freshness guard for every proof row: run from a clean worktree after the
 corresponding task changes; record command, exit code, and relevant artifact
@@ -390,17 +390,22 @@ Implement:
 
 Proof:
 
-- Cross-transport local auth matrix for generated profile bearer path, manual
+- Shared local-auth primitive matrix for generated profile bearer path, manual
   `X-Codex-Router-Token` header path, equal mixed-carrier success, mismatched
-  mixed-carrier failure, query, cookie, HTTP body token field, WebSocket
-  subprotocol token smuggling rejection, and nested prompt/tool canaries.
+  mixed-carrier failure, query, cookie, HTTP body token field, WebSocket carrier
+  input normalization, and nested prompt/tool canaries.
+- T5 proof must pass without editing `crates/codex-router-proxy/src/websocket.rs`
+  or `crates/codex-router-proxy/src/server.rs`; end-to-end WebSocket ingress,
+  non-101, subprotocol, and call-counter proof belongs to T6.
 - Call counters proving failure before selector, credential, auth injection, and
-  upstream open.
+  upstream open for HTTP/SSE paths owned by T5.
 
 Checkpoint:
 
 - May be included with T3 proxy checkpoint if implemented in same diff; otherwise
-  commit separately after security tests pass.
+  commit separately after T5-owned shared local-auth primitive and HTTP/SSE
+  security tests pass. Do not require T6 WebSocket ingress proof for the T5
+  checkpoint.
 
 ### T6. WebSocket Preselection, Affinity, And Pinning
 
@@ -408,7 +413,10 @@ Write scope:
 
 - `crates/codex-router-proxy/src/websocket.rs`
 - `crates/codex-router-proxy/src/server.rs`
-- `crates/codex-router-test-support/src/*` as needed for WebSocket proof
+- `crates/codex-router-test-support/src/mock_upstream.rs`
+- `crates/codex-router-test-support/src/transcript.rs`
+- `crates/codex-router-test-support/src/installed_codex.rs`
+- WebSocket-focused tests under `crates/codex-router-test-support/src/*`
 
 Implement:
 
@@ -440,7 +448,13 @@ Proof:
   equal mixed-carrier success, mismatched mixed-carrier failure,
   `Sec-WebSocket-Protocol` token smuggling rejection, and first-frame
   auth-smuggling rejection.
-- Non-101 proof for invalid local auth and unsupported WebSocket paths.
+- Non-101 proof for invalid local auth, unsupported WebSocket paths, and
+  forbidden subprotocol token smuggling.
+- Post-upgrade zero-side-effect proof for malformed, wrong-type, oversized,
+  timed-out, first-frame auth-smuggling, and affinity-secret first-frame
+  failures. These cases prove local upgrade accepted, then zero selector
+  advancement, zero credential resolution, zero auth injection, and zero
+  upstream open.
 - Direct installed-Codex first-frame compatibility tests.
 - Canary redaction tests over logs/audit/smoke transcript.
 - WebSocket affinity owner hit and failure tests.
@@ -507,6 +521,21 @@ Implement:
   `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --nocapture`
   and
   `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --nocapture`.
+- Test-inventory preflight commands for each prefix. T8a must record
+  `cargo test -p codex-router-test-support route_native_ -- --ignored --list`,
+  `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --list`,
+  and
+  `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --list`
+  receipts proving the matched test names/counts are exactly the intended
+  route-native, HTTP/SSE, and WebSocket suites before any grouped proof command
+  may pass.
+- Exact installed-Codex smoke commands:
+  `tests/smoke/installed_codex_mock.sh --transport http-sse` and
+  `tests/smoke/installed_codex_mock.sh --transport websocket`.
+- Transport-specific receipt roots:
+  `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/http-sse/`
+  and
+  `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/websocket/`.
 - Remove stale forbidden WebSocket first-frame transcript fields before any
   e2e transcript can be used as proof.
 - Transcript schema for selected safe label/hash, routing reason, local-auth
@@ -549,6 +578,9 @@ Implement:
 
 Proof:
 
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --list`
+  matches only the intended route-native ignored tests and records the matched
+  names/count before execution.
 - `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture`
   passes with redacted artifacts.
 
@@ -560,8 +592,11 @@ Checkpoint:
 
 Write scope:
 
-- installed-Codex test-support harness
-- `tests/smoke/installed_codex_mock.sh`
+- HTTP/SSE installed-Codex tests in
+  `crates/codex-router-test-support/src/installed_codex.rs`
+- HTTP/SSE smoke command handling in `tests/smoke/installed_codex_mock.sh`
+- HTTP/SSE evidence under
+  `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/http-sse/`
 
 Implement:
 
@@ -575,11 +610,14 @@ Implement:
 
 Proof:
 
+- `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --list`
+  matches only the intended HTTP/SSE installed-Codex ignored tests and records
+  the matched names/count before execution.
 - `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --nocapture`
   passes the HTTP/SSE path with redacted transcript.
-- `tests/smoke/installed_codex_mock.sh --transport http-sse` or equivalent
-  smoke wrapper invokes the same underlying HTTP/SSE path and records the
-  command in the receipt.
+- `tests/smoke/installed_codex_mock.sh --transport http-sse` invokes the same
+  underlying HTTP/SSE path and records the command plus artifacts under the
+  HTTP/SSE evidence root.
 
 Checkpoint:
 
@@ -589,9 +627,14 @@ Checkpoint:
 
 Write scope:
 
-- installed-Codex test-support harness
-- WebSocket mock upstream
-- smoke transcript writer
+- WebSocket installed-Codex tests in
+  `crates/codex-router-test-support/src/installed_codex.rs`
+- WebSocket mock upstream and transcript helpers in
+  `crates/codex-router-test-support/src/mock_upstream.rs` and
+  `crates/codex-router-test-support/src/transcript.rs`
+- WebSocket smoke command handling in `tests/smoke/installed_codex_mock.sh`
+- WebSocket evidence under
+  `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/websocket/`
 
 Implement:
 
@@ -606,6 +649,9 @@ Implement:
 
 Proof:
 
+- `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --list`
+  matches only the intended WebSocket installed-Codex ignored tests and records
+  the matched names/count before execution.
 - `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --nocapture`
   passes with:
   - `websocket.local_auth_carrier=authorization_bearer`
@@ -615,9 +661,9 @@ Proof:
   - selected safe label/hash and routing reason
   - status agreement with selected account
   - no forbidden first-frame fields
-- `tests/smoke/installed_codex_mock.sh --transport websocket` or equivalent
-  smoke wrapper invokes the same underlying WebSocket path and records the
-  command in the receipt.
+- `tests/smoke/installed_codex_mock.sh --transport websocket` invokes the same
+  underlying WebSocket path and records the command plus artifacts under the
+  WebSocket evidence root.
 
 Checkpoint:
 
@@ -651,14 +697,18 @@ Proof:
 - `cargo deny check`
 - `cargo audit`
 - `tests/smoke/quota_status_fixture.sh`
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --list`
 - `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture`
+- `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --list`
 - `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --nocapture`
+- `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --list`
 - `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --nocapture`
 - `tests/smoke/installed_codex_mock.sh --transport http-sse`
 - `tests/smoke/installed_codex_mock.sh --transport websocket`
 - Redaction negative search over produced artifacts for token/header/raw body/
-  raw frame/prompt/raw previous-response id/unsafe label/affinity secret/shared
-  JSON `account_id` canaries.
+  raw frame/prompt/raw previous-response id/unsafe label/affinity secret/
+  `router_affinity_hash_secret.v1`/secret-store backend identifier/
+  derived-secret-material/shared JSON `account_id` canaries.
 
 Checkpoint:
 
@@ -693,7 +743,8 @@ integration gate 2: adapters compile and prove
   +-- T5 shared local auth + HTTP/SSE auth security
       |
       +-- T6 WebSocket preselection/security/pinning
-  +-- T7 non-blocking black-box
+          |
+          +-- T7 non-blocking black-box
 
 security integration gate
   requires: T5, T6, T7
@@ -705,8 +756,9 @@ route-native black-box gate
 
 installed-Codex e2e gate
   requires: T8b
-  +-- T9 HTTP/SSE
-  +-- T10 WebSocket
+  T9 HTTP/SSE
+  |
+  T10 WebSocket
 
 T11 final validation
   |
@@ -728,11 +780,12 @@ plan-review/implementation findings folded before PR-ready claim
 - T3, T5, and T6 are serial on proxy/auth surfaces: T3 establishes runtime
   decision and call-counter hooks, T5 establishes shared local auth, then T6
   consumes that shared auth for WebSocket.
-- T7 may proceed beside T5/T6 only inside its explicit write allowlist.
+- T7 starts after T6. The non-blocking WebSocket assertions must run against
+  the final T6 WebSocket ingress, affinity, and pinning path.
 - T8b starts after T3/T5/T6 and T8a pass.
-- T9 and T10 can proceed in parallel only after T8a freezes their command/API
-  contracts and T8b route-native black-box proof is passing; their transcript
-  artifacts must be disjoint.
+- T9 and T10 are serial because they share the installed-Codex harness and
+  smoke script. T9 proves HTTP/SSE first, then T10 proves WebSocket using the
+  command and artifact contract frozen by T8a.
 
 ## Split / Replan Triggers
 

@@ -89,6 +89,31 @@ Next hard gate:
 - do not start implementation until the focused review verifies closure or any
   new accepted findings are folded back into the plan
 
+## Current Phase Update: Focused Plan Review Findings Folded
+
+Focused plan-review lanes completed and returned narrow `needs revision`
+findings. The accepted findings have been folded into Revision 2 of the
+implementation plan:
+
+- T7 now starts after T6 so non-blocking WebSocket proof uses the final
+  WebSocket ingress/affinity/pinning path.
+- T9 and T10 are serial because they share installed-Codex harness and smoke
+  script ownership.
+- T5 proof is limited to shared local-auth primitives and HTTP/SSE security;
+  WebSocket ingress, non-101, subprotocol, and call-counter proof belong to T6.
+- RP-11 now distinguishes pre-upgrade non-101 WebSocket failures from
+  post-upgrade first-frame zero-side-effect failures.
+- Route-native and installed-Codex grouped cargo filters now require `--list`
+  inventory receipts before execution.
+- RP-15/T11 now scan for affinity secret-store identifiers and derived secret
+  material, not only secret values.
+
+Next hard gate:
+
+- parent artifact validation for the revised plan
+- if validation passes, route to
+  `shravan-dev-workflow:implementation-execute-plan`
+
 ## Accepted Spec Review Findings
 
 The current spec is not accepted. The review found these required fixes:
