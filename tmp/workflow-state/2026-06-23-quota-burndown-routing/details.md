@@ -655,3 +655,46 @@ presentation fields, selected-pool-aware fallback reason precedence, a quota
 refresh lifecycle, local-auth ingress contract, WebSocket affinity-secret
 preselection, and the required proof rows. Goal details now point at current
 checkout-relative sources and concrete proof families.
+
+## R13 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`5e5a1c4`
+
+Review worktree:
+`/tmp/codex-router-r13-review.jSdi0u`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1665 lines before R13 fixes and was
+read by the parent in chunks 1-280, 281-560, 561-840, 841-1120, 1121-1400, and
+1401-1665. Three review lanes also reported full-read coverage.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r13/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- local-auth rejection needed to reject mixed-carrier requests even when the
+  accepted `X-Codex-Router-Token` header is present
+- HTTP/SSE response-creating and previous-response-capable routes needed an
+  explicit affinity-secret preselection order
+- WebSocket preselection wording needed to forbid parsing any additional
+  first-frame/body fields before selection
+- route-band policy lookup needed one owner: selection, not caller-supplied
+  `route_band_policy`
+- unsupported route-band result needed a stable payload and machine reason
+- refresh persistence needed a durable `quota_refresh_status` shape and
+  success/failure transition rules
+- `window_slots.source_window_ids` had no input contract and needed removal from
+  v1
+
+Revision applied:
+The spec now defines selection-owned `assess_route_band(...)`,
+`UnsupportedRouteBandAssessment`, `quota_refresh_status`, v1 `window_slots`
+without source ids, mixed-carrier auth failure, HTTP/SSE routing order, tighter
+WebSocket preselection wording, and proof rows for each contract.

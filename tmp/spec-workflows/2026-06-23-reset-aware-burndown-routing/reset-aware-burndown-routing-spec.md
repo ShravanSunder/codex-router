@@ -114,9 +114,9 @@ burn-down assessment
   owns: reset-aware pressure math, pure routability/exclusion classification
         from supplied facts, and structured explanation
   crate: codex-router-selection::burn_down
-  inputs: BurnDownRouteBandAssessmentInput, core RouteBand, fixed v1 route band policy
+  inputs: BurnDownRouteBandAssessmentInput with core RouteBand
   exposes: BurnDownRouteBandAssessmentResult::ok(BurnDownRouteBandAssessment)
-           or ::unsupported_route_band
+           or ::unsupported_route_band(UnsupportedRouteBandAssessment)
   assessment exposes: accounts, selected_pool, weighted_candidates, preferred_next,
                       account presentation fields, and safe route/status reason fields
   must not depend on: codex-router-state, codex-router-proxy, codex-router-cli
@@ -196,8 +196,8 @@ Normative lifecycle:
    the account/route-band selector window set and records `observed_unix_seconds`.
 4. A transient provider, auth, network, parse, or rate-limit refresh failure
    preserves the last successful selector rows. It records a redacted refresh
-   error class and marks the affected rows stale according to existing freshness
-   policy instead of deleting known quota evidence.
+   error class in `quota_refresh_status` and marks the affected account/route
+   band stale without deleting known quota evidence.
 5. If no persisted rows exist for an account/route band, assessment receives no
    relevant rows and returns `unknown` with `needs_quota_refresh`; it does not
    synthesize `0% left`.
@@ -223,6 +223,44 @@ Ownership:
   persisted facts as `fresh`, `stale`, `unknown`, `blocked`, `reserve`, or
   `usable`.
 
+Persisted refresh state contract:
+
+`codex-router-state` owns a small durable `quota_refresh_status` record keyed by
+`account_id` plus `route_band`:
+
+```text
+QuotaRefreshStatus {
+  account_id,
+  route_band,
+  last_success_unix_seconds: i64 | null,
+  last_attempt_unix_seconds: i64 | null,
+  last_error_class: provider_error | auth_error | network_error | parse_error | rate_limited | null,
+  stale_after_unix_seconds: i64 | null
+}
+```
+
+Successful refresh transaction:
+
+- replaces that account/route-band selector window set
+- sets `last_success_unix_seconds` and `last_attempt_unix_seconds`
+- clears `last_error_class`
+- computes `stale_after_unix_seconds` from the row freshness policy
+
+Transient failed refresh transaction:
+
+- preserves existing selector window rows exactly
+- updates `last_attempt_unix_seconds`
+- sets redacted `last_error_class`
+- sets `stale_after_unix_seconds` to `min(existing stale_after_unix_seconds,
+  now_unix_seconds)` so assessment can mark rows stale immediately without
+  erasing last-known headroom/reset facts
+
+The failed-refresh status update and row preservation are one repository
+operation from the caller's perspective. Proof must show a failed refresh leaves
+previous selector windows queryable, marks the account/route band stale or
+needs-refresh through the assessment/status path, and exposes only the redacted
+error class.
+
 ## Burn-Down Assessment Contract
 
 ### Inputs
@@ -232,7 +270,6 @@ Ownership:
 - `route_band`
 - `now_unix_seconds`
 - `accounts: Vec<BurnDownAccountInput>`
-- `route_band_policy: BurnDownRouteBandPolicy`
 
 `BurnDownAccountInput`:
 
@@ -256,13 +293,16 @@ Ownership:
 persisted selector rows: `eligible`, `stale`, `unknown`, and `ineligible`.
 Adapters translate from state DTO enums into this enum.
 
-`BurnDownRouteBandPolicy` is fixed v1 behavior, not operator
+`BurnDownRouteBandPolicy` is fixed v1 behavior owned by
+`codex-router-selection::burn_down`, not caller input and not operator
 configuration. Plan creation may name constants and test fixtures, but must not
 turn these into user-facing config unless a later spec changes the contract.
 
 `codex-router-selection::burn_down` owns the v1 route-band policy registry,
-keyed by `codex-router-core::routes::RouteBand`. Proxy and CLI request a policy
-from selection; they must not carry independent route-band policy `match` logic.
+keyed by `codex-router-core::routes::RouteBand`. Proxy and CLI call
+`assess_route_band(input: BurnDownRouteBandAssessmentInput) ->
+BurnDownRouteBandAssessmentResult`; they do not pass a policy and must not carry
+independent route-band policy `match` logic.
 V1 contains explicit policies for every currently classified route band:
 
 - `responses`: quota-managed 5h plus weekly public quota policy
@@ -271,12 +311,30 @@ V1 contains explicit policies for every currently classified route band:
 - `memories_trace_summarize`: quota-managed 5h plus weekly public quota policy
 
 Unknown or unregistered route bands return
-`BurnDownRouteBandAssessmentResult::unsupported_route_band` before weighted
-selection. Proxy, CLI, status, tests, and smoke proof must consume that same
-route-level result; none of them may keep a separate unsupported-band branch
-with different route-band strings or reason names. Default quota status renders
-the user `responses` quota route only; it must not emit per-route rows for the
-other route bands unless a future explicit debug or multi-route mode changes the
+`BurnDownRouteBandAssessmentResult::unsupported_route_band(UnsupportedRouteBandAssessment)`
+before account assessment or weighted selection. The unsupported branch payload
+is:
+
+```text
+UnsupportedRouteBandAssessment {
+  route_band,
+  route_result: unsupported_route_band,
+  selected_pool: none,
+  preferred_next: null,
+  weighted_candidates: [],
+  accounts: []
+}
+```
+
+Proxy, CLI, status, tests, and smoke proof must consume that same route-level
+result; none of them may keep a separate unsupported-band branch with different
+route-band strings or reason names. HTTP/SSE and WebSocket requests fail
+locally with machine reason `unsupported_route_band` before selector
+advancement, credential resolution, upstream auth injection, or upstream open.
+JSON machine output for an explicit unsupported route-band status request emits
+the payload above and no account rows. Default human quota status renders the
+user `responses` quota route only; it must not emit per-route rows for the other
+route bands unless a future explicit debug or multi-route mode changes the
 contract.
 
 Route-band drift guard:
@@ -941,8 +999,8 @@ JSON output schema:
       "routing_weight": 1..100 | null,
       "preferred_next": true | false,
       "window_slots": {
-        "5h": { "slot": "5h", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 18000 | null, "display_note": "string", "source_window_ids": ["string"] },
-        "weekly": { "slot": "weekly", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 604800 | null, "display_note": "string", "source_window_ids": ["string"] }
+        "5h": { "slot": "5h", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 18000 | null, "display_note": "string" },
+        "weekly": { "slot": "weekly", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 604800 | null, "display_note": "string" }
       },
       "windows": [
         { "window_seconds": 18000, "status": "eligible | stale | unknown | ineligible", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "observed_unix_seconds": 0 | null, "effective": true | false, "pressure_percent": 0..100 | null, "surplus_percent": 0..100 | null, "contributed_to_salvage": true | false }
@@ -963,13 +1021,14 @@ inside `accounts[]`, except that `weighted_candidates[]` repeats local
 `window_slots` contains the exact human-display slot inputs for `5h` and
 `weekly`: slot label, evidence state `known | unknown | no_data`, optional
 `remaining_headroom`, optional `reset_unix_seconds`, optional
-`reset_duration_seconds`, display note, and the source window ids included in
-the slot. `windows` contains every relevant route-band window with safe
-metadata only: window seconds, status, optional headroom, optional reset time,
-observed time, effective flag, pressure, surplus, and whether that window
-contributed to salvage. JSON must be able to reconstruct why the human table
-rendered `unknown`, `no data`, `fallback`, `held`, `available`, or `preferred`
-without reading logs or raw provider DTOs.
+`reset_duration_seconds`, and display note. V1 deliberately does not expose
+`source_window_ids` because no stable provider/window id exists in the selector
+facts. `windows` contains every relevant route-band window with safe metadata
+only: window seconds, status, optional headroom, optional reset time, observed
+time, effective flag, pressure, surplus, and whether that window contributed to
+salvage. JSON must be able to reconstruct why the human table rendered
+`unknown`, `no data`, `fallback`, `held`, `available`, or `preferred` without
+reading logs or raw provider DTOs.
 
 `safe_account_label` is always produced by the shared
 `codex-router-core::redaction` helper before any assessment, status, log, trace,
@@ -1260,13 +1319,51 @@ Forbidden local auth fallback surfaces in this goal:
 - WebSocket subprotocol token smuggling
 - request body tokens
 
-Requests that omit `X-Codex-Router-Token` or present the token only through a
-forbidden fallback surface fail as local auth failures before route-band
-assessment, selector advancement, credential resolution, upstream auth
-injection, upstream HTTP/SSE open, or upstream WebSocket open. HTTP/SSE and
-WebSocket proof must include negative cases for the forbidden fallback surfaces
-that were previously confusing: generated `env_key`/Authorization bearer auth
-must not be accepted as a compatibility path for this goal.
+Requests that omit `X-Codex-Router-Token` fail as local auth failures before
+route-band assessment, selector advancement, credential resolution, upstream
+auth injection, upstream HTTP/SSE open, or upstream WebSocket open. Requests
+that present any forbidden fallback surface also fail before those same side
+effects. HTTP/SSE and WebSocket proof must include negative cases for the
+forbidden fallback surfaces that were previously confusing: generated
+`env_key`/Authorization bearer auth must not be accepted as a compatibility path
+for this goal.
+
+Presence of any forbidden local-auth fallback surface is itself a local-auth
+failure even when `X-Codex-Router-Token` is also present and valid. The router
+must not ignore a second token carrier, because mixed-carrier requests make the
+auth boundary ambiguous and can hide accidental compatibility paths.
+
+### HTTP/SSE Routing Order Contract
+
+HTTP/SSE routing order is normative for response-creating and
+previous-response-capable routes:
+
+1. Validate local router auth and reject any forbidden auth carrier before
+   route-band assessment, selector state, credential resolution, or upstream
+   open.
+2. Classify the HTTP path into `codex-router-core::routes::RouteBand` or the
+   shared `unsupported_route_band` result before selector state, credential
+   resolution, or upstream open.
+3. For any route that can create or consume previous-response ids, load or
+   create `router_affinity_hash_secret.v1` before selector advancement,
+   credential resolution, upstream auth injection, or upstream open.
+4. If the affinity secret is unavailable, fail locally as
+   `affinity_secret_unavailable` with zero selector advancement, zero credential
+   resolver calls, zero upstream auth injection, and zero upstream open.
+5. Extract previous-response affinity metadata, when present, before weighted
+   fallback.
+6. If affinity is present, apply the Previous-Response Affinity Contract. Any
+   owner-resolution failure fails closed before weighted fallback.
+7. If no affinity is present, call the shared route-band assessment and select
+   from `weighted_candidates`.
+8. Resolve the selected account credential and inject upstream auth exactly once
+   after selection and before upstream open.
+9. Strip local client auth, router bearer auth, and hop-by-hop headers before
+   upstream open.
+
+HTTP/SSE proof must cover mixed-carrier local-auth failure and
+`affinity_secret_unavailable` before selector advancement, credential
+resolution, upstream auth injection, and upstream open.
 
 ### WebSocket Compatibility Contract
 
@@ -1294,8 +1391,10 @@ WebSocket routing order is normative:
    - no route-band field is read from the first-frame body in v1; the
      `/v1/responses` WebSocket path fixes the route band to `responses`
    - full request-schema validation remains upstream-owned
-5. Parse only the routing metadata needed for route-band assessment from the
-   first frame; do not log the full payload.
+5. Do not parse any additional first-frame/body fields before selection. The
+   route band comes from the `/v1/responses` path only, and the only first-frame
+   fields read before selection remain top-level `type` and top-level
+   `previous_response_id`.
 6. Load or create `router_affinity_hash_secret.v1` for the router root before
    selection, because `/v1/responses` can create or consume previous-response
    ids. If the secret is unavailable, fail locally as
@@ -1407,6 +1506,9 @@ The implementation plan must provide proof at these layers:
 - tests proving the route-band policy registry has explicit policies for every
   currently classified route band and fails closed for unregistered route bands
   before weighted selection
+- tests proving `assess_route_band(...)` owns policy lookup internally, callers
+  do not pass `route_band_policy`, and unsupported bands return the exact
+  `UnsupportedRouteBandAssessment` payload with empty accounts/candidates
 - tests proving proxy route classification, core `RouteBand` variants, and
   selection policy lookup cannot drift, with every routed `RouteBand` covered by
   either an explicit policy or `unsupported_route_band`
@@ -1476,6 +1578,12 @@ The implementation plan must provide proof at these layers:
 - live-safe CLI smoke proof over persisted router state for emitted `table`,
   `plain`, and `json` status output, including redaction and negative
   assertions on the actual command output
+- refresh persistence integration tests proving successful refresh replaces
+  account/route-band selector windows and updates `quota_refresh_status`, while
+  transient failed refresh preserves previous selector windows, records only a
+  redacted `last_error_class`, marks the account/route band stale or
+  needs-refresh through assessment/status, and performs that transition through
+  one repository operation
 - WebSocket compatibility tests for `/v1/responses` routing, selected-account
   pinning, previous-response affinity before weighted fallback, no weighted
   fallback on continuation-owner failure, `/v1/realtime` and unknown path
@@ -1514,6 +1622,10 @@ The implementation plan must provide proof at these layers:
   WebSocket requests fail locally before selector advancement, credential
   resolution, upstream auth injection, or upstream open when the hash secret
   cannot be loaded or created
+- HTTP/SSE call-order tests proving local auth, route classification,
+  affinity-secret load/create, affinity handling, assessment, credential
+  resolution, auth injection, header stripping, and upstream open happen in the
+  normative order for response-creating and previous-response-capable routes
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload
@@ -1535,7 +1647,8 @@ The implementation plan must provide proof at these layers:
   HTTP/SSE and WebSocket, and that Authorization bearer, query parameter,
   cookie, request-body, WebSocket subprotocol, and generated `env_key` fallback
   auth fail before selection, credential resolution, upstream auth injection, or
-  upstream open
+  upstream open, including mixed-carrier requests that include both a valid
+  `X-Codex-Router-Token` and any forbidden token carrier
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
@@ -1600,10 +1713,14 @@ chooses:
 - route-band identity: `codex-router-core::routes::RouteBand` is the shared
   identifier type used by proxy classification, selection policy lookup, and
   CLI status adapters
+- route-band assessment API: callers pass `RouteBand` and account facts only;
+  selection owns policy lookup and unsupported-band payload construction
 - route/status presentation boundary: selection-owned assessment output carries
   `next_use`, `routing_reason`, `window_slots`, `windows[]`, `salvage_tie_key`,
   and unsupported-band result fields; CLI/proxy render or act on these fields
   without recalculating routing semantics
+- v1 window slot schema: no `source_window_ids`; slot explanation comes from
+  slot fields plus the safe `windows[]` metadata
 - output ordering: `accounts[]` is `account_id` ascending;
   `weighted_candidates[]` is neutral selector order
 - routing reason precedence: weekly-reset-salvage preferred explanation, then
@@ -1615,10 +1732,16 @@ chooses:
   and status rendering never await provider refresh; immediate and periodic
   refresh update SQLite in the background and preserve last-known rows on
   transient failure
+- quota refresh persistence: `quota_refresh_status` records last success,
+  attempt, redacted error class, and stale timing per account/route band
 - local router auth: only `X-Codex-Router-Token` is accepted for HTTP/SSE and
   WebSocket in this goal; Authorization bearer, generated `env_key`, query,
   cookie, subprotocol, and body-token fallback surfaces are rejected before
-  selection or upstream open
+  selection or upstream open, even when mixed with a valid
+  `X-Codex-Router-Token`
+- HTTP/SSE response-creating routes: load/create the affinity hash secret
+  before selector advancement, credential resolution, auth injection, or
+  upstream open
 - WebSocket support: `/v1/responses` supported; every other WebSocket path is
   `unsupported_path` and fails closed before selection or upstream open
 - WebSocket selection: valid first `response.create` frame is required before
