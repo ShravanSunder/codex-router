@@ -88,12 +88,49 @@ Next hard gate:
 - do not route to `plan-creation-swarm` unless spec review returns
   `phase_result: complete`
 
+## Current Phase Update: Second Review Findings Folded Into Spec
+
+The second `spec-review-swarm` pass did not accept the first revision. It found
+additional blockers around route-band batch assessment ownership, unknown
+fallback semantics, WebSocket routing/security order, machine/plain status
+surfaces, safe account display, smoke/log redaction, and deterministic scenario
+coverage.
+
+The second spec-creation revision now folds those findings into the primary
+spec:
+
+- `BurnDownRouteBandAssessment` owns selected pool, weighted candidates, and
+  selected-next for runtime and CLI status.
+- Unknown quota is fallback-only with fixed weight `1`; it never competes with
+  known `usable` or `reserve` accounts.
+- `/v1/responses` WebSocket support is explicit, uses the `responses` route
+  band, and fails closed for unsupported routes before selection or upstream
+  open.
+- WebSocket local auth, bounded first-frame validation, selection, credential
+  resolution, upstream open, forwarding, and account pinning are ordered
+  normatively.
+- Default `table` and `plain` output are human-only, while JSON is the explicit
+  local machine/debug format.
+- Safe account labels or hashes are required by default; raw account id is
+  explicit local JSON/debug only.
+- Smoke/log/trace transcript evidence is allowlisted and forbids raw bodies,
+  full WebSocket first frames, prompts, memory traces, tool args, unsafe labels,
+  tokens, auth headers, and secret-store material.
+- Scenario D now includes weekly reset facts and numeric expected scoring.
+- Scenario E is fallback isolation, not same-pool unknown weighting.
+
+Next hard gate:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- do not route to `plan-creation-swarm` unless this second-revision spec review
+  returns `phase_result: complete`
+
 ## Requirements/proof matrix
 
 Requirement / claim:
 Spec captures the actual algorithm and UX contract.
 Proof source:
-Revised spec plus rerun `shravan-dev-workflow:spec-review-swarm` with
+Second-revision spec plus rerun `shravan-dev-workflow:spec-review-swarm` with
 `phase_result: complete`.
 evidence source:
 phase skill result and parent inspection of review artifacts.

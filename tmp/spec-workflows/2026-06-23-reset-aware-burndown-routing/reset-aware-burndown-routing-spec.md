@@ -89,14 +89,14 @@ persisted selector quota windows
 burn-down assessment
   owns: reset-aware pressure math and structured explanation
   crate: codex-router-selection::burn_down
-  inputs: BurnDownAssessmentInput, now_unix_seconds, fixed v1 route band policy
-  exposes: BurnDownAssessment { availability, routing_weight, limiting_window, reasons }
+  inputs: BurnDownRouteBandAssessmentInput, fixed v1 route band policy
+  exposes: BurnDownRouteBandAssessment { accounts, selected_pool, weighted_candidates, selected_next }
   must not depend on: codex-router-state, codex-router-proxy, codex-router-cli
 
 proxy account selection
   owns: route classification, account eligibility, process-lifetime fairness state
-  adapts: SelectorQuotaInput -> BurnDownAssessmentInput
-  consumes: BurnDownAssessment.routing_weight
+  adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
+  consumes: BurnDownRouteBandAssessment.weighted_candidates
   exposes: SelectedAccountDecision
 
 weighted deficit selector
@@ -106,8 +106,8 @@ weighted deficit selector
 
 quota status CLI
   owns: human and machine rendering
-  adapts: SelectorQuotaInput -> BurnDownAssessmentInput
-  consumes: BurnDownAssessment explanation
+  adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
+  consumes: BurnDownRouteBandAssessment explanation
   must not own: routing math
 ```
 
@@ -121,8 +121,8 @@ Dependency contract:
 - `codex-router-state` remains the source of persisted selector rows and must
   not depend on selection, proxy, or CLI crates.
 - `codex-router-proxy` owns the runtime adapter from `SelectorQuotaInput` to
-  `BurnDownAssessmentInput`, then feeds the resulting positive scalar weights
-  into `WeightedDeficitSelector`.
+  `BurnDownRouteBandAssessmentInput`, then feeds the selected pool's positive
+  scalar weights into `WeightedDeficitSelector`.
 - `codex-router-cli` may depend on `codex-router-selection` so status and
   routing share the same assessment output. It owns formatting only.
 - Reimplementing pressure, reserve, unknown, or limiting-window math in the CLI
@@ -132,16 +132,21 @@ Dependency contract:
 
 ### Inputs
 
-`BurnDownAssessmentInput`:
+`BurnDownRouteBandAssessmentInput`:
+
+- `route_band`
+- `now_unix_seconds`
+- `accounts: Vec<BurnDownAccountInput>`
+- `route_band_policy: BurnDownRouteBandPolicy`
+
+`BurnDownAccountInput`:
 
 - `account_id`
 - `account_label`
 - `route_band`
-- `now_unix_seconds`
 - `windows: Vec<QuotaWindowFact>`
 - `account_enabled: bool`
 - `has_active_credential: bool`
-- `route_band_policy: BurnDownRouteBandPolicy`
 
 `QuotaWindowFact`:
 
@@ -173,9 +178,11 @@ Fixed v1 policy:
 - `risk_penalty_cap = 90`
 - `selectable_weight_min = 1`
 - `selectable_weight_max = 100`
-- freshness penalties reuse the existing selector semantics:
-  stale with known fresh alternatives divides by 4; unknown with known fresh
-  alternatives divides by 8
+- stale penalty applies only inside the selected availability pool:
+  stale accounts divide by 4 when a fresh account exists in the same selected
+  pool; after division, clamp again to `selectable_weight_min..selectable_weight_max`
+- unknown accounts are fallback-only and do not use the legacy same-pool
+  `unknown / 8` penalty in v1
 
 Rationale:
 
@@ -282,6 +289,32 @@ from reset can still put the account in reserve.
 
 ### Routing Weight
 
+The route-band assessment owns cross-account pool choice and selected-next
+projection. Per-account assessment does not know about sibling accounts.
+
+`BurnDownRouteBandAssessment`:
+
+- `accounts: Vec<BurnDownAccountAssessment>`
+- `selected_pool: usable | reserve | unknown | none`
+- `weighted_candidates: Vec<(AccountId, u32)>`
+- `selected_next: Option<AccountId>`
+- `account_order: account_id ascending`
+
+`BurnDownAccountAssessment`:
+
+- `account_id`
+- `account_label`
+- `availability`
+- `freshness: fresh | stale | unknown`
+- `limiting_window`
+- `short_pressure`
+- `long_pressure`
+- `short_salvage`
+- `long_salvage`
+- `routing_weight`
+- `routing_reason`
+- `selected_next`
+
 Only `usable` accounts enter the normal weighted-deficit pool. If no usable
 account exists, `reserve` accounts may enter. `blocked` accounts never enter.
 `unknown` accounts enter only when no known usable or reserve account exists.
@@ -294,7 +327,11 @@ Pool order is normative:
 4. Else if one or more `unknown` accounts exist, select only from `unknown`.
 5. Else return no eligible account.
 
-For each selectable account:
+Within the selected pool, candidates are ordered by `account_id` ascending
+before they are passed to `WeightedDeficitSelector`. Tests that need a
+deterministic selected winner use the same order and an empty selector state.
+
+For each selectable `usable` or `reserve` account:
 
 ```text
 usable_headroom = min(remaining_headroom across relevant windows)
@@ -314,10 +351,18 @@ risk_adjusted_weight =
 Then:
 
 - clamp `risk_adjusted_weight` to `1..100` for selectable accounts
-- apply freshness penalties after burn-down scoring:
-  - stale with known fresh alternatives: divide by 4
-  - unknown with known fresh alternatives: divide by 8
+- apply stale penalties after burn-down scoring only inside the selected pool:
+  - stale with a fresh alternative in the same selected pool: divide by 4 using
+    integer floor division
+  - after division, clamp again to `1..100`
 - pass `(AccountId, risk_adjusted_weight)` into `WeightedDeficitSelector`
+
+For each selectable `unknown` account:
+
+- `routing_weight = 1`
+- `routing_reason = needs_quota_refresh`
+- unknown candidates are ordered by `account_id` ascending
+- unknown never competes with usable or reserve accounts in v1
 
 Sign semantics:
 
@@ -335,10 +380,10 @@ Tie and determinism contract:
 - Deterministic assessment tests compare `routing_weight`, availability,
   limiting window, and reason codes, not only the final selector output.
 - Integration tests that need a selected winner start the weighted selector
-  from empty state and provide candidates in stable account-label order.
+  from empty state and provide candidates in canonical `account_id` order.
 - For a pure assessment tie, the stable explanation order is:
   availability pool, higher `routing_weight`, lower `long_pressure`, lower
-  `short_pressure`, earlier near-reset salvage, then account label.
+  `short_pressure`, earlier near-reset salvage, then `account_id`.
 
 Rationale:
 
@@ -391,14 +436,24 @@ Expected: B outranks A and is selected from an empty weighted selector.
 Scenario D:
 
 ```text
-A: 5h 30% left, resets in 10m; weekly 60% left
-B: 5h 30% left, resets in 4h; weekly 60% left
+A: 5h 30% left, resets in 10m; weekly 60% left, resets in 3d
+B: 5h 30% left, resets in 4h; weekly 60% left, resets in 3d
 
-A receives short salvage because the 5h reset is near.
-B receives short pressure because 30% must last most of the 5h window.
+A:
+  short expected = 4, short surplus = 26, short salvage = 10
+  long expected = 43, long surplus = 17, long salvage = 0
+  usable_headroom = 30, long_pressure = 0, short_pressure = 0
+  routing_weight = 30 + 10 = 40
+
+B:
+  short expected = 80, short pressure = 50, short salvage = 0
+  long expected = 43, long surplus = 17, long salvage = 0
+  usable_headroom = 30, long_pressure = 0, short_pressure = 50
+  routing_weight = clamp(30 - 50, 1..100) = 1
 ```
 
-Expected: A has higher `routing_weight` than B.
+Expected: A has higher `routing_weight` than B and is selected from an empty
+weighted selector.
 
 ## Required Scenario Contracts
 
@@ -409,7 +464,7 @@ A: 5h 5% left, resets in 2m; weekly 80% left, resets in 5d
 B: 5h 90% left, resets in 4h; weekly 20% left, resets in 5d
 ```
 
-Expected: A outranks B.
+Expected: A is selected from the `usable` pool. B is held in `reserve`.
 
 Reason: B's weekly pressure is durable-budget risk. A's low 5h is acceptable because the short window resets soon and weekly is healthy.
 
@@ -440,8 +495,8 @@ Expected: A is blocked for the route band until weekly reset; B is selected if o
 ### Scenario D: same weekly, different short reset pressure
 
 ```text
-A: 5h 30% left, resets in 10m; weekly 60% left
-B: 5h 30% left, resets in 4h; weekly 60% left
+A: 5h 30% left, resets in 10m; weekly 60% left, resets in 3d
+B: 5h 30% left, resets in 4h; weekly 60% left, resets in 3d
 ```
 
 Expected: A receives higher `routing_weight` than B and outranks B when the
@@ -453,10 +508,11 @@ Reason: A has near-reset short-window quota that is safe to spend. B is under mo
 
 ```text
 A: known fresh 50% 5h, 50% weekly
-B: unknown 90% 5h, unknown weekly
+B: unknown 90% 5h, unknown weekly, missing reset evidence
 ```
 
-Expected: A outranks B.
+Expected: A is selected from the `usable` pool. B is not selected because
+`unknown` is fallback-only while any known `usable` or `reserve` account exists.
 
 Reason: unknown quota is not free capacity when known healthy quota exists.
 
@@ -464,10 +520,21 @@ Reason: unknown quota is not free capacity when known healthy quota exists.
 
 The human quota status view should answer "what can I use now?" without leaking internal score math.
 
-Default human output must be account-centric, with no more than one rendered row
-per account. A cell may contain two lines so 5h and weekly quota can be shown
-together without duplicating the account row. Expanded/debug human output may
-show at most two rows per account.
+Default `--format table` human output must be account-centric, with one logical
+row per account. A logical row may render as two physical terminal lines so 5h
+and weekly quota can be shown together without duplicating the account/status
+cells. Continuation lines must leave account/status blank. Expanded/debug human
+output may show at most two logical rows per account.
+
+`--format plain` is a colorless human fallback for terminals without Unicode or
+box drawing. It is not a machine format. It uses the same logical rows and
+content rules as the default table, replaces Unicode bars with ASCII bars, and
+does not expose account id, raw score, tokens, or auth material.
+
+`--format json` is the explicit machine/debug format. It may include raw
+`account_id` for local scripts, but default logs, smoke transcripts, and human
+output must not copy raw `account_id` unless they are explicitly redacted or
+hashed.
 
 Default columns:
 
@@ -488,6 +555,12 @@ Wording:
 - use label/tag only for `account`; do not show `account_id` in default human output
 - when routing choice is shown, include why the selected account is next
 
+Bar rendering:
+
+- table: `█` for filled segments and `░` for empty segments
+- plain: `#` for filled segments and `-` for empty segments
+- both modes include a numeric percent with `left`, for example `54% left`
+
 Normative vocabulary:
 
 | Term | Human meaning | Machine field |
@@ -500,6 +573,19 @@ Normative vocabulary:
 | `pressure` | quota is being spent faster than reset pace | `pressure_percent` |
 | `selected next` | this account is the next normal candidate | `selected_next=true` |
 | `held` | usable only after higher-priority pool is empty | `selected_next=false` |
+
+Stable routing reason enum:
+
+| Enum | Default human phrase |
+| --- | --- |
+| `selected_weekly_healthier` | `selected next: weekly healthier` |
+| `selected_short_reset_soon` | `selected next: 5h reset soon` |
+| `selected_highest_weight` | `selected next: safest quota` |
+| `held_reserve` | `held: reserve` |
+| `held_unknown` | `held: needs refresh` |
+| `blocked_window_exhausted` | `blocked: quota empty` |
+| `blocked_window_ineligible` | `blocked: quota ineligible` |
+| `needs_quota_refresh` | `needs refresh` |
 
 Default human output must not contain:
 
@@ -521,27 +607,63 @@ ssdev    enabled  ██████████ 100% left        ██░░�
                   resets in 3h 48m            resets in 1d 9h
 ```
 
-Machine output may include structured fields:
+JSON output schema:
 
+- `account_id`
+- `account_label`
 - `availability`
-- `limiting_window`
-- `long_pressure`
-- `short_pressure`
-- `reset_salvage`
 - `freshness`
+- `limiting_window`
+- `short_pressure`
+- `long_pressure`
+- `short_salvage`
+- `long_salvage`
 - `routing_reason`
-- `selected_next`
 - `routing_weight`
+- `selected_next`
 
-Machine output may expose scores. Default human output should not.
-
-The machine schema must use stable enums for availability, limiting window,
-freshness, and routing reason. It may include account id because it is intended
-for scripts/debugging, not default operator scan.
+JSON output may expose scores. Default table/plain output must not. The JSON
+schema must use stable enums for availability, limiting window, freshness, and
+routing reason.
 
 ## Security And Trust Context
 
 This design touches auth-adjacent account selection but does not expose secrets.
+
+Assets:
+
+- OAuth access tokens and refresh tokens
+- router bearer token
+- upstream auth headers
+- account id, safe display label, and account hash
+- persisted quota state
+- request bodies, response bodies, prompts, memory traces, and tool arguments
+- logs, audit events, traces, and smoke transcripts
+
+Entry points:
+
+- HTTP/SSE request routing
+- WebSocket handshake and first client frame
+- CLI quota status rendering
+- background quota refresh
+- state repository reads/writes
+- secret-store and credential resolver calls
+
+Trust boundaries:
+
+- local client to router local-auth boundary
+- router to secret store/provider credential boundary
+- router to upstream API boundary
+- router to SQLite state boundary
+- router to logs/traces/smoke transcript boundary
+
+Privileged actions:
+
+- selecting an account
+- resolving credentials
+- injecting upstream auth
+- opening upstream HTTP/SSE or WebSocket connections
+- writing logs, traces, audit events, status rows, and smoke transcripts
 
 Security-sensitive invariants:
 
@@ -549,17 +671,67 @@ Security-sensitive invariants:
 - status output must not print provider tokens, router bearer tokens, keychain identifiers, or upstream auth headers
 - stale/unknown quota must be conservative to avoid overusing a newly rotated or invalidated account
 - account selection must remain after local router auth and before upstream auth injection
+- default human, logs, traces, and smoke transcripts must use
+  `safe_account_label` or a redacted/hash form, never raw account id by default
+- `safe_account_label` must be an operator-chosen local label or redacted/hash
+  form; labels that resemble emails, provider-derived account identifiers,
+  tokens, or auth material are unsafe for default emission
+
+### WebSocket Compatibility Contract
+
+The v1 router must support the Codex `/v1/responses` WebSocket path. It uses the
+same `responses` route band as HTTP/SSE response creation.
+
+WebSocket routing order is normative:
+
+1. Validate local router auth before selector state, quota assessment,
+   credential resolution, or upstream connection open.
+2. Fail closed for unsupported, realtime, or unknown WebSocket routes before
+   selector state, quota assessment, credential resolution, or upstream
+   connection open.
+3. Require a bounded first client frame containing a valid `response.create`
+   payload before opening the upstream WebSocket.
+4. Parse only the routing metadata needed for route-band assessment from the
+   first frame; do not log the full payload.
+5. Run reset-aware route-band assessment for the `responses` route band.
+6. Apply previous-response affinity before weighted fallback. If affinity points
+   to an ineligible or missing account, fail or fall back only according to the
+   accepted route-band policy; do not silently switch mid-stream.
+7. Resolve the selected account credential and inject upstream auth exactly once
+   after selection and before upstream open.
+8. Strip local client auth, router bearer auth, and hop-by-hop headers before
+   upstream open.
+9. Forward the accepted first frame and all later frames unchanged at the
+   protocol payload layer.
+10. Pin the selected account for the lifetime of the WebSocket connection. Do
+    not switch accounts mid-stream. A later connection may reselect after quota
+    state changes.
+
+Malformed first frames, unsupported WebSocket routes, and failed local auth must
+advance no selector state, resolve no provider credential, inject no upstream
+auth, and open no upstream connection.
+
+Required WebSocket proof:
+
+- valid `/v1/responses` WebSocket routes through reset-aware selection
+- selected account is pinned for the full WebSocket connection
+- unsupported/realtime/unknown WebSocket routes fail closed before selection
+- invalid local auth fails before selection
+- malformed first frame fails before selection
+- previous-response affinity is honored before weighted fallback
+- malformed/unsupported/auth-failed paths show zero selector advance, zero
+  credential resolver calls, and zero upstream opens
 
 Allowed and forbidden emission surfaces:
 
 | Surface | Allowed | Forbidden |
 | --- | --- | --- |
-| default status rows | account label, status, percent-left bars, reset time, availability, routing reason | account id, OAuth tokens, router bearer token, keychain identifier, auth headers, raw score |
-| machine status | account id, label, enum reasons, routing weight, freshness, reset metadata | OAuth tokens, router bearer token, refresh token, upstream auth headers |
-| selection explanation | account label or id as already present in proxy audit context, availability, reason code | provider tokens, bearer tokens, auth headers, secret-store paths |
-| refresh errors | provider status class, redacted endpoint class, account label | response bodies containing secrets, full auth headers, tokens |
-| traces/logs | route band, availability, reason enum, redacted account label/id | token values, upstream auth headers, keychain identifiers |
-| smoke transcripts | commands, redacted logs, final selected account label/reason | any token, full auth header, secret file/keychain material |
+| default status rows | safe account label, status, percent-left bars, reset time, availability, routing reason | account id, OAuth tokens, router bearer token, keychain identifier, auth headers, raw score, unsafe label |
+| JSON machine status | account id, safe label, enum reasons, routing weight, freshness, reset metadata | OAuth tokens, router bearer token, refresh token, upstream auth headers, request/response body |
+| selection explanation | safe account label or hash, route band, availability, reason code | provider tokens, bearer tokens, auth headers, secret-store paths, prompts, tool args |
+| refresh errors | provider status class, redacted endpoint class, safe account label/hash | response bodies containing secrets, full auth headers, tokens |
+| traces/logs | route band, availability, reason enum, safe account label/hash | token values, upstream auth headers, keychain identifiers, raw request/response body, full WebSocket first-frame payload, prompts, memory traces, tool args, unsafe labels |
+| smoke transcripts | commands, redacted route band, reason enums, percentages/reset durations, selected safe label/hash | any token, full auth header, secret file/keychain material, raw request/response body, full WebSocket first-frame payload, prompts, memory traces, tool args, unsafe labels |
 
 ## Proof Expectations
 
@@ -570,10 +742,24 @@ The implementation plan must provide proof at these layers:
 - tests proving weekly pressure beats short-window urgency when weekly reset is far
 - tests proving long-window near-reset salvage is allowed when reset is imminent
 - tests proving unknown quota loses to known healthy quota
+- tests proving unknown quota is fallback-only and never competes with known
+  `usable` or `reserve` accounts
 - tests proving empty/no-window accounts are `unknown` fallback, not normal usable
 - tests proving missing reset time is conservative and receives no salvage
 - tests proving mixed stale/unknown/ineligible collapse uses any-window conservative rules
+- tests proving route-band batch assessment returns the same account ordering,
+  selected pool, weighted candidates, and selected-next result used by runtime
+  routing
+- tests proving stale penalty division is applied only inside the selected pool
+  and reclamped after division
+- tests proving canonical `account_id` order for deterministic selector inputs
 - CLI renderer tests proving status uses the same assessment reason and limiting-window semantics as routing
+- JSON schema tests for stable machine fields and enum values
+- plain renderer tests proving ASCII bars, no raw scores, no account ids, and
+  the same routing phrases as table mode
+- reason mapping tests from stable enum to human phrase
+- safe-label and redaction canary tests for account labels that look like
+  emails, provider identities, tokens, auth headers, or secret-store material
 - CLI golden/snapshot tests for default human output:
   - healthy multi-account table with Unicode bars
   - limiting-window disagreement between 5h and weekly
@@ -582,6 +768,13 @@ The implementation plan must provide proof at these layers:
   - blocked, reserve, usable, and unknown accounts
   - colorless/plain terminal mode if supported
   - negative assertions for `pp`, `bottleneck`, default `account_id`, raw score, and token-like strings
+- WebSocket compatibility tests for `/v1/responses` routing, selected-account
+  pinning, previous-response affinity before weighted fallback, unsupported
+  route failure, malformed first frame failure, and local-auth failure before
+  selection
+- security call-order tests proving failed local auth, unsupported WebSocket
+  route, and malformed first frame make zero selector-state advances, zero
+  credential resolver calls, and zero upstream opens
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
@@ -616,6 +809,23 @@ chooses:
 - no effective row: compute from all windows and mark limiting window by worst
   pressure/headroom/longest-window order
 - default human score visibility: no raw score
+- route-band assessment owner: `codex-router-selection::burn_down`
+- batch assessment contract: `BurnDownRouteBandAssessment` owns selected pool,
+  weighted candidates, and selected-next
+- unknown quota selection: fallback-only with fixed weight `1`, never competing
+  with known `usable` or `reserve`
+- deterministic candidate order: `account_id` ascending
+- WebSocket support: `/v1/responses` supported, unknown/realtime routes fail
+  closed before selection or upstream open
+- WebSocket selection: valid first `response.create` frame is required before
+  upstream open; selected account is pinned for connection lifetime
+- default status surfaces: table/plain are human-only and JSON is explicit
+  machine/debug output
+- default account display: safe label or hash; raw `account_id` only in explicit
+  local JSON/debug surfaces
+- smoke/log transcript policy: allowlisted fields only, no raw bodies, prompts,
+  tool args, memory traces, unsafe labels, tokens, auth headers, or secret-store
+  material
 
 Spec review may still reject these choices, but plan creation must not reopen
 them silently.

@@ -16,6 +16,8 @@ Status: revised parent synthesis after spec-review findings
 - `MEMORY.md:2455-2541` for recovered prior context; treated as secondary to live repo evidence
 - `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`
 - `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/lanes/*.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r2/review-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r2/lanes/*.md`
 
 ## Lanes Run
 
@@ -41,6 +43,11 @@ Accepted direct observations:
   ownership, thresholds, mixed-window collapse, human status output,
   non-blocking proof, and redaction proof. Source:
   `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23/review-ledger.md`.
+- second spec review found the first revision still under-specified route-band
+  batch assessment ownership, unknown fallback semantics, WebSocket routing and
+  security order, machine/plain status surfaces, safe-label policy, and security
+  proof. Source:
+  `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r2/review-ledger.md`.
 
 Rejected or deferred evidence:
 
@@ -75,6 +82,21 @@ Rejected or deferred evidence:
     and quota status render.
 14. Require end-to-end Codex-through-router proof, including WebSocket behavior,
     before implementation completion can be claimed.
+15. Make route-band batch assessment the selector-facing contract so one pure
+    assessment owns selected pool, weighted candidates, and selected-next.
+16. Make unknown quota fallback-only with fixed weight `1`; remove the legacy
+    same-pool unknown freshness penalty from v1 selection semantics.
+17. Define `/v1/responses` WebSocket support as a first-class route using the
+    `responses` route band, with local auth and first-frame validation before
+    selection, credential resolution, or upstream open.
+18. Split status surfaces into table/plain human output and explicit JSON
+    machine output with stable fields and enums.
+19. Use safe account labels or hashes by default in human output, logs, traces,
+    smoke transcripts, and selection explanations; raw account id is explicit
+    local JSON/debug only.
+20. Treat smoke/log/transcript output as allowlisted evidence and forbid raw
+    bodies, full WebSocket first frames, prompts, memory traces, tool args,
+    unsafe labels, tokens, auth headers, and secret-store material.
 
 ## Open Decisions
 
