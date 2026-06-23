@@ -1,6 +1,7 @@
 //! Secret storage boundary for codex-router.
 
 pub mod account_tokens;
+pub mod affinity_secret;
 pub mod backend;
 pub mod file_backend;
 pub mod model;
@@ -29,6 +30,10 @@ mod tests {
     use crate::SecretStore;
     use crate::account_tokens::AccountCredentialBundle;
     use crate::account_tokens::upstream_access_token_key;
+    use crate::affinity_secret::ROUTER_AFFINITY_HASH_SECRET_KEY;
+    use crate::affinity_secret::RouterAffinityHashSecretOrigin;
+    use crate::affinity_secret::load_or_create_router_affinity_hash_secret;
+    use crate::affinity_secret::router_affinity_hash_secret_key;
     use crate::file_backend::FileSecretStore;
     use crate::model::SecretKey;
     use crate::refresh_lease::LeaseAcquisition;
@@ -140,6 +145,53 @@ mod tests {
         let key = must_ok(upstream_access_token_key(&account_id));
 
         assert_eq!(key.as_str(), "openai_access_token.acct_primary");
+    }
+
+    #[test]
+    fn router_affinity_hash_secret_is_created_once_and_redacted() {
+        let test_root = TestRoot::new("affinity-secret");
+        let store = must_ok(FileSecretStore::open(test_root.path()));
+
+        let created = must_ok(load_or_create_router_affinity_hash_secret(&store));
+        let loaded = must_ok(load_or_create_router_affinity_hash_secret(&store));
+
+        assert_eq!(created.origin(), RouterAffinityHashSecretOrigin::CreatedNew);
+        assert_eq!(
+            loaded.origin(),
+            RouterAffinityHashSecretOrigin::LoadedExisting
+        );
+        assert_eq!(
+            created.secret().expose_secret(),
+            loaded.secret().expose_secret()
+        );
+        assert_eq!(created.secret().expose_secret().len(), 64);
+        assert!(
+            created
+                .secret()
+                .expose_secret()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(
+            router_affinity_hash_secret_key()
+                .unwrap_or_else(|error| panic!("affinity key should parse: {error}"))
+                .as_str(),
+            ROUTER_AFFINITY_HASH_SECRET_KEY
+        );
+        assert!(!format!("{created:?}").contains(created.secret().expose_secret()));
+    }
+
+    #[test]
+    fn router_affinity_hash_secret_rejects_malformed_payload() {
+        let test_root = TestRoot::new("affinity-secret-malformed");
+        let store = must_ok(FileSecretStore::open(test_root.path()));
+        let key = must_ok(router_affinity_hash_secret_key());
+        must_ok(store.write_secret(&key, &SecretString::new("not-a-valid-secret")));
+
+        let error = must_err(load_or_create_router_affinity_hash_secret(&store));
+
+        assert!(error.to_string().contains("invalid secret payload"));
+        assert!(!error.to_string().contains("not-a-valid-secret"));
     }
 
     #[test]

@@ -147,3 +147,38 @@ Notes:
   `stale_after_unix_seconds`, matching the minimum grace in the spec. Threading
   the configured background interval into the refresh worker remains for the
   later non-blocking refresh slice.
+
+## T2c Affinity Secret Store Contract
+
+Plan rows:
+
+- RP-09 previous-response affinity HMAC secret is router-owned and redacted.
+- RP-15 artifacts must not expose affinity secrets or secret-store identifiers.
+
+Files changed:
+
+- `crates/codex-router-secret-store/src/affinity_secret.rs`
+- `crates/codex-router-secret-store/src/lib.rs`
+
+Implemented:
+
+- Added stable `router_affinity_hash_secret.v1` secret-store key.
+- Added `load_or_create_router_affinity_hash_secret`, returning lifecycle
+  origin `loaded_existing` or `created_new`.
+- Generated secret is 32 bytes of OS entropy encoded as 64 lowercase hex and
+  validated by core `RouterAffinityHashSecret`.
+- Malformed stored payloads fail with redacted `InvalidSecretPayload`.
+
+Proof:
+
+- `cargo test -p codex-router-secret-store` passed: 11 tests.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 71, quota 4, secret-store 11,
+  selection 21, state 16, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- This was implemented before T2b hash-owner state because runtime hash
+  production depends on the secret lifecycle. T2b remains the next state slice.
