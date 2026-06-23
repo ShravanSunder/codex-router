@@ -62,7 +62,6 @@ Run the router with the same root:
 ```shell
 cargo run -p codex-router-cli -- serve \
   --router-root <router-root> \
-  --upstream-base-url <upstream-base-url> \
   --quota-refresh-interval-seconds 300 \
   --quota-refresh-timeout-seconds 30
 ```

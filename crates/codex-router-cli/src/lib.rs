@@ -534,9 +534,9 @@ impl ServeCommand {
             option: "--router-root",
         })?;
         let router_paths = RouterRootPaths::new(router_root.clone());
-        let upstream_base_url = options.upstream_base_url.ok_or(CliError::MissingOption {
-            option: "--upstream-base-url",
-        })?;
+        let upstream_base_url = options
+            .upstream_base_url
+            .unwrap_or_else(quota::default_quota_base_url);
 
         Ok(Self {
             listen_host,
@@ -1138,7 +1138,7 @@ commands:
   account disable --router-root <path> --account <id-or-label>
   quota status --router-root <path> [--format table|plain] [--all-limits]
   quota refresh --router-root <path> [--account <id-or-label>] [--base-url <url>] [--allow-insecure-quota-base-url]
-  serve --router-root <path> --upstream-base-url <url> [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>] [--audit-file <path>] [--debug-otel]
+  serve --router-root <path> [--upstream-base-url <url>] [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>] [--audit-file <path>] [--debug-otel]
   token init --router-root <path>
   token rotate --router-root <path>
   token export --router-root <path> [--shell posix]
@@ -3645,8 +3645,6 @@ mod tests {
             OsString::from("serve"),
             OsString::from("--router-root"),
             OsString::from("/tmp/codex-router"),
-            OsString::from("--upstream-base-url"),
-            OsString::from("http://127.0.0.1:1/v1"),
         ]) {
             Ok(CliCommand::Serve(command)) => command,
             Ok(other) => panic!("serve command should parse, got {other:?}"),
@@ -3654,6 +3652,7 @@ mod tests {
         };
 
         assert_eq!(command.fixed_now_unix_seconds, None);
+        assert_eq!(command.upstream_base_url, quota::default_quota_base_url());
         assert_eq!(
             command.state_db,
             PathBuf::from("/tmp/codex-router/state.sqlite")

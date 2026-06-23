@@ -33,7 +33,7 @@ cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
 cargo run -p codex-router-cli -- quota status --router-root <router-root>
 cargo run -p codex-router-cli -- quota status --router-root <router-root> --format plain
 cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
-cargo run -p codex-router-cli -- serve --router-root <router-root> --upstream-base-url <url> --quota-refresh-interval-seconds 300 --quota-refresh-timeout-seconds 30
+cargo run -p codex-router-cli -- serve --router-root <router-root> --quota-refresh-interval-seconds 300 --quota-refresh-timeout-seconds 30
 ```
 
 `account import-codex-auth` is the implemented OAuth setup path. There is not
@@ -101,7 +101,7 @@ cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
 cargo run -p codex-router-cli -- token init --router-root <router-root>
 cargo run -p codex-router-cli -- token export --router-root <router-root> --shell posix
-cargo run -p codex-router-cli -- serve --router-root <router-root> --upstream-base-url <url> [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>]
+cargo run -p codex-router-cli -- serve --router-root <router-root> [--upstream-base-url <url>] [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>]
 cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> [--allow-insecure-quota-base-url]
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> [--allow-insecure-quota-base-url]
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --format table --all-limits
