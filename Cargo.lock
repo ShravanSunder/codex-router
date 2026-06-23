@@ -99,8 +99,10 @@ dependencies = [
 name = "codex-router-core"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "toml",
 ]

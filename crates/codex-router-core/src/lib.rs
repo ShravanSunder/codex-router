@@ -1,11 +1,13 @@
 //! Shared primitives for codex-router.
 
+pub mod affinity;
 pub mod audit;
 pub mod config;
 pub mod error;
 pub mod ids;
 pub mod local_auth;
 pub mod redaction;
+pub mod routes;
 
 /// Returns this crate's package name.
 #[must_use]
