@@ -38,6 +38,7 @@ pub struct AccountRecord {
     account_id: AccountId,
     label: String,
     status: AccountStatus,
+    active_credential_generation: Option<u64>,
 }
 
 impl AccountRecord {
@@ -48,7 +49,18 @@ impl AccountRecord {
             account_id,
             label: label.into(),
             status,
+            active_credential_generation: None,
         }
+    }
+
+    /// Sets the active credential generation.
+    #[must_use]
+    pub const fn with_active_credential_generation(
+        mut self,
+        active_credential_generation: u64,
+    ) -> Self {
+        self.active_credential_generation = Some(active_credential_generation);
+        self
     }
 
     /// Returns the account id.
@@ -67,5 +79,11 @@ impl AccountRecord {
     #[must_use]
     pub const fn status(&self) -> AccountStatus {
         self.status
+    }
+
+    /// Returns the active credential generation when credentials are usable.
+    #[must_use]
+    pub const fn active_credential_generation(&self) -> Option<u64> {
+        self.active_credential_generation
     }
 }

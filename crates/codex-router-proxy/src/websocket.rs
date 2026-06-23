@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_core::audit::AuditEvent;
 use codex_router_core::audit::AuditEventFields;
 use codex_router_core::audit::AuditFileSink;
@@ -31,12 +32,14 @@ use tungstenite::handshake::server::Response;
 use tungstenite::http::HeaderName;
 use tungstenite::http::HeaderValue;
 
+use crate::account_selection::AccountDecisionSelector;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
 use crate::http_sse::HttpProxyRequest;
-use crate::http_sse::UpstreamAccountSelector;
+use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::allowed_audit_event;
+use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::http_sse::redacted_account_hash;
 use crate::local_auth::ProxyLocalAuthGate;
@@ -124,6 +127,8 @@ pub enum WebSocketCloseReason {
     },
     /// Account selection failed before upstream open.
     Selection,
+    /// Provider credential resolution failed before upstream open.
+    ProviderCredential,
     /// First frame exceeded local resource limit.
     FirstFrameTooLarge,
     /// First frame was not text.
@@ -154,7 +159,7 @@ impl WebSocketProtocolRouter {
         &self,
         handshake: WebSocketHandshakeRequest,
         first_frame: WebSocketFrame,
-        upstream_auth_token: SecretString,
+        provider_bearer_token: SecretString,
     ) -> Result<WebSocketFirstFrameDecision, WebSocketCloseReason> {
         let WebSocketFrame::Text(first_frame_bytes) = &first_frame else {
             return Err(WebSocketCloseReason::UnsupportedFirstFrameType);
@@ -174,7 +179,7 @@ impl WebSocketProtocolRouter {
 
         Ok(WebSocketFirstFrameDecision::OpenUpstream {
             token_generation: TokenGeneration::new(0),
-            headers: sanitize_headers_for_upstream(handshake.headers, upstream_auth_token),
+            headers: sanitize_headers_for_upstream(handshake.headers, provider_bearer_token),
             first_frame,
         })
     }
@@ -182,30 +187,35 @@ impl WebSocketProtocolRouter {
 
 /// WebSocket router that composes local auth, account selection, and first-frame routing.
 #[derive(Clone, Copy, Debug)]
-pub struct AuthenticatedWebSocketRouter<'a, S>
+pub struct AuthenticatedWebSocketRouter<'a, S, C>
 where
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
     auth_gate: &'a ProxyLocalAuthGate,
     selector: &'a S,
+    credential_resolver: &'a C,
     protocol_router: &'a WebSocketProtocolRouter,
     audit_sink: Option<&'a AuditFileSink>,
 }
 
-impl<'a, S> AuthenticatedWebSocketRouter<'a, S>
+impl<'a, S, C> AuthenticatedWebSocketRouter<'a, S, C>
 where
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
     /// Creates an authenticated WebSocket router.
     #[must_use]
     pub const fn new(
         auth_gate: &'a ProxyLocalAuthGate,
         selector: &'a S,
+        credential_resolver: &'a C,
         protocol_router: &'a WebSocketProtocolRouter,
     ) -> Self {
         Self {
             auth_gate,
             selector,
+            credential_resolver,
             protocol_router,
             audit_sink: None,
         }
@@ -220,7 +230,7 @@ where
 
     fn emit_audit_event(&self, event: AuditEvent) {
         if let Some(audit_sink) = self.audit_sink {
-            let _result = audit_sink.append(&event);
+            append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
         }
     }
 
@@ -254,14 +264,19 @@ where
                 WebSocketCloseReason::Selection
             })?;
         let account_hash = redacted_account_hash(selected.account_id());
+        let resolved = self
+            .credential_resolver
+            .resolve_provider_credentials(selected.account_id())
+            .map_err(|_reason| {
+                self.emit_audit_event(websocket_credential_rejection_audit_event(
+                    account_hash.clone(),
+                ));
+                WebSocketCloseReason::ProviderCredential
+            })?;
 
         let decision = self
             .protocol_router
-            .route_first_frame(
-                handshake,
-                first_frame,
-                selected.upstream_auth_token().clone(),
-            )
+            .route_first_frame(handshake, first_frame, resolved.access_token().clone())
             .inspect_err(|_reason| {
                 self.emit_audit_event(websocket_first_frame_rejection_audit_event(
                     account_hash.clone(),
@@ -315,6 +330,20 @@ fn websocket_first_frame_rejection_audit_event(account_hash: String) -> AuditEve
     })
 }
 
+fn websocket_credential_rejection_audit_event(account_hash: String) -> AuditEvent {
+    AuditEvent::proxy_decision(AuditEventFields {
+        request_id: RequestId::new("local_proxy_request"),
+        route_kind: AuditRouteKind::ResponsesWebSocket,
+        transport_kind: TransportKind::WebSocket,
+        local_auth_result: LocalAuthAuditResult::Valid,
+        outcome: AuditOutcome::Rejected,
+        decision_reason: "credential_rejected",
+        response_commit_state: ResponseCommitState::NotCommitted,
+        account_hash: Some(account_hash),
+        error_class: Some("provider_credential"),
+    })
+}
+
 /// Tracks active local WebSocket streams by local token generation.
 #[derive(Clone, Debug, Default)]
 pub struct WebSocketRevocationRegistry {
@@ -365,27 +394,35 @@ impl WebSocketRevocationRegistry {
 
 /// Blocking WebSocket tunnel that uses the authenticated first-frame router.
 #[derive(Clone, Debug)]
-pub struct BlockingWebSocketTunnel<'a, S>
+pub struct BlockingWebSocketTunnel<'a, S, C>
 where
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
-    router: AuthenticatedWebSocketRouter<'a, S>,
+    router: AuthenticatedWebSocketRouter<'a, S, C>,
     revocations: WebSocketRevocationRegistry,
 }
 
-impl<'a, S> BlockingWebSocketTunnel<'a, S>
+impl<'a, S, C> BlockingWebSocketTunnel<'a, S, C>
 where
-    S: UpstreamAccountSelector,
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
 {
     /// Creates a blocking WebSocket tunnel.
     #[must_use]
     pub fn new(
         auth_gate: &'a ProxyLocalAuthGate,
         selector: &'a S,
+        credential_resolver: &'a C,
         protocol_router: &'a WebSocketProtocolRouter,
     ) -> Self {
         Self {
-            router: AuthenticatedWebSocketRouter::new(auth_gate, selector, protocol_router),
+            router: AuthenticatedWebSocketRouter::new(
+                auth_gate,
+                selector,
+                credential_resolver,
+                protocol_router,
+            ),
             revocations: WebSocketRevocationRegistry::new(),
         }
     }
@@ -395,11 +432,17 @@ where
     pub fn new_with_revocation_registry(
         auth_gate: &'a ProxyLocalAuthGate,
         selector: &'a S,
+        credential_resolver: &'a C,
         protocol_router: &'a WebSocketProtocolRouter,
         revocations: WebSocketRevocationRegistry,
     ) -> Self {
         Self {
-            router: AuthenticatedWebSocketRouter::new(auth_gate, selector, protocol_router),
+            router: AuthenticatedWebSocketRouter::new(
+                auth_gate,
+                selector,
+                credential_resolver,
+                protocol_router,
+            ),
             revocations,
         }
     }
@@ -409,13 +452,19 @@ where
     pub fn new_with_revocation_registry_and_audit_sink(
         auth_gate: &'a ProxyLocalAuthGate,
         selector: &'a S,
+        credential_resolver: &'a C,
         protocol_router: &'a WebSocketProtocolRouter,
         revocations: WebSocketRevocationRegistry,
         audit_sink: &'a AuditFileSink,
     ) -> Self {
         Self {
-            router: AuthenticatedWebSocketRouter::new(auth_gate, selector, protocol_router)
-                .with_audit_sink(audit_sink),
+            router: AuthenticatedWebSocketRouter::new(
+                auth_gate,
+                selector,
+                credential_resolver,
+                protocol_router,
+            )
+            .with_audit_sink(audit_sink),
             revocations,
         }
     }

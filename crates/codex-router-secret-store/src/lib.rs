@@ -1,9 +1,12 @@
 //! Secret storage boundary for codex-router.
 
 pub mod account_tokens;
+pub mod backend;
 pub mod file_backend;
 pub mod model;
 pub mod refresh_lease;
+
+pub use backend::SecretStore;
 
 /// Returns this crate's package name.
 #[must_use]
@@ -23,9 +26,10 @@ mod tests {
     use codex_router_core::redaction::SecretString;
 
     use super::package_name;
+    use crate::SecretStore;
+    use crate::account_tokens::AccountCredentialBundle;
     use crate::account_tokens::upstream_access_token_key;
     use crate::file_backend::FileSecretStore;
-    use crate::file_backend::SecretStore;
     use crate::model::SecretKey;
     use crate::refresh_lease::LeaseAcquisition;
     use crate::refresh_lease::ManualClock;
@@ -136,6 +140,16 @@ mod tests {
         let key = must_ok(upstream_access_token_key(&account_id));
 
         assert_eq!(key.as_str(), "openai_access_token.acct_primary");
+    }
+
+    #[test]
+    fn imported_codex_auth_extracts_jwt_expiry_claim() {
+        let bundle = AccountCredentialBundle::imported_codex_auth(
+            "eyJhbGciOiJub25lIn0.eyJleHAiOjIwMDB9.sig",
+            Some("refresh-token-canary".to_owned()),
+        );
+
+        assert_eq!(bundle.expires_unix_seconds(), Some(2_000));
     }
 
     #[test]

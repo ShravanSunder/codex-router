@@ -1,7 +1,7 @@
 # Live OAuth And Quota Proof Runbook
 
-Date: 2026-06-20
-Status: implemented and run after explicit approval
+Date: 2026-06-22
+Status: implemented; router-owned multi-account live proof is approval-gated
 
 ## Purpose
 
@@ -22,22 +22,53 @@ tokens, or the local router bearer token.
 
 ## Current Executable State
 
-This revision has a narrow live quota proof command:
+This revision has router-owned account onboarding plus a read-only diagnostic
+quota command.
+
+Router-owned account setup:
+
+```shell
+cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --auth-json <path> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account list --router-root <router-root>
+cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
+cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
+```
+
+`account login --device-auth` delegates the interactive OAuth device-code flow
+to the installed `codex` binary in a temporary owner-only `CODEX_HOME`, then
+imports the resulting OAuth `auth.json` into router-owned account state. Use
+`--codex-bin <path>` when the test must pin a specific Codex binary.
+
+`account login --auth-json` imports an existing Codex/Prodex-style OAuth
+`auth.json` into router-owned account state. It is an explicit migration,
+recovery, and test setup path, not implicit steady-state shared auth.
+
+`quota refresh` uses the router-owned credential resolver and persists provider
+quota windows to SQLite. `quota status` reads SQLite only and performs no
+provider I/O.
+
+Read-only diagnostic live quota:
 
 ```shell
 cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label>
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
 ```
 
-The command reads Codex/Prodex-style OAuth `auth.json` as a compatibility
-input, calls the ChatGPT usage endpoint, and prints only redacted quota window
-summaries. It does not copy the file into router state, does not make
-`auth.json` the router runtime source of truth, and rejects API-key auth for
-quota because the ChatGPT quota endpoint requires Codex OAuth access tokens.
+The diagnostic command reads Codex/Prodex-style OAuth `auth.json` as a
+compatibility input, calls the ChatGPT usage endpoint, and prints only redacted
+quota window summaries. It does not copy the file into router state, does not
+make `auth.json` the router runtime source of truth, and rejects API-key auth
+for quota because the ChatGPT quota endpoint requires Codex OAuth access tokens.
 
-The implemented CLI surface is intentionally limited to:
+The implemented CLI surface for local router proof is:
 
 ```shell
+cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --auth-json <path> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account list --router-root <router-root>
+cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
+cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
 cargo run -p codex-router-cli -- profile print --port 8787
 cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
@@ -47,13 +78,15 @@ cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
 ```
 
-The profile, token, and serve commands are not live OAuth proof by themselves.
-They prove local profile, token export, and router/proxy behavior only. The
-`live quota` command is live OAuth quota proof.
+The account, quota, profile, token, and serve commands prove router-owned local
+behavior. Real provider execution through `account login --device-auth`, `quota
+refresh`, or `live quota` is live OAuth/quota proof and must follow the approval
+boundary below.
 
-Do not invent or run additional live commands such as `codex-router login`,
-`codex-router live-proof`, or model-traffic live proof commands unless that CLI
-surface has first been designed, implemented, tested, and added to this runbook.
+Do not invent or run additional live commands such as `codex-router
+live-proof`, `account logout`, `account remove`, or model-traffic live proof
+commands unless that CLI surface has first been designed, implemented, tested,
+and added to this runbook.
 
 ## Approval Boundary
 
@@ -69,9 +102,13 @@ tests does not authorize this live gate.
 
 ## Exact Commands For This Revision
 
-Approved live quota proof command:
+Approved live quota proof commands for this revision:
 
 ```shell
+cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --router-root <router-root> --label <label> --auth-json <path> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
+cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
 cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root>
 ```
 
@@ -127,12 +164,19 @@ Future approved live evidence must exclude:
 - memory traces
 - raw account emails
 
-## Current Gate Result
+## Prior Diagnostic Evidence
 
 ```text
-live_oauth_quota_gate: run
+live_quota_diagnostic_gate: run
 approval: explicit user approval in transcript on 2026-06-20
 command: cargo run -q -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root>
 result: 3 OAuth profiles returned status ok from the ChatGPT usage endpoint
 redaction: no tokens, auth headers, emails, or raw response bodies printed
+```
+
+## Current Gate Result
+
+```text
+live_oauth_quota_gate: not-run
+reason: approval required for router-owned device-auth/import plus real quota refresh and cycling proof
 ```

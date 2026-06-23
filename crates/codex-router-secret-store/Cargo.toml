@@ -9,5 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 codex-router-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true

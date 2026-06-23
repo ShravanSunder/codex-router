@@ -7,7 +7,7 @@ use codex_router_core::ids::TokenGeneration;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_core::redaction::SecretString;
-use codex_router_secret_store::file_backend::SecretStore;
+use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::model::SecretKey;
 use codex_router_secret_store::model::SecretStoreError;
 use thiserror::Error;

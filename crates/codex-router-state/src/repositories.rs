@@ -5,6 +5,8 @@ use codex_router_core::ids::AffinityKey;
 
 use crate::account::AccountRecord;
 use crate::quota_snapshot::PersistedQuotaSnapshot;
+use crate::quota_snapshot::PersistedSelectorQuotaWindow;
+use crate::quota_snapshot::SelectorQuotaInput;
 use crate::sqlite::StateStoreError;
 
 /// Account metadata repository.
@@ -39,6 +41,21 @@ pub trait QuotaSnapshotRepository {
         account_id: &AccountId,
         route_band: &str,
     ) -> Result<Option<PersistedQuotaSnapshot>, StateStoreError>;
+}
+
+/// Selector quota input repository.
+pub trait SelectorQuotaRepository {
+    /// Inserts or updates one selector quota window.
+    fn upsert_selector_window(
+        &self,
+        window: &PersistedSelectorQuotaWindow,
+    ) -> Result<(), StateStoreError>;
+
+    /// Loads selector input rows for one route band.
+    fn selector_inputs_for_route_band(
+        &self,
+        route_band: &str,
+    ) -> Result<Vec<SelectorQuotaInput>, StateStoreError>;
 }
 
 /// Previous-response affinity repository.

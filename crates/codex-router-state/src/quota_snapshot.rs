@@ -2,6 +2,8 @@
 
 use codex_router_core::ids::AccountId;
 
+use crate::account::AccountStatus;
+
 /// Source that produced a persisted quota snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuotaSnapshotSource {
@@ -9,6 +11,8 @@ pub enum QuotaSnapshotSource {
     MockEndpoint,
     /// OpenAI quota endpoint.
     OpenAiEndpoint,
+    /// Stale marker written after credential mutation.
+    CredentialMutation,
 }
 
 impl QuotaSnapshotSource {
@@ -18,6 +22,7 @@ impl QuotaSnapshotSource {
         match self {
             Self::MockEndpoint => "mock_endpoint",
             Self::OpenAiEndpoint => "openai_endpoint",
+            Self::CredentialMutation => "credential_mutation",
         }
     }
 
@@ -27,6 +32,7 @@ impl QuotaSnapshotSource {
         match value {
             "mock_endpoint" => Some(Self::MockEndpoint),
             "openai_endpoint" => Some(Self::OpenAiEndpoint),
+            "credential_mutation" => Some(Self::CredentialMutation),
             _ => None,
         }
     }
@@ -42,6 +48,224 @@ pub struct PersistedQuotaSnapshot {
     remaining_headroom: u32,
     reset_unix_seconds: Option<u64>,
     stale_penalty: bool,
+}
+
+/// Selector-facing quota window status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectorQuotaWindowStatus {
+    /// Window can be used for account selection.
+    Eligible,
+    /// Window is stale but may be used as a fallback.
+    Stale,
+    /// Window must not be used for selection.
+    Ineligible,
+    /// Window state is unknown.
+    Unknown,
+}
+
+impl SelectorQuotaWindowStatus {
+    /// Serializes status to SQLite.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::Stale => "stale",
+            Self::Ineligible => "ineligible",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parses status from SQLite.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "eligible" => Some(Self::Eligible),
+            "stale" => Some(Self::Stale),
+            "ineligible" => Some(Self::Ineligible),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+/// Durable selector input for one provider quota window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedSelectorQuotaWindow {
+    account_id: AccountId,
+    route_band: String,
+    limit_window_seconds: u64,
+    status: SelectorQuotaWindowStatus,
+    remaining_headroom: u32,
+    reset_unix_seconds: Option<u64>,
+    effective: bool,
+    observed_unix_seconds: u64,
+}
+
+impl PersistedSelectorQuotaWindow {
+    /// Creates selector quota window input.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        route_band: impl Into<String>,
+        limit_window_seconds: u64,
+        status: SelectorQuotaWindowStatus,
+    ) -> Self {
+        Self {
+            account_id,
+            route_band: route_band.into(),
+            limit_window_seconds,
+            status,
+            remaining_headroom: 0,
+            reset_unix_seconds: None,
+            effective: false,
+            observed_unix_seconds: 0,
+        }
+    }
+
+    /// Sets remaining headroom.
+    #[must_use]
+    pub const fn with_remaining_headroom(mut self, remaining_headroom: u32) -> Self {
+        self.remaining_headroom = remaining_headroom;
+        self
+    }
+
+    /// Sets reset time.
+    #[must_use]
+    pub const fn with_reset_unix_seconds(mut self, reset_unix_seconds: u64) -> Self {
+        self.reset_unix_seconds = Some(reset_unix_seconds);
+        self
+    }
+
+    /// Marks this as the effective selector window.
+    #[must_use]
+    pub const fn with_effective(mut self, effective: bool) -> Self {
+        self.effective = effective;
+        self
+    }
+
+    /// Sets observation time.
+    #[must_use]
+    pub const fn with_observed_unix_seconds(mut self, observed_unix_seconds: u64) -> Self {
+        self.observed_unix_seconds = observed_unix_seconds;
+        self
+    }
+
+    /// Returns account id.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns route band.
+    #[must_use]
+    pub fn route_band(&self) -> &str {
+        &self.route_band
+    }
+
+    /// Returns provider limit window seconds.
+    #[must_use]
+    pub const fn limit_window_seconds(&self) -> u64 {
+        self.limit_window_seconds
+    }
+
+    /// Returns status.
+    #[must_use]
+    pub const fn status(&self) -> SelectorQuotaWindowStatus {
+        self.status
+    }
+
+    /// Returns remaining headroom.
+    #[must_use]
+    pub const fn remaining_headroom(&self) -> u32 {
+        self.remaining_headroom
+    }
+
+    /// Returns reset time.
+    #[must_use]
+    pub const fn reset_unix_seconds(&self) -> Option<u64> {
+        self.reset_unix_seconds
+    }
+
+    /// Returns whether this is the effective selector window.
+    #[must_use]
+    pub const fn effective(&self) -> bool {
+        self.effective
+    }
+
+    /// Returns observed time.
+    #[must_use]
+    pub const fn observed_unix_seconds(&self) -> u64 {
+        self.observed_unix_seconds
+    }
+}
+
+/// Durable selector input for one account and route band.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectorQuotaInput {
+    account_id: AccountId,
+    account_label: String,
+    account_status: AccountStatus,
+    active_credential_generation: Option<u64>,
+    route_band: String,
+    windows: Vec<PersistedSelectorQuotaWindow>,
+}
+
+impl SelectorQuotaInput {
+    /// Creates selector input.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        account_label: impl Into<String>,
+        account_status: AccountStatus,
+        active_credential_generation: Option<u64>,
+        route_band: impl Into<String>,
+        windows: Vec<PersistedSelectorQuotaWindow>,
+    ) -> Self {
+        Self {
+            account_id,
+            account_label: account_label.into(),
+            account_status,
+            active_credential_generation,
+            route_band: route_band.into(),
+            windows,
+        }
+    }
+
+    /// Returns account id.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns account label.
+    #[must_use]
+    pub fn account_label(&self) -> &str {
+        &self.account_label
+    }
+
+    /// Returns account status.
+    #[must_use]
+    pub const fn account_status(&self) -> AccountStatus {
+        self.account_status
+    }
+
+    /// Returns active credential generation.
+    #[must_use]
+    pub const fn active_credential_generation(&self) -> Option<u64> {
+        self.active_credential_generation
+    }
+
+    /// Returns route band.
+    #[must_use]
+    pub fn route_band(&self) -> &str {
+        &self.route_band
+    }
+
+    /// Returns selector windows.
+    #[must_use]
+    pub fn windows(&self) -> &[PersistedSelectorQuotaWindow] {
+        &self.windows
+    }
 }
 
 impl PersistedQuotaSnapshot {
