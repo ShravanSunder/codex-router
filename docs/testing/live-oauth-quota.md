@@ -23,18 +23,20 @@ tokens, or the local router bearer token.
 ## Current Executable State
 
 This revision has a router-owned account and quota surface. Normal local use
-starts from one router root:
+starts from the default router root at `$HOME/.codex-router`:
 
 ```shell
-cargo run -p codex-router-cli -- token init --router-root <router-root>
-cargo run -p codex-router-cli -- account import-codex-auth --router-root <router-root> --label <local-safe-label> --auth-json <path-to-codex-auth.json> --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account list --router-root <router-root>
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
-cargo run -p codex-router-cli -- quota status --router-root <router-root>
-cargo run -p codex-router-cli -- quota status --router-root <router-root> --format plain
-cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
-cargo run -p codex-router-cli -- serve --router-root <router-root> --quota-refresh-interval-seconds 300 --quota-refresh-timeout-seconds 30
+cargo run -p codex-router-cli -- token init
+cargo run -p codex-router-cli -- account import-codex-auth --label <local-safe-label> --auth-json <path-to-codex-auth.json> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account list
+cargo run -p codex-router-cli -- quota refresh
+cargo run -p codex-router-cli -- quota status
+cargo run -p codex-router-cli -- quota status --format plain
+cargo run -p codex-router-cli -- quota status --all-limits
+cargo run -p codex-router-cli -- serve --quota-refresh-interval-seconds 300 --quota-refresh-timeout-seconds 30
 ```
+
+Use `--router-root <path>` only for tests or an alternate local router home.
 
 `account import-codex-auth` is the implemented OAuth setup path. There is not
 yet an interactive `codex-router account login` browser/device flow. Import
@@ -43,14 +45,14 @@ secrets, leaves the source `auth.json` unchanged, rejects API-key auth, rejects
 duplicate labels, accepts only the local-safe label alphabet `A-Z`, `a-z`,
 `0-9`, `.`, `_`, and `-`, and prints only redacted account metadata.
 
-`<router-root>/state.sqlite` is the SQLite state database. `<router-root>/secrets`
-is the current file secret backend. This backend is plaintext at rest under
-private filesystem permissions, so importing OAuth material requires the
-explicit `--allow-plaintext-file-secrets` acknowledgement. Do not describe this
-backend as encrypted storage. Router-owned state and secrets must not be placed
-under `.codex` or `.prodex`.
+`$HOME/.codex-router/state.sqlite` is the SQLite state database.
+`$HOME/.codex-router/secrets` is the current file secret backend. This backend
+is plaintext at rest under private filesystem permissions, so importing OAuth
+material requires the explicit `--allow-plaintext-file-secrets` acknowledgement.
+Do not describe this backend as encrypted storage. Router-owned state and
+secrets must not be placed under `.codex` or `.prodex`.
 
-`quota refresh` reads router-owned access tokens from `<router-root>/secrets`,
+`quota refresh` reads router-owned access tokens from `$HOME/.codex-router/secrets`,
 calls the provider quota endpoint, and persists selector snapshots plus
 normalized status rows to SQLite. `quota status` reads SQLite only and performs
 no provider I/O. Default quota status renders compact effective rows; `--all-limits`
@@ -90,18 +92,18 @@ not make `auth.json` the runtime source of truth.
 The implemented CLI surface is intentionally limited to:
 
 ```shell
-cargo run -p codex-router-cli -- account import-codex-auth --router-root <router-root> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account list --router-root <router-root>
-cargo run -p codex-router-cli -- account enable --router-root <router-root> --account <id-or-label>
-cargo run -p codex-router-cli -- account disable --router-root <router-root> --account <id-or-label>
-cargo run -p codex-router-cli -- quota status --router-root <router-root> [--format table|plain] [--all-limits]
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root> [--account <id-or-label>] [--base-url <url>] [--allow-insecure-quota-base-url]
+cargo run -p codex-router-cli -- account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account list [--router-root <path>]
+cargo run -p codex-router-cli -- account enable [--router-root <path>] --account <id-or-label>
+cargo run -p codex-router-cli -- account disable [--router-root <path>] --account <id-or-label>
+cargo run -p codex-router-cli -- quota status [--router-root <path>] [--format table|plain] [--all-limits]
+cargo run -p codex-router-cli -- quota refresh [--router-root <path>] [--account <id-or-label>] [--base-url <url>] [--allow-insecure-quota-base-url]
 cargo run -p codex-router-cli -- profile print --port 8787
 cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
-cargo run -p codex-router-cli -- token init --router-root <router-root>
-cargo run -p codex-router-cli -- token export --router-root <router-root> --shell posix
-cargo run -p codex-router-cli -- serve --router-root <router-root> [--upstream-base-url <url>] [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>]
+cargo run -p codex-router-cli -- token init [--router-root <path>]
+cargo run -p codex-router-cli -- token export [--router-root <path>] --shell posix
+cargo run -p codex-router-cli -- serve [--router-root <path>] [--upstream-base-url <url>] [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>]
 cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> [--allow-insecure-quota-base-url]
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> [--allow-insecure-quota-base-url]
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --format table --all-limits
@@ -134,8 +136,8 @@ tests does not authorize this live gate.
 Approval-gated live quota proof commands:
 
 ```shell
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root> --account <id-or-label>
+cargo run -p codex-router-cli -- quota refresh
+cargo run -p codex-router-cli -- quota refresh --account <id-or-label>
 cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root>
 cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root> --format table --all-limits
 ```
@@ -154,7 +156,7 @@ Required properties:
 - performs no writes to `~/.codex` or `~/.prodex`
 - `live quota` performs no writes to router state
 - `quota refresh` writes only router-owned SQLite quota state under
-  `<router-root>/state.sqlite`
+  `$HOME/.codex-router/state.sqlite` by default
 - treats `auth.json` as read-only compatibility/import input, not runtime
   credential storage
 - API-key auth is reported as quota-incompatible rather than sent to the quota

@@ -28,6 +28,7 @@ use thiserror::Error;
 use crate::ArgumentParser;
 use crate::CliError;
 use crate::RouterRootPaths;
+use crate::router_root_or_default;
 
 /// Account command namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,9 +88,7 @@ impl AccountRootCommand {
         }
 
         Ok(Self {
-            router_root: router_root.ok_or(CliError::MissingOption {
-                option: "--router-root",
-            })?,
+            router_root: router_root_or_default(router_root)?,
         })
     }
 }
@@ -122,9 +121,7 @@ impl AccountSelectCommand {
         }
 
         Ok(Self {
-            router_root: router_root.ok_or(CliError::MissingOption {
-                option: "--router-root",
-            })?,
+            router_root: router_root_or_default(router_root)?,
             account: account.ok_or(CliError::MissingOption {
                 option: "--account",
             })?,
@@ -171,9 +168,7 @@ impl AccountImportCodexAuthCommand {
         }
 
         Ok(Self {
-            router_root: router_root.ok_or(CliError::MissingOption {
-                option: "--router-root",
-            })?,
+            router_root: router_root_or_default(router_root)?,
             auth_json: auth_json.ok_or(CliError::MissingOption {
                 option: "--auth-json",
             })?,

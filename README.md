@@ -19,24 +19,28 @@ The current router-owned OAuth onboarding path is explicit import from an
 existing Codex/Prodex-style OAuth `auth.json`. There is not yet an interactive
 `codex-router account login` browser/device flow.
 
+By default, `codex-router` stores router-owned state under
+`$HOME/.codex-router`, for example `/Users/shravansunder/.codex-router` on this
+machine. Use `--router-root <path>` only for tests or an alternate local router
+home.
+
 ```shell
-cargo run -p codex-router-cli -- token init --router-root <router-root>
+cargo run -p codex-router-cli -- token init
 
 cargo run -p codex-router-cli -- account import-codex-auth \
-  --router-root <router-root> \
   --label <local-safe-label> \
   --auth-json <path-to-codex-auth.json> \
   --allow-plaintext-file-secrets
 
-cargo run -p codex-router-cli -- account list --router-root <router-root>
-cargo run -p codex-router-cli -- quota refresh --router-root <router-root>
-cargo run -p codex-router-cli -- quota status --router-root <router-root>
-cargo run -p codex-router-cli -- quota status --router-root <router-root> --format plain
-cargo run -p codex-router-cli -- quota status --router-root <router-root> --all-limits
+cargo run -p codex-router-cli -- account list
+cargo run -p codex-router-cli -- quota refresh
+cargo run -p codex-router-cli -- quota status
+cargo run -p codex-router-cli -- quota status --format plain
+cargo run -p codex-router-cli -- quota status --all-limits
 ```
 
-`<router-root>/state.sqlite` stores account metadata and quota snapshots.
-`<router-root>/secrets` stores the local router bearer token and imported
+`$HOME/.codex-router/state.sqlite` stores account metadata and quota snapshots.
+`$HOME/.codex-router/secrets` stores the local router bearer token and imported
 upstream OAuth token material through the current file secret backend. That
 backend is plaintext at rest under private filesystem permissions, so importing
 OAuth material requires `--allow-plaintext-file-secrets`. The router root must
@@ -61,7 +65,6 @@ Run the router with the same root:
 
 ```shell
 cargo run -p codex-router-cli -- serve \
-  --router-root <router-root> \
   --quota-refresh-interval-seconds 300 \
   --quota-refresh-timeout-seconds 30
 ```

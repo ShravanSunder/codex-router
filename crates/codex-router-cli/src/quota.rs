@@ -39,6 +39,7 @@ use crate::CliError;
 use crate::RouterRootPaths;
 use crate::current_unix_seconds;
 use crate::parse_u64_option;
+use crate::router_root_or_default;
 
 const DEFAULT_QUOTA_STATUS_MAX_AGE_SECONDS: u64 = 300;
 
@@ -142,9 +143,7 @@ impl QuotaRefreshCommand {
         }
 
         Ok(Self {
-            router_root: router_root.ok_or(CliError::MissingOption {
-                option: "--router-root",
-            })?,
+            router_root: router_root_or_default(router_root)?,
             account,
             base_url,
             allow_insecure_quota_base_url,
@@ -202,9 +201,7 @@ impl QuotaStatusCommand {
         }
 
         Ok(Self {
-            router_root: router_root.ok_or(CliError::MissingOption {
-                option: "--router-root",
-            })?,
+            router_root: router_root_or_default(router_root)?,
             output_format,
             all_limits,
             now_unix_seconds: now_unix_seconds.map_or_else(current_unix_seconds, Ok)?,

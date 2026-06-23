@@ -223,6 +223,23 @@ struct RouterRootPaths {
     secret_root: PathBuf,
 }
 
+const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
+
+pub(crate) fn router_root_or_default(router_root: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    match router_root {
+        Some(router_root) => Ok(router_root),
+        None => default_router_root(),
+    }
+}
+
+fn default_router_root() -> Result<PathBuf, CliError> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(CliError::HomeDirectoryUnavailable)?;
+    Ok(home.join(DEFAULT_ROUTER_ROOT_DIR))
+}
+
 impl RouterRootPaths {
     fn new(router_root: PathBuf) -> Self {
         Self {
@@ -530,9 +547,7 @@ impl ServeCommand {
             .listen_host
             .unwrap_or_else(|| "127.0.0.1".to_owned());
         let port = options.port.unwrap_or(DEFAULT_PROFILE_PORT);
-        let router_root = options.router_root.ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })?;
+        let router_root = router_root_or_default(options.router_root)?;
         let router_paths = RouterRootPaths::new(router_root.clone());
         let upstream_base_url = options
             .upstream_base_url
@@ -760,9 +775,7 @@ impl TokenRootOptions {
     }
 
     fn router_root(self) -> Result<PathBuf, CliError> {
-        self.router_root.ok_or_else(|| CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_root_or_default(self.router_root)
     }
 }
 
@@ -801,9 +814,7 @@ impl TokenExportOptions {
     }
 
     fn router_root(self) -> Result<PathBuf, CliError> {
-        self.router_root.ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_root_or_default(self.router_root)
     }
 }
 
@@ -1034,6 +1045,10 @@ pub enum CliError {
         option: &'static str,
     },
 
+    /// HOME is unavailable for the default router root.
+    #[error("HOME is not set; pass --router-root <path>")]
+    HomeDirectoryUnavailable,
+
     /// A required option value is missing.
     #[error("missing value for option: {option}")]
     MissingOptionValue {
@@ -1132,16 +1147,16 @@ const HELP_TEXT: &str = "\
 codex-router
 
 commands:
-  account import-codex-auth --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-  account list --router-root <path>
-  account enable --router-root <path> --account <id-or-label>
-  account disable --router-root <path> --account <id-or-label>
-  quota status --router-root <path> [--format table|plain] [--all-limits]
-  quota refresh --router-root <path> [--account <id-or-label>] [--base-url <url>] [--allow-insecure-quota-base-url]
-  serve --router-root <path> [--upstream-base-url <url>] [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>] [--audit-file <path>] [--debug-otel]
-  token init --router-root <path>
-  token rotate --router-root <path>
-  token export --router-root <path> [--shell posix]
+  account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
+  account list [--router-root <path>]
+  account enable [--router-root <path>] --account <id-or-label>
+  account disable [--router-root <path>] --account <id-or-label>
+  quota status [--router-root <path>] [--format table|plain] [--all-limits]
+  quota refresh [--router-root <path>] [--account <id-or-label>] [--base-url <url>] [--allow-insecure-quota-base-url]
+  serve [--router-root <path>] [--upstream-base-url <url>] [--quota-refresh-base-url <url>] [--allow-insecure-quota-base-url] [--quota-refresh-interval-seconds <seconds>] [--quota-refresh-timeout-seconds <seconds>] [--audit-file <path>] [--debug-otel]
+  token init [--router-root <path>]
+  token rotate [--router-root <path>]
+  token export [--router-root <path>] [--shell posix]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -1195,8 +1210,10 @@ mod tests {
     use super::CliCommand;
     use super::CliContext;
     use super::CliError;
+    use super::TokenCommand;
     use super::package_name;
     use super::run_with_io;
+    use crate::account::AccountCommand;
     use crate::doctor::DoctorAccountState;
     use crate::doctor::DoctorReport;
     use crate::doctor::QuotaDoctorState;
@@ -1231,6 +1248,17 @@ mod tests {
         fn path(&self) -> &Path {
             &self.path
         }
+    }
+
+    fn default_router_root_for_test() -> PathBuf {
+        let Some(home) = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        else {
+            panic!("HOME must be set for default router root tests");
+        };
+
+        home.join(".codex-router")
     }
 
     impl Drop for TestRoot {
@@ -2034,28 +2062,50 @@ mod tests {
     }
 
     #[test]
-    fn token_export_command_requires_router_root() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let error = match run_with_io(
-            vec![
-                "codex-router".into(),
-                "token".into(),
-                "export".into(),
-                "--shell".into(),
-                "posix".into(),
-            ],
-            &CliContext::new(Vec::new()),
-            &mut stdout,
-            &mut stderr,
-        ) {
-            Ok(()) => panic!("token export without router root must fail"),
-            Err(error) => error,
+    fn token_export_command_defaults_router_root_to_home_codex_router() {
+        let command = match CliCommand::parse([
+            OsString::from("token"),
+            OsString::from("export"),
+            OsString::from("--shell"),
+            OsString::from("posix"),
+        ]) {
+            Ok(CliCommand::Token(command)) => command,
+            Ok(other) => panic!("token command should parse, got {other:?}"),
+            Err(error) => panic!("token command should parse: {error}"),
         };
 
-        assert_eq!(error.to_string(), "missing required option: --router-root");
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
+        let TokenCommand::Export { router_root, shell } = command else {
+            panic!("token export command should parse");
+        };
+        assert_eq!(router_root, default_router_root_for_test());
+        assert_eq!(shell, Shell::Posix);
+    }
+
+    #[test]
+    fn account_list_command_defaults_router_root() {
+        let command = match CliCommand::parse([OsString::from("account"), OsString::from("list")]) {
+            Ok(CliCommand::Account(command)) => command,
+            Ok(other) => panic!("account command should parse, got {other:?}"),
+            Err(error) => panic!("account command should parse: {error}"),
+        };
+
+        assert!(matches!(command, AccountCommand::List(_)));
+    }
+
+    #[test]
+    fn quota_status_command_defaults_router_root() {
+        let command = match CliCommand::parse([
+            OsString::from("quota"),
+            OsString::from("status"),
+            OsString::from("--now-unix-seconds"),
+            OsString::from("0"),
+        ]) {
+            Ok(CliCommand::Quota(command)) => command,
+            Ok(other) => panic!("quota command should parse, got {other:?}"),
+            Err(error) => panic!("quota command should parse: {error}"),
+        };
+
+        assert!(matches!(command, quota::QuotaCommand::Status(_)));
     }
 
     #[test]
@@ -3667,6 +3717,20 @@ mod tests {
             command.quota_refresh_base_url,
             quota::default_quota_base_url()
         );
+    }
+
+    #[test]
+    fn serve_command_defaults_router_root_to_home_codex_router() {
+        let command = match CliCommand::parse([OsString::from("serve")]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(other) => panic!("serve command should parse, got {other:?}"),
+            Err(error) => panic!("serve command should parse: {error}"),
+        };
+
+        let router_root = default_router_root_for_test();
+        assert_eq!(command.router_root, router_root);
+        assert_eq!(command.state_db, router_root.join("state.sqlite"));
+        assert_eq!(command.secret_root, router_root.join("secrets"));
     }
 
     #[test]
