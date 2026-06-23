@@ -43,13 +43,18 @@ Resolve these paths in the current checkout or review worktree for the git
 commit being reviewed:
 
 - `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
-- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r15/review-ledger.md`
-- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r15/swarm-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r16/review-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r17/swarm-ledger.md`
 - `tmp/workflow-state/2026-06-23-quota-burndown-routing/details.md`
 - `tmp/workflow-state/2026-06-23-quota-burndown-routing/events.jsonl`
 
 Earlier review ledgers remain historical context only. The latest review ledger
 is authoritative for the next workflow transition.
+
+Historical phase updates below are retained as a log, not active instructions.
+When older sections mention `phase_result` or rejected generated-profile auth
+shapes, the active source of truth is the required-reading list above, the
+latest orchestrator event, and the current primary spec.
 
 ## Accepted Spec Review Findings
 
@@ -89,8 +94,8 @@ Next hard gate:
 - rerun `shravan-dev-workflow:spec-review-swarm`
 - the dedicated security/trust-boundary lane should be rerun because the prior
   security lane crashed
-- do not route to `plan-creation-swarm` unless spec review returns
-  `phase_result: complete`
+- do not route to `plan-creation-swarm` unless spec review returns a
+  parent-verified verdict of `ready`
 
 ## Current Phase Update: Second Review Findings Folded Into Spec
 
@@ -127,8 +132,8 @@ spec:
 Next hard gate:
 
 - rerun `shravan-dev-workflow:spec-review-swarm`
-- do not route to `plan-creation-swarm` unless this second-revision spec review
-  returns `phase_result: complete`
+- do not route to `plan-creation-swarm` unless spec review returns a
+  parent-verified verdict of `ready`
 
 ## Current Phase Update: Third Review Still Needs Revision
 
@@ -163,8 +168,8 @@ Next hard gate:
 
 - revise the spec through `shravan-dev-workflow:spec-creation-swarm`
 - rerun `shravan-dev-workflow:spec-review-swarm`
-- do not route to `plan-creation-swarm` until review returns
-  `phase_result: complete`
+- do not route to `plan-creation-swarm` until review returns a parent-verified
+  verdict of `ready`
 
 ## Current Phase Update: Third Review Findings Folded Into Spec
 
@@ -191,8 +196,8 @@ The spec-creation pass after R3 folded in accepted review findings:
 Next hard gate:
 
 - rerun `shravan-dev-workflow:spec-review-swarm`
-- do not route to `plan-creation-swarm` unless the R4 review returns
-  `phase_result: complete`
+- do not route to `plan-creation-swarm` unless spec review returns a
+  parent-verified verdict of `ready`
 
 ## Current Phase Update: Fourth Review Still Needs Focused Revision
 
@@ -221,15 +226,16 @@ Accepted R4 findings:
 The follow-up spec revision folds these in. Next hard gate remains:
 
 - rerun `shravan-dev-workflow:spec-review-swarm`
-- no `plan-creation-swarm` until review returns `phase_result: complete`
+- no `plan-creation-swarm` until review returns a parent-verified verdict of
+  `ready`
 
 ## Requirements/proof matrix
 
 Requirement / claim:
 Spec captures the actual algorithm and UX contract.
 Proof source:
-Second-revision spec plus rerun `shravan-dev-workflow:spec-review-swarm` with
-`phase_result: complete`.
+Second-revision spec plus rerun `shravan-dev-workflow:spec-review-swarm` with a
+parent-verified verdict of `ready`.
 evidence source:
 phase skill result and parent inspection of review artifacts.
 freshness guard:
@@ -564,8 +570,10 @@ Accepted findings:
 - public `routing_reason` needed deterministic precedence when preferred
   explanation predicates overlap
 - secret-unavailable behavior for response-creating routes needed to be explicit
-- installed-Codex e2e needed to pin generated profile local auth to
-  `env_http_headers`, not `env_key` or Authorization fallback
+- Historical rejected finding: installed-Codex e2e was once pointed at an old
+  explicit-header generated-profile shape; later review rejected that. Active
+  contract is
+  `env_key = "CODEX_ROUTER_TOKEN"` and local `Authorization: Bearer`.
 
 Revision applied:
 The spec now defines core-owned safe-label and affinity helpers,
@@ -723,9 +731,11 @@ Accepted findings:
 
 - top-level requirement trace is incomplete for local auth, generated profile,
   affinity-secret, WebSocket preselection, and smoke-redaction cutovers
-- local-auth/profile contract contradicts the current installed Codex path:
-  the spec requires `env_http_headers` with `X-Codex-Router-Token`, while
-  current code/tests still use or accept `env_key`/`Authorization`
+- Historical rejected finding: an older spec required an explicit-header
+  generated-profile shape with `X-Codex-Router-Token`. Active contract is
+  generated-profile
+  `env_key = "CODEX_ROUTER_TOKEN"` with local `Authorization: Bearer`, while
+  `X-Codex-Router-Token` remains manual/compat ingress.
 - WebSocket preselection wording conflicts with the current direct-payload
   branch that reads fields such as `model`, `input`, and `stream`
 - unknown-quota fallback/probe semantics are not first-class in the route
@@ -812,7 +822,7 @@ Accepted important findings:
 - generated-profile bearer-auth e2e proof needs a named safe observable or an
   explicit split between ingress tests and e2e proof
 - tail workflow wording should use parent-verified spec-review verdict
-  `ready`, not `phase_result: complete`
+  `ready`, not an old `phase_result` completion signal
 
 Next hard gate:
 Return to `shravan-dev-workflow:spec-creation-swarm`; do not proceed to
@@ -851,5 +861,65 @@ Revision applied:
 
 Next hard gate:
 Run `shravan-dev-workflow:spec-review-swarm` against R16. Do not proceed to
+`plan-creation-swarm` until that review returns a parent-verified `ready`
+verdict.
+
+## R16 Spec Review
+
+Date: 2026-06-23
+
+Phase:
+spec-review-swarm review of R16.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r16/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted blockers:
+
+- refresh read overlay still exposed contradictory selector repository APIs
+- WebSocket/HTTP local-auth and auth-smuggling ownership was still fuzzy
+- installed-Codex generated-profile bearer proof was optional
+- HTTP/SSE body-token rejection had no exact inspection boundary
+- goal details still contained stale active source-of-truth guidance
+
+Accepted important fixes:
+
+- raw unknown quota evidence reasons needed to be evidence-only, not public
+  routing reasons
+- legacy selector rows with no refresh metadata needed first-read semantics
+- proxy runtime selection needed a DTO carrying the shared route-result envelope
+- affinity hit side effects on weighted-deficit state and route-band holds
+  needed to be normative
+
+## R17 Spec Revision
+
+Date: 2026-06-23
+
+Phase:
+spec-creation-swarm revision after R16.
+
+Revision artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r17/swarm-ledger.md`
+
+Revision applied:
+
+- canonical state read API is
+  `selector_inputs_for_route_band(route_band, now_unix_seconds)`
+- legacy selector rows without refresh metadata are stale on first post-upgrade
+  read before successful refresh
+- unknown public routing reasons are pool-based, with raw causes preserved in
+  `quota_evidence_reason`
+- `RuntimeSelectedAccountDecision` carries the shared assessment envelope
+- affinity hit side effects are specified
+- HTTP/SSE body and WebSocket first-frame auth-smuggling checks are narrow
+  top-level JSON field-name validators
+- installed-Codex bearer receipt proof is mandatory and audit-safe
+- primary spec is 1990 lines, under the artifact cap
+
+Next hard gate:
+Run `shravan-dev-workflow:spec-review-swarm` against R17. Do not proceed to
 `plan-creation-swarm` until that review returns a parent-verified `ready`
 verdict.

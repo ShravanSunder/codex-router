@@ -21,35 +21,36 @@ Success means the router can answer these questions consistently:
 
 Observed in current code:
 
-- Runtime selection reads route-band selector rows from `SelectorQuotaRepository::selector_inputs_for_route_band`.
-  Source: `crates/codex-router-proxy/src/account_selection.rs:189-210`, `crates/codex-router-state/src/repositories.rs:46-59`.
-- Current selector collapse loses reset geometry. It rejects any ineligible window, finds the effective window, then uses the minimum `remaining_headroom` across windows.
-  Source: `crates/codex-router-proxy/src/account_selection.rs:262-292`.
-- `WeightedDeficitSelector` is generic weighted round-robin over `(AccountId, u32)`. It does not know freshness, reset time, weekly quota, or route semantics.
-  Source: `crates/codex-router-selection/src/weighted_deficit.rs:60-98`.
-- Persisted selector windows already contain the raw facts needed for reset-aware routing: `limit_window_seconds`, `status`, `remaining_headroom`, `reset_unix_seconds`, `effective`, and `observed_unix_seconds`.
-  Source: `crates/codex-router-state/src/quota_snapshot.rs:91-200`.
-- CLI status already computes pace and projected runout from reset time and remaining headroom.
-  Source: `crates/codex-router-cli/src/quota.rs:924-1007`.
+- Runtime selection reads route-band selector rows through the one-argument
+  `SelectorQuotaRepository::selector_inputs_for_route_band`; this spec requires
+  a hard cutover to the state-owned read overlay API with `now_unix_seconds`.
+  Sources: `account_selection.rs:189-210`, `repositories.rs:46-59`.
+- Current selector collapse loses reset geometry by reducing windows to minimum
+  headroom after ineligible/effective checks. Source:
+  `account_selection.rs:262-292`.
+- `WeightedDeficitSelector` is generic weighted round-robin over
+  `(AccountId, u32)` and must stay quota-semantics-free. Source:
+  `weighted_deficit.rs:60-98`.
+- Persisted selector windows already contain the needed raw facts:
+  `limit_window_seconds`, `status`, `remaining_headroom`, `reset_unix_seconds`,
+  `effective`, and `observed_unix_seconds`. Source:
+  `quota_snapshot.rs:91-200`.
+- CLI status already computes pace/runout from reset time and headroom. Source:
+  `quota.rs:924-1007`.
 - Current WebSocket routing already performs local-auth preflight, unsupported
-  path rejection, and bounded first-frame validation before selection on the
-  normal `/v1/responses` path. The target design tightens the remaining delta:
-  the first-frame parser must expose only allowlisted routing/affinity/auth-
-  smuggling signals to selection and proof surfaces, and affinity-secret
-  fail-closed ordering must be explicit.
-  Source: `crates/codex-router-proxy/src/server.rs:334-363`,
-  `crates/codex-router-proxy/src/server.rs:456-500`,
-  `crates/codex-router-proxy/src/websocket.rs:158-217`,
-  `crates/codex-router-proxy/src/websocket.rs:269-345`.
-- Current affinity helpers and repositories exist, but the target design makes
-  previous-response owner lookup and fail-closed behavior explicit for both
-  HTTP/SSE and WebSocket continuation requests.
-  Source: `crates/codex-router-selection/src/affinity.rs`,
-  `crates/codex-router-state/src/repositories.rs:61-72`.
-- Existing spec already says weekly quota must be protected before short-window reset urgency.
-  Source: `docs/specs/2026-06-20-codex-router-greenfield-spec.md:147-151`.
-- Existing plan already calls for selection order: eligibility/freshness, long-window pressure, effective limiting headroom, reset urgency as bounded tiebreaker.
-  Source: `docs/plans/2026-06-22-codex-router-plan-1b-quota-runtime-status-selection.md:322-338`.
+  path rejection, and bounded first-frame validation before `/v1/responses`
+  selection; the remaining delta is allowlisted first-frame evidence,
+  redaction, and affinity-secret fail-closed ordering. Sources:
+  `server.rs:334-363`, `server.rs:456-500`, `websocket.rs:158-217`,
+  `websocket.rs:269-345`.
+- Current `select_affinity_owner` requires owner membership in
+  `weighted_candidates`; the target rule allows `usable`/`reserve`
+  continuation owners outside the current selected pool, while still failing
+  closed for blocked, unknown, excluded, stale-generation, or credential-invalid
+  owners. Sources: `affinity.rs`, `repositories.rs:61-72`.
+- Prior spec/plan already require weekly quota protection before short-window
+  reset urgency and selection ordered by eligibility/freshness, long-window
+  pressure, effective headroom, and bounded reset urgency.
 
 ## Requirements
 
@@ -95,9 +96,10 @@ therefore sends `Authorization: Bearer <token>` to the local router for
 HTTP/SSE and WebSocket transports. The router accepts that bearer carrier for
 the generated profile path and also accepts `X-Codex-Router-Token` as a
 manual/compatibility ingress carrier. Query, cookie, WebSocket subprotocol, and
-HTTP/SSE request-body token carriers remain forbidden. WebSocket first frames
-hard-reject only top-level token-carrier field names as a narrow
-auth-smuggling check.
+HTTP/SSE request-body token carriers remain forbidden through the same narrow
+top-level JSON field-name check used for WebSocket first frames. The router
+does not scan nested prompt text, tool arguments, metadata, or arbitrary string
+values for token-like content.
 
 R9. WebSocket routing must preselect from an allowlisted first-frame view.
 
@@ -138,7 +140,8 @@ provider quota refresh
 
 persisted selector quota windows
   owns: last-known per-account, per-route-band, per-window quota facts
-  exposes: SelectorQuotaRepository::selector_inputs_for_route_band(route_band)
+  exposes: SelectorQuotaRepository::selector_inputs_for_route_band(route_band, now_unix_seconds)
+           and SelectorQuotaRepository::quota_refresh_statuses_for_route_band(route_band)
 
 burn-down assessment
   owns: reset-aware pressure math, pure routability/exclusion classification
@@ -159,7 +162,8 @@ proxy account selection
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
   consumes: BurnDownRouteBandAssessmentResult and
             BurnDownRouteBandAssessment.weighted_candidates
-  exposes: SelectedAccountDecision
+  exposes: RuntimeSelectedAccountDecision with the shared route assessment
+           envelope plus runtime-only selected-account fields
 
 weighted deficit selector
   owns: generic weighted fairness state
@@ -249,7 +253,7 @@ Ownership:
 - `codex-router-quota` or the existing provider quota client owns provider fetch
   and normalization into route-band window facts.
 - `codex-router-state` owns durable selector window writes, last-success rows,
-  stale markers, and redacted refresh error metadata.
+  read-time stale overlay, and redacted refresh error metadata.
 - `codex-router-selection::burn_down` owns interpretation of the supplied
   persisted facts as `fresh`, `stale`, `unknown`, `blocked`, `reserve`, or
   `usable`.
@@ -325,6 +329,12 @@ Refresh read-model contract:
   `QuotaWindowStatus::Stale` on otherwise eligible persisted rows for that
   account/route band. It does not mutate the stored selector-window row during
   read.
+- If selector rows exist but the matching `quota_refresh_status` row is absent
+  or has null `stale_after_unix_seconds` after upgrade, the first read treats
+  those selector rows as `stale` and preserves last-known headroom/reset facts.
+  The immediate background refresh may replace them with fresh rows, but
+  request routing and status must not treat legacy rows with missing refresh
+  metadata as fresh capacity.
 - If no selector windows exist for an account/route band, the read model returns
   no windows; assessment classifies that account as `unknown` /
   `needs_quota_refresh`.
@@ -342,6 +352,7 @@ Refresh state transitions:
 | no rows | success with eligible windows | replace with known windows | `fresh` known assessment |
 | known rows | success with eligible windows | replace with new known windows | `fresh` known assessment |
 | known rows | transient failure | preserve prior windows | `stale` known assessment plus redacted error class |
+| legacy rows with missing refresh status | first post-upgrade read before refresh | preserve prior windows | `stale` known assessment plus missing-status refresh note |
 | stale rows | success with eligible windows | replace with new known windows | `fresh` known assessment |
 | no rows | transient failure | no selector rows | `unknown` / `needs_quota_refresh` |
 | any rows | provider reports exhausted/ineligible | replace with blocked window facts | `blocked`, not transient failure |
@@ -620,7 +631,7 @@ from unclassified request data.
 - `availability: usable | reserve | blocked | unknown | excluded`
 - `freshness: fresh | stale | unknown`
 - `routing_exclusion: none | disabled | missing_credential`
-- `next_use: preferred | available | held | blocked | needs_refresh | fallback`
+- `next_use: preferred | available | held | blocked | fallback`
 - `limiting_window`
 - `quota_evidence_reason`
 - `short_pressure`
@@ -749,6 +760,7 @@ Runtime selection wrapper:
 
 ```text
 RuntimeSelectedAccountDecision {
+  assessment: BurnDownRouteBandAssessmentResult,
   selected_account_id,
   decision_reason:
     previous_response_affinity
@@ -756,7 +768,8 @@ RuntimeSelectedAccountDecision {
     | preferred_next
     | available
     | fallback,
-  assessment_selected_pool: usable | reserve | unknown | none
+  assessment_selected_pool: usable | reserve | unknown | none,
+  actual_selected_from_weighted_deficit: bool
 }
 ```
 
@@ -764,6 +777,10 @@ The pure assessment decides pool, weights, and neutral preference. The proxy may
 wrap that assessment with runtime-only state such as previous-response affinity,
 connection/account hold cooldown, or accumulated weighted-deficit fairness.
 Runtime wrappers must not alter per-account quota classification.
+Proxy, audit, log, and test surfaces consume this DTO and may render subsets,
+but must not reconstruct `route_result`, `selected_pool`,
+`selected_pool_reason`, `preferred_next_account_id`, `weighted_candidates`, or
+account rows from raw quota windows after selection.
 
 Cooldown and pinning contract:
 
@@ -785,14 +802,15 @@ Cooldown and pinning contract:
 - when `selected_pool=unknown`, a hold may reuse only an account still in the
   unknown fallback pool; known-pool holds do not keep an account alive after the
   route falls to unknown-only evidence
-
-Sign semantics:
-
-- higher `pressure_percent` is worse
-- higher `risk_penalty` is worse
-- higher `surplus_percent` is better only inside near-reset salvage caps
-- higher `routing_weight` means safer to use and therefore receives more turns
-- `routing_weight` is always a positive scalar for selectable accounts
+- a successful previous-response affinity hit does not advance
+  `WeightedDeficitSelector` state, because no weighted fallback occurred
+- a successful previous-response affinity hit refreshes the route-band
+  connection/account hold for that selected account and selected route band, so
+  the continuation remains pinned unless the owner later becomes blocked,
+  excluded, unknown, stale-generation, credential-invalid, or unsupported
+- when affinity reuses a reserve owner outside the current selected pool, the
+  hold is recorded for runtime continuity only; it must not move the reserve
+  owner into `weighted_candidates` or change the pure assessment envelope
 
 Tie and determinism contract:
 
@@ -804,13 +822,6 @@ Tie and determinism contract:
   `preferred_next`, and reason codes, not only the final selector output.
 - Integration tests that need a selected winner start the weighted selector
   from empty state and provide candidates in the neutral selector order above.
-
-Rationale:
-
-- long pressure has a larger penalty because weekly depletion strands the account longer
-- short salvage can help use quota before it expires
-- long salvage applies only when long reset is near, so low weekly quota far from reset is not excused
-- weighted deficit still balances among similarly safe candidates instead of turning routing into strict single-account priority
 
 ### Worked Scoring Examples
 
@@ -987,7 +998,7 @@ Column semantics:
 - `weekly`: long-window bar, percent left, reset timing, and long-window note
 - `routing`: stable reason phrase from the route-band assessment
 - `next use`: one of `preferred`, `available`, `held`, `blocked`, or
-  `needs refresh`, or `fallback`
+  `fallback`
 
 Wording:
 
@@ -1044,10 +1055,12 @@ Stable routing reason enum:
 | `excluded_missing_credential` | `blocked: missing credential` |
 | `blocked_window_exhausted` | `blocked: quota empty` |
 | `blocked_window_ineligible` | `blocked: quota ineligible` |
-| `unknown_quota_window` | `needs refresh: unknown quota` |
-| `missing_reset_time` | `needs refresh: missing reset` |
-| `missing_expected_window` | `needs refresh: missing 5h or weekly` |
-| `needs_quota_refresh` | `needs refresh` |
+Raw quota evidence reasons such as `unknown_quota_window`,
+`missing_reset_time`, `missing_expected_window`, and `needs_quota_refresh`
+remain in `quota_evidence_reason`. They are not public `routing_reason` values.
+Human renderers show `needs refresh` in the window slot or phrase, while
+`routing_reason` stays tied to pool status: `held_unknown`,
+`unknown_fallback_preferred`, or `unknown_fallback_available`.
 
 Public reason mapping:
 
@@ -1066,10 +1079,6 @@ Public reason mapping:
 | account with no active credential generation | `excluded_missing_credential` | `blocked: missing credential` | `blocked` |
 | exhausted relevant window | `blocked_window_exhausted` | `blocked: quota empty` | `blocked` |
 | ineligible relevant window | `blocked_window_ineligible` | `blocked: quota ineligible` | `blocked` |
-| unknown relevant window | `unknown_quota_window` | `needs refresh: unknown quota` | `needs refresh` |
-| missing reset time | `missing_reset_time` | `needs refresh: missing reset` | `needs refresh` |
-| exactly one expected v1 5h or weekly window missing | `missing_expected_window` | `needs refresh: missing 5h or weekly` | `needs refresh` |
-| no relevant route-band windows | `needs_quota_refresh` | `needs refresh` | `needs refresh` |
 
 Reason precedence is deterministic. Public `routing_reason` is assigned after
 availability pool selection in this order:
@@ -1084,20 +1093,17 @@ availability pool selection in this order:
 5. The preferred account inside an `unknown` selected pool maps to
    `unknown_fallback_preferred`, preserving the raw `quota_evidence_reason`
    separately.
-6. Unknown accounts that are not in an unknown selected pool map to their exact
-   evidence reason: `unknown_quota_window`, `missing_reset_time`,
-   `missing_expected_window`, or `needs_quota_refresh`.
-7. Non-preferred accounts inside a known selected pool map to
+6. Non-preferred accounts inside a known selected pool map to
    `available_same_pool`.
-8. The preferred account in a known selected pool maps to
+7. The preferred account in a known selected pool maps to
    `preferred_weekly_reset_soon` when `long_salvage > 0`.
-9. Else, the preferred account in a known selected pool maps to
+8. Else, the preferred account in a known selected pool maps to
    `preferred_weekly_healthier` when its `long_pressure` is strictly lower than
    at least one other known selected-pool candidate, or when another supplied
    known account was held in `reserve` because of long-window pressure.
-10. Else, the preferred account maps to `preferred_short_reset_soon` when
+9. Else, the preferred account maps to `preferred_short_reset_soon` when
    `short_salvage > 0`.
-11. Else, the preferred account maps to `preferred_highest_weight`.
+10. Else, the preferred account maps to `preferred_highest_weight`.
 
 When multiple preferred-account predicates are true, this precedence wins. The
 runtime audit, table/plain status, JSON status, and tests must use the same
@@ -1143,7 +1149,7 @@ JSON output schema:
       "availability": "usable | reserve | blocked | unknown | excluded",
       "freshness": "fresh | stale | unknown",
       "routing_exclusion": "none | disabled | missing_credential",
-      "next_use": "preferred | available | held | blocked | needs_refresh | fallback",
+      "next_use": "preferred | available | held | blocked | fallback",
       "limiting_window": "5h | weekly | unknown | none",
       "quota_evidence_reason": "needs_quota_refresh | missing_expected_window | window_ineligible | window_exhausted | unknown_quota_window | missing_reset_time | none",
       "short_pressure": 0..100 | null,
@@ -1151,7 +1157,7 @@ JSON output schema:
       "short_salvage": 0..100 | null,
       "long_salvage": 0..100 | null,
       "salvage_tie_key": { "reset_unix_seconds": 0, "window_seconds": 18000 } | null,
-      "routing_reason": "preferred_weekly_healthier | preferred_weekly_reset_soon | preferred_short_reset_soon | preferred_highest_weight | available_same_pool | held_reserve | held_unknown | unknown_fallback_preferred | unknown_fallback_available | excluded_disabled | excluded_missing_credential | blocked_window_exhausted | blocked_window_ineligible | unknown_quota_window | missing_reset_time | missing_expected_window | needs_quota_refresh",
+      "routing_reason": "preferred_weekly_healthier | preferred_weekly_reset_soon | preferred_short_reset_soon | preferred_highest_weight | available_same_pool | held_reserve | held_unknown | unknown_fallback_preferred | unknown_fallback_available | excluded_disabled | excluded_missing_credential | blocked_window_exhausted | blocked_window_ineligible",
       "routing_weight": 1..100 | null,
       "preferred_next": true | false,
       "window_slots": {
@@ -1482,7 +1488,7 @@ Forbidden local auth fallback surfaces in this goal:
 - query-string tokens
 - cookies
 - WebSocket subprotocol token smuggling
-- HTTP/SSE request body tokens
+- HTTP/SSE request-body token carriers expressed as top-level JSON field names
 - WebSocket top-level first-frame auth-smuggling fields:
   `authorization`, `x-codex-router-token`, `api_key`, `token`,
   `access_token`, `refresh_token`, or `bearer`
@@ -1492,6 +1498,19 @@ route-band assessment, selector advancement, credential resolution, upstream
 auth injection, upstream HTTP/SSE open, or upstream WebSocket open. Requests
 that present any forbidden token carrier also fail before those same side
 effects.
+
+HTTP/SSE forbidden body-carrier detection is intentionally narrow:
+
+- applies only to JSON request bodies with an object at the top level
+- checks only top-level field names against `authorization`,
+  `x-codex-router-token`, `api_key`, `token`, `access_token`,
+  `refresh_token`, and `bearer`
+- never scans nested prompt text, tool arguments, metadata, message content,
+  binary bodies, form strings, or arbitrary token-like values
+- emits only `forbidden_carrier_kind=http_body`, never raw body fields or values
+
+WebSocket first-frame forbidden-carrier detection uses the same field-name
+denylist at the top level of the first frame only.
 
 Mixed-carrier rule:
 
@@ -1515,10 +1534,13 @@ PresentedLocalAuthCarriers {
 }
 ```
 
-HTTP/SSE handlers, WebSocket preflight, and the authenticated WebSocket tunnel
-must preserve both accepted carriers and forbidden-carrier presence until local
-auth validation decides accept/reject. They must not collapse to
-`Option<&str>` before mixed-carrier mismatch checks.
+HTTP/SSE handlers and WebSocket preflight preserve accepted handshake/header
+carriers until local-auth validation decides accept/reject. HTTP/SSE body and
+WebSocket first-frame auth-smuggling checks are separate preselection
+validators owned by their protocol handlers; they run after local header auth
+has established a valid client but before route assessment, selector state,
+credential resolution, or upstream open. All local-auth and auth-smuggling
+failures share the same zero-side-effect guarantee.
 
 HTTP/SSE and WebSocket proof must include the generated-profile
 `env_key`/Authorization bearer path, the manual `X-Codex-Router-Token` path,
@@ -1526,10 +1548,12 @@ and negative cases for query, cookie, HTTP body-token, WebSocket
 subprotocol-token, WebSocket first-frame auth-smuggling field, and mismatched
 mixed-carrier requests.
 
-Installed-Codex e2e proof may emit the audit-safe enum
+Installed-Codex e2e proof must emit the audit-safe enum
 `local_auth_carrier=authorization_bearer` and boolean
 `local_auth_validated=true` from the local router test harness. It must not emit
 the bearer token, raw auth header, header length, token hash, or token prefix.
+Upstream-only evidence is insufficient for the generated-profile bearer-auth
+e2e gate.
 Dedicated local-auth ingress tests remain the authoritative negative proof for
 manual header, query, cookie, body, subprotocol, first-frame auth-smuggling, and
 mixed-carrier failure cases.
@@ -1752,6 +1776,9 @@ The implementation plan must provide proof at these layers:
   `preferred_next_account_id` because of previous-response affinity or
   accumulated weighted-deficit fairness state, and that default status does not
   claim runtime-exact next use
+- tests proving runtime audit receives one `RuntimeSelectedAccountDecision`
+  containing the shared `BurnDownRouteBandAssessmentResult` envelope and does
+  not reconstruct route-result fields from raw quota rows after selection
 - tests proving cooldown/hold reuse happens only when the held account remains
   in the current assessment's `weighted_candidates`
 - tests proving a selected-pool change breaks a hold when the held account is
@@ -1760,6 +1787,9 @@ The implementation plan must provide proof at these layers:
   the current selected pool and fails closed before weighted fallback only when
   the owner is `unknown`, `blocked`, `excluded`, disabled, missing credential,
   exhausted, ineligible, or stale for credential generation
+- tests proving a successful previous-response affinity hit does not advance
+  weighted-deficit state, refreshes the runtime hold, and does not move a
+  reserve owner into the pure assessment's `weighted_candidates`
 - tests proving unknown-pool fallback can hold only accounts still in the
   unknown selected pool and cannot keep a former known-pool account alive after
   evidence falls to all-unknown
@@ -1773,6 +1803,8 @@ The implementation plan must provide proof at these layers:
   all-unknown fallback pool
 - tests proving all-unknown fallback emits `fallback` next-use rows without
   implying healthy quota
+- tests proving raw unknown evidence reasons remain in `quota_evidence_reason`
+  and never appear as public `routing_reason` values
 - tests proving accounts with exactly one expected v1 window missing are
   `unknown`, never normal usable, and render the missing slot as `no data`
 - tests proving unknown, missing-reset, and no-window human slots never render
@@ -1834,6 +1866,9 @@ The implementation plan must provide proof at these layers:
   `now_unix_seconds >= stale_after_unix_seconds`, preserves last-known headroom
   and reset metadata, and exposes `last_error_class` only through explicit
   status/log/proof DTOs
+- refresh read-model tests proving legacy selector rows with missing
+  `quota_refresh_status` or null `stale_after_unix_seconds` are treated as
+  stale on the first post-upgrade read before a successful refresh
 - WebSocket compatibility tests for `/v1/responses` routing, selected-account
   pinning, previous-response affinity before weighted fallback, no weighted
   fallback on continuation-owner failure, `/v1/realtime` and unknown path
@@ -1906,6 +1941,10 @@ The implementation plan must provide proof at these layers:
   subprotocol token, WebSocket top-level first-frame auth-smuggling field, and
   mismatched mixed-carrier auth fail before selection, credential resolution,
   upstream auth injection, or upstream open
+- HTTP/SSE body auth-smuggling tests proving only top-level JSON field names in
+  the denylist fail as `forbidden_carrier_kind=http_body`, while nested prompt,
+  tool, metadata, message, binary, form, and arbitrary string values are not
+  scanned or emitted
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
@@ -1924,7 +1963,7 @@ The implementation plan must provide proof at these layers:
   helper-rendered Codex custom-provider profile must use
   `env_key = "CODEX_ROUTER_TOKEN"` and installed Codex must authenticate to the
   local router with `Authorization: Bearer` for both HTTP/SSE and WebSocket.
-  The e2e transcript may prove local router receipt with the audit-safe enum
+  The e2e transcript must prove local router receipt with the audit-safe enum
   `local_auth_carrier=authorization_bearer` plus
   `local_auth_validated=true`, must prove local auth is stripped before upstream
   HTTP/SSE and WebSocket opens, and must never print the token, raw auth header,
@@ -1943,26 +1982,9 @@ Non-blocking pass signal:
 - Tests should synchronize on observable readiness, request completion, rendered
   output, or bounded fake-provider calls, not wall-clock sleeps.
 
-## Open Decisions For Review
-
-No open product decisions remain before the next spec review. The normative
-decisions live in the sections above. The highest-risk choices to re-check are:
-
-- refresh staleness is a `codex-router-state` read-model overlay, not row
-  mutation
-- previous-response affinity may reuse `usable` or `reserve` owners outside the
-  current selected pool
-- WebSocket first-frame auth-smuggling checks inspect only forbidden top-level
-  field names, never nested prompt/body values
-- generated Codex profile auth uses `env_key = "CODEX_ROUTER_TOKEN"` and local
-  `Authorization: Bearer`
-- plan creation waits for a parent-verified spec-review verdict of `ready`
-
-Spec review may still reject these choices, but plan creation must not reopen
-them silently.
-
 ## Next Workflow
 
 Run `shravan-dev-workflow:spec-review-swarm` against this revised spec. Only if
-the parent reducer records a spec-review verdict of `ready` should the
-orchestrator transition to `shravan-dev-workflow:plan-creation-swarm`.
+the parent reducer records a spec-review verdict of `ready` in the latest
+`spec-review-*/review-ledger.md` should the orchestrator transition to
+`shravan-dev-workflow:plan-creation-swarm`.
