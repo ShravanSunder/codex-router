@@ -36,6 +36,12 @@ Observed in current code:
   that order so local auth and first-frame routing metadata validation happen
   before quota assessment, credential resolution, or upstream open.
   Source: `crates/codex-router-proxy/src/websocket.rs`.
+- Current WebSocket routing synthesizes a fixed `/v1/responses` selection
+  request and does not classify the handshake path before selection. The target
+  design intentionally changes that order so shared WebSocket route
+  classification and `unsupported_path` failure happen before selection,
+  credential resolution, or upstream open.
+  Source: `crates/codex-router-proxy/src/websocket.rs`.
 - Current affinity helpers and repositories exist, but the target design makes
   previous-response owner lookup and fail-closed behavior explicit for both
   HTTP/SSE and WebSocket continuation requests.
@@ -62,9 +68,14 @@ Unknown accounts never compete with known `usable` or `reserve` accounts. If
 only unknown accounts remain, partial headroom evidence may order the fallback
 pool conservatively, but missing reset times receive no reset-salvage bonus.
 
-R4. Weekly or other long-window quota is durable budget.
+R4. Weekly quota is durable budget in v1.
 
-Long-window pressure dominates short-window reset urgency. An account with low weekly headroom and a far weekly reset must not be preferred merely because its 5h window has more headroom or resets sooner.
+The v1 public quota contract is the observed 5h plus weekly window shape.
+Weekly pressure dominates 5h reset urgency. An account with low weekly headroom
+and a far weekly reset must not be preferred merely because its 5h window has
+more headroom or resets sooner. Internally, code may keep generic
+short-window/long-window helpers, but v1 user-facing status, examples, and
+reason names are 5h/weekly.
 
 R5. Soon-reset quota may be salvaged only inside a bounded rule.
 
@@ -344,9 +355,18 @@ Pool order is normative:
 4. Else if one or more `unknown` accounts exist, select only from `unknown`.
 5. Else return no eligible account.
 
-Within the selected pool, candidates are ordered by `account_id` ascending
-before they are passed to `WeightedDeficitSelector`. Tests that need a
-deterministic selected winner use the same order and an empty selector state.
+Within the selected pool, candidates are ordered before they are passed to
+`WeightedDeficitSelector`. This order is part of the neutral selector contract:
+
+1. higher `routing_weight`
+2. lower `long_pressure`
+3. lower `short_pressure`
+4. earlier near-reset salvage
+5. `account_id` ascending
+
+Tests that need a deterministic selected winner use this same order and an
+empty selector state. `preferred_next` must equal the account selected by this
+exact neutral selector contract.
 
 For each selectable `usable` or `reserve` account:
 
@@ -381,8 +401,8 @@ For each selectable `unknown` account:
 - if at least one known relevant window has headroom, compute
   `routing_weight = clamp(min_known_headroom - reserve_pressure_threshold, 1..100)`
 - if no usable partial headroom exists, use `routing_weight = 1`
-- unknown candidates are ordered by `routing_weight` descending, then
-  `account_id` ascending
+- unknown candidates are ordered by the same neutral selector contract:
+  `routing_weight` descending, then lower pressure, then `account_id` ascending
 - unknown never competes with usable or reserve accounts in v1
 
 `preferred_next` semantics:
@@ -391,6 +411,9 @@ For each selectable `unknown` account:
   empty weighted-deficit state and no previous-response affinity key.
 - It answers "which account is preferred for the next normal non-affinity
   request if fairness has no accumulated deficit?"
+- It is computed from the exact `weighted_candidates` order given to
+  `WeightedDeficitSelector`, so neutral status and neutral runtime selection
+  cannot disagree on equal weights.
 - It is not the runtime-exact next request. The proxy may choose a different
   account when previous-response affinity is present or when accumulated
   weighted-deficit state rotates to a lower-weight account for fairness.
@@ -415,10 +438,7 @@ Tie and determinism contract:
   limiting window, `preferred_next`, and reason codes, not only the final
   selector output.
 - Integration tests that need a selected winner start the weighted selector
-  from empty state and provide candidates in canonical `account_id` order.
-- For a pure assessment tie, the stable explanation order is:
-  availability pool, higher `routing_weight`, lower `long_pressure`, lower
-  `short_pressure`, earlier near-reset salvage, then `account_id`.
+  from empty state and provide candidates in the neutral selector order above.
 
 Rationale:
 
@@ -598,7 +618,8 @@ Column semantics:
 - `5h`: short-window bar, percent left, reset timing, and short-window note
 - `weekly`: long-window bar, percent left, reset timing, and long-window note
 - `routing`: stable reason phrase from the route-band assessment
-- `next use`: one of `preferred`, `held`, `blocked`, or `needs refresh`
+- `next use`: one of `preferred`, `available`, `held`, `blocked`, or
+  `needs refresh`
 
 Wording:
 
@@ -627,7 +648,8 @@ Normative vocabulary:
 | `limiting window` | the 5h or weekly window driving the decision | `limiting_window` |
 | `pressure` | quota is being spent faster than reset pace | `pressure_percent` |
 | `preferred next` | this account is the neutral next normal candidate, before affinity or accumulated fairness state | `preferred_next=true` |
-| `held` | usable only after higher-priority pool is empty | `preferred_next=false` |
+| `available` | selectable in the current pool, but not the neutral preferred row | `preferred_next=false, availability=usable or reserve, selected_pool matches availability` |
+| `held` | usable only after a higher-priority pool is empty | `preferred_next=false, availability lower than selected_pool` |
 
 Stable routing reason enum:
 
@@ -636,11 +658,30 @@ Stable routing reason enum:
 | `preferred_weekly_healthier` | `preferred next: weekly healthier` |
 | `preferred_short_reset_soon` | `preferred next: 5h reset soon` |
 | `preferred_highest_weight` | `preferred next: safest quota` |
+| `available_same_pool` | `available: same pool` |
 | `held_reserve` | `held: reserve` |
 | `held_unknown` | `held: needs refresh` |
 | `blocked_window_exhausted` | `blocked: quota empty` |
 | `blocked_window_ineligible` | `blocked: quota ineligible` |
+| `unknown_quota_window` | `needs refresh: unknown quota` |
+| `missing_reset_time` | `needs refresh: missing reset` |
 | `needs_quota_refresh` | `needs refresh` |
+
+Public reason mapping:
+
+| Assessment outcome | Public `routing_reason` | Human phrase | `next use` |
+| --- | --- | --- | --- |
+| preferred usable account with healthier weekly pressure | `preferred_weekly_healthier` | `preferred next: weekly healthier` | `preferred` |
+| preferred usable account because 5h reset is near | `preferred_short_reset_soon` | `preferred next: 5h reset soon` | `preferred` |
+| preferred account by neutral selector weight | `preferred_highest_weight` | `preferred next: safest quota` | `preferred` |
+| non-preferred account in the selected pool | `available_same_pool` | `available: same pool` | `available` |
+| reserve account while a usable pool exists | `held_reserve` | `held: reserve` | `held` |
+| unknown account while usable or reserve pool exists | `held_unknown` | `held: needs refresh` | `held` |
+| exhausted relevant window | `blocked_window_exhausted` | `blocked: quota empty` | `blocked` |
+| ineligible relevant window | `blocked_window_ineligible` | `blocked: quota ineligible` | `blocked` |
+| unknown relevant window | `unknown_quota_window` | `needs refresh: unknown quota` | `needs refresh` |
+| missing reset time | `missing_reset_time` | `needs refresh: missing reset` | `needs refresh` |
+| no relevant route-band windows | `needs_quota_refresh` | `needs refresh` | `needs refresh` |
 
 Default human output must not contain:
 
@@ -654,11 +695,11 @@ Example shape:
 
 ```text
 account  status   5h                         weekly                     routing                         next use
-askluna  enabled  ██████████ 100% left        ░░░░░░░░░░ 0% left          blocked: weekly empty           blocked
+askluna  enabled  ██████████ 100% left        ░░░░░░░░░░ 0% left          blocked: quota empty             blocked
                   resets in 4h 55m            resets in 1d 11h
 matches  enabled  █████████░ 91% left         █████░░░░░ 54% left         preferred next: weekly healthier preferred
                   resets in 4h 8m             resets in 5d 22h
-ssdev    enabled  ██████████ 100% left        ██░░░░░░░░ 16% left         held: weekly reserve             held
+ssdev    enabled  ██████████ 100% left        ██░░░░░░░░ 16% left         held: reserve                    held
                   resets in 3h 48m            resets in 1d 9h
 ```
 
@@ -793,21 +834,28 @@ WebSocket routing order is normative:
    are representative `unsupported_path` cases in v1.
 3. Require a bounded first client frame containing a valid `response.create`
    payload before opening the upstream WebSocket.
-4. Parse only the routing metadata needed for route-band assessment from the
+4. Enforce the v1 first-frame resource contract before selection:
+   - maximum first frame size: 1 MiB
+   - maximum wait for first frame: 250 ms
+   - accepted first frame type: `response.create`
+   - locally read fields: `type`, route-band metadata needed for `responses`,
+     and previous-response affinity metadata
+   - full request-schema validation remains upstream-owned
+5. Parse only the routing metadata needed for route-band assessment from the
    first frame; do not log the full payload.
-5. Extract previous-response affinity metadata from the first frame, when
+6. Extract previous-response affinity metadata from the first frame, when
    present, before weighted fallback.
-6. If affinity is present, apply the Previous-Response Affinity Contract. Any
+7. If affinity is present, apply the Previous-Response Affinity Contract. Any
    owner-resolution failure fails closed before weighted fallback.
-7. If no affinity is present, run reset-aware route-band assessment for the
+8. If no affinity is present, run reset-aware route-band assessment for the
    `responses` route band and select from weighted candidates.
-8. Resolve the selected account credential and inject upstream auth exactly once
+9. Resolve the selected account credential and inject upstream auth exactly once
    after selection and before upstream open.
-9. Strip local client auth, router bearer auth, and hop-by-hop headers before
+10. Strip local client auth, router bearer auth, and hop-by-hop headers before
    upstream open.
-10. Forward the accepted first frame and all later frames unchanged at the
+11. Forward the accepted first frame and all later frames unchanged at the
    protocol payload layer.
-11. Pin the selected account for the lifetime of the WebSocket connection. Do
+12. Pin the selected account for the lifetime of the WebSocket connection. Do
     not switch accounts mid-stream. A later connection may reselect after quota
     state changes.
 
@@ -823,6 +871,7 @@ Required WebSocket proof:
   `unsupported_path` before selection
 - invalid local auth fails before selection
 - malformed first frame fails before selection
+- oversized or timed-out first frame fails before selection
 - previous-response affinity is honored before weighted fallback and fails
   closed on owner-resolution failure
 - malformed/unsupported/auth-failed paths show zero selector advance, zero
@@ -880,7 +929,7 @@ The implementation plan must provide proof at these layers:
   - reset-aware preferred-next explanation
   - unknown or partial data
   - blocked, reserve, usable, and unknown accounts
-  - colorless/plain terminal mode if supported
+  - colorless/plain terminal mode
   - negative assertions for `pp`, `bottleneck`, default `account_id`, raw score, and token-like strings
 - live-safe CLI smoke proof over persisted router state for emitted `table`,
   `plain`, and `json` status output, including redaction and negative
@@ -888,8 +937,12 @@ The implementation plan must provide proof at these layers:
 - WebSocket compatibility tests for `/v1/responses` routing, selected-account
   pinning, previous-response affinity before weighted fallback, no weighted
   fallback on continuation-owner failure, `/v1/realtime` and unknown path
-  `unsupported_path` failure, malformed first frame failure, and local-auth
-  failure before selection
+  `unsupported_path` failure, malformed first frame failure, oversized first
+  frame failure, first-frame timeout failure, and local-auth failure before
+  selection
+- WebSocket redaction proof with a synthetic canary in first-frame/request-body
+  content, proving audit/log/smoke artifacts do not contain the raw body or full
+  first-frame payload
 - WebSocket non-blocking proof that delayed or failing quota refresh does not
   block the first valid `/v1/responses` route after bounded first-frame parsing,
   and that selection uses persisted selector rows on that path

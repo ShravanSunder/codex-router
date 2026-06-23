@@ -190,6 +190,35 @@ Next hard gate:
 - do not route to `plan-creation-swarm` unless the R4 review returns
   `phase_result: complete`
 
+## Current Phase Update: Fourth Review Still Needs Focused Revision
+
+The fourth `spec-review-swarm` pass reviewed commit
+`053d3069bad6596d202824c00768e74c1579fe50` with full 961-line coverage. It did
+not pass the hard gate, but the remaining issues were focused.
+
+Accepted R4 findings:
+
+- `preferred_next` must be computed from the exact ordered candidate list passed
+  to `WeightedDeficitSelector`, not from a prose-only tie rule.
+- `next use` needs `available` for same-pool non-preferred accounts.
+- Public reason vocabulary must map every assessment outcome to
+  `routing_reason`, human phrase, and `next use`.
+- V1 public UX is explicitly 5h plus weekly; generic short/long helpers may
+  remain internal only.
+- Current WebSocket code hardcodes `/v1/responses` selection and lacks
+  pre-selection handshake path classification; the spec must name this target
+  delta.
+- WebSocket first-frame guardrails must freeze 1 MiB, 250 ms,
+  `response.create`, local routing/affinity fields only, and upstream-owned full
+  schema validation.
+- WebSocket redaction proof needs synthetic canary evidence for first-frame and
+  request-body non-leakage.
+
+The follow-up spec revision folds these in. Next hard gate remains:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- no `plan-creation-swarm` until review returns `phase_result: complete`
+
 ## Requirements/proof matrix
 
 Requirement / claim:
