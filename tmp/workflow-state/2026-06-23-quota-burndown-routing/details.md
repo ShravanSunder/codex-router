@@ -502,3 +502,48 @@ independently from bearer/account credential rotation, forbids v1 rotation,
 keeps it stable across restarts and refreshes, and requires owner rows to be
 ignored or purged with continuations failing closed when the secret is missing,
 unreadable, or replaced.
+
+## R10 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`71487af`
+
+Review worktree:
+`/tmp/codex-router-r10-review.lHVDkc`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1294 lines before R10 fixes and was
+read in chunks 1-260, 261-520, 521-780, 781-1040, and 1041-1294.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r10/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- previous-response affinity needed concrete core/secret-store/state/proxy API
+  ownership for hash-secret storage, HMAC construction, repository methods, and
+  schema cutover
+- route-band policy needed a selection-owned registry covering every currently
+  classified route band
+- `accounts[]` ordering and `weighted_candidates[]` ordering contradicted each
+  other and needed separate contracts
+- safe account label/hash sanitization needed one shared owner
+- `router_affinity_hash_secret` needed to be in global security assets,
+  forbidden emission surfaces, and proof expectations
+- public `routing_reason` needed deterministic precedence when preferred
+  explanation predicates overlap
+- secret-unavailable behavior for response-creating routes needed to be explicit
+- installed-Codex e2e needed to pin generated profile local auth to
+  `env_http_headers`, not `env_key` or Authorization fallback
+
+Revision applied:
+The spec now defines core-owned safe-label and affinity helpers,
+secret-store-owned hash-secret loading, state-owned hashed owner records,
+proxy-owned affinity orchestration, route-band policy registry, split output
+ordering, routing-reason precedence, affinity-secret-unavailable failure,
+hash-secret redaction proof, and generated-profile local auth proof.

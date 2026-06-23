@@ -173,6 +173,30 @@ Rejected or deferred evidence:
     stable across restart and refresh, and non-rotating in v1. If it is missing,
     unreadable, or replaced, existing owner rows are ignored or purged and
     continuations fail closed.
+45. Define concrete previous-response affinity boundaries: core owns typed
+    affinity/HMAC helpers, secret-store owns `router_affinity_hash_secret`,
+    state stores only hashed owner records, and proxy owns edge extraction,
+    secret loading, lookup/write orchestration, and fail-closed enforcement.
+46. Define affinity repository cutover APIs for hashed owner records and forbid
+    state repository methods from accepting raw previous-response ids, raw
+    canonical affinity keys, request bodies, or response bodies.
+47. Add `router_affinity_hash_secret` to security assets, forbidden emission
+    surfaces, and proof expectations, including storage identifier and derived
+    secret material redaction.
+48. Define `affinity_secret_unavailable` fail-closed behavior for
+    response-creating HTTP/SSE and WebSocket routes when the hash secret cannot
+    be loaded or created.
+49. Make `codex-router-selection::burn_down` own the v1 route-band policy
+    registry for all currently classified route bands, with unknown route bands
+    failing closed before weighted selection.
+50. Split deterministic output ordering: `accounts[]` is sorted by
+    `account_id`, while `weighted_candidates[]` is sorted by neutral selector
+    order.
+51. Define deterministic public `routing_reason` precedence for overlapping
+    preferred-account explanations.
+52. Pin installed-Codex e2e profile local auth to
+    `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }` and
+    reject `env_key` or Authorization-bearer fallback for this goal.
 
 ## Open Decisions
 
