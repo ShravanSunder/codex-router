@@ -95,3 +95,55 @@ Notes:
   updated to the new startup contract: partial/missing window metadata remains
   visible as "needs probe" in the quota cells while routing uses the fallback
   account instead of blocking startup.
+
+## T2a State Refresh Read Model
+
+Plan rows:
+
+- RP-01 startup/routing do not block on live quota refresh.
+- RP-03 unknown and stale quota are distinct fallback/staleness states.
+- Refresh read-model contract for `quota_refresh_status` and read-time stale
+  overlay.
+
+Files changed:
+
+- `crates/codex-router-state/src/quota_snapshot.rs`
+- `crates/codex-router-state/src/repositories.rs`
+- `crates/codex-router-state/src/sqlite.rs`
+- `crates/codex-router-state/src/lib.rs`
+- `crates/codex-router-cli/src/quota.rs`
+- `crates/codex-router-cli/src/lib.rs`
+- `crates/codex-router-proxy/src/account_selection.rs`
+
+Implemented:
+
+- SQLite schema v5 adds `quota_refresh_status` keyed by account and route band.
+- Added redacted `QuotaRefreshErrorClass`, `QuotaRefreshStatusSource`, and
+  `QuotaRefreshStatusView`.
+- `SelectorQuotaRepository::selector_inputs_for_route_band` now takes
+  `now_unix_seconds` and overlays stale status at read time without mutating
+  stored selector windows.
+- Added atomic success/failure repository operations:
+  `record_refresh_success_and_replace_selector_windows` and
+  `record_refresh_failure_preserving_selector_windows`.
+- Refresh success now writes selector windows plus refresh status through the
+  atomic repository operation.
+- Credential/provider refresh failures now preserve selector windows and record
+  redacted refresh error metadata.
+
+Proof:
+
+- `cargo test -p codex-router-state` passed: 16 tests.
+- `cargo test -p codex-router-cli` passed: 60 tests.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 71, quota 4, secret-store 9,
+  selection 21, state 16, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- Current refresh success uses `observed_unix_seconds + 600` for
+  `stale_after_unix_seconds`, matching the minimum grace in the spec. Threading
+  the configured background interval into the refresh worker remains for the
+  later non-blocking refresh slice.

@@ -2418,10 +2418,6 @@ exit 42
         .with_reset_unix_seconds(20_000)
         .with_effective(true)
         .with_observed_unix_seconds(10_000);
-        must_ok(SelectorQuotaRepository::upsert_selector_window(
-            &state,
-            &five_hour_window,
-        ));
         let weekly_window = PersistedSelectorQuotaWindow::new(
             account_id("acct_primary"),
             "responses",
@@ -2431,10 +2427,16 @@ exit 42
         .with_remaining_headroom(80)
         .with_reset_unix_seconds(614_800)
         .with_observed_unix_seconds(10_000);
-        must_ok(SelectorQuotaRepository::upsert_selector_window(
-            &state,
-            &weekly_window,
-        ));
+        must_ok(
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                primary_account.account_id(),
+                "responses",
+                &[five_hour_window, weekly_window],
+                10_000,
+                20_000,
+            ),
+        );
 
         let output = run_cli(
             [
@@ -2496,10 +2498,6 @@ exit 42
         .with_reset_unix_seconds(20_000)
         .with_effective(true)
         .with_observed_unix_seconds(10_000);
-        must_ok(SelectorQuotaRepository::upsert_selector_window(
-            &state,
-            &five_hour_window,
-        ));
         let weekly_window = PersistedSelectorQuotaWindow::new(
             account_id("acct_primary"),
             "responses",
@@ -2509,10 +2507,16 @@ exit 42
         .with_remaining_headroom(80)
         .with_reset_unix_seconds(614_800)
         .with_observed_unix_seconds(10_000);
-        must_ok(SelectorQuotaRepository::upsert_selector_window(
-            &state,
-            &weekly_window,
-        ));
+        must_ok(
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                primary_account.account_id(),
+                "responses",
+                &[five_hour_window, weekly_window],
+                10_000,
+                20_000,
+            ),
+        );
 
         let output = run_cli(
             [
@@ -3226,6 +3230,7 @@ exit 42
         let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
             &state,
             "responses",
+            1_100,
         ));
         assert_eq!(selector_inputs.len(), 1);
         let windows = selector_inputs[0].windows();
@@ -3312,6 +3317,7 @@ exit 42
         let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
             &state,
             "responses",
+            1_100,
         ));
         assert_eq!(selector_inputs[0].windows().len(), 1);
         let status_output = run_cli(
@@ -3516,6 +3522,7 @@ exit 42
         let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
             &state,
             "responses",
+            1_100,
         ));
         assert_eq!(selector_inputs.len(), 1);
         let windows = selector_inputs[0].windows();

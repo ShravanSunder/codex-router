@@ -63,6 +63,151 @@ pub enum SelectorQuotaWindowStatus {
     Unknown,
 }
 
+/// Redacted provider refresh failure class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuotaRefreshErrorClass {
+    /// Provider returned a non-auth quota error.
+    ProviderError,
+    /// Credential resolution or provider auth failed.
+    AuthError,
+    /// Network transport failed.
+    NetworkError,
+    /// Provider response could not be parsed.
+    ParseError,
+    /// Provider asked us to slow down.
+    RateLimited,
+}
+
+impl QuotaRefreshErrorClass {
+    /// Serializes error class to SQLite.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderError => "provider_error",
+            Self::AuthError => "auth_error",
+            Self::NetworkError => "network_error",
+            Self::ParseError => "parse_error",
+            Self::RateLimited => "rate_limited",
+        }
+    }
+
+    /// Parses error class from SQLite.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "provider_error" => Some(Self::ProviderError),
+            "auth_error" => Some(Self::AuthError),
+            "network_error" => Some(Self::NetworkError),
+            "parse_error" => Some(Self::ParseError),
+            "rate_limited" => Some(Self::RateLimited),
+            _ => None,
+        }
+    }
+}
+
+/// Source of a refresh status view row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuotaRefreshStatusSource {
+    /// Explicit durable refresh status row.
+    Recorded,
+    /// Selector rows exist from an older schema, but refresh status is absent.
+    LegacyMissingRefreshStatus,
+}
+
+/// Durable refresh status view for one account and route band.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuotaRefreshStatusView {
+    account_id: AccountId,
+    route_band: String,
+    status_source: QuotaRefreshStatusSource,
+    last_success_unix_seconds: Option<u64>,
+    last_attempt_unix_seconds: Option<u64>,
+    last_error_class: Option<QuotaRefreshErrorClass>,
+    stale_after_unix_seconds: Option<u64>,
+}
+
+impl QuotaRefreshStatusView {
+    /// Creates a recorded refresh status row.
+    #[must_use]
+    pub fn recorded(
+        account_id: AccountId,
+        route_band: impl Into<String>,
+        last_success_unix_seconds: Option<u64>,
+        last_attempt_unix_seconds: Option<u64>,
+        last_error_class: Option<QuotaRefreshErrorClass>,
+        stale_after_unix_seconds: Option<u64>,
+    ) -> Self {
+        Self {
+            account_id,
+            route_band: route_band.into(),
+            status_source: QuotaRefreshStatusSource::Recorded,
+            last_success_unix_seconds,
+            last_attempt_unix_seconds,
+            last_error_class,
+            stale_after_unix_seconds,
+        }
+    }
+
+    /// Creates a legacy missing-status row for existing selector windows.
+    #[must_use]
+    pub fn legacy_missing_refresh_status(
+        account_id: AccountId,
+        route_band: impl Into<String>,
+    ) -> Self {
+        Self {
+            account_id,
+            route_band: route_band.into(),
+            status_source: QuotaRefreshStatusSource::LegacyMissingRefreshStatus,
+            last_success_unix_seconds: None,
+            last_attempt_unix_seconds: None,
+            last_error_class: None,
+            stale_after_unix_seconds: None,
+        }
+    }
+
+    /// Returns account id.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns route band.
+    #[must_use]
+    pub fn route_band(&self) -> &str {
+        &self.route_band
+    }
+
+    /// Returns source.
+    #[must_use]
+    pub const fn status_source(&self) -> QuotaRefreshStatusSource {
+        self.status_source
+    }
+
+    /// Returns last successful refresh time.
+    #[must_use]
+    pub const fn last_success_unix_seconds(&self) -> Option<u64> {
+        self.last_success_unix_seconds
+    }
+
+    /// Returns last attempted refresh time.
+    #[must_use]
+    pub const fn last_attempt_unix_seconds(&self) -> Option<u64> {
+        self.last_attempt_unix_seconds
+    }
+
+    /// Returns redacted error class.
+    #[must_use]
+    pub const fn last_error_class(&self) -> Option<QuotaRefreshErrorClass> {
+        self.last_error_class
+    }
+
+    /// Returns stale-after time.
+    #[must_use]
+    pub const fn stale_after_unix_seconds(&self) -> Option<u64> {
+        self.stale_after_unix_seconds
+    }
+}
+
 impl SelectorQuotaWindowStatus {
     /// Serializes status to SQLite.
     #[must_use]

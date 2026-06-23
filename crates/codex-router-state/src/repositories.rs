@@ -6,6 +6,8 @@ use codex_router_core::ids::AffinityKey;
 use crate::account::AccountRecord;
 use crate::quota_snapshot::PersistedQuotaSnapshot;
 use crate::quota_snapshot::PersistedSelectorQuotaWindow;
+use crate::quota_snapshot::QuotaRefreshErrorClass;
+use crate::quota_snapshot::QuotaRefreshStatusView;
 use crate::quota_snapshot::SelectorQuotaInput;
 use crate::sqlite::StateStoreError;
 
@@ -51,11 +53,37 @@ pub trait SelectorQuotaRepository {
         window: &PersistedSelectorQuotaWindow,
     ) -> Result<(), StateStoreError>;
 
+    /// Atomically records refresh success and replaces account route-band windows.
+    fn record_refresh_success_and_replace_selector_windows(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+        windows: &[PersistedSelectorQuotaWindow],
+        last_success_unix_seconds: u64,
+        stale_after_unix_seconds: u64,
+    ) -> Result<(), StateStoreError>;
+
+    /// Atomically records refresh failure while preserving selector windows.
+    fn record_refresh_failure_preserving_selector_windows(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+        last_attempt_unix_seconds: u64,
+        last_error_class: QuotaRefreshErrorClass,
+    ) -> Result<(), StateStoreError>;
+
     /// Loads selector input rows for one route band.
     fn selector_inputs_for_route_band(
         &self,
         route_band: &str,
+        now_unix_seconds: u64,
     ) -> Result<Vec<SelectorQuotaInput>, StateStoreError>;
+
+    /// Loads refresh status view rows for one route band.
+    fn quota_refresh_statuses_for_route_band(
+        &self,
+        route_band: &str,
+    ) -> Result<Vec<QuotaRefreshStatusView>, StateStoreError>;
 }
 
 /// Previous-response affinity repository.

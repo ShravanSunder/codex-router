@@ -253,13 +253,13 @@ where
         _token_generation: TokenGeneration,
     ) -> Result<SelectedAccountDecision, HttpProxyError> {
         let route_band = route_band_for_request(request)?;
+        let now_unix_seconds = (self.clock)();
         let selector_inputs = self
             .state_repository
-            .selector_inputs_for_route_band(route_band.as_str())
+            .selector_inputs_for_route_band(route_band.as_str(), now_unix_seconds)
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
-        let now_unix_seconds = (self.clock)();
         let selector_accounts = selector_inputs
             .iter()
             .map(account_input_from_selector_input)

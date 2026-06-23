@@ -40,6 +40,7 @@ use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
 use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
+use codex_router_state::quota_snapshot::QuotaRefreshErrorClass;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
@@ -61,6 +62,7 @@ use crate::router_root_or_default;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
+const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 600;
 
 /// Quota CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -427,6 +429,15 @@ where
             Ok(resolved) => resolved,
             Err(error) => {
                 failed_count = failed_count.saturating_add(DEFAULT_ROUTE_BANDS.len() as u64);
+                for route_band in DEFAULT_ROUTE_BANDS {
+                    SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
+                        &state,
+                        account.account_id(),
+                        route_band,
+                        observed_unix_seconds,
+                        QuotaRefreshErrorClass::AuthError,
+                    )?;
+                }
                 writeln!(
                     stdout,
                     "refresh failed: account={} route_band=* error={error}",
@@ -447,6 +458,13 @@ where
                 Ok(response) => response,
                 Err(error) => {
                     failed_count = failed_count.saturating_add(1);
+                    SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
+                        &state,
+                        account.account_id(),
+                        route_band,
+                        observed_unix_seconds,
+                        quota_refresh_error_class(&error),
+                    )?;
                     writeln!(
                         stdout,
                         "refresh failed: account={} route_band={} error={error}",
@@ -457,14 +475,27 @@ where
                     continue;
                 }
             };
-            let effective_window =
-                response
-                    .effective_window()
-                    .ok_or_else(|| QuotaCommandError::ProviderResponse {
-                        message: format!(
-                            "missing provider quota windows for route band {route_band}"
-                        ),
-                    })?;
+            let effective_window = match response.effective_window() {
+                Some(effective_window) => effective_window,
+                None => {
+                    failed_count = failed_count.saturating_add(1);
+                    SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
+                        &state,
+                        account.account_id(),
+                        route_band,
+                        observed_unix_seconds,
+                        QuotaRefreshErrorClass::ParseError,
+                    )?;
+                    writeln!(
+                        stdout,
+                        "refresh failed: account={} route_band={} error=missing provider quota windows",
+                        account.label(),
+                        route_band
+                    )
+                    .map_err(QuotaCommandError::Stdout)?;
+                    continue;
+                }
+            };
             let snapshot = PersistedQuotaSnapshot::new(
                 account.account_id().clone(),
                 QuotaSnapshotSource::OpenAiEndpoint,
@@ -478,6 +509,7 @@ where
                 snapshot
             };
             QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot)?;
+            let mut selector_windows = Vec::new();
             for window in &response.windows {
                 let status = if window.remaining_headroom == 0 {
                     SelectorQuotaWindowStatus::Ineligible
@@ -498,8 +530,16 @@ where
                 } else {
                     selector_window
                 };
-                SelectorQuotaRepository::upsert_selector_window(&state, &selector_window)?;
+                selector_windows.push(selector_window);
             }
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                account.account_id(),
+                route_band,
+                &selector_windows,
+                observed_unix_seconds,
+                stale_after_unix_seconds(observed_unix_seconds),
+            )?;
             refreshed_count = refreshed_count.saturating_add(1);
         }
     }
@@ -703,6 +743,31 @@ fn quota_response_for_route_band(
     quota_response_from_window_pair(window_pair, route_band)
 }
 
+const fn stale_after_unix_seconds(observed_unix_seconds: u64) -> u64 {
+    observed_unix_seconds.saturating_add(DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS)
+}
+
+fn quota_refresh_error_class(error: &QuotaCommandError) -> QuotaRefreshErrorClass {
+    match error {
+        QuotaCommandError::CredentialResolver(_) => QuotaRefreshErrorClass::AuthError,
+        QuotaCommandError::ProviderRequest { .. } => QuotaRefreshErrorClass::NetworkError,
+        QuotaCommandError::ProviderStatus { status } if *status == 401 || *status == 403 => {
+            QuotaRefreshErrorClass::AuthError
+        }
+        QuotaCommandError::ProviderStatus { status } if *status == 429 => {
+            QuotaRefreshErrorClass::RateLimited
+        }
+        QuotaCommandError::ProviderStatus { .. } => QuotaRefreshErrorClass::ProviderError,
+        QuotaCommandError::ProviderResponse { .. } => QuotaRefreshErrorClass::ParseError,
+        QuotaCommandError::InvalidFormat { .. }
+        | QuotaCommandError::DisallowedBaseUrl { .. }
+        | QuotaCommandError::RefreshNotImplemented
+        | QuotaCommandError::CredentialResolverOpen(_)
+        | QuotaCommandError::StateStore(_)
+        | QuotaCommandError::Stdout(_) => QuotaRefreshErrorClass::ProviderError,
+    }
+}
+
 fn quota_response_from_window_pair(
     window_pair: &WindowPair,
     route_band: &str,
@@ -795,8 +860,11 @@ fn quota_status_report(
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
-    let selector_inputs =
-        SelectorQuotaRepository::selector_inputs_for_route_band(state, USER_QUOTA_ROUTE_BAND)?;
+    let selector_inputs = SelectorQuotaRepository::selector_inputs_for_route_band(
+        state,
+        USER_QUOTA_ROUTE_BAND,
+        now_unix_seconds,
+    )?;
     let mut status_inputs = Vec::new();
     let mut burn_down_inputs = Vec::new();
     for account in accounts {
