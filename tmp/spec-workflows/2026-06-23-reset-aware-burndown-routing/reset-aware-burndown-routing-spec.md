@@ -31,17 +31,16 @@ Observed in current code:
   Source: `crates/codex-router-state/src/quota_snapshot.rs:91-200`.
 - CLI status already computes pace and projected runout from reset time and remaining headroom.
   Source: `crates/codex-router-cli/src/quota.rs:924-1007`.
-- Current WebSocket routing selects an account and resolves provider credentials
-  before bounded first-frame parsing. The target design intentionally changes
-  that order so local auth and first-frame routing metadata validation happen
-  before quota assessment, credential resolution, or upstream open.
-  Source: `crates/codex-router-proxy/src/websocket.rs`.
-- Current WebSocket routing synthesizes a fixed `/v1/responses` selection
-  request and does not classify the handshake path before selection. The target
-  design intentionally changes that order so shared WebSocket route
-  classification and `unsupported_path` failure happen before selection,
-  credential resolution, or upstream open.
-  Source: `crates/codex-router-proxy/src/websocket.rs`.
+- Current WebSocket routing already performs local-auth preflight, unsupported
+  path rejection, and bounded first-frame validation before selection on the
+  normal `/v1/responses` path. The target design tightens the remaining delta:
+  the first-frame parser must expose only allowlisted routing/affinity/auth-
+  smuggling signals to selection and proof surfaces, and affinity-secret
+  fail-closed ordering must be explicit.
+  Source: `crates/codex-router-proxy/src/server.rs:334-363`,
+  `crates/codex-router-proxy/src/server.rs:456-500`,
+  `crates/codex-router-proxy/src/websocket.rs:158-217`,
+  `crates/codex-router-proxy/src/websocket.rs:269-345`.
 - Current affinity helpers and repositories exist, but the target design makes
   previous-response owner lookup and fail-closed behavior explicit for both
   HTTP/SSE and WebSocket continuation requests.
@@ -96,7 +95,9 @@ therefore sends `Authorization: Bearer <token>` to the local router for
 HTTP/SSE and WebSocket transports. The router accepts that bearer carrier for
 the generated profile path and also accepts `X-Codex-Router-Token` as a
 manual/compatibility ingress carrier. Query, cookie, WebSocket subprotocol, and
-request-body token carriers remain forbidden.
+HTTP/SSE request-body token carriers remain forbidden. WebSocket first frames
+hard-reject only top-level token-carrier field names as a narrow
+auth-smuggling check.
 
 R9. WebSocket routing must preselect from an allowlisted first-frame view.
 
@@ -105,7 +106,9 @@ only the minimum fields needed to classify an installed-Codex response-create
 request and optional previous-response affinity, and then selects/pins an
 account before opening upstream. Non-allowlisted first-frame/body values must
 not affect route-band selection, logs, traces, audit records, or smoke
-transcripts.
+transcripts. A narrow top-level auth-smuggling field-name check rejects
+token-carrier fields before selection without inspecting nested prompt/body
+values.
 
 R10. Route result and unknown-fallback semantics are first-class contracts.
 
@@ -267,12 +270,25 @@ QuotaRefreshStatus {
 }
 ```
 
+Refresh freshness policy:
+
+- `QuotaRefreshFreshnessPolicy` is a refresh-worker input derived from the
+  configured refresh interval.
+- `stale_after_unix_seconds = last_success_unix_seconds +
+  max(configured_refresh_interval_seconds * 2, 600)`.
+- The minimum 600 second grace prevents short local test intervals from marking
+  rows stale immediately; the two-interval rule marks rows stale after one
+  missed periodic refresh at normal runtime intervals.
+- The refresh worker computes and passes the exact stale-after timestamp into
+  the repository success/failure operations. `codex-router-state` persists the
+  timestamp and applies the read overlay below.
+
 Successful refresh transaction:
 
 - replaces that account/route-band selector window set
 - sets `last_success_unix_seconds` and `last_attempt_unix_seconds`
 - clears `last_error_class`
-- computes `stale_after_unix_seconds` from the row freshness policy
+- computes `stale_after_unix_seconds` from the freshness policy above
 
 Transient failed refresh transaction:
 
@@ -297,6 +313,27 @@ Repository operation contract:
   existing selector windows and records only redacted failure/staleness metadata.
 - callers do not perform ad hoc selector-window deletion or stale marking across
   separate repository calls.
+
+Refresh read-model contract:
+
+- `codex-router-state` owns the read overlay that joins
+  `selector_quota_windows` with `quota_refresh_status`.
+- `selector_inputs_for_route_band(route_band, now_unix_seconds)` returns
+  selector windows with last-known `remaining_headroom`, `reset_unix_seconds`,
+  `observed_unix_seconds`, and `effective` preserved.
+- If `now_unix_seconds >= stale_after_unix_seconds`, the repository overlays
+  `QuotaWindowStatus::Stale` on otherwise eligible persisted rows for that
+  account/route band. It does not mutate the stored selector-window row during
+  read.
+- If no selector windows exist for an account/route band, the read model returns
+  no windows; assessment classifies that account as `unknown` /
+  `needs_quota_refresh`.
+- `last_error_class` is not consumed by pure selection. It is exposed only by
+  explicit status/log/proof DTOs that use redacted error classes and safe
+  labels.
+- The CLI status adapter may join selector inputs with refresh status metadata
+  to display `needs refresh`/stale notes, but it must not recompute stale
+  semantics outside the repository read model.
 
 Refresh state transitions:
 
@@ -543,9 +580,10 @@ accounts.
 `BurnDownRouteBandAssessment`:
 
 - `route_result: ok`
+- `route_band`
 - `accounts: Vec<BurnDownAccountAssessment>`
 - `selected_pool: usable | reserve | unknown | none`
-- `selected_pool_reason: usable_available | reserve_only | unknown_fallback_only | none_available`
+- `selected_pool_reason: usable_available | reserve_only | unknown_fallback_only | none_available | unsupported_route_band`
 - `weighted_candidates: Vec<(AccountId, u32)>`
 - `preferred_next_account_id: Option<AccountId>`
 - `accounts_order: account_id ascending`
@@ -565,10 +603,15 @@ BurnDownRouteBandAssessmentResult {
 }
 ```
 
-Supported route bands return the same top-level envelope with
-`route_result=ok`. Unsupported route bands never enter weighted selection,
-never advance selector state, and never synthesize per-account rows from
-unclassified request data.
+Supported and unsupported route bands return the same route-level inventory:
+`route_result`, `route_band`, `selected_pool`, `selected_pool_reason`,
+`preferred_next_account_id`, `weighted_candidates`, and `accounts`. Supported
+route bands use `route_result=ok`; unsupported route bands use
+`route_result=unsupported_route_band`, `selected_pool=none`,
+`selected_pool_reason=unsupported_route_band`, null preferred account, and empty
+candidate/account arrays. Unsupported route bands never enter weighted
+selection, never advance selector state, and never synthesize per-account rows
+from unclassified request data.
 
 `BurnDownAccountAssessment`:
 
@@ -728,9 +771,13 @@ Cooldown and pinning contract:
   considered
 - a cooldown/hold can reuse an account only if that account is still present in
   the current assessment's `weighted_candidates`
-- previous-response affinity can reuse an owner only if that owner is in the
-  current `weighted_candidates`; otherwise it fails closed before weighted
-  fallback
+- previous-response affinity is a continuation-correctness override, not a
+  fairness/cooldown hold; it may reuse an owner when that owner is still
+  `availability=usable` or `availability=reserve`, even if the owner is outside
+  the current selected pool's `weighted_candidates`
+- previous-response affinity fails closed before weighted fallback when the
+  owner is `unknown`, `blocked`, `excluded`, disabled, missing active
+  credential, exhausted, ineligible, or stale for credential generation
 - `blocked`, `excluded`, exhausted, ineligible, and missing-credential accounts
   never survive a hold or affinity pin
 - a selected-pool change breaks a hold when the held account is not in the new
@@ -1410,6 +1457,9 @@ Proof must cover:
 - duplicate or ambiguous owner record fails closed
 - malformed affinity metadata
 - no weighted fallback on any continuation-owner failure
+- reserve owner continuity when another account is in the current usable
+  selected pool; this must continue on the reserve owner and not weighted
+  fallback
 
 ### Local Router Auth Contract
 
@@ -1432,7 +1482,10 @@ Forbidden local auth fallback surfaces in this goal:
 - query-string tokens
 - cookies
 - WebSocket subprotocol token smuggling
-- request body tokens
+- HTTP/SSE request body tokens
+- WebSocket top-level first-frame auth-smuggling fields:
+  `authorization`, `x-codex-router-token`, `api_key`, `token`,
+  `access_token`, `refresh_token`, or `bearer`
 
 Requests that omit both accepted carriers fail as local auth failures before
 route-band assessment, selector advancement, credential resolution, upstream
@@ -1450,10 +1503,36 @@ Mixed-carrier rule:
   side effect.
 - The router strips both accepted local-auth carriers before upstream open.
 
+Local auth validation input contract:
+
+```text
+PresentedLocalAuthCarriers {
+  authorization_bearer: Option<RedactedTokenCandidate>
+  x_codex_router_token: Option<RedactedTokenCandidate>
+  forbidden_carrier_present: bool
+  forbidden_carrier_kind:
+    query | cookie | http_body | websocket_subprotocol | websocket_first_frame
+}
+```
+
+HTTP/SSE handlers, WebSocket preflight, and the authenticated WebSocket tunnel
+must preserve both accepted carriers and forbidden-carrier presence until local
+auth validation decides accept/reject. They must not collapse to
+`Option<&str>` before mixed-carrier mismatch checks.
+
 HTTP/SSE and WebSocket proof must include the generated-profile
 `env_key`/Authorization bearer path, the manual `X-Codex-Router-Token` path,
-and negative cases for query, cookie, body-token, subprotocol-token, and
-mismatched mixed-carrier requests.
+and negative cases for query, cookie, HTTP body-token, WebSocket
+subprotocol-token, WebSocket first-frame auth-smuggling field, and mismatched
+mixed-carrier requests.
+
+Installed-Codex e2e proof may emit the audit-safe enum
+`local_auth_carrier=authorization_bearer` and boolean
+`local_auth_validated=true` from the local router test harness. It must not emit
+the bearer token, raw auth header, header length, token hash, or token prefix.
+Dedicated local-auth ingress tests remain the authoritative negative proof for
+manual header, query, cookie, body, subprotocol, first-frame auth-smuggling, and
+mixed-carrier failure cases.
 
 ### HTTP/SSE Routing Order Contract
 
@@ -1516,32 +1595,41 @@ WebSocket routing order is normative:
      - top-level `previous_response_id`, when present
      - for direct payload compatibility only: whether `model` is present,
        whether `input` is present, and whether `stream` is `true`
+     - for auth-smuggling rejection only: whether any forbidden top-level
+       auth-carrier field name is present
    - no route-band field is read from the first-frame body in v1; the
      `/v1/responses` WebSocket path fixes the route band to `responses`
    - full request-schema validation remains upstream-owned
 5. Do not parse any additional first-frame/body fields before selection. The
    route band comes from the `/v1/responses` path only. Direct-payload
-   structural checks may accept or reject the first frame but must not expose or
-   use the raw `model`, `input`, or `stream` values for route-band selection,
+   structural and auth-smuggling checks may accept or reject the first frame but
+   must not expose or use the raw `model`, `input`, `stream`, token-like field
+   values, nested prompt text, or nested body values for route-band selection,
    account scoring, logs, traces, audit records, or smoke transcripts.
-6. Load or create `router_affinity_hash_secret.v1` for the router root before
+6. Reject any first frame with a forbidden top-level auth-carrier field name as
+   `forbidden_local_auth_carrier` before selector advancement, credential
+   resolution, upstream auth injection, or upstream open. This is a narrow
+   top-level field-name check only; the router does not scan nested prompt text,
+   tool arguments, metadata values, or arbitrary body strings for token-like
+   words.
+7. Load or create `router_affinity_hash_secret.v1` for the router root before
    selection, because `/v1/responses` can create or consume previous-response
    ids. If the secret is unavailable, fail locally as
    `affinity_secret_unavailable` before selector advancement, credential
    resolution, upstream auth injection, or upstream open.
-7. Extract previous-response affinity metadata from the first frame, when
+8. Extract previous-response affinity metadata from the first frame, when
    present, before weighted fallback.
-8. If affinity is present, apply the Previous-Response Affinity Contract. Any
+9. If affinity is present, apply the Previous-Response Affinity Contract. Any
    owner-resolution failure fails closed before weighted fallback.
-9. If no affinity is present, run reset-aware route-band assessment for the
+10. If no affinity is present, run reset-aware route-band assessment for the
    `responses` route band and select from weighted candidates.
-10. Resolve the selected account credential and inject upstream auth exactly once
+11. Resolve the selected account credential and inject upstream auth exactly once
    after selection and before upstream open.
-11. Strip local client auth, router bearer auth, and hop-by-hop headers before
+12. Strip local client auth, router bearer auth, and hop-by-hop headers before
    upstream open.
-12. Forward the accepted first frame and all later frames unchanged at the
+13. Forward the accepted first frame and all later frames unchanged at the
    protocol payload layer.
-13. Pin the selected account for the lifetime of the WebSocket connection. Do
+14. Pin the selected account for the lifetime of the WebSocket connection. Do
     not switch accounts mid-stream. A later connection may reselect after quota
     state changes.
 
@@ -1557,6 +1645,7 @@ Preselection WebSocket failure matrix:
 | unsupported path | no | 0 | 0 | 0 | 0 | route and reason only |
 | non-text or non-JSON first frame | yes | 0 | 0 | 0 | 0 | no full payload |
 | syntactically valid wrong `type` | yes | 0 | 0 | 0 | 0 | no full payload |
+| forbidden top-level auth carrier in first frame | yes | 0 | 0 | 0 | 0 | field kind only; no value |
 | oversized first frame | yes | 0 | 0 | 0 | 0 | size class only |
 | timed-out first frame | yes | 0 | 0 | 0 | 0 | timeout reason only |
 | affinity hash secret unavailable | yes | 0 | 0 | 0 | 0 | error class only; no secret path/id/value |
@@ -1572,6 +1661,8 @@ Required WebSocket proof:
 - invalid local auth fails before selection
 - malformed first frame and syntactically valid wrong-type first frame fail
   before selection
+- forbidden top-level auth-carrier fields in the first frame fail before
+  selection and emit only the forbidden carrier kind
 - direct installed-Codex payload without an enveloped `type` is accepted when
   it satisfies the bounded structural response-create check
 - oversized or timed-out first frame fails before selection
@@ -1610,7 +1701,10 @@ Smoke transcript WebSocket first-frame policy:
   proof fields from first-frame handling:
   - `first_frame_type=response.create`
   - `first_frame_shape=enveloped | direct`
-  - token/header absence booleans
+  - local auth carrier enum such as `authorization_bearer` or
+    `x_codex_router_token`
+  - `local_auth_validated=true | false`
+  - token/header absence booleans for upstream-open stripping only
   - route band
   - selected safe account label/hash
   - reason enum
@@ -1619,6 +1713,11 @@ Smoke transcript WebSocket first-frame policy:
   `tools`, prompt text, request body content, or any other non-allowlisted
   first-frame/body field, even as individual summary fields such as
   `first_frame_model`, `first_frame_has_input`, or `first_frame_stream`
+- Existing transcript fields named `first_frame_model`,
+  `first_frame_has_input`, and `first_frame_stream` are stale and
+  non-compliant with this goal. The implementation plan must delete them or
+  replace them with the allowlisted `first_frame_shape`/`first_frame_type`
+  fields above.
 
 ## Proof Expectations
 
@@ -1657,8 +1756,10 @@ The implementation plan must provide proof at these layers:
   in the current assessment's `weighted_candidates`
 - tests proving a selected-pool change breaks a hold when the held account is
   no longer in the new selected pool
-- tests proving previous-response affinity fails closed before weighted
-  fallback when the owner is not in the current `weighted_candidates`
+- tests proving previous-response affinity can reuse a reserve owner outside
+  the current selected pool and fails closed before weighted fallback only when
+  the owner is `unknown`, `blocked`, `excluded`, disabled, missing credential,
+  exhausted, ineligible, or stale for credential generation
 - tests proving unknown-pool fallback can hold only accounts still in the
   unknown selected pool and cannot keep a former known-pool account alive after
   evidence falls to all-unknown
@@ -1728,13 +1829,18 @@ The implementation plan must provide proof at these layers:
   redacted `last_error_class`, marks the account/route band stale or
   needs-refresh through assessment/status, and performs that transition through
   one repository operation
+- refresh read-model tests proving `selector_inputs_for_route_band(route_band,
+  now_unix_seconds)` overlays `QuotaWindowStatus::Stale` when
+  `now_unix_seconds >= stale_after_unix_seconds`, preserves last-known headroom
+  and reset metadata, and exposes `last_error_class` only through explicit
+  status/log/proof DTOs
 - WebSocket compatibility tests for `/v1/responses` routing, selected-account
   pinning, previous-response affinity before weighted fallback, no weighted
   fallback on continuation-owner failure, `/v1/realtime` and unknown path
   `unsupported_path` pre-upgrade failure, malformed first frame failure,
-  wrong-type first frame failure, oversized first frame failure, first-frame
-  timeout failure, malformed affinity failure, and local-auth pre-upgrade
-  failure before selection
+  wrong-type first frame failure, top-level first-frame auth-smuggling failure,
+  oversized first frame failure, first-frame timeout failure, malformed affinity
+  failure, and local-auth pre-upgrade failure before selection
 - HTTP/SSE and WebSocket affinity pin-write tests proving owner records are
   created only from allowlisted upstream response id fields, store
   `credential_generation`, and never emit raw previous response ids, raw
@@ -1773,11 +1879,16 @@ The implementation plan must provide proof at these layers:
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload
+- WebSocket auth-smuggling proof with a top-level first-frame field named
+  `token`, proving rejection before selector advancement, credential
+  resolution, upstream auth injection, or upstream open and proving logs/traces
+  expose only the forbidden field kind, not the value
 - WebSocket first-frame allowlist proof with canary values in non-allowlisted
   fields such as `model`, `input`, `metadata`, `tools`, and prompt text,
   proving selection reads only top-level `type`, top-level
-  `previous_response_id`, and direct-payload structural booleans before
-  selection, and never emits raw direct-payload values
+  `previous_response_id`, direct-payload structural booleans, and forbidden
+  top-level auth-carrier field-name presence before selection, and never emits
+  raw direct-payload values
 - smoke transcript negative proof with the same non-allowlisted first-frame/body
   canaries, proving persisted/shared smoke artifacts do not emit raw `model`,
   `input`, `metadata`, `tools`, prompt text, request body content, or any
@@ -1791,9 +1902,10 @@ The implementation plan must provide proof at these layers:
 - local-auth ingress tests proving generated-profile
   `env_key = "CODEX_ROUTER_TOKEN"` / `Authorization: Bearer` works for HTTP/SSE
   and WebSocket, manual `X-Codex-Router-Token` works for HTTP/SSE and
-  WebSocket, and query parameter, cookie, request-body, WebSocket subprotocol,
-  and mismatched mixed-carrier auth fail before selection, credential
-  resolution, upstream auth injection, or upstream open
+  WebSocket, and query parameter, cookie, HTTP request-body token, WebSocket
+  subprotocol token, WebSocket top-level first-frame auth-smuggling field, and
+  mismatched mixed-carrier auth fail before selection, credential resolution,
+  upstream auth injection, or upstream open
 - black-box non-blocking proof for:
   - server boot/listen readiness while provider refresh is delayed or failing
   - first routed request while provider refresh is delayed or failing
@@ -1812,9 +1924,11 @@ The implementation plan must provide proof at these layers:
   helper-rendered Codex custom-provider profile must use
   `env_key = "CODEX_ROUTER_TOKEN"` and installed Codex must authenticate to the
   local router with `Authorization: Bearer` for both HTTP/SSE and WebSocket.
-  The e2e transcript must prove the local auth reaches the router, is stripped
-  before upstream HTTP/SSE and WebSocket opens, and is never printed in
-  transcripts.
+  The e2e transcript may prove local router receipt with the audit-safe enum
+  `local_auth_carrier=authorization_bearer` plus
+  `local_auth_validated=true`, must prove local auth is stripped before upstream
+  HTTP/SSE and WebSocket opens, and must never print the token, raw auth header,
+  token hash, token length, or token prefix.
 - redaction proof for status rows, machine status, selection explanations,
   refresh errors, traces/logs, and smoke transcripts
 
@@ -1831,100 +1945,18 @@ Non-blocking pass signal:
 
 ## Open Decisions For Review
 
-No open product decisions remain before the next spec review. This revision
-chooses:
+No open product decisions remain before the next spec review. The normative
+decisions live in the sections above. The highest-risk choices to re-check are:
 
-- weekly near-reset threshold: fixed v1 12h cap
-- reserve traffic: zero normal traffic while any usable account exists
-- assessment owner: `codex-router-selection::burn_down`
-- CLI dependency: CLI may depend on `codex-router-selection`
-- default account identifier: account label/tag only
-- empty relevant window set: `unknown` fallback
-- no effective row: compute from all windows and mark limiting window by worst
-  pressure/headroom/longest-window order
-- default human score visibility: no raw score
-- route-band assessment owner: `codex-router-selection::burn_down`
-- batch assessment contract: `BurnDownRouteBandAssessment` owns route result,
-  selected pool, selected-pool reason, weighted candidates, and neutral
-  `preferred_next_account_id`
-- unknown quota selection: fallback-only, never competing with known `usable` or
-  `reserve`, with conservative partial-headroom ordering inside the all-unknown
-  pool
-- deterministic account inventory order: `accounts[]` uses `account_id`
-  ascending; selector candidate order is neutral selector order
-- route-band policy registry: `codex-router-selection::burn_down` owns explicit
-  policies for `responses`, `responses_compact`, `models`, and
-  `memories_trace_summarize`; unknown route bands return the shared
-  `BurnDownRouteBandAssessmentResult::unsupported_route_band`
-- route-band identity: `codex-router-core::routes::RouteBand` is the shared
-  identifier type used by proxy classification, selection policy lookup, and
-  CLI status adapters
-- route-band assessment API: callers pass `RouteBand` and account facts only;
-  selection owns policy lookup and unsupported-band payload construction
-- route/status presentation boundary: selection-owned assessment output carries
-  `next_use`, `routing_reason`, `window_slots`, `windows[]`, `salvage_tie_key`,
-  and unsupported-band result fields; CLI/proxy render or act on these fields
-  without recalculating routing semantics
-- v1 window slot schema: no `source_window_ids`; slot explanation comes from
-  slot fields plus the safe `windows[]` metadata
-- output ordering: `accounts[]` is `account_id` ascending;
-  `weighted_candidates[]` is neutral selector order
-- routing reason precedence: weekly-reset-salvage preferred explanation, then
-  weekly-health preferred explanation, then short-reset preferred explanation,
-  then safest-quota fallback after availability and pool mapping
-- unknown fallback reason mapping: all-unknown selected pools render fallback
-  reasons while preserving raw `quota_evidence_reason` separately
-- quota refresh lifecycle: startup/listen, request selection, WebSocket routing,
-  and status rendering never await provider refresh; immediate and periodic
-  refresh update SQLite in the background and preserve last-known rows on
-  transient failure
-- quota refresh persistence: `quota_refresh_status` records last success,
-  attempt, redacted error class, and stale timing per account/route band
-- local router auth: generated Codex profiles use
-  `env_key = "CODEX_ROUTER_TOKEN"` and installed Codex sends
-  `Authorization: Bearer`; the router accepts that bearer carrier and also
-  accepts `X-Codex-Router-Token` for manual/compatibility ingress, while query,
-  cookie, subprotocol, body-token, and mismatched mixed-carrier requests are
-  rejected before selection or upstream open
-- HTTP/SSE response-creating routes: load/create the affinity hash secret
-  before selector advancement, credential resolution, auth injection, or
-  upstream open
-- WebSocket support: `/v1/responses` supported; every other WebSocket path is
-  `unsupported_path` and fails closed before selection or upstream open
-- WebSocket selection: a bounded enveloped `response.create` first frame or
-  installed-Codex direct response-create payload is required before upstream
-  open; affinity hash secret is loaded before selection; selected account is
-  pinned for connection lifetime
-- previous-response affinity: applies to HTTP/SSE and WebSocket; owner
-  resolution failures fail closed before weighted fallback
-- previous-response affinity hash secret: generated once per router root,
-  independent of bearer/account credential rotation, and non-rotating in v1
-- previous-response affinity boundaries: core owns typed affinity/HMAC helpers,
-  secret-store owns the hash secret, state stores only hashed owner records, and
-  proxy orchestrates extraction, secret loading, lookup/write, and fail-closed
-  enforcement
-- previous-response raw-key cutover: no v1 previous-response path may use
-  `codex-router-selection::affinity` or raw `AffinityKey`
-- affinity hash-secret storage: stable secret key
-  `router_affinity_hash_secret.v1`, 32 random bytes, 64-lowercase-hex persisted
-  encoding, typed core return, and redacted errors
-- previous-response owner route eligibility: only `usable` and `reserve`
-  owners are valid; `unknown`, `blocked`, and `excluded` owners fail closed
-- default status surfaces: table/plain are human-only and JSON is explicit
-  machine/debug output
-- default account display: safe label or hash; JSON uses `safe_account_label`
-  plus raw `account_id` only for explicit local machine/debug use
-- safe-label ownership: `codex-router-core::redaction` owns the shared
-  `SafeAccountLabel`/hash helper consumed by CLI, proxy, JSON, logs/traces, and
-  smoke transcript helpers
-- safe-label format: preserved printable local labels or
-  `acct-<12 lowercase hex chars>` deterministic tags for unsafe labels
-- generated Codex profile local auth: the e2e and profile helpers use
-  `env_key = "CODEX_ROUTER_TOKEN"`, proving installed Codex authenticates with
-  `Authorization: Bearer` for HTTP/SSE and WebSocket
-- smoke/log transcript policy: allowlisted fields only, no raw bodies, prompts,
-  tool args, memory traces, unsafe labels, tokens, auth headers, or secret-store
-  material
+- refresh staleness is a `codex-router-state` read-model overlay, not row
+  mutation
+- previous-response affinity may reuse `usable` or `reserve` owners outside the
+  current selected pool
+- WebSocket first-frame auth-smuggling checks inspect only forbidden top-level
+  field names, never nested prompt/body values
+- generated Codex profile auth uses `env_key = "CODEX_ROUTER_TOKEN"` and local
+  `Authorization: Bearer`
+- plan creation waits for a parent-verified spec-review verdict of `ready`
 
 Spec review may still reject these choices, but plan creation must not reopen
 them silently.
@@ -1932,5 +1964,5 @@ them silently.
 ## Next Workflow
 
 Run `shravan-dev-workflow:spec-review-swarm` against this revised spec. Only if
-that review returns `phase_result: complete` should orchestrator transition to
-`shravan-dev-workflow:plan-creation-swarm`.
+the parent reducer records a spec-review verdict of `ready` should the
+orchestrator transition to `shravan-dev-workflow:plan-creation-swarm`.

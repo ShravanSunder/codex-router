@@ -43,7 +43,8 @@ Resolve these paths in the current checkout or review worktree for the git
 commit being reviewed:
 
 - `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/reset-aware-burndown-routing-spec.md`
-- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r12/review-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r15/review-ledger.md`
+- `tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r15/swarm-ledger.md`
 - `tmp/workflow-state/2026-06-23-quota-burndown-routing/details.md`
 - `tmp/workflow-state/2026-06-23-quota-burndown-routing/events.jsonl`
 
@@ -300,9 +301,10 @@ Codex can communicate through the router end to end, including WebSocket.
 Proof source:
 installed Codex CLI e2e against a served local router and mock upstream with a
 generated codex-router profile using
-`env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`. The
-fixture must exercise HTTP/SSE and WebSocket `/v1/responses`, reset-aware
-account choice, WebSocket selected-account pinning, local auth stripping before
+`env_key = "CODEX_ROUTER_TOKEN"`, which installed Codex sends as local
+`Authorization: Bearer`. The fixture must exercise HTTP/SSE and WebSocket
+`/v1/responses`, reset-aware account choice, WebSocket selected-account pinning,
+local auth carrier validation via safe enum/boolean, local auth stripping before
 upstream open, and redacted transcript artifacts.
 evidence source:
 e2e command transcript, mock upstream assertions, router logs, and redacted
@@ -816,3 +818,38 @@ Next hard gate:
 Return to `shravan-dev-workflow:spec-creation-swarm`; do not proceed to
 `plan-creation-swarm` until the spec is revised and another spec review returns
 a parent-verified `ready` verdict.
+
+## R16 Spec Revision
+
+Date: 2026-06-23
+
+Phase:
+spec-creation-swarm revision after R15.
+
+Revision artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-revision-2026-06-23-r16/swarm-ledger.md`
+
+Revision applied:
+
+- refresh staleness is now a `codex-router-state` repository read-model overlay
+  with formula `last_success + max(refresh_interval * 2, 600)`
+- previous-response affinity can reuse `usable` or `reserve` owners, even
+  outside the current selected pool, and fails closed for unknown/blocked/
+  excluded/exhausted/ineligible/missing-credential/stale-generation owners
+- WebSocket first-frame auth-smuggling hard-fails only on forbidden top-level
+  auth-carrier field names and does not scan nested prompt/body values
+- route-result inventory now includes `route_band` and full
+  `selected_pool_reason` domain across ok and unsupported branches
+- local auth validation now has an input contract that preserves both accepted
+  carriers plus forbidden-carrier presence until mismatch checks run
+- generated-profile e2e bearer proof now uses safe observables:
+  `local_auth_carrier=authorization_bearer` and `local_auth_validated=true`
+- current-state WebSocket evidence and tail workflow verdict wording were
+  corrected
+- active required-reading and e2e proof rows in this details file now point at
+  R15/R16 and the `env_key`/Authorization bearer contract
+
+Next hard gate:
+Run `shravan-dev-workflow:spec-review-swarm` against R16. Do not proceed to
+`plan-creation-swarm` until that review returns a parent-verified `ready`
+verdict.
