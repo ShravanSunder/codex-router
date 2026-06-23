@@ -2266,7 +2266,7 @@ exit 42
         assert!(output.stdout.contains("account"));
         assert!(output.stdout.contains("primary"));
         assert!(output.stdout.contains("72%"));
-        assert!(output.stdout.contains("ready"));
+        assert!(output.stdout.contains("✓ ready"));
         assert!(!output.stdout.contains("acct_primary"));
         assert!(!output.stdout.contains("responses"));
         assert!(!output.stdout.contains("models"));
@@ -2322,15 +2322,15 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\twindow\tquota_left\tresets\tpace\trunout\tnote"
+            "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t5h\t75%\tin 2h 46m\t19pp under\tin 6h 40m\tready"
+            "snapshot\tenabled\t5h\t75%\tin 2h 46m\t▼ 19pp under\tin 6h 40m\t✓ ready"
         );
         assert_eq!(
             lines[2],
-            "snapshot\tenabled\tweekly\t-\t-\t-\t-\tneeds refresh"
+            "snapshot\tenabled\tweekly\t-\t-\t-\t-\t↻ needs refresh"
         );
         assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
@@ -2399,15 +2399,15 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\twindow\tquota_left\tresets\tpace\trunout\tnote"
+            "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t5h\t25%\tin 2h 30m\t25pp over\tin 50m\tready"
+            "primary\tenabled\t5h\t25%\tin 2h 30m\t▲ 25pp over\tin 50m\t✓ ready"
         );
         assert_eq!(
             lines[2],
-            "primary\tenabled\tweekly\t80%\tin 6d 23h\t20pp over\tin 1h 6m\tready"
+            "primary\tenabled\tweekly\t80%\tin 6d 23h\t▲ 20pp over\tin 1h 6m\t✓ ready"
         );
         assert_eq!(lines.len(), 3);
         assert!(!output.stdout.contains("acct_primary"));

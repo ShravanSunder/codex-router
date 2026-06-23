@@ -834,14 +834,7 @@ fn write_quota_table(
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header([
-        "account",
-        "status",
-        "window",
-        "quota_left",
-        "resets",
-        "pace",
-        "runout",
-        "note",
+        "account", "status", "window", "left", "resets", "pace", "runout", "note",
     ]);
     for row in rows {
         table.add_row([
@@ -865,7 +858,7 @@ fn write_quota_plain(
 ) -> Result<(), QuotaCommandError> {
     writeln!(
         stdout,
-        "account\tstatus\twindow\tquota_left\tresets\tpace\trunout\tnote"
+        "account\tstatus\twindow\tleft\tresets\tpace\trunout\tnote"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
@@ -920,9 +913,9 @@ impl QuotaStatusRow {
             pace: math.pace,
             runout: math.runout,
             note: if snapshot.stale_penalty() {
-                "needs refresh".to_owned()
+                "↻ needs refresh".to_owned()
             } else {
-                "snapshot only".to_owned()
+                "• snapshot".to_owned()
             },
         }
     }
@@ -969,7 +962,7 @@ impl QuotaStatusRow {
             reset: "-".to_owned(),
             pace: math.pace,
             runout: math.runout,
-            note: "needs refresh".to_owned(),
+            note: "↻ needs refresh".to_owned(),
         }
     }
 }
@@ -1080,21 +1073,21 @@ fn format_duration(seconds: u64) -> String {
 
 fn format_pace(pace_points: i64) -> String {
     match pace_points.cmp(&0) {
-        std::cmp::Ordering::Greater => format!("{pace_points}pp over"),
-        std::cmp::Ordering::Equal => "on pace".to_owned(),
-        std::cmp::Ordering::Less => format!("{}pp under", pace_points.abs()),
+        std::cmp::Ordering::Greater => format!("▲ {pace_points}pp over"),
+        std::cmp::Ordering::Equal => "◆ on pace".to_owned(),
+        std::cmp::Ordering::Less => format!("▼ {}pp under", pace_points.abs()),
     }
 }
 
 fn quota_window_note(window: &PersistedSelectorQuotaWindow) -> &'static str {
     if window.observed_unix_seconds() == 0 {
-        "needs refresh"
+        "↻ needs refresh"
     } else if window.status() == SelectorQuotaWindowStatus::Eligible {
-        "ready"
+        "✓ ready"
     } else if window.remaining_headroom() == 0 {
-        "empty"
+        "× empty"
     } else {
-        "unusable"
+        "! unusable"
     }
 }
 
