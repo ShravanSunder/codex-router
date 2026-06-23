@@ -193,6 +193,54 @@ Proof:
   - result: pass
   - count: 70 passed, 0 failed
 
+## T6 Installed Codex WebSocket E2E Checkpoint
+
+Implemented:
+
+- router WebSocket preflight now authorizes the same local token sources as the
+  tunnel path: explicit `x-codex-router-token` and Codex env-key
+  `Authorization: Bearer ...`.
+- first-frame validation accepts current Codex direct Responses WebSocket
+  request payloads (`model`, `input`, `stream`) as well as the older
+  `type=response.create` wrapper shape.
+- installed Codex smoke now seeds three router accounts with persisted 5h and
+  weekly selector windows plus router-owned credential bundles.
+- installed smoke runs real `codex exec` twice through a generated
+  `codex-router` profile:
+  - HTTP/SSE mode with WebSockets disabled.
+  - WebSocket mode with the installed Codex WebSocket prewarm plus a real
+    non-prewarm WebSocket request.
+- smoke contract verifies:
+  - hostile no-token WebSocket does not reach upstream.
+  - local router token does not leak to upstream headers, HTTP body, or
+    WebSocket frames.
+  - upstream receives a routable selected account token.
+  - HTTP/SSE and WebSocket reuse the held account inside cooldown.
+  - quota status table/plain/json include the selected account label and mark a
+    `next` account.
+  - redacted transcript is written under `tmp/smoke`.
+
+Proof:
+
+- `cargo fmt --all -- --check`
+  - result: pass
+- `cargo test -p codex-router-test-support -- --nocapture`
+  - result: pass
+  - count: 6 passed, 0 failed, 2 ignored
+- `tests/smoke/installed_codex_mock.sh`
+  - result: pass
+  - count: 2 passed, 0 failed
+  - transcript: `tmp/smoke/installed-codex-mock-36316-1782242168747.json`
+- `tests/smoke/quota_status_fixture.sh`
+  - result: pass
+  - artifact root:
+    `/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T//codex-router-quota-status.S6uujZ`
+- `cargo test --workspace -- --nocapture`
+  - result: pass
+  - package counts:
+    auth 13, cli 60, core 8, proxy 71, quota 4, secret-store 9,
+    selection 20, state 13, test-support 6 plus doc tests all passing.
+
 ## T4 Quota Status UX Checkpoint
 
 Implemented:

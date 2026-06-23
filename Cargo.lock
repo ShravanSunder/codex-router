@@ -80,13 +80,16 @@ dependencies = [
 name = "codex-router-cli"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "codex-router-auth",
  "codex-router-core",
  "codex-router-proxy",
  "codex-router-secret-store",
+ "codex-router-selection",
  "codex-router-state",
  "comfy-table",
  "reqwest",
+ "serde",
  "serde_json",
  "thiserror",
  "tungstenite",

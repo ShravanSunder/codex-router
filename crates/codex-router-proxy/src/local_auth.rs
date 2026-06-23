@@ -48,3 +48,58 @@ impl ProxyLocalAuthGate {
             .unwrap_or(false)
     }
 }
+
+/// Extracts the local router token from supported Codex provider auth headers.
+#[must_use]
+pub(crate) fn presented_local_token<'a>(
+    router_token_header: Option<&'a str>,
+    authorization_header: Option<&'a str>,
+) -> Option<&'a str> {
+    if router_token_header.is_some() {
+        return router_token_header;
+    }
+
+    bearer_token_from_authorization(authorization_header?)
+}
+
+fn bearer_token_from_authorization(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+
+    Some(token.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bearer_token_from_authorization;
+    use super::presented_local_token;
+
+    #[test]
+    fn presented_local_token_prefers_explicit_router_token_header() {
+        assert_eq!(
+            presented_local_token(Some("router-token"), Some("Bearer authorization-token")),
+            Some("router-token")
+        );
+    }
+
+    #[test]
+    fn presented_local_token_accepts_authorization_bearer() {
+        assert_eq!(
+            presented_local_token(None, Some("Bearer router-token")),
+            Some("router-token")
+        );
+        assert_eq!(
+            presented_local_token(None, Some("bearer router-token")),
+            Some("router-token")
+        );
+    }
+
+    #[test]
+    fn bearer_token_from_authorization_ignores_non_bearer_auth() {
+        assert_eq!(bearer_token_from_authorization("Basic abc"), None);
+        assert_eq!(bearer_token_from_authorization("Bearer"), None);
+    }
+}

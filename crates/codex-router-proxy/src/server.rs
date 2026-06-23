@@ -35,6 +35,7 @@ use crate::http_sse::StreamingHttpProxyResponse;
 use crate::http_sse::StreamingHttpRequestHandler;
 use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::local_auth_rejection_audit_event;
+use crate::local_auth::presented_local_token;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
@@ -331,7 +332,10 @@ impl LoopbackRouterRuntime {
         stream: TcpStream,
     ) -> Result<(), LoopbackRouterRuntimeError> {
         if let Some(preflight) = websocket_handshake_preflight(&stream)? {
-            match self.auth_gate.authorize(preflight.router_token.as_deref()) {
+            match self
+                .auth_gate
+                .authorize(preflight.presented_token.as_deref())
+            {
                 Ok(_generation) => {}
                 Err(reason) => {
                     if let Some(audit_sink) = &self.audit_sink {
@@ -446,7 +450,7 @@ impl LocalAuthReloader {
 #[derive(Debug)]
 struct WebSocketHandshakePreflight {
     path: String,
-    router_token: Option<String>,
+    presented_token: Option<String>,
 }
 
 fn websocket_handshake_preflight(
@@ -477,8 +481,19 @@ fn websocket_handshake_preflight(
         .find(|header| header.name.eq_ignore_ascii_case("x-codex-router-token"))
         .and_then(|header| std::str::from_utf8(header.value).ok())
         .map(str::to_owned);
+    let authorization = parsed_request
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("authorization"))
+        .and_then(|header| std::str::from_utf8(header.value).ok())
+        .map(str::to_owned);
+    let presented_token =
+        presented_local_token(router_token.as_deref(), authorization.as_deref()).map(str::to_owned);
 
-    Ok(Some(WebSocketHandshakePreflight { path, router_token }))
+    Ok(Some(WebSocketHandshakePreflight {
+        path,
+        presented_token,
+    }))
 }
 
 fn path_without_query(path: &str) -> &str {

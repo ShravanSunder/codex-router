@@ -44,6 +44,10 @@ impl UpstreamEndpoint {
     /// Builds a full upstream URL for a Codex request path.
     #[must_use]
     pub fn url_for_path(&self, request_path: &str) -> String {
+        if self.base_url.ends_with("/backend-api") {
+            return self.chatgpt_backend_url_for_path(request_path);
+        }
+
         let relative_path = request_path.trim_start_matches('/');
         let upstream_path = relative_path
             .strip_prefix("v1/")
@@ -58,6 +62,28 @@ impl UpstreamEndpoint {
         }
 
         format!("{}/{}", self.base_url, upstream_path)
+    }
+
+    fn chatgpt_backend_url_for_path(&self, request_path: &str) -> String {
+        let (path, query) = request_path.trim_start_matches('/').split_once('?').map_or(
+            (request_path.trim_start_matches('/'), None),
+            |(path, query)| (path, Some(query)),
+        );
+        let upstream_path = match path {
+            "v1/responses" => "codex/responses",
+            "v1/responses/compact" => "codex/responses/compact",
+            _ => path.strip_prefix("v1/").unwrap_or(path),
+        };
+        let url = if upstream_path.is_empty() || upstream_path == "v1" {
+            self.base_url.clone()
+        } else {
+            format!("{}/{}", self.base_url, upstream_path)
+        };
+
+        match query {
+            Some(query) => format!("{url}?{query}"),
+            None => url,
+        }
     }
 
     /// Builds a WebSocket URL for a Codex request path.
@@ -399,9 +425,23 @@ impl UpstreamRequestBuilder {
     /// Builds the upstream request.
     #[must_use]
     pub fn build(self, upstream_auth_token: SecretString) -> UpstreamRequest {
+        self.build_with_chatgpt_account_id(upstream_auth_token, None)
+    }
+
+    /// Builds the upstream request with a ChatGPT account id header.
+    #[must_use]
+    pub fn build_with_chatgpt_account_id(
+        self,
+        upstream_auth_token: SecretString,
+        chatgpt_account_id: Option<&str>,
+    ) -> UpstreamRequest {
         UpstreamRequest {
             route_kind: self.route_kind,
-            headers: sanitize_headers_for_upstream(self.headers, upstream_auth_token),
+            headers: sanitize_headers_for_upstream(
+                self.headers,
+                upstream_auth_token,
+                chatgpt_account_id,
+            ),
             body: self.body,
         }
     }

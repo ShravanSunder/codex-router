@@ -21,6 +21,7 @@ pub struct AccountCredentialBundle {
     access_token: SecretString,
     refresh_token: Option<SecretString>,
     expires_unix_seconds: Option<u64>,
+    chatgpt_account_id: Option<String>,
     source: String,
 }
 
@@ -37,6 +38,7 @@ impl AccountCredentialBundle {
             access_token: SecretString::new(access_token),
             refresh_token: refresh_token.map(SecretString::new),
             expires_unix_seconds,
+            chatgpt_account_id: None,
             source: "codex_auth_json".to_owned(),
         }
     }
@@ -66,6 +68,22 @@ impl AccountCredentialBundle {
         self.expires_unix_seconds
     }
 
+    /// Returns the ChatGPT account id used by ChatGPT backend requests.
+    #[must_use]
+    pub fn chatgpt_account_id(&self) -> Option<&str> {
+        self.chatgpt_account_id.as_deref()
+    }
+
+    /// Sets the ChatGPT account id used by ChatGPT backend requests.
+    #[must_use]
+    pub fn with_chatgpt_account_id(mut self, chatgpt_account_id: impl Into<String>) -> Self {
+        let chatgpt_account_id = chatgpt_account_id.into();
+        if !chatgpt_account_id.trim().is_empty() {
+            self.chatgpt_account_id = Some(chatgpt_account_id);
+        }
+        self
+    }
+
     /// Returns the source that produced this bundle.
     #[must_use]
     pub fn source(&self) -> &str {
@@ -79,6 +97,7 @@ impl AccountCredentialBundle {
             access_token: self.access_token.expose_secret(),
             refresh_token: self.refresh_token.as_ref().map(SecretString::expose_secret),
             expires_unix_seconds: self.expires_unix_seconds,
+            chatgpt_account_id: self.chatgpt_account_id.as_deref(),
             source: &self.source,
         };
         serde_json::to_string(&payload)
@@ -108,6 +127,10 @@ impl AccountCredentialBundle {
             expires_unix_seconds: payload
                 .expires_unix_seconds
                 .or_else(|| access_token_exp_unix_seconds(&payload.access_token)),
+            chatgpt_account_id: payload
+                .chatgpt_account_id
+                .map(|account_id| account_id.trim().to_owned())
+                .filter(|account_id| !account_id.is_empty()),
             access_token: SecretString::new(payload.access_token),
             refresh_token: payload
                 .refresh_token
@@ -128,6 +151,7 @@ impl fmt::Debug for AccountCredentialBundle {
                 &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
             )
             .field("expires_unix_seconds", &self.expires_unix_seconds)
+            .field("chatgpt_account_id", &self.chatgpt_account_id)
             .field("source", &self.source)
             .finish()
     }
@@ -139,6 +163,7 @@ struct AccountCredentialBundlePayload<'a> {
     access_token: &'a str,
     refresh_token: Option<&'a str>,
     expires_unix_seconds: Option<u64>,
+    chatgpt_account_id: Option<&'a str>,
     source: &'a str,
 }
 
@@ -148,6 +173,7 @@ struct OwnedAccountCredentialBundlePayload {
     access_token: String,
     refresh_token: Option<String>,
     expires_unix_seconds: Option<u64>,
+    chatgpt_account_id: Option<String>,
     source: String,
 }
 

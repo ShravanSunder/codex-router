@@ -178,11 +178,11 @@ where
     }
 }
 
-/// Renders a shell assignment for the local router token.
+/// Renders a shell export for the local router token.
 #[must_use]
 pub fn export_token_assignment(env_var: &str, token: &str, shell: Shell) -> String {
     match shell {
-        Shell::Posix => format!("{env_var}={}\n", quote_posix(token)),
+        Shell::Posix => format!("export {env_var}={}\n", quote_posix(token)),
     }
 }
 

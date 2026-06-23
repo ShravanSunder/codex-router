@@ -78,6 +78,7 @@ impl HeaderCollection {
 pub fn sanitize_headers_for_upstream(
     headers: Vec<Header>,
     upstream_auth_token: SecretString,
+    chatgpt_account_id: Option<&str>,
 ) -> HeaderCollection {
     let mut sanitized = headers
         .into_iter()
@@ -87,16 +88,26 @@ pub fn sanitize_headers_for_upstream(
         "authorization",
         format!("Bearer {}", upstream_auth_token.expose_secret()),
     ));
+    if let Some(chatgpt_account_id) = chatgpt_account_id {
+        sanitized.push(Header::new("chatgpt-account-id", chatgpt_account_id));
+    }
 
     HeaderCollection::new(sanitized)
 }
 
 fn should_strip_header(name: &str) -> bool {
+    if name.starts_with("sec-websocket-") {
+        return true;
+    }
+
     matches!(
         name,
         "authorization"
+            | "chatgpt-account-id"
             | "connection"
+            | "content-length"
             | "cookie"
+            | "host"
             | "keep-alive"
             | "proxy-authenticate"
             | "proxy-authorization"

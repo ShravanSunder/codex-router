@@ -136,7 +136,7 @@ pub enum WebSocketCloseReason {
     UnsupportedFirstFrameType,
     /// First frame text was not valid JSON.
     MalformedFirstFrame,
-    /// First frame was not `response.create`.
+    /// First frame was not a Responses WebSocket create request.
     UnexpectedFirstFrame,
     /// First frame did not arrive before the local preselection deadline.
     FirstFrameTimeout,
@@ -168,11 +168,14 @@ impl WebSocketProtocolRouter {
         }
         let payload = serde_json::from_slice::<serde_json::Value>(first_frame_bytes)
             .map_err(|_| WebSocketCloseReason::MalformedFirstFrame)?;
-        let frame_type = payload
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(WebSocketCloseReason::UnexpectedFirstFrame)?;
-        if frame_type != "response.create" {
+        if let Some(frame_type) = payload.get("type").and_then(serde_json::Value::as_str) {
+            if frame_type != "response.create" {
+                return Err(WebSocketCloseReason::UnexpectedFirstFrame);
+            }
+            return Ok(first_frame_bytes);
+        }
+
+        if !is_direct_response_create_payload(&payload) {
             return Err(WebSocketCloseReason::UnexpectedFirstFrame);
         }
 
@@ -199,6 +202,18 @@ impl WebSocketProtocolRouter {
             first_frame,
         })
     }
+}
+
+fn is_direct_response_create_payload(payload: &serde_json::Value) -> bool {
+    payload
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|model| !model.is_empty())
+        && payload
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .is_some()
+        && payload.get("stream").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 /// WebSocket router that composes local auth, account selection, and first-frame routing.

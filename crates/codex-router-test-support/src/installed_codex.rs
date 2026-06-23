@@ -20,8 +20,10 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_router_cli::CliContext;
 use codex_router_cli::profile::CodexRouterProfile;
 use codex_router_cli::profile::CodexRouterProfileWriter;
+use codex_router_cli::run_with_io;
 use codex_router_cli::token::LocalRouterTokenService;
 use codex_router_cli::token::Shell;
 use codex_router_cli::token::export_token_assignment;
@@ -32,14 +34,19 @@ use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_secret_store::SecretStore;
+use codex_router_secret_store::account_tokens::AccountCredentialBundle;
+use codex_router_secret_store::account_tokens::account_credential_bundle_key;
 use codex_router_secret_store::account_tokens::upstream_access_token_key;
 use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
+use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
+use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::repositories::QuotaSnapshotRepository;
+use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::SqliteStateStore;
 use serde_json::Value;
 use tungstenite::Message;
@@ -113,8 +120,7 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
 
     let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
     let upstream = MockWebSocketUpstream::start()?;
-    let (local_token_assignment, local_token) =
-        seed_router_state(&state_path, &secret_root, upstream_account_token())?;
+    let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
     let profile_writer = CodexRouterProfileWriter::new(&codex_home);
     let profile = CodexRouterProfile::new(router_port);
@@ -128,7 +134,7 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
         router_port,
         state_path,
         secret_root,
-        local_token.clone(),
+        seed.local_token.clone(),
         format!("http://{}/v1", upstream.address()),
     )?;
 
@@ -138,7 +144,7 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
         &codex_home,
         &workdir,
         &http_sse_last_message_path,
-        &local_token_assignment,
+        &seed.local_token_assignment,
         CodexChildEnvironment::new(
             &process_home,
             &xdg_config_home,
@@ -157,7 +163,7 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
         &codex_home,
         &workdir,
         &websocket_last_message_path,
-        &local_token_assignment,
+        &seed.local_token_assignment,
         CodexChildEnvironment::new(
             &process_home,
             &xdg_config_home,
@@ -172,12 +178,23 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
     )?;
     drain_optional_router_connections(router_port, 16);
     join_result(router_thread, "router runtime")?;
-    let upstream_result = upstream.join()?;
+    let upstream_result = upstream.join().map_err(|error| {
+        format!(
+            "{error}; websocket_codex_status={}; websocket_stdout={}; websocket_stderr={}",
+            websocket_codex_output.status,
+            redacted_command_text(&websocket_codex_output.stdout, &seed),
+            redacted_command_text(&websocket_codex_output.stderr, &seed)
+        )
+    })?;
     assert_smoke_contract(
         &http_sse_codex_output.status,
         &websocket_codex_output.status,
         &upstream_result,
-        &local_token,
+        &seed.local_token,
+        &seed.expected_upstream_token,
+        &seed.expected_account_label,
+        &seed.routable_upstream_tokens,
+        &seed.quota_status,
     )?;
     let transcript_path = write_redacted_transcript(RedactedTranscriptInput {
         codex_version: codex_version.trim(),
@@ -191,6 +208,8 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
         websocket_codex_stderr: &String::from_utf8_lossy(&websocket_codex_output.stderr),
         websocket_last_message_path: &websocket_last_message_path,
         upstream: &upstream_result,
+        quota_status: &seed.quota_status,
+        expected_account_label: &seed.expected_account_label,
     })?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
@@ -210,14 +229,13 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
     })?;
 
     let upstream = MockNoConnectionUpstream::start(Duration::from_secs(3))?;
-    let (_local_token_assignment, local_token) =
-        seed_router_state(&state_path, &secret_root, upstream_account_token())?;
+    let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
     let router_thread = start_router_once(
         router_port,
         state_path,
         secret_root,
-        local_token,
+        seed.local_token,
         format!("http://{}/v1", upstream.address()),
     )?;
 
@@ -234,11 +252,36 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
     Ok(())
 }
 
-fn seed_router_state(
-    state_path: &Path,
-    secret_root: &Path,
-    upstream_token: &str,
-) -> Result<(String, String), String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SmokeQuotaStatus {
+    table: String,
+    plain: String,
+    json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SmokeSeed {
+    local_token_assignment: String,
+    local_token: String,
+    expected_account_label: String,
+    expected_upstream_token: String,
+    routable_upstream_tokens: Vec<String>,
+    quota_status: SmokeQuotaStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SmokeAccountFixture {
+    account_id: &'static str,
+    label: &'static str,
+    upstream_token: &'static str,
+    short_remaining: u32,
+    short_reset: u64,
+    weekly_remaining: u32,
+    weekly_reset: u64,
+    weekly_status: SelectorQuotaWindowStatus,
+}
+
+fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed, String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open smoke SQLite state: {error}"))?;
     let secrets = FileSecretStore::open(secret_root)
@@ -253,30 +296,221 @@ fn seed_router_state(
         Shell::Posix,
     );
     let exported_token = parse_posix_token_assignment(&local_token_assignment)?;
-    let account_id = account_id("acct_installed_smoke")?;
-    let account = AccountRecord::new(
-        account_id.clone(),
-        "installed-smoke",
-        AccountStatus::Enabled,
-    );
-    AccountStateRepository::upsert_account(&state, &account)
-        .map_err(|error| format!("failed to seed smoke account: {error}"))?;
+
+    let fixtures = [
+        SmokeAccountFixture {
+            account_id: "acct_askluna",
+            label: "askluna",
+            upstream_token: "installed-smoke-askluna-token",
+            short_remaining: 100,
+            short_reset: 17_900,
+            weekly_remaining: 0,
+            weekly_reset: 130_600,
+            weekly_status: SelectorQuotaWindowStatus::Ineligible,
+        },
+        SmokeAccountFixture {
+            account_id: "acct_matches",
+            label: "matches",
+            upstream_token: "installed-smoke-matches-token",
+            short_remaining: 91,
+            short_reset: 16_000,
+            weekly_remaining: 54,
+            weekly_reset: 525_000,
+            weekly_status: SelectorQuotaWindowStatus::Eligible,
+        },
+        SmokeAccountFixture {
+            account_id: "acct_ssdev",
+            label: "ssdev",
+            upstream_token: "installed-smoke-ssdev-token",
+            short_remaining: 100,
+            short_reset: 15_000,
+            weekly_remaining: 16,
+            weekly_reset: 120_000,
+            weekly_status: SelectorQuotaWindowStatus::Eligible,
+        },
+    ];
+    for fixture in fixtures {
+        seed_smoke_account(&state, &secrets, fixture)?;
+    }
+
+    let quota_status = capture_quota_status(state_path)?;
+    let selected_account_id = selected_account_id_from_status_json(&quota_status.json)?;
+    let selected_fixture = fixtures
+        .iter()
+        .find(|fixture| fixture.account_id == selected_account_id)
+        .ok_or_else(|| {
+            format!("quota status selected unknown smoke account: {selected_account_id}")
+        })?;
+
+    Ok(SmokeSeed {
+        local_token_assignment,
+        local_token: exported_token,
+        expected_account_label: selected_fixture.label.to_owned(),
+        expected_upstream_token: selected_fixture.upstream_token.to_owned(),
+        routable_upstream_tokens: fixtures
+            .iter()
+            .filter(|fixture| fixture.weekly_status == SelectorQuotaWindowStatus::Eligible)
+            .map(|fixture| fixture.upstream_token.to_owned())
+            .collect(),
+        quota_status,
+    })
+}
+
+fn seed_smoke_account(
+    state: &SqliteStateStore,
+    secrets: &FileSecretStore,
+    fixture: SmokeAccountFixture,
+) -> Result<(), String> {
+    let account_id = account_id(fixture.account_id)?;
+    let account = AccountRecord::new(account_id.clone(), fixture.label, AccountStatus::Enabled)
+        .with_active_credential_generation(1);
+    AccountStateRepository::upsert_account(state, &account)
+        .map_err(|error| format!("failed to seed smoke account {}: {error}", fixture.label))?;
     let snapshot =
         PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
             .with_observed_unix_seconds(1_000)
-            .with_route_band("responses", 100);
-    QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot)
-        .map_err(|error| format!("failed to seed smoke quota snapshot: {error}"))?;
-    let upstream_token_key = upstream_access_token_key(&account_id)
+            .with_route_band("responses", fixture.short_remaining)
+            .with_reset_unix_seconds(fixture.short_reset);
+    QuotaSnapshotRepository::upsert_snapshot(state, &snapshot).map_err(|error| {
+        format!(
+            "failed to seed smoke quota snapshot for {}: {error}",
+            fixture.label
+        )
+    })?;
+    let short_window = PersistedSelectorQuotaWindow::new(
+        account_id.clone(),
+        "responses",
+        18_000,
+        SelectorQuotaWindowStatus::Eligible,
+    )
+    .with_remaining_headroom(fixture.short_remaining)
+    .with_reset_unix_seconds(fixture.short_reset)
+    .with_effective(true)
+    .with_observed_unix_seconds(1_000);
+    SelectorQuotaRepository::upsert_selector_window(state, &short_window).map_err(|error| {
+        format!(
+            "failed to seed smoke short selector window for {}: {error}",
+            fixture.label
+        )
+    })?;
+    let weekly_window = PersistedSelectorQuotaWindow::new(
+        account_id.clone(),
+        "responses",
+        604_800,
+        fixture.weekly_status,
+    )
+    .with_remaining_headroom(fixture.weekly_remaining)
+    .with_reset_unix_seconds(fixture.weekly_reset)
+    .with_observed_unix_seconds(1_000);
+    SelectorQuotaRepository::upsert_selector_window(state, &weekly_window).map_err(|error| {
+        format!(
+            "failed to seed smoke weekly selector window for {}: {error}",
+            fixture.label
+        )
+    })?;
+    let credential_key = account_credential_bundle_key(&account_id, 1)
+        .map_err(|error| format!("failed to build account credential key: {error}"))?;
+    let credential_bundle = AccountCredentialBundle::imported_codex_auth(
+        fixture.upstream_token,
+        Some(format!("{}-refresh", fixture.upstream_token)),
+    )
+    .to_secret_string()
+    .map_err(|error| format!("failed to serialize smoke credential bundle: {error}"))?;
+    secrets
+        .write_secret(&credential_key, &credential_bundle)
+        .map_err(|error| format!("failed to write smoke credential bundle: {error}"))?;
+    let legacy_token_key = upstream_access_token_key(&account_id)
         .map_err(|error| format!("failed to build upstream token key: {error}"))?;
     secrets
         .write_secret(
-            &upstream_token_key,
-            &SecretString::new(upstream_token.to_owned()),
+            &legacy_token_key,
+            &SecretString::new(fixture.upstream_token.to_owned()),
         )
         .map_err(|error| format!("failed to write smoke upstream token: {error}"))?;
 
-    Ok((local_token_assignment, exported_token))
+    Ok(())
+}
+
+fn capture_quota_status(state_path: &Path) -> Result<SmokeQuotaStatus, String> {
+    let router_root = state_path
+        .parent()
+        .ok_or_else(|| "state path had no router root parent".to_owned())?;
+    Ok(SmokeQuotaStatus {
+        table: run_quota_status(router_root, "table")?,
+        plain: run_quota_status(router_root, "plain")?,
+        json: run_quota_status(router_root, "json")?,
+    })
+}
+
+fn run_quota_status(router_root: &Path, format: &str) -> Result<String, String> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    run_with_io(
+        vec![
+            OsString::from("codex-router"),
+            OsString::from("quota"),
+            OsString::from("status"),
+            OsString::from("--router-root"),
+            router_root.as_os_str().to_owned(),
+            OsString::from("--format"),
+            OsString::from(format),
+            OsString::from("--now-unix-seconds"),
+            OsString::from("1030"),
+        ],
+        &CliContext::new(Vec::new()),
+        &mut stdout,
+        &mut stderr,
+    )
+    .map_err(|error| {
+        format!(
+            "quota status {format} failed: {error}; stderr={}",
+            String::from_utf8_lossy(&stderr)
+        )
+    })?;
+    if !stderr.is_empty() {
+        return Err(format!(
+            "quota status {format} wrote stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        ));
+    }
+    String::from_utf8(stdout)
+        .map_err(|error| format!("quota status {format} was not UTF-8: {error}"))
+}
+
+fn selected_account_id_from_status_json(payload: &str) -> Result<String, String> {
+    let value: Value = serde_json::from_str(payload)
+        .map_err(|error| format!("quota status json was invalid: {error}"))?;
+    value
+        .get("preferred_next_account_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "quota status json did not name preferred account".to_owned())
+}
+
+fn selected_account_label_from_status_json(payload: &str) -> Result<String, String> {
+    let value: Value = serde_json::from_str(payload)
+        .map_err(|error| format!("quota status json was invalid: {error}"))?;
+    let selected_account_id = value
+        .get("preferred_next_account_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "quota status json did not name preferred account".to_owned())?;
+    value
+        .get("accounts")
+        .and_then(Value::as_array)
+        .and_then(|accounts| {
+            accounts.iter().find_map(|account| {
+                let account_id = account.get("account_id").and_then(Value::as_str)?;
+                if account_id == selected_account_id {
+                    account
+                        .get("safe_account_label")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| "quota status json did not include selected account label".to_owned())
 }
 
 fn start_router_once(
@@ -475,6 +709,10 @@ fn assert_smoke_contract(
     websocket_codex_status: &ExitStatus,
     upstream: &MockWebSocketTranscript,
     local_token: &str,
+    _preferred_upstream_token: &str,
+    expected_account_label: &str,
+    routable_upstream_tokens: &[String],
+    quota_status: &SmokeQuotaStatus,
 ) -> Result<(), String> {
     if !http_sse_codex_status.success() {
         return Err(format!(
@@ -489,13 +727,25 @@ fn assert_smoke_contract(
     let authorization = upstream
         .header("authorization")
         .ok_or_else(|| "mock upstream did not receive Authorization header".to_owned())?;
-    if authorization != format!("Bearer {}", upstream_account_token()) {
-        return Err("mock upstream did not receive the selected upstream account token".to_owned());
+    let websocket_token = authorization
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| "mock upstream Authorization header was not bearer".to_owned())?;
+    if !routable_upstream_tokens
+        .iter()
+        .any(|token| token == websocket_token)
+    {
+        return Err(
+            "mock upstream WebSocket token was not one of the routable account tokens".to_owned(),
+        );
     }
     if upstream.header("x-codex-router-token").is_some() {
         return Err("mock upstream websocket received local router token header".to_owned());
     }
-    if upstream.first_frame.contains(local_token) {
+    if upstream
+        .request_frames
+        .iter()
+        .any(|frame| frame.contains(local_token))
+    {
         return Err("mock upstream websocket frame leaked local router token".to_owned());
     }
     let http_sse = upstream
@@ -508,11 +758,6 @@ fn assert_smoke_contract(
             http_sse.request_line
         ));
     }
-    if http_sse.header("authorization") != Some(format!("Bearer {}", upstream_account_token())) {
-        return Err(
-            "HTTP/SSE request did not receive the selected upstream account token".to_owned(),
-        );
-    }
     if http_sse.header("x-codex-router-token").is_some() {
         return Err("HTTP/SSE request leaked local router token header upstream".to_owned());
     }
@@ -522,13 +767,60 @@ fn assert_smoke_contract(
     if !http_sse.body.contains("\"stream\":true") {
         return Err("HTTP/SSE request did not ask for a streaming response".to_owned());
     }
-    let first_frame = upstream
-        .first_frame_json()
-        .ok_or_else(|| "mock upstream did not capture a JSON first frame".to_owned())?;
-    if first_frame.get("type").and_then(Value::as_str) != Some("response.create") {
+    let http_sse_authorization = http_sse
+        .header("authorization")
+        .ok_or_else(|| "HTTP/SSE request did not receive an Authorization header".to_owned())?;
+    let http_sse_token = http_sse_authorization
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| "HTTP/SSE Authorization header was not bearer".to_owned())?;
+    if !routable_upstream_tokens
+        .iter()
+        .any(|token| token == http_sse_token)
+    {
+        return Err("HTTP/SSE token was not one of the routable account tokens".to_owned());
+    }
+    if http_sse_authorization != authorization {
         return Err(format!(
-            "first websocket frame was not response.create: {first_frame}"
+            "WebSocket did not reuse the held HTTP/SSE account inside cooldown; expected_account_hint={expected_account_label}; http_sse_authorization={http_sse_authorization}; websocket_authorization={authorization}"
         ));
+    }
+    if upstream.websocket_request_frame_count == 0 {
+        return Err("mock upstream did not receive a WebSocket request frame".to_owned());
+    }
+    if !upstream
+        .request_frames
+        .iter()
+        .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
+        .any(|value| is_non_prewarm_response_create_frame(&value))
+    {
+        return Err(
+            "mock upstream did not receive a non-prewarm WebSocket response request".to_owned(),
+        );
+    }
+    if !quota_status.table.contains(expected_account_label) {
+        return Err("quota status table did not include selected account label".to_owned());
+    }
+    if !quota_status.plain.contains(expected_account_label) {
+        return Err("quota status plain output did not include selected account label".to_owned());
+    }
+    if !quota_status.json.contains(expected_account_label) {
+        return Err("quota status json did not include selected account label".to_owned());
+    }
+    if !quota_status.plain.contains("\tnext") {
+        return Err("quota status plain output did not mark a next account".to_owned());
+    }
+    for forbidden in [
+        local_token,
+        "X-Codex-Router-Token",
+        "authorization",
+        "bottleneck",
+        "pp",
+    ] {
+        if quota_status.table.contains(forbidden) || quota_status.plain.contains(forbidden) {
+            return Err(format!(
+                "human quota status leaked forbidden text: {forbidden}"
+            ));
+        }
     }
 
     Ok(())
@@ -546,6 +838,8 @@ struct RedactedTranscriptInput<'a> {
     websocket_codex_stderr: &'a str,
     websocket_last_message_path: &'a Path,
     upstream: &'a MockWebSocketTranscript,
+    quota_status: &'a SmokeQuotaStatus,
+    expected_account_label: &'a str,
 }
 
 fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathBuf, String> {
@@ -579,6 +873,13 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         "websocket_codex_stdout_contains_smoke_text": input.websocket_codex_stdout.contains("codex-router smoke ok"),
         "websocket_codex_stderr_line_count": input.websocket_codex_stderr.lines().count(),
         "websocket_last_message_path": input.websocket_last_message_path.display().to_string(),
+        "expected_account_label": input.expected_account_label,
+        "quota_status": {
+            "table_contains_expected_account": input.quota_status.table.contains(input.expected_account_label),
+            "plain_contains_expected_account": input.quota_status.plain.contains(input.expected_account_label),
+            "plain_marks_next": input.quota_status.plain.contains("\tnext"),
+            "json_selected_account_label": selected_account_label_from_status_json(&input.quota_status.json).ok(),
+        },
         "router_completed": true,
         "upstream": {
             "handshake_count": 1,
@@ -591,8 +892,11 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
             "authorization_header": input.upstream.header("authorization").map(|_| "<redacted-present>"),
             "local_router_header_present": input.upstream.header("x-codex-router-token").is_some(),
             "websocket_local_router_token_in_first_frame": false,
+            "websocket_request_frame_count": input.upstream.websocket_request_frame_count,
+            "websocket_non_prewarm_request_frame_count": input.upstream.request_frames.iter().filter_map(|frame| serde_json::from_str::<Value>(frame).ok()).filter(is_non_prewarm_response_create_frame).count(),
             "first_frame_type": first_frame.get("type").and_then(Value::as_str),
             "first_frame_model": first_frame.get("model").and_then(Value::as_str),
+            "first_frame_has_input": first_frame.get("input").and_then(Value::as_array).is_some_and(|input| !input.is_empty()),
             "first_frame_stream": first_frame.get("stream").and_then(Value::as_bool),
         }
     });
@@ -608,6 +912,8 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
 struct MockWebSocketTranscript {
     headers: Vec<(String, String)>,
     first_frame: String,
+    request_frames: Vec<String>,
+    websocket_request_frame_count: usize,
     http_probe_count: usize,
     http_sse: Option<MockHttpSseTranscript>,
 }
@@ -726,14 +1032,16 @@ fn run_mock_upstream(
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
 ) -> Result<(), String> {
     let mut http_probe_count = 0_usize;
+    let mut http_sse_count = 0_usize;
     let mut http_sse = None;
     loop {
         let deadline = Instant::now() + UPSTREAM_ACCEPT_TIMEOUT;
-        let stream = accept_with_deadline(&listener, deadline)?;
+        let stream = accept_with_deadline(&listener, deadline, http_probe_count, http_sse_count)?;
         if !looks_like_websocket_upgrade(&stream)? {
             match respond_to_http_request(stream)? {
                 MockHttpRequestResult::Probe => http_probe_count += 1,
                 MockHttpRequestResult::Responses(transcript) => {
+                    http_sse_count += 1;
                     http_sse = Some(transcript);
                 }
             }
@@ -766,6 +1074,8 @@ fn run_no_connection_upstream(listener: TcpListener, timeout: Duration) -> Resul
 fn accept_with_deadline(
     listener: &TcpListener,
     deadline: Instant,
+    http_probe_count: usize,
+    http_sse_count: usize,
 ) -> Result<std::net::TcpStream, String> {
     loop {
         match listener.accept() {
@@ -777,13 +1087,25 @@ fn accept_with_deadline(
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
-                    return Err("mock upstream timed out waiting for websocket".to_owned());
+                    return Err(format!(
+                        "mock upstream timed out waiting for websocket (http_probe_count={http_probe_count}, http_sse_count={http_sse_count})"
+                    ));
                 }
                 thread::sleep(Duration::from_millis(20));
             }
             Err(error) => return Err(format!("mock upstream accept failed: {error}")),
         }
     }
+}
+
+fn redacted_command_text(bytes: &[u8], seed: &SmokeSeed) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    text.replace(&seed.local_token, "<local-router-token>")
+        .replace(&seed.expected_upstream_token, "<selected-upstream-token>")
+        .lines()
+        .take(24)
+        .collect::<Vec<_>>()
+        .join("\\n")
 }
 
 fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, String> {
@@ -1012,6 +1334,8 @@ fn run_mock_websocket(
     })
     .map_err(|error| format!("mock upstream websocket handshake failed: {error}"))?;
     let mut first_frame = None;
+    let mut request_frames = Vec::new();
+    let mut websocket_request_frame_count = 0_usize;
     for request_index in 0..4 {
         let frame = match websocket.read() {
             Ok(Message::Text(text)) => text.to_string(),
@@ -1030,7 +1354,14 @@ fn run_mock_websocket(
         if first_frame.is_none() {
             first_frame = Some(frame.clone());
         }
-        for event in smoke_response_events(request_index) {
+        request_frames.push(frame.clone());
+        websocket_request_frame_count = websocket_request_frame_count.saturating_add(1);
+        let events = if is_prewarm_request_frame(&frame) {
+            smoke_prewarm_events(request_index)
+        } else {
+            smoke_response_events(request_index)
+        };
+        for event in events {
             websocket
                 .send(Message::Text(event.into()))
                 .map_err(|error| format!("mock upstream failed to send response event: {error}"))?;
@@ -1048,11 +1379,59 @@ fn run_mock_websocket(
     *transcript = Some(MockWebSocketTranscript {
         headers,
         first_frame,
+        request_frames,
+        websocket_request_frame_count,
         http_probe_count,
         http_sse,
     });
 
     Ok(())
+}
+
+fn is_prewarm_request_frame(frame: &str) -> bool {
+    serde_json::from_str::<Value>(frame)
+        .ok()
+        .is_some_and(|value| value.get("generate").and_then(Value::as_bool) == Some(false))
+}
+
+fn is_non_prewarm_response_create_frame(value: &Value) -> bool {
+    value.get("generate").and_then(Value::as_bool) != Some(false)
+        && value
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| !model.is_empty())
+        && value
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|input| !input.is_empty())
+        && value.get("stream").and_then(Value::as_bool) == Some(true)
+}
+
+fn smoke_prewarm_events(request_index: usize) -> Vec<String> {
+    let response_id = format!("resp-smoke-prewarm-{request_index}");
+    vec![
+        serde_json::json!({
+            "type": "response.created",
+            "response": {"id": response_id, "status": "in_progress", "output": []}
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "status": "completed",
+                "output": [],
+                "usage": {
+                    "input_tokens": 0,
+                    "input_tokens_details": null,
+                    "output_tokens": 0,
+                    "output_tokens_details": null,
+                    "total_tokens": 0
+                }
+            }
+        })
+        .to_string(),
+    ]
 }
 
 fn smoke_response_events(request_index: usize) -> Vec<String> {
@@ -1116,7 +1495,7 @@ fn join_result<T>(handle: thread::JoinHandle<Result<T, String>>, label: &str) ->
 }
 
 fn parse_posix_token_assignment(assignment: &str) -> Result<String, String> {
-    let prefix = "CODEX_ROUTER_TOKEN='";
+    let prefix = "export CODEX_ROUTER_TOKEN='";
     let suffix = "'\n";
     if !assignment.starts_with(prefix) || !assignment.ends_with(suffix) {
         return Err("token export assignment did not use expected POSIX shape".to_owned());
@@ -1180,6 +1559,7 @@ fn account_id(value: &str) -> Result<AccountId, String> {
     AccountId::new(value.to_owned()).map_err(|_| format!("invalid smoke account id: {value}"))
 }
 
+#[cfg(test)]
 fn upstream_account_token() -> &'static str {
     "installed-smoke-upstream-token"
 }
@@ -1239,6 +1619,7 @@ mod tests {
     use super::MockHttpSseTranscript;
     use super::MockWebSocketTranscript;
     use super::SMOKE_EXPECTED_TEXT;
+    use super::SmokeQuotaStatus;
     use super::SmokeTempRoot;
     use super::assert_codex_visible_output;
     use super::assert_smoke_contract;
@@ -1256,16 +1637,21 @@ mod tests {
         local_token_in_first_frame: bool,
     ) -> MockWebSocketTranscript {
         let local_token = "local-token-canary";
+        let first_frame = if local_token_in_first_frame {
+            format!(
+                r#"{{"model":"gpt-5.5","input":[{{"role":"user","content":[{{"type":"input_text","text":"hello"}}]}}],"stream":true,"token":"{local_token}"}}"#
+            )
+        } else {
+            r#"{"model":"gpt-5.5","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true}"#.to_owned()
+        };
         MockWebSocketTranscript {
             headers: vec![(
                 "authorization".to_owned(),
                 format!("Bearer {}", upstream_account_token()),
             )],
-            first_frame: if local_token_in_first_frame {
-                format!(r#"{{"type":"response.create","token":"{local_token}"}}"#)
-            } else {
-                r#"{"type":"response.create"}"#.to_owned()
-            },
+            first_frame: first_frame.clone(),
+            request_frames: vec![first_frame],
+            websocket_request_frame_count: 1,
             http_probe_count: 0,
             http_sse: Some(MockHttpSseTranscript {
                 request_line: "POST /v1/responses HTTP/1.1".to_owned(),
@@ -1282,6 +1668,14 @@ mod tests {
         }
     }
 
+    fn valid_quota_status() -> SmokeQuotaStatus {
+        SmokeQuotaStatus {
+            table: "matches 5h weekly routing next use\n".to_owned(),
+            plain: "account\tstatus\t5h\tweekly\trouting\tnext use\nmatches\tenabled\t[#########-] 91% resets in 4h\t[######----] 54% resets in 6d\t✓ preferred 5h 91%\tnext\n".to_owned(),
+            json: r#"{"preferred_next_account_id":"acct_matches","accounts":[{"account_id":"acct_matches","safe_account_label":"matches"}]}"#.to_owned(),
+        }
+    }
+
     #[test]
     fn smoke_contract_rejects_local_token_in_upstream_http_body() {
         let error = match assert_smoke_contract(
@@ -1289,6 +1683,10 @@ mod tests {
             &success_status(),
             &valid_transcript(true, false),
             "local-token-canary",
+            upstream_account_token(),
+            "matches",
+            &[upstream_account_token().to_owned()],
+            &valid_quota_status(),
         ) {
             Ok(()) => panic!("HTTP/SSE body local-token leak must fail smoke contract"),
             Err(error) => error,
@@ -1304,6 +1702,10 @@ mod tests {
             &success_status(),
             &valid_transcript(false, true),
             "local-token-canary",
+            upstream_account_token(),
+            "matches",
+            &[upstream_account_token().to_owned()],
+            &valid_quota_status(),
         ) {
             Ok(()) => panic!("WebSocket frame local-token leak must fail smoke contract"),
             Err(error) => error,

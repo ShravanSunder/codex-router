@@ -2504,8 +2504,8 @@ mod tests {
                     Err(error) => panic!("local websocket request should build: {error}"),
                 };
             request.headers_mut().insert(
-                "X-Codex-Router-Token",
-                HeaderValue::from_static("current-token"),
+                "Authorization",
+                HeaderValue::from_static("Bearer current-token"),
             );
             let (mut client, _response) = match connect(request) {
                 Ok(connection) => connection,
@@ -3794,6 +3794,43 @@ mod tests {
     }
 
     #[test]
+    fn websocket_first_direct_response_create_payload_selects_and_forwards_unchanged() {
+        let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let frame = WebSocketFrame::Text(
+            br#"{"model":"gpt-5.5","input":[],"stream":true,"unknown_codex_field":{"kept":true}}"#
+                .to_vec(),
+        );
+
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("X-Codex-Router-Token", "local-token"))
+                .with_header(Header::new("Authorization", "Bearer wrong")),
+            frame.clone(),
+            SecretString::new("selected-upstream-token"),
+            Some("chatgpt-account-id-canary"),
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("valid direct first frame should route: {error:?}"),
+        };
+
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            headers,
+            first_frame,
+            ..
+        } = decision;
+        assert_eq!(first_frame, frame);
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer selected-upstream-token"]
+        );
+        assert_eq!(
+            headers.value("chatgpt-account-id"),
+            Some("chatgpt-account-id-canary")
+        );
+        assert_eq!(headers.value("x-codex-router-token"), None);
+    }
+
+    #[test]
     fn authenticated_websocket_router_selects_after_local_auth_and_first_frame() {
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
         let selector = RecordingSelector::new();
@@ -4146,6 +4183,17 @@ mod tests {
                 .route_first_frame(
                     WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Text(br#"{"type":"not.response.create"}"#.to_vec()),
+                    SecretString::new("selected-upstream-token"),
+                    None,
+                )
+                .err(),
+            Some(WebSocketCloseReason::UnexpectedFirstFrame)
+        );
+        assert_eq!(
+            router
+                .route_first_frame(
+                    WebSocketHandshakeRequest::new(),
+                    WebSocketFrame::Text(br#"{}"#.to_vec()),
                     SecretString::new("selected-upstream-token"),
                     None,
                 )
