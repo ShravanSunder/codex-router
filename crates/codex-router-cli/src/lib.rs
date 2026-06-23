@@ -48,6 +48,7 @@ use token::export_token_assignment;
 
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
+const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 
 /// Runs the process CLI.
 pub fn run() {
@@ -192,6 +193,30 @@ where
 
     stderr.flush().map_err(CliError::Stderr)?;
     Ok(())
+}
+
+pub(crate) fn router_root_or_default(router_root: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    match router_root {
+        Some(router_root) => Ok(router_root),
+        None => default_router_root(),
+    }
+}
+
+pub(crate) fn router_secret_root_or_default(
+    router_root: Option<PathBuf>,
+) -> Result<PathBuf, CliError> {
+    match router_root {
+        Some(router_root) => Ok(router_root),
+        None => Ok(default_router_root()?.join("secrets")),
+    }
+}
+
+fn default_router_root() -> Result<PathBuf, CliError> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(CliError::HomeDirectoryUnavailable)?;
+    Ok(home.join(DEFAULT_ROUTER_ROOT_DIR))
 }
 
 fn write_profile_preview(
@@ -408,15 +433,16 @@ impl ServeCommand {
             .listen_host
             .unwrap_or_else(|| "127.0.0.1".to_owned());
         let port = options.port.unwrap_or(DEFAULT_PROFILE_PORT);
-        let state_db = options.state_db.ok_or(CliError::MissingOption {
-            option: "--state-db",
-        })?;
-        let secret_root = options.secret_root.ok_or(CliError::MissingOption {
-            option: "--secret-root",
-        })?;
-        let upstream_base_url = options.upstream_base_url.ok_or(CliError::MissingOption {
-            option: "--upstream-base-url",
-        })?;
+        let router_root = default_router_root()?;
+        let state_db = options
+            .state_db
+            .unwrap_or_else(|| router_root.join("state.sqlite"));
+        let secret_root = options
+            .secret_root
+            .unwrap_or_else(|| router_root.join("secrets"));
+        let upstream_base_url = options
+            .upstream_base_url
+            .unwrap_or_else(|| DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned());
 
         Ok(Self {
             listen_host,
@@ -600,9 +626,7 @@ impl TokenRootOptions {
     }
 
     fn router_root(self) -> Result<PathBuf, CliError> {
-        self.router_root.ok_or_else(|| CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_secret_root_or_default(self.router_root)
     }
 }
 
@@ -641,9 +665,7 @@ impl TokenExportOptions {
     }
 
     fn router_root(self) -> Result<PathBuf, CliError> {
-        self.router_root.ok_or(CliError::MissingOption {
-            option: "--router-root",
-        })
+        router_secret_root_or_default(self.router_root)
     }
 }
 
@@ -874,6 +896,10 @@ pub enum CliError {
         option: &'static str,
     },
 
+    /// HOME is unavailable for the default router root.
+    #[error("HOME is not set; pass --router-root <path>")]
+    HomeDirectoryUnavailable,
+
     /// A required option value is missing.
     #[error("missing value for option: {option}")]
     MissingOptionValue {
@@ -969,16 +995,16 @@ const HELP_TEXT: &str = "\
 codex-router
 
 commands:
-  serve --state-db <path> --secret-root <path> --upstream-base-url <url> [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]
-  token init --router-root <path>
-  token rotate --router-root <path>
-  token export --router-root <path> [--shell posix]
-  account login --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-  account login --router-root <path> --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets
-  account import-codex-auth --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets
-  account list --router-root <path>
-  quota refresh --router-root <path> [--base-url <url>]
-  quota status --router-root <path> [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]
+  serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]
+  token init [--router-root <path>]
+  token rotate [--router-root <path>]
+  token export [--router-root <path>] [--shell posix]
+  account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
+  account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets
+  account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
+  account list [--router-root <path>]
+  quota refresh [--router-root <path>] [--base-url <url>]
+  quota status [--router-root <path>] [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -1044,8 +1070,10 @@ mod tests {
 
     use super::CliCommand;
     use super::CliContext;
+    use super::TokenCommand;
     use super::package_name;
     use super::run_with_io;
+    use crate::account::AccountCommand;
     use crate::account::AccountImportRequest;
     use crate::account::import_codex_auth_from_request;
     use crate::credential_runtime::CliCredentialResolver;
@@ -1057,6 +1085,7 @@ mod tests {
     use crate::profile::ProfileWriteError;
     use crate::quota::BackgroundQuotaRefreshRuntime;
     use crate::quota::HttpQuotaRefreshProvider;
+    use crate::quota::QuotaCommand;
     use crate::quota::QuotaRefreshProvider;
     use crate::quota::QuotaRefreshProviderRequest;
     use crate::quota::QuotaRefreshProviderResponse;
@@ -1093,6 +1122,21 @@ mod tests {
         fn path(&self) -> &Path {
             &self.path
         }
+    }
+
+    fn default_router_root_for_test() -> PathBuf {
+        let Some(home) = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        else {
+            panic!("HOME must be set for default router root tests");
+        };
+
+        home.join(".codex-router")
+    }
+
+    fn default_router_secret_root_for_test() -> PathBuf {
+        default_router_root_for_test().join("secrets")
     }
 
     impl Drop for TestRoot {
@@ -1161,11 +1205,11 @@ mod tests {
         );
 
         for expected_line in [
-            "serve --state-db <path> --secret-root <path> --upstream-base-url <url> [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]",
-            "account login --router-root <path> --label <label> --auth-json <path> --allow-plaintext-file-secrets",
-            "account login --router-root <path> --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
-            "quota refresh --router-root <path> [--base-url <url>]",
-            "quota status --router-root <path> [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]",
+            "serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]",
+            "account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets",
+            "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
+            "quota refresh [--router-root <path>] [--base-url <url>]",
+            "quota status [--router-root <path>] [--format table|plain] [--all-limits] [--now-unix-seconds <seconds>]",
             "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>]",
         ] {
             assert!(
@@ -3399,28 +3443,56 @@ exit 42
     }
 
     #[test]
-    fn token_export_command_requires_router_root() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let error = match run_with_io(
-            vec![
-                "codex-router".into(),
-                "token".into(),
-                "export".into(),
-                "--shell".into(),
-                "posix".into(),
-            ],
-            &CliContext::new(Vec::new()),
-            &mut stdout,
-            &mut stderr,
-        ) {
-            Ok(()) => panic!("token export without router root must fail"),
-            Err(error) => error,
+    fn token_export_command_defaults_to_home_router_secret_root() {
+        let command = match CliCommand::parse([
+            OsString::from("token"),
+            OsString::from("export"),
+            OsString::from("--shell"),
+            OsString::from("posix"),
+        ]) {
+            Ok(CliCommand::Token(command)) => command,
+            Ok(other) => panic!("token command should parse, got {other:?}"),
+            Err(error) => panic!("token command should parse: {error}"),
         };
 
-        assert_eq!(error.to_string(), "missing required option: --router-root");
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
+        let TokenCommand::Export { router_root, shell } = command else {
+            panic!("token export command should parse");
+        };
+        assert_eq!(router_root, default_router_secret_root_for_test());
+        assert_eq!(shell, Shell::Posix);
+    }
+
+    #[test]
+    fn account_list_command_defaults_to_home_router_root() {
+        let command = match CliCommand::parse([OsString::from("account"), OsString::from("list")]) {
+            Ok(CliCommand::Account(command)) => command,
+            Ok(other) => panic!("account command should parse, got {other:?}"),
+            Err(error) => panic!("account command should parse: {error}"),
+        };
+
+        let AccountCommand::List { router_root } = command else {
+            panic!("account list command should parse");
+        };
+        assert_eq!(router_root, default_router_root_for_test());
+    }
+
+    #[test]
+    fn quota_status_command_defaults_to_home_router_root() {
+        let command = match CliCommand::parse([
+            OsString::from("quota"),
+            OsString::from("status"),
+            OsString::from("--now-unix-seconds"),
+            OsString::from("0"),
+        ]) {
+            Ok(CliCommand::Quota(command)) => command,
+            Ok(other) => panic!("quota command should parse, got {other:?}"),
+            Err(error) => panic!("quota command should parse: {error}"),
+        };
+
+        let QuotaCommand::Status { router_root, .. } = command else {
+            panic!("quota status command should parse");
+        };
+        assert_eq!(router_root, default_router_root_for_test());
     }
 
     #[test]
@@ -3559,6 +3631,23 @@ exit 42
         assert!(command.now_unix_seconds >= before_parse);
         assert!(command.now_unix_seconds <= after_parse);
         assert_ne!(command.now_unix_seconds, 0);
+    }
+
+    #[test]
+    fn serve_command_defaults_to_home_router_paths_and_provider_upstream() {
+        let command = match CliCommand::parse([OsString::from("serve")]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(other) => panic!("serve command should parse, got {other:?}"),
+            Err(error) => panic!("serve command should parse: {error}"),
+        };
+
+        let router_root = default_router_root_for_test();
+        assert_eq!(command.state_db, router_root.join("state.sqlite"));
+        assert_eq!(command.secret_root, router_root.join("secrets"));
+        assert_eq!(
+            command.upstream_base_url,
+            codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL
+        );
     }
 
     #[test]
