@@ -234,3 +234,39 @@ Remaining T4 caveat:
 - `--all-limits` is still accepted for compatibility, but the product status
   view intentionally renders the user quota route band (`responses`) because
   the spec centers the concise account-use decision.
+
+## T5 Background Probe / Refresh Persistence Checkpoint
+
+Implemented:
+
+- successful quota refresh test fakes now persist a verified v1 quota pair:
+  5h and weekly windows, both with reset metadata.
+- refreshed complete selector windows promote later `quota status` output from
+  `needs probe` to a selectable `next` account.
+- partial provider data (only one expected v1 window) is persisted but remains
+  `needs probe` and not usable.
+- missing reset metadata is persisted but remains `needs probe` and not usable.
+- provider/auth failures continue to report redacted diagnostics without
+  promoting partial state.
+- background worker startup is explicitly tested to return without waiting for
+  a slow provider fetch.
+
+Proof:
+
+- `cargo fmt --all -- --check`
+  - result: pass
+- `cargo test -p codex-router-cli quota_refresh -- --nocapture`
+  - result: pass
+  - count: 14 passed, 0 failed
+- `cargo test -p codex-router-cli background_quota_refresh -- --nocapture`
+  - result: pass
+  - count: 4 passed, 0 failed
+- `cargo test -p codex-router-cli`
+  - result: pass
+  - count: 60 passed, 0 failed
+- `cargo test -p codex-router-selection`
+  - result: pass
+  - count: 20 passed, 0 failed
+- `cargo test -p codex-router-proxy`
+  - result: pass
+  - count: 70 passed, 0 failed

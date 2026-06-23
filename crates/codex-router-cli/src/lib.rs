@@ -1033,6 +1033,7 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+    use std::time::Instant;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
     use tungstenite::Message;
@@ -2630,7 +2631,7 @@ exit 42
 
         must_ok(refresh_quota_with_dependencies(
             &mut stdout,
-            router_root,
+            router_root.clone(),
             "https://chatgpt.com/backend-api".to_owned(),
             &resolver,
             &provider,
@@ -2784,6 +2785,57 @@ exit 42
         .unwrap_or_else(|| panic!("background refresh should persist snapshot"));
         assert_eq!(snapshot.remaining_headroom(), 58);
         assert!(snapshot.observed_unix_seconds() > 0);
+    }
+
+    #[test]
+    fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider() {
+        let test_root = TestRoot::new("background-quota-refresh-slow-provider");
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("acct_background_refresh_slow_provider");
+        let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "background-slow-access-token",
+                        Some("background-slow-refresh-token".to_owned()),
+                    )
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            &secret_root,
+            1_000,
+            NoopCredentialRefreshClient,
+        ));
+        let provider = SlowQuotaRefreshProvider::new(Duration::from_millis(500), 72);
+
+        let start = Instant::now();
+        let worker = start_background_quota_refresh_worker_with_dependencies(
+            state_path,
+            secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            resolver,
+            provider,
+            Duration::from_secs(0),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "background worker startup waited for provider: {elapsed:?}"
+        );
+        drop(worker);
     }
 
     #[test]
@@ -3088,7 +3140,7 @@ exit 42
 
         must_ok(refresh_quota_with_dependencies(
             &mut stdout,
-            router_root,
+            router_root.clone(),
             "https://chatgpt.com/backend-api".to_owned(),
             &resolver,
             &provider,
@@ -3156,7 +3208,7 @@ exit 42
 
         must_ok(refresh_quota_with_dependencies(
             &mut stdout,
-            router_root,
+            router_root.clone(),
             "https://chatgpt.com/backend-api".to_owned(),
             &resolver,
             &provider,
@@ -3169,13 +3221,185 @@ exit 42
         ));
         assert_eq!(selector_inputs.len(), 1);
         let windows = selector_inputs[0].windows();
-        assert_eq!(windows.len(), 1);
+        assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].limit_window_seconds(), 18_000);
         assert_eq!(windows[0].status(), SelectorQuotaWindowStatus::Eligible);
         assert_eq!(windows[0].remaining_headroom(), 37);
+        assert_eq!(windows[0].reset_unix_seconds(), Some(20_000));
         assert_eq!(windows[0].observed_unix_seconds(), 1_100);
         assert!(windows[0].effective());
+        assert_eq!(windows[1].limit_window_seconds(), 604_800);
+        assert_eq!(windows[1].status(), SelectorQuotaWindowStatus::Eligible);
+        assert_eq!(windows[1].remaining_headroom(), 50);
+        assert_eq!(windows[1].reset_unix_seconds(), Some(614_800));
+        assert_eq!(windows[1].observed_unix_seconds(), 1_100);
+        assert!(!windows[1].effective());
         assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
+
+        let status_output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "plain",
+                "--now-unix-seconds",
+                "1100",
+            ],
+            CliContext::new(Vec::new()),
+        );
+        assert!(status_output.stdout.contains("selector"));
+        assert!(status_output.stdout.contains("next"));
+        assert!(!status_output.stdout.contains("needs probe"));
+        assert!(status_output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_refresh_partial_window_response_remains_probe_required() {
+        let test_root = TestRoot::new("quota-refresh-partial-window");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account_id = account_id("acct_quota_partial");
+        let account = AccountRecord::new(account_id.clone(), "partial", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "partial-quota-token",
+                        Some("partial-quota-refresh-token".to_owned()),
+                    )
+                    .with_expires_unix_seconds(2_000)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let provider = StaticQuotaRefreshProvider::new(vec![QuotaRefreshProviderWindow {
+            limit_window_seconds: 18_000,
+            remaining_headroom: 80,
+            reset_unix_seconds: Some(20_000),
+            effective: true,
+        }]);
+        let mut stdout = Vec::new();
+
+        must_ok(refresh_quota_with_dependencies(
+            &mut stdout,
+            router_root.clone(),
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        ));
+
+        let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
+            &state,
+            "responses",
+        ));
+        assert_eq!(selector_inputs[0].windows().len(), 1);
+        let status_output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "plain",
+                "--now-unix-seconds",
+                "1100",
+            ],
+            CliContext::new(Vec::new()),
+        );
+        assert!(status_output.stdout.contains("partial"));
+        assert!(status_output.stdout.contains("needs probe"));
+        assert!(status_output.stdout.ends_with("\tno\n"));
+        assert!(!status_output.stdout.contains("partial-quota-token"));
+        assert!(status_output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_refresh_missing_reset_response_remains_probe_required() {
+        let test_root = TestRoot::new("quota-refresh-missing-reset");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account_id = account_id("acct_quota_missing_reset");
+        let account =
+            AccountRecord::new(account_id.clone(), "missing-reset", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &bundle_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "missing-reset-quota-token",
+                        Some("missing-reset-quota-refresh-token".to_owned()),
+                    )
+                    .with_expires_unix_seconds(2_000)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let provider = StaticQuotaRefreshProvider::new(vec![
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 18_000,
+                remaining_headroom: 80,
+                reset_unix_seconds: Some(20_000),
+                effective: true,
+            },
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 604_800,
+                remaining_headroom: 90,
+                reset_unix_seconds: None,
+                effective: false,
+            },
+        ]);
+        let mut stdout = Vec::new();
+
+        must_ok(refresh_quota_with_dependencies(
+            &mut stdout,
+            router_root.clone(),
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        ));
+
+        let status_output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "plain",
+                "--now-unix-seconds",
+                "1100",
+            ],
+            CliContext::new(Vec::new()),
+        );
+        assert!(status_output.stdout.contains("missing-reset"));
+        assert!(status_output.stdout.contains("needs probe"));
+        assert!(status_output.stdout.ends_with("\tno\n"));
+        assert!(!status_output.stdout.contains("missing-reset-quota-token"));
+        assert!(status_output.stderr.is_empty());
     }
 
     #[test]
@@ -4158,12 +4382,54 @@ exit 42
                 request.access_token().expose_secret().to_owned(),
             ));
             Ok(QuotaRefreshProviderResponse {
-                windows: vec![QuotaRefreshProviderWindow {
-                    limit_window_seconds: 18_000,
-                    remaining_headroom: self.remaining_headroom,
-                    reset_unix_seconds: None,
-                    effective: true,
-                }],
+                windows: verified_quota_windows(self.remaining_headroom),
+            })
+        }
+    }
+
+    struct StaticQuotaRefreshProvider {
+        windows: Vec<QuotaRefreshProviderWindow>,
+    }
+
+    impl StaticQuotaRefreshProvider {
+        fn new(windows: Vec<QuotaRefreshProviderWindow>) -> Self {
+            Self { windows }
+        }
+    }
+
+    impl QuotaRefreshProvider for StaticQuotaRefreshProvider {
+        fn fetch_quota(
+            &self,
+            _request: QuotaRefreshProviderRequest,
+        ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+            Ok(QuotaRefreshProviderResponse {
+                windows: self.windows.clone(),
+            })
+        }
+    }
+
+    struct SlowQuotaRefreshProvider {
+        delay: Duration,
+        remaining_headroom: u32,
+    }
+
+    impl SlowQuotaRefreshProvider {
+        fn new(delay: Duration, remaining_headroom: u32) -> Self {
+            Self {
+                delay,
+                remaining_headroom,
+            }
+        }
+    }
+
+    impl QuotaRefreshProvider for SlowQuotaRefreshProvider {
+        fn fetch_quota(
+            &self,
+            _request: QuotaRefreshProviderRequest,
+        ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+            thread::sleep(self.delay);
+            Ok(QuotaRefreshProviderResponse {
+                windows: verified_quota_windows(self.remaining_headroom),
             })
         }
     }
@@ -4191,12 +4457,7 @@ exit 42
                 panic!("background refresh signal should send: {error}");
             }
             Ok(QuotaRefreshProviderResponse {
-                windows: vec![QuotaRefreshProviderWindow {
-                    limit_window_seconds: 18_000,
-                    remaining_headroom: self.remaining_headroom,
-                    reset_unix_seconds: None,
-                    effective: true,
-                }],
+                windows: verified_quota_windows(self.remaining_headroom),
             })
         }
     }
@@ -4225,14 +4486,26 @@ exit 42
             }
 
             Ok(QuotaRefreshProviderResponse {
-                windows: vec![QuotaRefreshProviderWindow {
-                    limit_window_seconds: 18_000,
-                    remaining_headroom: self.remaining_headroom,
-                    reset_unix_seconds: None,
-                    effective: true,
-                }],
+                windows: verified_quota_windows(self.remaining_headroom),
             })
         }
+    }
+
+    fn verified_quota_windows(remaining_headroom: u32) -> Vec<QuotaRefreshProviderWindow> {
+        vec![
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 18_000,
+                remaining_headroom,
+                reset_unix_seconds: Some(20_000),
+                effective: true,
+            },
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 604_800,
+                remaining_headroom: remaining_headroom.max(50),
+                reset_unix_seconds: Some(614_800),
+                effective: false,
+            },
+        ]
     }
 
     fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
