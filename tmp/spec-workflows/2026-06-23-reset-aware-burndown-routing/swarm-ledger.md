@@ -75,17 +75,19 @@ Rejected or deferred evidence:
     stale marks stale, and `effective` is only an explanation hint.
 11. Route by availability pool before weighted fairness:
     `usable`, then `reserve`, then `unknown`, never `blocked`.
-12. Make default human status output strict: account label only, Unicode bars
-    when supported, no `pp`, no `bottleneck`, no raw score, and selected-next
-    explanation when routing is shown.
+12. Make default human status output strict: safe account label only, Unicode
+    bars when supported, no `pp`, no `bottleneck`, no raw score, and
+    preferred-next explanation when routing is shown.
 13. Require black-box non-blocking proof for boot/listen, first routed request,
     and quota status render.
 14. Require end-to-end Codex-through-router proof, including WebSocket behavior,
     before implementation completion can be claimed.
 15. Make route-band batch assessment the selector-facing contract so one pure
-    assessment owns selected pool, weighted candidates, and selected-next.
-16. Make unknown quota fallback-only with fixed weight `1`; remove the legacy
-    same-pool unknown freshness penalty from v1 selection semantics.
+    assessment owns selected pool, weighted candidates, and neutral
+    `preferred_next`.
+16. Make unknown quota fallback-only; remove the legacy same-pool unknown
+    freshness penalty from v1 selection semantics, but preserve conservative
+    partial-headroom ordering inside the all-unknown fallback pool.
 17. Define `/v1/responses` WebSocket support as a first-class route using the
     `responses` route band, with local auth and first-frame validation before
     selection, credential resolution, or upstream open.
@@ -97,6 +99,13 @@ Rejected or deferred evidence:
 20. Treat smoke/log/transcript output as allowlisted evidence and forbid raw
     bodies, full WebSocket first frames, prompts, memory traces, tool args,
     unsafe labels, tokens, auth headers, and secret-store material.
+21. Define previous-response affinity as a fail-closed continuation contract for
+    HTTP/SSE and WebSocket before weighted fallback.
+22. Collapse all non-`/v1/responses` WebSocket paths to `unsupported_path`.
+23. Require live-safe CLI status smoke over persisted router state for `table`,
+    `plain`, and `json`.
+24. Require delayed/failing-refresh proof for first valid `/v1/responses`
+    WebSocket routing.
 
 ## Open Decisions
 

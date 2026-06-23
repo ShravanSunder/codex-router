@@ -25,7 +25,7 @@ In scope:
 - account classification and routing decisions across 5h and weekly windows
 - shared quota assessment semantics for runtime routing and status display
 - human quota/status UX with concise account-centric rows, Unicode bars, and
-  explicit selected-next explanation
+  explicit preferred-next explanation
 - non-blocking startup and request behavior using persisted quota state
 - background refresh behavior and stale/unknown/ineligible handling
 - proof gates across unit, integration, smoke, and end-to-end runtime paths
@@ -60,7 +60,7 @@ The current spec is not accepted. The review found these required fixes:
    no effective row, and empty window set.
 5. Make human quota/status output strict: at most two rows per account, Unicode
    bars, no `pp`, no `bottleneck`, no account id in default human table, and
-   explicit selected-next explanation when routing is shown.
+   explicit preferred-next explanation when routing is shown.
 6. Define black-box non-blocking proof for server boot/listen, first routed
    request, and quota status render.
 7. Define redaction and observability proof across status rows, selection
@@ -100,9 +100,10 @@ The second spec-creation revision now folds those findings into the primary
 spec:
 
 - `BurnDownRouteBandAssessment` owns selected pool, weighted candidates, and
-  selected-next for runtime and CLI status.
-- Unknown quota is fallback-only with fixed weight `1`; it never competes with
-  known `usable` or `reserve` accounts.
+  neutral `preferred_next` for CLI status.
+- Unknown quota is fallback-only; it never competes with known `usable` or
+  `reserve` accounts, but it may preserve conservative partial-headroom ordering
+  inside the all-unknown pool.
 - `/v1/responses` WebSocket support is explicit, uses the `responses` route
   band, and fails closed for unsupported routes before selection or upstream
   open.
@@ -124,6 +125,70 @@ Next hard gate:
 - rerun `shravan-dev-workflow:spec-review-swarm`
 - do not route to `plan-creation-swarm` unless this second-revision spec review
   returns `phase_result: complete`
+
+## Current Phase Update: Third Review Still Needs Revision
+
+The third `spec-review-swarm` pass reviewed the second-revision spec at commit
+`ab89b2bb4e67a2e327a6dfb253cf7de1241ab8f5` with full 837-line coverage. It did
+not pass the hard gate.
+
+Accepted blockers:
+
+- `selected_next` overclaims live runtime truth because proxy-owned affinity and
+  weighted-deficit state can change the actual next request. The spec must use a
+  neutral `preferred_next` projection for shared assessment/status, or define a
+  live runtime status surface. The parent reducer chooses `preferred_next` for
+  this goal to preserve boundaries and avoid misleading default status.
+- Previous-response affinity lacks a first-class fail-closed contract. The spec
+  must define durable owner lookup, HTTP/SSE and WebSocket scope, missing or
+  unavailable owner behavior, and proof rows before planning.
+
+Accepted important fixes:
+
+- call out the current WebSocket call-order delta as an intentional target
+  change
+- collapse unsupported WebSocket route taxonomy to an explicit v1
+  `unsupported_path` class
+- replace ambiguous `account_label` machine output with `safe_account_label`
+- resolve unknown fallback ordering when all accounts are unknown
+- add live CLI smoke proof for `table`, `plain`, and `json`
+- add delayed/failing-refresh proof for first `/v1/responses` WebSocket
+- make the default human table invariant explicit
+
+Next hard gate:
+
+- revise the spec through `shravan-dev-workflow:spec-creation-swarm`
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- do not route to `plan-creation-swarm` until review returns
+  `phase_result: complete`
+
+## Current Phase Update: Third Review Findings Folded Into Spec
+
+The spec-creation pass after R3 folded in accepted review findings:
+
+- Pure shared assessment now exposes neutral `preferred_next`, not runtime-exact
+  `selected_next`.
+- Default status says `preferred next` and explicitly does not claim live next
+  request truth after affinity or accumulated weighted-deficit state.
+- Previous-response affinity now has a first-class HTTP/SSE and WebSocket
+  contract with durable owner lookup and fail-closed owner-resolution failures.
+- Weighted fallback is allowed only when no previous-response affinity key is
+  present.
+- Current WebSocket call-order delta is named as a target change.
+- All non-`/v1/responses` WebSocket paths collapse to `unsupported_path`.
+- JSON status uses `safe_account_label`, and unsafe configured labels degrade to
+  deterministic safe hash/tag.
+- Unknown fallback preserves conservative partial-headroom ordering inside the
+  all-unknown pool while never competing with known usable/reserve accounts.
+- Live-safe CLI status smoke is required for `table`, `plain`, and `json`.
+- First valid `/v1/responses` WebSocket routing must prove non-blocking behavior
+  under delayed or failing quota refresh.
+
+Next hard gate:
+
+- rerun `shravan-dev-workflow:spec-review-swarm`
+- do not route to `plan-creation-swarm` unless the R4 review returns
+  `phase_result: complete`
 
 ## Requirements/proof matrix
 
@@ -175,7 +240,7 @@ evidence source:
 snapshot/golden tests and manual CLI output inspection.
 freshness guard:
 Golden output must include historical bad cases: noisy per-route rows, `pp`,
-`bottleneck`, account ids, and missing selected-next explanation.
+`bottleneck`, account ids, and missing preferred-next explanation.
 
 Requirement / claim:
 Startup and normal requests do not block on live provider quota refresh.

@@ -11,10 +11,11 @@ Codex-router should pick the next account using quota survivability, not only ra
 Success means the router can answer these questions consistently:
 
 - Which account is usable now?
-- Which account should be selected next?
+- Which account is preferred for the next normal non-affinity request?
 - Which window is limiting the account: 5h or weekly?
 - Is low remaining quota dangerous, or is it safe because reset is imminent?
-- Is the status display explaining the same decision the runtime selector is making?
+- Is the status display explaining the same burn-down reasoning runtime routing
+  uses, while being honest about fairness and affinity overrides?
 
 ## Current-State Evidence
 
@@ -30,6 +31,16 @@ Observed in current code:
   Source: `crates/codex-router-state/src/quota_snapshot.rs:91-200`.
 - CLI status already computes pace and projected runout from reset time and remaining headroom.
   Source: `crates/codex-router-cli/src/quota.rs:924-1007`.
+- Current WebSocket routing selects an account and resolves provider credentials
+  before bounded first-frame parsing. The target design intentionally changes
+  that order so local auth and first-frame routing metadata validation happen
+  before quota assessment, credential resolution, or upstream open.
+  Source: `crates/codex-router-proxy/src/websocket.rs`.
+- Current affinity helpers and repositories exist, but the target design makes
+  previous-response owner lookup and fail-closed behavior explicit for both
+  HTTP/SSE and WebSocket continuation requests.
+  Source: `crates/codex-router-selection/src/affinity.rs`,
+  `crates/codex-router-state/src/repositories.rs:61-72`.
 - Existing spec already says weekly quota must be protected before short-window reset urgency.
   Source: `docs/specs/2026-06-20-codex-router-greenfield-spec.md:147-151`.
 - Existing plan already calls for selection order: eligibility/freshness, long-window pressure, effective limiting headroom, reset urgency as bounded tiebreaker.
@@ -47,7 +58,9 @@ For the requested route band, an account is not normally selectable if any relev
 
 R3. Unknown quota is not free capacity.
 
-If known fresh accounts exist, stale and unknown accounts are penalized before selection. Unknown or missing reset times must not make an account look safer than an account with known healthy quota.
+Unknown accounts never compete with known `usable` or `reserve` accounts. If
+only unknown accounts remain, partial headroom evidence may order the fallback
+pool conservatively, but missing reset times receive no reset-salvage bonus.
 
 R4. Weekly or other long-window quota is durable budget.
 
@@ -90,11 +103,12 @@ burn-down assessment
   owns: reset-aware pressure math and structured explanation
   crate: codex-router-selection::burn_down
   inputs: BurnDownRouteBandAssessmentInput, fixed v1 route band policy
-  exposes: BurnDownRouteBandAssessment { accounts, selected_pool, weighted_candidates, selected_next }
+  exposes: BurnDownRouteBandAssessment { accounts, selected_pool, weighted_candidates, preferred_next }
   must not depend on: codex-router-state, codex-router-proxy, codex-router-cli
 
 proxy account selection
-  owns: route classification, account eligibility, process-lifetime fairness state
+  owns: route classification, account eligibility, previous-response affinity,
+        process-lifetime fairness state, and runtime exact account choice
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
   consumes: BurnDownRouteBandAssessment.weighted_candidates
   exposes: SelectedAccountDecision
@@ -107,8 +121,9 @@ weighted deficit selector
 quota status CLI
   owns: human and machine rendering
   adapts: Vec<SelectorQuotaInput> -> BurnDownRouteBandAssessmentInput
-  consumes: BurnDownRouteBandAssessment explanation
+  consumes: BurnDownRouteBandAssessment explanation and neutral preferred-next projection
   must not own: routing math
+  must not claim: runtime-exact next account after affinity or fairness state
 ```
 
 Dependency contract:
@@ -228,7 +243,8 @@ Meaning:
 For windows with missing reset:
 
 - set `reset_known = false`
-- set `pressure_percent` to `reserve_pressure_threshold` for ranking purposes
+- set `pressure_percent` to `reserve_pressure_threshold` for conservative
+  unknown-pool ordering only
 - set the account-level evidence state to `unknown` unless a blocking condition
   already applies
 - do not grant reset-salvage bonus
@@ -289,15 +305,16 @@ from reset can still put the account in reserve.
 
 ### Routing Weight
 
-The route-band assessment owns cross-account pool choice and selected-next
-projection. Per-account assessment does not know about sibling accounts.
+The route-band assessment owns cross-account pool choice and neutral
+preferred-next projection. Per-account assessment does not know about sibling
+accounts.
 
 `BurnDownRouteBandAssessment`:
 
 - `accounts: Vec<BurnDownAccountAssessment>`
 - `selected_pool: usable | reserve | unknown | none`
 - `weighted_candidates: Vec<(AccountId, u32)>`
-- `selected_next: Option<AccountId>`
+- `preferred_next: Option<AccountId>`
 - `account_order: account_id ascending`
 
 `BurnDownAccountAssessment`:
@@ -313,7 +330,7 @@ projection. Per-account assessment does not know about sibling accounts.
 - `long_salvage`
 - `routing_weight`
 - `routing_reason`
-- `selected_next`
+- `preferred_next`
 
 Only `usable` accounts enter the normal weighted-deficit pool. If no usable
 account exists, `reserve` accounts may enter. `blocked` accounts never enter.
@@ -359,10 +376,27 @@ Then:
 
 For each selectable `unknown` account:
 
-- `routing_weight = 1`
 - `routing_reason = needs_quota_refresh`
-- unknown candidates are ordered by `account_id` ascending
+- unknown candidates never receive reset-salvage bonus
+- if at least one known relevant window has headroom, compute
+  `routing_weight = clamp(min_known_headroom - reserve_pressure_threshold, 1..100)`
+- if no usable partial headroom exists, use `routing_weight = 1`
+- unknown candidates are ordered by `routing_weight` descending, then
+  `account_id` ascending
 - unknown never competes with usable or reserve accounts in v1
+
+`preferred_next` semantics:
+
+- `preferred_next` is a neutral projection from the pure assessment using an
+  empty weighted-deficit state and no previous-response affinity key.
+- It answers "which account is preferred for the next normal non-affinity
+  request if fairness has no accumulated deficit?"
+- It is not the runtime-exact next request. The proxy may choose a different
+  account when previous-response affinity is present or when accumulated
+  weighted-deficit state rotates to a lower-weight account for fairness.
+- Default status must label this as `preferred next`, not `selected next`.
+- Runtime audit may additionally log the actual selected account after affinity
+  and weighted-deficit selection.
 
 Sign semantics:
 
@@ -378,7 +412,8 @@ Tie and determinism contract:
   accumulated deficits may select a lower-weight account occasionally to
   preserve smooth weighted fairness.
 - Deterministic assessment tests compare `routing_weight`, availability,
-  limiting window, and reason codes, not only the final selector output.
+  limiting window, `preferred_next`, and reason codes, not only the final
+  selector output.
 - Integration tests that need a selected winner start the weighted selector
   from empty state and provide candidates in canonical `account_id` order.
 - For a pure assessment tie, the stable explanation order is:
@@ -526,6 +561,16 @@ and weekly quota can be shown together without duplicating the account/status
 cells. Continuation lines must leave account/status blank. Expanded/debug human
 output may show at most two logical rows per account.
 
+For v1, the default human table shows exactly one short-window slot and one
+long-window slot per route band:
+
+- `5h` displays the shortest relevant known short window, or the short window
+  with the worst pressure when more than one short window exists
+- `weekly` displays the longest relevant known long window, or the long window
+  with the worst pressure when more than one long window exists
+- additional relevant windows are summarized in the displayed slot text and are
+  available in JSON
+
 `--format plain` is a colorless human fallback for terminals without Unicode or
 box drawing. It is not a machine format. It uses the same logical rows and
 content rules as the default table, replaces Unicode bars with ASCII bars, and
@@ -545,15 +590,25 @@ Default columns:
 - `routing`
 - `next use`
 
+Column semantics:
+
+- `account`: safe display label or hash
+- `status`: account admin status such as `enabled` or `disabled`; routing
+  usefulness must appear in `5h`, `weekly`, `routing`, and `next use`
+- `5h`: short-window bar, percent left, reset timing, and short-window note
+- `weekly`: long-window bar, percent left, reset timing, and long-window note
+- `routing`: stable reason phrase from the route-band assessment
+- `next use`: one of `preferred`, `held`, `blocked`, or `needs refresh`
+
 Wording:
 
 - use `left`, never ambiguous bare percent
 - avoid `pp`
 - avoid `bottleneck` in default output
-- use `limiting window`, `weekly pressure`, `5h pressure`, `selected next`, `held`, `blocked`, `needs refresh`
+- use `limiting window`, `weekly pressure`, `5h pressure`, `preferred next`, `held`, `blocked`, `needs refresh`
 - show Unicode bars in the Rust app's human table when the terminal supports them
 - use label/tag only for `account`; do not show `account_id` in default human output
-- when routing choice is shown, include why the selected account is next
+- when routing choice is shown, include why the preferred account is next
 
 Bar rendering:
 
@@ -571,16 +626,16 @@ Normative vocabulary:
 | `unknown` | needs refresh; fallback only | `availability=unknown` |
 | `limiting window` | the 5h or weekly window driving the decision | `limiting_window` |
 | `pressure` | quota is being spent faster than reset pace | `pressure_percent` |
-| `selected next` | this account is the next normal candidate | `selected_next=true` |
-| `held` | usable only after higher-priority pool is empty | `selected_next=false` |
+| `preferred next` | this account is the neutral next normal candidate, before affinity or accumulated fairness state | `preferred_next=true` |
+| `held` | usable only after higher-priority pool is empty | `preferred_next=false` |
 
 Stable routing reason enum:
 
 | Enum | Default human phrase |
 | --- | --- |
-| `selected_weekly_healthier` | `selected next: weekly healthier` |
-| `selected_short_reset_soon` | `selected next: 5h reset soon` |
-| `selected_highest_weight` | `selected next: safest quota` |
+| `preferred_weekly_healthier` | `preferred next: weekly healthier` |
+| `preferred_short_reset_soon` | `preferred next: 5h reset soon` |
+| `preferred_highest_weight` | `preferred next: safest quota` |
 | `held_reserve` | `held: reserve` |
 | `held_unknown` | `held: needs refresh` |
 | `blocked_window_exhausted` | `blocked: quota empty` |
@@ -599,18 +654,18 @@ Example shape:
 
 ```text
 account  status   5h                         weekly                     routing                         next use
-askluna  enabled  ██████████ 100% left        ░░░░░░░░░░ 0% left          blocked: weekly empty           no
+askluna  enabled  ██████████ 100% left        ░░░░░░░░░░ 0% left          blocked: weekly empty           blocked
                   resets in 4h 55m            resets in 1d 11h
-matches  enabled  █████████░ 91% left         █████░░░░░ 54% left         selected next: weekly healthier  next
+matches  enabled  █████████░ 91% left         █████░░░░░ 54% left         preferred next: weekly healthier preferred
                   resets in 4h 8m             resets in 5d 22h
-ssdev    enabled  ██████████ 100% left        ██░░░░░░░░ 16% left         held: weekly reserve             backup
+ssdev    enabled  ██████████ 100% left        ██░░░░░░░░ 16% left         held: weekly reserve             held
                   resets in 3h 48m            resets in 1d 9h
 ```
 
 JSON output schema:
 
 - `account_id`
-- `account_label`
+- `safe_account_label`
 - `availability`
 - `freshness`
 - `limiting_window`
@@ -620,11 +675,17 @@ JSON output schema:
 - `long_salvage`
 - `routing_reason`
 - `routing_weight`
-- `selected_next`
+- `preferred_next`
 
 JSON output may expose scores. Default table/plain output must not. The JSON
 schema must use stable enums for availability, limiting window, freshness, and
 routing reason.
+
+`safe_account_label` is always sanitized for emission. If the configured label
+looks like an email address, provider-derived identity, token, auth header, or
+secret-store material, the renderer must replace it with a deterministic safe
+hash/tag. Raw configured labels are not emitted by default status, logs, traces,
+or smoke transcripts.
 
 ## Security And Trust Context
 
@@ -677,6 +738,46 @@ Security-sensitive invariants:
   form; labels that resemble emails, provider-derived account identifiers,
   tokens, or auth material are unsafe for default emission
 
+### Previous-Response Affinity Contract
+
+Previous-response affinity is a continuation correctness rule, not quota
+optimization. It applies to HTTP/SSE and WebSocket requests that carry a
+provider previous-response identifier.
+
+Ownership:
+
+- proxy extracts previous-response metadata from HTTP/SSE request bodies and
+  from the bounded first WebSocket `response.create` frame
+- `codex-router-state` owns durable previous-response owner records through
+  `AffinityRepository`
+- `codex-router-selection` may provide pure affinity key helpers, but it does
+  not own durable state or provider credentials
+- weighted burn-down fallback is allowed only when no previous-response
+  affinity key is present
+
+Owner resolution:
+
+- a continuation request with a known previous-response owner must use that
+  owner account if the account is enabled, has an active credential generation,
+  and is route-eligible
+- missing owner, disabled owner, stale credential generation, unavailable
+  credential, route-ineligible owner, or exhausted owner fail closed before
+  weighted fallback
+- a continuation request must never silently replay on a different account
+- failure must be local and audit-safe, with no upstream open and no provider
+  credential resolution for a different account
+
+Proof must cover:
+
+- HTTP/SSE continuation owner hit
+- WebSocket continuation owner hit
+- restart/durable owner lookup
+- unknown previous-response owner
+- disabled owner
+- stale or unavailable credential generation
+- route-ineligible or exhausted owner
+- no weighted fallback on any continuation-owner failure
+
 ### WebSocket Compatibility Contract
 
 The v1 router must support the Codex `/v1/responses` WebSocket path. It uses the
@@ -686,24 +787,27 @@ WebSocket routing order is normative:
 
 1. Validate local router auth before selector state, quota assessment,
    credential resolution, or upstream connection open.
-2. Fail closed for unsupported, realtime, or unknown WebSocket routes before
-   selector state, quota assessment, credential resolution, or upstream
-   connection open.
+2. Fail closed with `unsupported_path` for any WebSocket path other than
+   `/v1/responses` before selector state, quota assessment, credential
+   resolution, or upstream connection open. `/v1/realtime` and any unknown path
+   are representative `unsupported_path` cases in v1.
 3. Require a bounded first client frame containing a valid `response.create`
    payload before opening the upstream WebSocket.
 4. Parse only the routing metadata needed for route-band assessment from the
    first frame; do not log the full payload.
-5. Run reset-aware route-band assessment for the `responses` route band.
-6. Apply previous-response affinity before weighted fallback. If affinity points
-   to an ineligible or missing account, fail or fall back only according to the
-   accepted route-band policy; do not silently switch mid-stream.
-7. Resolve the selected account credential and inject upstream auth exactly once
+5. Extract previous-response affinity metadata from the first frame, when
+   present, before weighted fallback.
+6. If affinity is present, apply the Previous-Response Affinity Contract. Any
+   owner-resolution failure fails closed before weighted fallback.
+7. If no affinity is present, run reset-aware route-band assessment for the
+   `responses` route band and select from weighted candidates.
+8. Resolve the selected account credential and inject upstream auth exactly once
    after selection and before upstream open.
-8. Strip local client auth, router bearer auth, and hop-by-hop headers before
+9. Strip local client auth, router bearer auth, and hop-by-hop headers before
    upstream open.
-9. Forward the accepted first frame and all later frames unchanged at the
+10. Forward the accepted first frame and all later frames unchanged at the
    protocol payload layer.
-10. Pin the selected account for the lifetime of the WebSocket connection. Do
+11. Pin the selected account for the lifetime of the WebSocket connection. Do
     not switch accounts mid-stream. A later connection may reselect after quota
     state changes.
 
@@ -715,10 +819,12 @@ Required WebSocket proof:
 
 - valid `/v1/responses` WebSocket routes through reset-aware selection
 - selected account is pinned for the full WebSocket connection
-- unsupported/realtime/unknown WebSocket routes fail closed before selection
+- `/v1/realtime` and one unknown WebSocket path fail closed as
+  `unsupported_path` before selection
 - invalid local auth fails before selection
 - malformed first frame fails before selection
-- previous-response affinity is honored before weighted fallback
+- previous-response affinity is honored before weighted fallback and fails
+  closed on owner-resolution failure
 - malformed/unsupported/auth-failed paths show zero selector advance, zero
   credential resolver calls, and zero upstream opens
 
@@ -727,7 +833,7 @@ Allowed and forbidden emission surfaces:
 | Surface | Allowed | Forbidden |
 | --- | --- | --- |
 | default status rows | safe account label, status, percent-left bars, reset time, availability, routing reason | account id, OAuth tokens, router bearer token, keychain identifier, auth headers, raw score, unsafe label |
-| JSON machine status | account id, safe label, enum reasons, routing weight, freshness, reset metadata | OAuth tokens, router bearer token, refresh token, upstream auth headers, request/response body |
+| JSON machine status | account id, safe account label, enum reasons, routing weight, freshness, reset metadata | OAuth tokens, router bearer token, refresh token, upstream auth headers, request/response body, unsafe label |
 | selection explanation | safe account label or hash, route band, availability, reason code | provider tokens, bearer tokens, auth headers, secret-store paths, prompts, tool args |
 | refresh errors | provider status class, redacted endpoint class, safe account label/hash | response bodies containing secrets, full auth headers, tokens |
 | traces/logs | route band, availability, reason enum, safe account label/hash | token values, upstream auth headers, keychain identifiers, raw request/response body, full WebSocket first-frame payload, prompts, memory traces, tool args, unsafe labels |
@@ -748,13 +854,21 @@ The implementation plan must provide proof at these layers:
 - tests proving missing reset time is conservative and receives no salvage
 - tests proving mixed stale/unknown/ineligible collapse uses any-window conservative rules
 - tests proving route-band batch assessment returns the same account ordering,
-  selected pool, weighted candidates, and selected-next result used by runtime
-  routing
+  selected pool, weighted candidates, and neutral `preferred_next` projection
+  used by status
+- tests proving runtime exact selection may differ from `preferred_next` because
+  of previous-response affinity or accumulated weighted-deficit fairness state,
+  and that default status does not claim runtime-exact next use
 - tests proving stale penalty division is applied only inside the selected pool
   and reclamped after division
 - tests proving canonical `account_id` order for deterministic selector inputs
+- tests proving unknown fallback never competes with known `usable` or
+  `reserve`, but preserves conservative partial-headroom ordering inside the
+  all-unknown fallback pool
 - CLI renderer tests proving status uses the same assessment reason and limiting-window semantics as routing
 - JSON schema tests for stable machine fields and enum values
+- JSON schema tests proving `safe_account_label` is sanitized/hash-tagged and
+  no unsafe configured label is emitted
 - plain renderer tests proving ASCII bars, no raw scores, no account ids, and
   the same routing phrases as table mode
 - reason mapping tests from stable enum to human phrase
@@ -763,15 +877,22 @@ The implementation plan must provide proof at these layers:
 - CLI golden/snapshot tests for default human output:
   - healthy multi-account table with Unicode bars
   - limiting-window disagreement between 5h and weekly
-  - reset-aware selected-next explanation
+  - reset-aware preferred-next explanation
   - unknown or partial data
   - blocked, reserve, usable, and unknown accounts
   - colorless/plain terminal mode if supported
   - negative assertions for `pp`, `bottleneck`, default `account_id`, raw score, and token-like strings
+- live-safe CLI smoke proof over persisted router state for emitted `table`,
+  `plain`, and `json` status output, including redaction and negative
+  assertions on the actual command output
 - WebSocket compatibility tests for `/v1/responses` routing, selected-account
-  pinning, previous-response affinity before weighted fallback, unsupported
-  route failure, malformed first frame failure, and local-auth failure before
-  selection
+  pinning, previous-response affinity before weighted fallback, no weighted
+  fallback on continuation-owner failure, `/v1/realtime` and unknown path
+  `unsupported_path` failure, malformed first frame failure, and local-auth
+  failure before selection
+- WebSocket non-blocking proof that delayed or failing quota refresh does not
+  block the first valid `/v1/responses` route after bounded first-frame parsing,
+  and that selection uses persisted selector rows on that path
 - security call-order tests proving failed local auth, unsupported WebSocket
   route, and malformed first frame make zero selector-state advances, zero
   credential resolver calls, and zero upstream opens
@@ -811,18 +932,21 @@ chooses:
 - default human score visibility: no raw score
 - route-band assessment owner: `codex-router-selection::burn_down`
 - batch assessment contract: `BurnDownRouteBandAssessment` owns selected pool,
-  weighted candidates, and selected-next
-- unknown quota selection: fallback-only with fixed weight `1`, never competing
-  with known `usable` or `reserve`
+  weighted candidates, and neutral `preferred_next`
+- unknown quota selection: fallback-only, never competing with known `usable` or
+  `reserve`, with conservative partial-headroom ordering inside the all-unknown
+  pool
 - deterministic candidate order: `account_id` ascending
-- WebSocket support: `/v1/responses` supported, unknown/realtime routes fail
-  closed before selection or upstream open
+- WebSocket support: `/v1/responses` supported; every other WebSocket path is
+  `unsupported_path` and fails closed before selection or upstream open
 - WebSocket selection: valid first `response.create` frame is required before
   upstream open; selected account is pinned for connection lifetime
+- previous-response affinity: applies to HTTP/SSE and WebSocket; owner
+  resolution failures fail closed before weighted fallback
 - default status surfaces: table/plain are human-only and JSON is explicit
   machine/debug output
-- default account display: safe label or hash; raw `account_id` only in explicit
-  local JSON/debug surfaces
+- default account display: safe label or hash; JSON uses `safe_account_label`
+  plus raw `account_id` only for explicit local machine/debug use
 - smoke/log transcript policy: allowlisted fields only, no raw bodies, prompts,
   tool args, memory traces, unsafe labels, tokens, auth headers, or secret-store
   material
