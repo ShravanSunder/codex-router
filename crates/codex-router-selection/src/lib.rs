@@ -1,6 +1,7 @@
 //! Account selection state machine for codex-router.
 
 pub mod affinity;
+pub mod burn_down;
 pub mod eligibility;
 pub mod precommit;
 pub mod reservation;
