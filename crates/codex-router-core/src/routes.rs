@@ -30,6 +30,18 @@ impl RouteBand {
             Self::MemoriesTraceSummarize => "memories_trace_summarize",
         }
     }
+
+    /// Parses a stable route-band name.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "responses" => Some(Self::Responses),
+            "responses_compact" => Some(Self::ResponsesCompact),
+            "models" => Some(Self::Models),
+            "memories_trace_summarize" => Some(Self::MemoriesTraceSummarize),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for RouteBand {
@@ -56,6 +68,7 @@ mod tests {
 
         for (route_band, expected_name) in cases {
             assert_eq!(route_band.as_str(), expected_name);
+            assert_eq!(RouteBand::parse(expected_name), Some(route_band));
             assert_eq!(route_band.to_string(), expected_name);
 
             let serialized = match serde_json::to_string(&route_band) {
@@ -70,5 +83,7 @@ mod tests {
             };
             assert_eq!(deserialized, route_band);
         }
+
+        assert_eq!(RouteBand::parse("unknown"), None);
     }
 }

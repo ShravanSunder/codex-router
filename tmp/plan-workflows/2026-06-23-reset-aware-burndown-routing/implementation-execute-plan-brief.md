@@ -182,3 +182,46 @@ Notes:
 
 - This was implemented before T2b hash-owner state because runtime hash
   production depends on the secret lifecycle. T2b remains the next state slice.
+
+## T2b Affinity Owner Storage
+
+Plan rows:
+
+- RP-09 previous-response owner rows use HMAC hashes, safe metadata, route-band
+  partitioning, and fail-closed ambiguous lookup.
+
+Files changed:
+
+- `crates/codex-router-core/src/routes.rs`
+- `crates/codex-router-state/src/affinity_owner.rs`
+- `crates/codex-router-state/src/repositories.rs`
+- `crates/codex-router-state/src/sqlite.rs`
+- `crates/codex-router-state/src/lib.rs`
+
+Implemented:
+
+- Added `RouteBand::parse` for state round trips.
+- SQLite schema v6 adds `previous_response_affinity_owners`.
+- Added `PreviousResponseAffinityOwnerRecord`,
+  `PreviousResponseAffinityOwnerLookup`, and `AffinitySourceTransport`.
+- Added repository methods to write, load, and purge hashed owner records.
+- Lookup is route-scoped and returns `missing`, `found`, or `ambiguous`.
+- Tests prove the new table stores only `AffinityKeyHash` plus safe metadata,
+  not raw previous-response IDs.
+
+Proof:
+
+- `cargo test -p codex-router-core -p codex-router-state` passed:
+  core 15 tests, state 18 tests.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 71, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- The new hash-owner repository is present and proven. The legacy proxy
+  affinity adapter still calls the old raw affinity methods; that runtime
+  cutover requires the T3 proxy secret/selection adapter work so the proxy can
+  compute `AffinityKeyHash` before lookup.

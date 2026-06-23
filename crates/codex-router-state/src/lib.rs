@@ -1,6 +1,7 @@
 //! SQLite-backed metadata boundary for codex-router.
 
 pub mod account;
+pub mod affinity_owner;
 pub mod quota_snapshot;
 pub mod repositories;
 pub mod sqlite;
@@ -20,13 +21,18 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use codex_router_core::affinity::AffinityKeyHash;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::AffinityKey;
+    use codex_router_core::routes::RouteBand;
     use rusqlite::Connection;
 
     use super::package_name;
     use crate::account::AccountRecord;
     use crate::account::AccountStatus;
+    use crate::affinity_owner::AffinitySourceTransport;
+    use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
+    use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
     use crate::quota_snapshot::PersistedSelectorQuotaWindow;
     use crate::quota_snapshot::QuotaRefreshErrorClass;
@@ -56,7 +62,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 5);
+        assert_eq!(store.schema_version(), 6);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -439,7 +445,7 @@ mod tests {
             Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 5);
+        assert_eq!(store.schema_version(), 6);
         let selector_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -498,7 +504,7 @@ mod tests {
             Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 5);
+        assert_eq!(store.schema_version(), 6);
         let responses_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -877,6 +883,114 @@ mod tests {
     }
 
     #[test]
+    fn previous_response_affinity_owner_repository_is_hash_only_and_route_scoped() {
+        let temp_dir = TestTempDir::new("affinity_owner_hash_only");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let hash = affinity_hash('a');
+        let responses_owner = PreviousResponseAffinityOwnerRecord::new(
+            hash.clone(),
+            account_id("acct_owner"),
+            7,
+            RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            1_000,
+        );
+        let models_owner = PreviousResponseAffinityOwnerRecord::new(
+            hash.clone(),
+            account_id("acct_models"),
+            9,
+            RouteBand::Models,
+            AffinitySourceTransport::WebSocket,
+            1_100,
+        );
+
+        if let Err(error) =
+            AffinityRepository::write_previous_response_owner(&store, &responses_owner)
+        {
+            panic!("responses affinity owner should persist: {error}");
+        }
+        if let Err(error) = AffinityRepository::write_previous_response_owner(&store, &models_owner)
+        {
+            panic!("models affinity owner should persist: {error}");
+        }
+
+        assert_eq!(
+            AffinityRepository::load_previous_response_owner(
+                &store,
+                &hash,
+                RouteBand::Responses.as_str()
+            ),
+            Ok(PreviousResponseAffinityOwnerLookup::Found(responses_owner))
+        );
+        assert_eq!(
+            AffinityRepository::load_previous_response_owner(
+                &store,
+                &hash,
+                RouteBand::Models.as_str()
+            ),
+            Ok(PreviousResponseAffinityOwnerLookup::Found(models_owner))
+        );
+        assert_eq!(
+            AffinityRepository::load_previous_response_owner(
+                &store,
+                &affinity_hash('b'),
+                RouteBand::Responses.as_str()
+            ),
+            Ok(PreviousResponseAffinityOwnerLookup::Missing)
+        );
+        assert_no_previous_response_id_in_affinity_owner_rows(&database_path, "resp_raw_canary");
+    }
+
+    #[test]
+    fn previous_response_affinity_owner_detects_ambiguous_rows_and_can_purge() {
+        let temp_dir = TestTempDir::new("affinity_owner_ambiguous_purge");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let hash = affinity_hash('c');
+        for account_id_value in ["acct_first", "acct_second"] {
+            let owner = PreviousResponseAffinityOwnerRecord::new(
+                hash.clone(),
+                account_id(account_id_value),
+                1,
+                RouteBand::Responses,
+                AffinitySourceTransport::HttpSse,
+                2_000,
+            );
+            if let Err(error) = AffinityRepository::write_previous_response_owner(&store, &owner) {
+                panic!("affinity owner should persist: {error}");
+            }
+        }
+
+        assert_eq!(
+            AffinityRepository::load_previous_response_owner(
+                &store,
+                &hash,
+                RouteBand::Responses.as_str()
+            ),
+            Ok(PreviousResponseAffinityOwnerLookup::Ambiguous)
+        );
+
+        if let Err(error) = AffinityRepository::purge_previous_response_owners(&store) {
+            panic!("affinity owners should purge: {error}");
+        }
+        assert_eq!(
+            AffinityRepository::load_previous_response_owner(
+                &store,
+                &hash,
+                RouteBand::Responses.as_str()
+            ),
+            Ok(PreviousResponseAffinityOwnerLookup::Missing)
+        );
+    }
+
+    #[test]
     fn state_repository_lists_accounts_in_selector_stable_order() {
         let temp_dir = TestTempDir::new("list_accounts");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -951,6 +1065,37 @@ mod tests {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
         }
+    }
+
+    fn affinity_hash(character: char) -> AffinityKeyHash {
+        match AffinityKeyHash::new(character.to_string().repeat(64)) {
+            Ok(hash) => hash,
+            Err(error) => panic!("affinity hash should parse: {error}"),
+        }
+    }
+
+    fn assert_no_previous_response_id_in_affinity_owner_rows(
+        database_path: &Path,
+        raw_previous_response_id: &str,
+    ) {
+        let connection = match Connection::open(database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("raw sqlite should open: {error}"),
+        };
+        let count: i64 = match connection.query_row(
+            "SELECT COUNT(*)
+               FROM previous_response_affinity_owners
+              WHERE affinity_key_hash = ?1
+                 OR route_band = ?1
+                 OR account_id = ?1
+                 OR source_transport = ?1",
+            [raw_previous_response_id],
+            |row| row.get(0),
+        ) {
+            Ok(count) => count,
+            Err(error) => panic!("raw sqlite count should query: {error}"),
+        };
+        assert_eq!(count, 0);
     }
 
     fn create_v2_database_with_quota_snapshot(database_path: &Path) {

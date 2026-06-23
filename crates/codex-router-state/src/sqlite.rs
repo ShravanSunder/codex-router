@@ -4,8 +4,10 @@ use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_router_core::affinity::AffinityKeyHash;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::AffinityKey;
+use codex_router_core::routes::RouteBand;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -13,6 +15,9 @@ use thiserror::Error;
 
 use crate::account::AccountRecord;
 use crate::account::AccountStatus;
+use crate::affinity_owner::AffinitySourceTransport;
+use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
+use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use crate::quota_snapshot::PersistedQuotaSnapshot;
 use crate::quota_snapshot::PersistedSelectorQuotaWindow;
 use crate::quota_snapshot::QuotaRefreshErrorClass;
@@ -25,7 +30,7 @@ use crate::repositories::AffinityRepository;
 use crate::repositories::QuotaSnapshotRepository;
 use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
@@ -916,18 +921,25 @@ impl SqliteStateStore {
                 self.apply_v2()?;
                 self.apply_v3()?;
                 self.apply_v4()?;
-                self.apply_v5()
+                self.apply_v5()?;
+                self.apply_v6()
             }
             2 => {
                 self.apply_v3()?;
                 self.apply_v4()?;
-                self.apply_v5()
+                self.apply_v5()?;
+                self.apply_v6()
             }
             3 => {
                 self.apply_v4()?;
-                self.apply_v5()
+                self.apply_v5()?;
+                self.apply_v6()
             }
-            4 => self.apply_v5(),
+            4 => {
+                self.apply_v5()?;
+                self.apply_v6()
+            }
+            5 => self.apply_v6(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -982,7 +994,17 @@ impl SqliteStateStore {
                     PRIMARY KEY (account_id, route_band)
                 );
 
-                PRAGMA user_version = 5;
+                CREATE TABLE IF NOT EXISTS previous_response_affinity_owners (
+                    affinity_key_hash TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    credential_generation INTEGER NOT NULL,
+                    source_transport TEXT NOT NULL,
+                    created_unix_seconds INTEGER NOT NULL,
+                    PRIMARY KEY (affinity_key_hash, route_band, account_id)
+                );
+
+                PRAGMA user_version = 6;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -1113,6 +1135,28 @@ impl SqliteStateStore {
                 );
 
                 PRAGMA user_version = 5;
+                ",
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn apply_v6(&self) -> Result<(), StateStoreError> {
+        self.connection
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS previous_response_affinity_owners (
+                    affinity_key_hash TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    credential_generation INTEGER NOT NULL,
+                    source_transport TEXT NOT NULL,
+                    created_unix_seconds INTEGER NOT NULL,
+                    PRIMARY KEY (affinity_key_hash, route_band, account_id)
+                );
+
+                PRAGMA user_version = 6;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -1253,6 +1297,99 @@ impl AffinityRepository for SqliteStateStore {
                 field: "account_id",
             })
     }
+
+    fn write_previous_response_owner(
+        &self,
+        owner: &PreviousResponseAffinityOwnerRecord,
+    ) -> Result<(), StateStoreError> {
+        self.connection
+            .execute(
+                "INSERT INTO previous_response_affinity_owners (
+                   affinity_key_hash, route_band, account_id, credential_generation,
+                   source_transport, created_unix_seconds
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(affinity_key_hash, route_band, account_id) DO UPDATE SET
+                   credential_generation = excluded.credential_generation,
+                   source_transport = excluded.source_transport,
+                   created_unix_seconds = excluded.created_unix_seconds",
+                params![
+                    owner.affinity_key_hash().as_str(),
+                    owner.route_band().as_str(),
+                    owner.account_id().as_str(),
+                    u64_to_i64(owner.credential_generation())?,
+                    owner.source_transport().as_str(),
+                    u64_to_i64(owner.created_unix_seconds())?,
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn load_previous_response_owner(
+        &self,
+        affinity_key_hash: &AffinityKeyHash,
+        route_band: &str,
+    ) -> Result<PreviousResponseAffinityOwnerLookup, StateStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT affinity_key_hash, route_band, account_id, credential_generation,
+                        source_transport, created_unix_seconds
+                   FROM previous_response_affinity_owners
+                  WHERE affinity_key_hash = ?1 AND route_band = ?2
+                  ORDER BY account_id
+                  LIMIT 2",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map(params![affinity_key_hash.as_str(), route_band], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
+
+        let mut owners = Vec::new();
+        for row in rows {
+            let (
+                hash_value,
+                route_band_value,
+                account_id_value,
+                credential_generation,
+                source_transport_value,
+                created_unix_seconds,
+            ) = row.map_err(sqlite_error)?;
+            owners.push(parse_previous_response_owner_row(
+                hash_value,
+                route_band_value,
+                account_id_value,
+                credential_generation,
+                source_transport_value,
+                created_unix_seconds,
+            )?);
+        }
+
+        match owners.len() {
+            0 => Ok(PreviousResponseAffinityOwnerLookup::Missing),
+            1 => Ok(PreviousResponseAffinityOwnerLookup::Found(owners.remove(0))),
+            _ => Ok(PreviousResponseAffinityOwnerLookup::Ambiguous),
+        }
+    }
+
+    fn purge_previous_response_owners(&self) -> Result<(), StateStoreError> {
+        self.connection
+            .execute("DELETE FROM previous_response_affinity_owners", [])
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
 }
 
 fn sqlite_error(error: rusqlite::Error) -> StateStoreError {
@@ -1334,6 +1471,58 @@ fn parse_refresh_error_class(value: &str) -> Result<QuotaRefreshErrorClass, Stat
         account_id: "<quota-refresh-status>".to_owned(),
         field: "last_error_class",
     })
+}
+
+fn parse_previous_response_owner_row(
+    hash_value: String,
+    route_band_value: String,
+    account_id_value: String,
+    credential_generation: i64,
+    source_transport_value: String,
+    created_unix_seconds: i64,
+) -> Result<PreviousResponseAffinityOwnerRecord, StateStoreError> {
+    let affinity_key_hash =
+        AffinityKeyHash::new(hash_value).map_err(|_| StateStoreError::CorruptQuotaSnapshot {
+            account_id: account_id_value.clone(),
+            field: "affinity_key_hash",
+        })?;
+    let route_band = RouteBand::parse(&route_band_value).ok_or_else(|| {
+        StateStoreError::CorruptQuotaSnapshot {
+            account_id: account_id_value.clone(),
+            field: "route_band",
+        }
+    })?;
+    let account_id =
+        AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
+            account_id: account_id_value.clone(),
+            field: "account_id",
+        })?;
+    let credential_generation = i64_to_u64_account_generation(
+        credential_generation,
+        &account_id_value,
+        "credential_generation",
+    )?;
+    let source_transport =
+        AffinitySourceTransport::parse(&source_transport_value).ok_or_else(|| {
+            StateStoreError::CorruptQuotaSnapshot {
+                account_id: account_id_value.clone(),
+                field: "source_transport",
+            }
+        })?;
+    let created_unix_seconds = i64_to_u64(
+        created_unix_seconds,
+        &account_id_value,
+        "created_unix_seconds",
+    )?;
+
+    Ok(PreviousResponseAffinityOwnerRecord::new(
+        affinity_key_hash,
+        account_id,
+        credential_generation,
+        route_band,
+        source_transport,
+        created_unix_seconds,
+    ))
 }
 
 fn parse_account_row(

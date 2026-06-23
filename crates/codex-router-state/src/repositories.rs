@@ -1,9 +1,12 @@
 //! State repository contracts used by proxy and selection.
 
+use codex_router_core::affinity::AffinityKeyHash;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::AffinityKey;
 
 use crate::account::AccountRecord;
+use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
+use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use crate::quota_snapshot::PersistedQuotaSnapshot;
 use crate::quota_snapshot::PersistedSelectorQuotaWindow;
 use crate::quota_snapshot::QuotaRefreshErrorClass;
@@ -97,4 +100,20 @@ pub trait AffinityRepository {
 
     /// Loads an affinity pin.
     fn load_pin(&self, affinity_key: &AffinityKey) -> Result<Option<AccountId>, StateStoreError>;
+
+    /// Writes a hashed previous-response owner record.
+    fn write_previous_response_owner(
+        &self,
+        owner: &PreviousResponseAffinityOwnerRecord,
+    ) -> Result<(), StateStoreError>;
+
+    /// Loads a hashed previous-response owner record for one route band.
+    fn load_previous_response_owner(
+        &self,
+        affinity_key_hash: &AffinityKeyHash,
+        route_band: &str,
+    ) -> Result<PreviousResponseAffinityOwnerLookup, StateStoreError>;
+
+    /// Purges all hashed previous-response owner rows.
+    fn purge_previous_response_owners(&self) -> Result<(), StateStoreError>;
 }
