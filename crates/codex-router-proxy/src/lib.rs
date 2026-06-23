@@ -497,6 +497,40 @@ mod tests {
     }
 
     #[test]
+    fn quota_aware_selector_boosts_lower_headroom_when_reset_is_sooner() {
+        let resets_tomorrow = quota_account_with_reset(
+            "acct_resets_tomorrow",
+            "tomorrow-token",
+            20,
+            SnapshotFreshness::Fresh { age_seconds: 10 },
+            87_400,
+        );
+        let resets_next_week = quota_account_with_reset(
+            "acct_resets_next_week",
+            "weekly-token",
+            60,
+            SnapshotFreshness::Fresh { age_seconds: 10 },
+            605_800,
+        );
+        let selector =
+            QuotaAwareAccountSelector::new_with_now(vec![resets_next_week, resets_tomorrow], 1_000);
+
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("selector should choose eligible account: {error}"),
+        };
+
+        assert_eq!(selected.account_id().as_str(), "acct_resets_tomorrow");
+        assert_eq!(
+            selected.upstream_auth_token().expose_secret(),
+            "tomorrow-token"
+        );
+    }
+
+    #[test]
     fn quota_aware_selector_fails_closed_when_no_account_has_headroom() {
         let selector = QuotaAwareAccountSelector::new(vec![quota_account(
             "acct_empty",
@@ -556,6 +590,63 @@ mod tests {
             "alpha-token"
         );
         assert_eq!(selected.selection_reason(), "fresh_quota");
+    }
+
+    #[test]
+    fn repository_backed_selector_uses_reset_hint_for_expiring_quota() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_reset_hint");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let soon = AccountRecord::new(
+            account_id("acct_resets_tomorrow"),
+            "tomorrow",
+            AccountStatus::Enabled,
+        );
+        let later = AccountRecord::new(
+            account_id("acct_resets_next_week"),
+            "weekly",
+            AccountStatus::Enabled,
+        );
+
+        persist_account_with_snapshot_reset_and_token(
+            &state,
+            &secrets,
+            &later,
+            60,
+            605_800,
+            "weekly-token",
+        );
+        persist_account_with_snapshot_reset_and_token(
+            &state,
+            &secrets,
+            &soon,
+            20,
+            87_400,
+            "tomorrow-token",
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state, &secrets, 1_000, 60);
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("repository-backed selector should select account: {error}"),
+        };
+
+        assert_eq!(selected.account_id().as_str(), "acct_resets_tomorrow");
+        assert_eq!(
+            selected.upstream_auth_token().expose_secret(),
+            "tomorrow-token"
+        );
     }
 
     #[test]
@@ -1565,6 +1656,152 @@ mod tests {
 
     #[test]
     #[allow(clippy::result_large_err)]
+    fn loopback_router_runtime_audits_websocket_upstream_transport_failure() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_upstream_failure_audit");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let audit_path = temp_dir.path().join("audit").join("events.jsonl");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_ws_failure"),
+            "ws-failure",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &account,
+            90,
+            "runtime-ws-failure-upstream-token-canary",
+        );
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("resetting upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("resetting upstream address should read: {error}"),
+        };
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("resetting upstream should accept: {error}"),
+            };
+            let mut websocket =
+                match accept_hdr(stream, |_request: &Request, response: Response| {
+                    Ok(response)
+                }) {
+                    Ok(websocket) => websocket,
+                    Err(error) => panic!("resetting upstream handshake should accept: {error}"),
+                };
+            match websocket.read() {
+                Ok(_message) => {}
+                Err(error) => panic!("resetting upstream should read first frame: {error}"),
+            }
+        });
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("resetting endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60)
+        .with_max_websocket_upstream_messages(1)
+        .with_audit_file(audit_path.clone());
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            let mut request =
+                match format!("ws://{router_address}/v1/responses").into_client_request() {
+                    Ok(request) => request,
+                    Err(error) => panic!("local websocket request should build: {error}"),
+                };
+            request.headers_mut().insert(
+                "X-Codex-Router-Token",
+                HeaderValue::from_static("current-token"),
+            );
+            let (mut client, _response) = match connect(request) {
+                Ok(connection) => connection,
+                Err(error) => panic!("local websocket client should connect: {error}"),
+            };
+            match client.get_mut() {
+                tungstenite::stream::MaybeTlsStream::Plain(stream) => {
+                    if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(2))) {
+                        panic!("local websocket client should set read timeout: {error}");
+                    }
+                }
+                _other => {}
+            }
+            let first_frame = r#"{"type":"response.create","prompt":"body-canary"}"#;
+            if let Err(error) = client.send(Message::text(first_frame)) {
+                panic!("local websocket client should send first frame: {error}");
+            }
+            match client.read() {
+                Ok(message) => {
+                    panic!("local websocket should close after upstream failure: {message}")
+                }
+                Err(_error) => {}
+            }
+        });
+
+        let handled = match runtime.serve_protocol_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => {
+                panic!("router runtime should finish failed websocket connection: {error}")
+            }
+        };
+        assert_eq!(handled, 1);
+        match client_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("client thread panicked: {error:?}"),
+        }
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("resetting upstream thread panicked: {error:?}"),
+        }
+
+        let audit_contents = match fs::read_to_string(&audit_path) {
+            Ok(contents) => contents,
+            Err(error) => panic!("websocket failure audit file should exist: {error}"),
+        };
+        assert!(audit_contents.contains("\"decision_reason\":\"forwarded\""));
+        assert!(audit_contents.contains("\"decision_reason\":\"upstream_transport_failed\""));
+        assert!(audit_contents.contains("\"error_class\":\"upstream_websocket_transport\""));
+        assert!(audit_contents.contains("\"transport_kind\":\"web_socket\""));
+        assert!(audit_contents.contains("\"route_kind\":\"responses_web_socket\""));
+        assert!(audit_contents.contains("\"local_auth_result\":\"valid\""));
+        assert!(audit_contents.contains("\"account_hash\""));
+        assert!(!audit_contents.contains("current-token"));
+        assert!(!audit_contents.contains("runtime-ws-failure-upstream-token-canary"));
+        assert!(!audit_contents.contains("body-canary"));
+        assert!(!audit_contents.contains("acct_ws_failure"));
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
     fn loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket() {
         let temp_dir = ProxyTestTempDir::new("runtime_websocket_token_rotation");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -2217,6 +2454,22 @@ mod tests {
         )
     }
 
+    fn quota_account_with_reset(
+        account_id: &str,
+        upstream_auth_token: &str,
+        remaining_headroom: u32,
+        freshness: SnapshotFreshness,
+        reset_unix_seconds: u64,
+    ) -> QuotaAwareAccountState {
+        quota_account(
+            account_id,
+            upstream_auth_token,
+            remaining_headroom,
+            freshness,
+        )
+        .with_reset_unix_seconds(reset_unix_seconds)
+    }
+
     fn persist_account_with_snapshot_and_token(
         state: &SqliteStateStore,
         secrets: &FileSecretStore,
@@ -2233,6 +2486,37 @@ mod tests {
         )
         .with_observed_unix_seconds(1_000)
         .with_route_band("responses", remaining_headroom)
+        .with_stale_penalty(false);
+        if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(state, &snapshot) {
+            panic!("quota snapshot should persist: {error}");
+        }
+        let token_key = match upstream_access_token_key(account.account_id()) {
+            Ok(token_key) => token_key,
+            Err(error) => panic!("token key should build: {error}"),
+        };
+        if let Err(error) = secrets.write_secret(&token_key, &SecretString::new(upstream_token)) {
+            panic!("upstream token should persist: {error}");
+        }
+    }
+
+    fn persist_account_with_snapshot_reset_and_token(
+        state: &SqliteStateStore,
+        secrets: &FileSecretStore,
+        account: &AccountRecord,
+        remaining_headroom: u32,
+        reset_unix_seconds: u64,
+        upstream_token: &str,
+    ) {
+        if let Err(error) = AccountStateRepository::upsert_account(state, account) {
+            panic!("account should persist: {error}");
+        }
+        let snapshot = PersistedQuotaSnapshot::new(
+            account.account_id().clone(),
+            QuotaSnapshotSource::MockEndpoint,
+        )
+        .with_observed_unix_seconds(1_000)
+        .with_route_band("responses", remaining_headroom)
+        .with_reset_unix_seconds(reset_unix_seconds)
         .with_stale_penalty(false);
         if let Err(error) = QuotaSnapshotRepository::upsert_snapshot(state, &snapshot) {
             panic!("quota snapshot should persist: {error}");

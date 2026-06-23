@@ -36,8 +36,8 @@ pub enum SecretStoreError {
         value: String,
     },
 
-    /// Router root must never live inside Codex home.
-    #[error("secret store root must not use .codex path: {path}")]
+    /// Router root must never live inside Codex or Prodex home.
+    #[error("secret store root must not use .codex or .prodex path: {path}")]
     CodexHomePath {
         /// Rejected path.
         path: PathBuf,

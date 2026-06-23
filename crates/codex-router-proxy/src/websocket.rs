@@ -107,6 +107,8 @@ pub enum WebSocketFirstFrameDecision {
     OpenUpstream {
         /// Local token generation used to authorize the connection.
         token_generation: TokenGeneration,
+        /// Redacted selected account hash, when selection happened in this router.
+        account_hash: Option<String>,
         /// Sanitized upstream handshake headers.
         headers: HeaderCollection,
         /// First frame to forward unchanged.
@@ -174,6 +176,7 @@ impl WebSocketProtocolRouter {
 
         Ok(WebSocketFirstFrameDecision::OpenUpstream {
             token_generation: TokenGeneration::new(0),
+            account_hash: None,
             headers: sanitize_headers_for_upstream(handshake.headers, upstream_auth_token),
             first_frame,
         })
@@ -270,16 +273,18 @@ where
         self.emit_audit_event(allowed_audit_event(
             TransportKind::WebSocket,
             AuditRouteKind::ResponsesWebSocket,
-            account_hash,
+            account_hash.clone(),
         ));
 
         Ok(match decision {
             WebSocketFirstFrameDecision::OpenUpstream {
+                account_hash: _account_hash,
                 headers,
                 first_frame,
                 ..
             } => WebSocketFirstFrameDecision::OpenUpstream {
                 token_generation,
+                account_hash: Some(account_hash),
                 headers,
                 first_frame,
             },
@@ -312,6 +317,20 @@ fn websocket_first_frame_rejection_audit_event(account_hash: String) -> AuditEve
         response_commit_state: ResponseCommitState::NotCommitted,
         account_hash: Some(account_hash),
         error_class: Some("websocket_first_frame"),
+    })
+}
+
+fn websocket_upstream_transport_rejection_audit_event(account_hash: String) -> AuditEvent {
+    AuditEvent::proxy_decision(AuditEventFields {
+        request_id: RequestId::new("local_proxy_request"),
+        route_kind: AuditRouteKind::ResponsesWebSocket,
+        transport_kind: TransportKind::WebSocket,
+        local_auth_result: LocalAuthAuditResult::Valid,
+        outcome: AuditOutcome::Rejected,
+        decision_reason: "upstream_transport_failed",
+        response_commit_state: ResponseCommitState::Committed,
+        account_hash: Some(account_hash),
+        error_class: Some("upstream_websocket_transport"),
     })
 }
 
@@ -463,6 +482,7 @@ where
             .map_err(WebSocketTunnelError::CloseReason)?;
         let WebSocketFirstFrameDecision::OpenUpstream {
             token_generation,
+            account_hash,
             headers,
             first_frame,
         } = decision;
@@ -471,13 +491,24 @@ where
 
         let mut upstream_request = upstream_url.into_client_request()?;
         apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
-        let (mut upstream_websocket, _response) = connect(upstream_request)?;
-        upstream_websocket.send(message_from_frame(first_frame)?)?;
+        let (mut upstream_websocket, _response) =
+            connect(upstream_request).inspect_err(|_error| {
+                self.emit_upstream_transport_rejection(account_hash.clone());
+            })?;
+        let first_message = message_from_frame(first_frame)?;
+        upstream_websocket
+            .send(first_message)
+            .inspect_err(|_error| {
+                self.emit_upstream_transport_rejection(account_hash.clone());
+            })?;
         forward_upstream_response(
             &mut upstream_websocket,
             &mut local_websocket,
             max_upstream_messages,
-        )?;
+        )
+        .inspect_err(|_error| {
+            self.emit_upstream_transport_rejection(account_hash.clone());
+        })?;
         local_websocket
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(500)))
@@ -506,6 +537,15 @@ where
                 &mut local_websocket,
                 max_upstream_messages,
             )?;
+        }
+    }
+
+    fn emit_upstream_transport_rejection(&self, account_hash: Option<String>) {
+        if let Some(account_hash) = account_hash {
+            self.router
+                .emit_audit_event(websocket_upstream_transport_rejection_audit_event(
+                    account_hash,
+                ));
         }
     }
 }

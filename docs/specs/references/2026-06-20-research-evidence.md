@@ -8,6 +8,7 @@ Current source snapshots used by the spec review:
 - Prodex: `/Users/shravansunder/Documents/dev/open-source/ai-dev/prodex`, commit `682e442a`.
 - Archived old fork: `/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router-prodex-fork-archive-2026-06-20`.
 - Official Codex manual cache: `/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T/openai-docs-cache/codex-manual.md`; helper reported current on 2026-06-20.
+- Quota burn-down research ledger: `tmp/research-workflows/2026-06-21-quota-burn-down/research-ledger.md`.
 
 ## Codex Evidence
 
@@ -40,10 +41,20 @@ Useful source-mining areas:
 
 - OAuth/account parsing and refresh-needed logic
 - quota usage models and quota-window tests
+- quota rendering with separate short and weekly windows
+- runtime summaries and reset-aware quota pressure scoring
 - refresh lease and single-flight coordination
 - secret-store trait shape and hardened file-write ideas
 - HTTP/SSE response forwarding, header filtering, and bounded stream observation
 - WebSocket proxy mechanics
+
+Quota calculation evidence accepted into the spec:
+
+- Multiple provider quota windows must remain distinct for durable logic and human display; semantic labels such as `5h`, `daily`, `weekly`, and `monthly` are better than anonymous primary/secondary slots.
+- Effective headroom is the bottleneck across applicable windows, and the effective row must inherit the bottleneck window reset, pace, and projected runout.
+- Pace is computed as actual used percentage minus expected used percentage at the current point in the reset window.
+- Projected runout is an estimate from observed burn rate, not an exact promise, and must be presented as projection.
+- Reset-aware routing may prefer sooner-resetting quota only after eligibility and long-window bottleneck protection; weekly or other long-window quota must carry higher selection weight than short-window reset urgency.
 
 Areas to exclude:
 

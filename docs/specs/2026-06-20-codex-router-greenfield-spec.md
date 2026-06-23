@@ -100,26 +100,57 @@ Previous-response affinity is correctness-critical when Codex sends `previous_re
 An account is a router-owned upstream identity with:
 
 - opaque local account id
-- redacted human hint, such as email hash or display label
+- redacted human hint, such as email hash or local-safe display label
 - enabled/disabled state
 - OAuth credential reference
 - quota snapshot
 - active reservations
 - optional affinity ownership records
 
-Quota snapshots are refreshed in the background. Request-time routing reads existing snapshots and must not block the accept loop on broad quota refresh. A request may trigger a narrow refresh only when that is bounded, account-scoped, and outside the committed upstream response path.
+Quota snapshots are refreshed in the background. Startup and request-time routing must never block on broad quota refresh. On startup, the router must bind and begin serving from last-known persisted SQLite snapshots when they exist, or from conservative unknown state when they do not. A request may trigger a narrow refresh only when that is bounded, account-scoped, and outside the committed upstream response path.
+
+The serve-owned refresh worker must run one refresh cycle as soon as the router starts, then continue on the configured schedule. The immediate startup cycle is background work: it must not delay listener binding, local auth checks, or request acceptance. Scheduled refresh must write updated selector snapshots and human-readable status rows to SQLite atomically per account and route band.
+
+Refresh failures must be classified before they change selector state:
+
+- transient refresh failures, such as provider/network unavailability or malformed refresh-cycle configuration discovered after startup, must preserve the last-known selector snapshot and mark status as stale or failed with redacted diagnostics
+- terminal account failures, such as missing credentials, unrefreshable expired credentials, explicit account disablement, or provider-confirmed quota/auth exhaustion, must make that account ineligible for the affected route band until a later successful refresh or credential repair
+- route-band alias replacement must stay consistent: when a terminal response-quota failure is written, it must fan out to every response-backed route band so stale positive aliases cannot survive
 
 Quota state is advisory until it is used as a precommit gate. The router should prefer fresh live quota data, then persisted snapshots, then unknown quota state. Unknown quota must not be treated as free capacity when known healthy accounts exist.
+
+Provider response quota is a shared upstream limit, but the proxy selects by
+request route band. Until the provider exposes separate limits, refresh must
+persist the response quota under every response-backed route band consumed by
+the proxy: `responses`, `models`, `memories_trace_summarize`, and
+`responses_compact`. Failure replacement must fan out to the same bands so stale
+positive snapshots cannot survive under aliases.
 
 The selector should balance accounts using quota headroom and active reservations, not naive modulo round-robin. The target behavior is weighted deficit round robin over eligible accounts:
 
 - accounts with more remaining quota receive more turns
 - accounts with active reservations have reduced immediate headroom
+- accounts with sooner-resetting bottleneck quota may receive more turns so expiring quota is not wasted
 - disabled, unauthenticated, expired, or explicitly exhausted accounts are ineligible
 - stale snapshots are penalized
 - same-turn and previous-response affinity can override balance when correctness requires it
 
-The router should rotate before commit when the selected account is known to be exhausted, unauthorized, expired, or explicitly rejected for quota/auth reasons. It must not rotate on upstream 5xx, overload, timeout, DNS failure, connection reset, slow stream, client cancellation, or post-commit stream failure.
+Quota windows must remain explainable as windows, not only as one aggregate number. When a provider returns short/session/daily and weekly windows, the router must compute:
+
+- per-window remaining percentage
+- semantic window label when inferable from `limit_window_seconds`, such as `5h`, `daily`, `weekly`, or `monthly`
+- bottleneck/effective remaining headroom as the lower remaining percentage across applicable windows
+- reset-in for each window
+- pace as actual used percentage minus expected used percentage at the current point in the reset window
+- projected runout at the observed current-window burn rate
+
+The `effective` quota view must inherit the bottleneck window's reset, pace, and projected runout. If the weekly window is the limiting window, weekly reset timing must remain visible in display and must be available to selection.
+
+Selection weights must protect longer-window quota, especially weekly quota, before spending short-window quota. Weekly or other long-window headroom is the durable account budget; short-window reset urgency can increase an account's weight only after the account remains eligible under the long-window bottleneck. An account with low weekly headroom must not be preferred merely because its short window resets sooner.
+
+The router must provide a first-class local quota status command backed by SQLite. The default human view must use a readable table with one compact effective row per account and route band, and must show account hint, route band, status, remaining headroom, limiting window, reset timing, pace, projected runout, and redacted notes. An expanded view must show each provider window separately while keeping the effective bottleneck row visible. Machine-readable plain output may exist, but it must not replace the human table. The status command must not perform provider I/O unless the user explicitly requests a refresh path; it reports the last persisted truth and its freshness.
+
+The router should rotate before commit when the selected account is known to be exhausted, unauthorized, expired, or explicitly rejected for quota/auth reasons. It must not rotate on upstream 5xx, overload, timeout, DNS failure, connection reset, slow stream, client cancellation, or post-commit stream failure. When an account becomes ineligible, the next normal selectable path must choose another eligible account. The router must not switch accounts mid-stream or across previous-response/same-turn affinity unless the owning account cannot safely continue; in that case it must fail clearly rather than silently replaying state on a different account.
 
 ## Routing State Machine
 
@@ -336,7 +367,9 @@ Unit proof:
 
 - config accepts intended fields and rejects forbidden/unknown fields
 - selector eligibility, weighted deficit behavior, staleness penalties, reservations, and affinity
+- selector weighting protects weekly or other long-window quota before applying short-window reset urgency
 - quota window classification
+- quota pace, projected runout, effective bottleneck row, semantic window labels, and long-window reset inheritance
 - auth expiry and refresh-needed classification
 - redaction wrappers and audit event serialization
 - no production `unwrap`/`expect` lint escapes
@@ -348,6 +381,12 @@ Integration proof:
 - file secret-store permissions, symlink refusal, atomic write behavior, and parent-directory checks
 - refresh lease owner/follower behavior and stale-lock recovery
 - mock quota refresh with persisted snapshot fallback
+- serve startup binds without waiting for provider quota I/O and can route from last-known persisted snapshots
+- serve schedules one immediate background quota refresh after startup and then continues at the configured interval
+- transient refresh failures preserve last-known selector snapshots while surfacing stale or failed redacted status
+- terminal account failures make only the affected account and route band ineligible until repair or successful refresh
+- quota status renders the default human table from SQLite without provider I/O, including headroom, limiting window, reset, pace, runout, and notes
+- quota status expanded mode keeps the effective bottleneck row visible while also showing provider windows
 - local auth rejects missing or bad tokens before account selection
 - local token rotation rejects old tokens and closes old-token WebSockets
 - profile print and profile write dry-run never mutate `~/.codex`
@@ -360,6 +399,7 @@ Protocol proof:
 - local router token is stripped upstream
 - selected upstream auth is injected exactly once
 - explicit precommit auth/quota failure can rotate
+- after an account becomes ineligible, the next normal selectable request uses another eligible account without blocking on quota refresh
 - timeout, 5xx, overload, DNS, reset, cancellation, and post-commit failures do not rotate
 - WebSocket handshake validates local auth before upstream connection
 - WebSocket first-frame routing reads only bounded metadata before opening upstream
@@ -376,6 +416,8 @@ Smoke proof:
 - smoke captures the installed Codex version and the profile used
 - a temp `CODEX_HOME` or equivalent isolated profile fixture is used
 - `CODEX_ROUTER_TOKEN` is injected for the smoke without printing it
+- smoke starts the router without a live quota endpoint response on the startup path and verifies startup is not quota-blocked
+- smoke captures a redacted quota status table after a background refresh has populated SQLite
 - HTTP/SSE and WebSocket modes are each exercised when enabled
 - mock upstream transcript assertions prove header stripping, upstream auth injection, and body/frame preservation
 - a hostile local request without the router token never opens an upstream connection

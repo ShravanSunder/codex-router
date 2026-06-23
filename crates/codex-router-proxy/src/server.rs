@@ -138,7 +138,7 @@ pub struct LoopbackRouterRuntimeConfig {
     state_database_path: PathBuf,
     secret_store_root: PathBuf,
     local_token: LocalRouterTokenRecord,
-    now_unix_seconds: u64,
+    fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     max_websocket_upstream_messages: usize,
     audit_file_path: Option<PathBuf>,
@@ -160,7 +160,7 @@ impl LoopbackRouterRuntimeConfig {
             state_database_path,
             secret_store_root,
             local_token,
-            now_unix_seconds: 0,
+            fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             max_websocket_upstream_messages: usize::MAX,
             audit_file_path: None,
@@ -174,7 +174,7 @@ impl LoopbackRouterRuntimeConfig {
         now_unix_seconds: u64,
         max_snapshot_age_seconds: u64,
     ) -> Self {
-        self.now_unix_seconds = now_unix_seconds;
+        self.fixed_now_unix_seconds = Some(now_unix_seconds);
         self.max_snapshot_age_seconds = max_snapshot_age_seconds;
         self
     }
@@ -206,7 +206,7 @@ pub struct LoopbackRouterRuntime {
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
-    now_unix_seconds: u64,
+    fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     max_websocket_upstream_messages: usize,
     websocket_revocations: WebSocketRevocationRegistry,
@@ -235,7 +235,7 @@ impl LoopbackRouterRuntime {
             auth_gate,
             upstream,
             upstream_endpoint,
-            now_unix_seconds: config.now_unix_seconds,
+            fixed_now_unix_seconds: config.fixed_now_unix_seconds,
             max_snapshot_age_seconds: config.max_snapshot_age_seconds,
             max_websocket_upstream_messages: config.max_websocket_upstream_messages,
             websocket_revocations: WebSocketRevocationRegistry::new(),
@@ -282,7 +282,7 @@ impl LoopbackRouterRuntime {
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
             &self.secret_store,
-            self.now_unix_seconds,
+            self.selector_now_unix_seconds(),
             self.max_snapshot_age_seconds,
             Arc::clone(&self.weighted_selector),
         );
@@ -350,7 +350,7 @@ impl LoopbackRouterRuntime {
             let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
                 &self.state_store,
                 &self.secret_store,
-                self.now_unix_seconds,
+                self.selector_now_unix_seconds(),
                 self.max_snapshot_age_seconds,
                 Arc::clone(&self.weighted_selector),
             );
@@ -388,7 +388,7 @@ impl LoopbackRouterRuntime {
         let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
             &self.state_store,
             &self.secret_store,
-            self.now_unix_seconds,
+            self.selector_now_unix_seconds(),
             self.max_snapshot_age_seconds,
             Arc::clone(&self.weighted_selector),
         );
@@ -402,6 +402,17 @@ impl LoopbackRouterRuntime {
         LoopbackHttpAdapter::handle_streaming_connection(stream, &service)
             .map_err(LoopbackRouterRuntimeError::Connection)
     }
+
+    fn selector_now_unix_seconds(&self) -> u64 {
+        self.fixed_now_unix_seconds
+            .unwrap_or_else(current_unix_seconds_for_selector)
+    }
+}
+
+fn current_unix_seconds_for_selector() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Thread-safe handle for replacing local auth without sharing the full runtime.

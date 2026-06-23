@@ -22,6 +22,7 @@ publish = false
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.0" }
 codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.0" }
 base64 = "0.22.1"
+comfy-table = "7.2.2"
 hmac = "0.12.1"
 httparse = "1.10.1"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
@@ -30,6 +31,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
 thiserror = "2.0.18"
+opentelemetry = "0.32.0"
+opentelemetry-appender-tracing = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "logs", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["logs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

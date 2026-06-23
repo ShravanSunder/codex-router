@@ -4,6 +4,7 @@ pub mod live_quota;
 pub mod oauth;
 pub mod quota_client;
 pub mod refresh_worker;
+pub mod router_credentials;
 
 /// Returns this crate's package name.
 #[must_use]
@@ -14,6 +15,12 @@ pub const fn package_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::package_name;
+    use crate::live_quota::UsageWindow;
+    use crate::live_quota::UsageWindowBurnDown;
+    use crate::live_quota::WindowPair;
+    use crate::live_quota::quota_pair_bottleneck_window;
+    use crate::live_quota::quota_pair_remaining_headroom;
+    use crate::live_quota::quota_window_burn_down;
     use crate::oauth::OAuthRefreshClassification;
     use crate::oauth::OAuthTokenStatus;
     use crate::oauth::TokenClock;
@@ -113,6 +120,47 @@ mod tests {
 
         assert_eq!(response.remaining_headroom(), 77);
         assert_eq!(response.route_name(), "responses");
+    }
+
+    #[test]
+    fn live_quota_headroom_uses_daily_weekly_bottleneck() {
+        let quota = WindowPair {
+            primary_window: Some(UsageWindow {
+                used_percent: Some(25),
+                reset_at: Some(2_000),
+                limit_window_seconds: Some(18_000),
+            }),
+            secondary_window: Some(UsageWindow {
+                used_percent: Some(80),
+                reset_at: Some(9_000),
+                limit_window_seconds: Some(604_800),
+            }),
+        };
+
+        assert_eq!(quota_pair_remaining_headroom(Some(&quota)), Some(20));
+        assert_eq!(
+            quota_pair_bottleneck_window(Some(&quota)).and_then(|window| window.reset_at),
+            Some(9_000)
+        );
+    }
+
+    #[test]
+    fn live_quota_window_burn_down_reports_pace_and_projected_runout() {
+        let window = UsageWindow {
+            used_percent: Some(25),
+            reset_at: Some(1_800),
+            limit_window_seconds: Some(1_000),
+        };
+
+        assert_eq!(
+            quota_window_burn_down(Some(&window), 1_300),
+            Some(UsageWindowBurnDown {
+                expected_used_percent: 50,
+                pace_delta_percent: -25,
+                runout_unix_seconds: Some(2_800),
+                runout_before_reset: false,
+            })
+        );
     }
 
     struct FakeAuthenticatedQuotaClient;

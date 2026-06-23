@@ -131,6 +131,24 @@ impl AuditEvent {
             error_class: fields.error_class,
         }
     }
+
+    /// Emits the safe audit fields through `tracing` when a subscriber is installed.
+    pub fn emit_tracing_event(&self) {
+        tracing::info!(
+            target: "codex_router.audit",
+            event_type = self.event_type,
+            request_id = self.request_id.as_str(),
+            route_kind = ?self.route_kind,
+            transport_kind = ?self.transport_kind,
+            local_auth_result = ?self.local_auth_result,
+            outcome = ?self.outcome,
+            decision_reason = self.decision_reason,
+            response_commit_state = ?self.response_commit_state,
+            account_hash = self.account_hash.as_deref().unwrap_or(""),
+            error_class = self.error_class.unwrap_or(""),
+            "codex_router_proxy_decision"
+        );
+    }
 }
 
 /// Construction fields for an audit event.
@@ -177,6 +195,7 @@ impl AuditFileSink {
 
     /// Appends one JSONL audit event.
     pub fn append(&self, event: &AuditEvent) -> Result<(), AuditSinkError> {
+        event.emit_tracing_event();
         if let Some(parent) = self.path.parent() {
             create_private_dir(parent)?;
         }

@@ -442,6 +442,7 @@ pub struct QuotaAwareAccountState {
     upstream_auth_token: SecretString,
     remaining_headroom: u32,
     freshness: SnapshotFreshness,
+    reset_unix_seconds: Option<u64>,
 }
 
 impl QuotaAwareAccountState {
@@ -458,7 +459,25 @@ impl QuotaAwareAccountState {
             upstream_auth_token,
             remaining_headroom,
             freshness,
+            reset_unix_seconds: None,
         }
+    }
+
+    /// Sets reset hint for reset-aware selection.
+    #[must_use]
+    pub const fn with_reset_unix_seconds(mut self, reset_unix_seconds: u64) -> Self {
+        self.reset_unix_seconds = Some(reset_unix_seconds);
+        self
+    }
+
+    /// Sets optional reset hint for reset-aware selection.
+    #[must_use]
+    pub const fn with_optional_reset_unix_seconds(
+        mut self,
+        reset_unix_seconds: Option<u64>,
+    ) -> Self {
+        self.reset_unix_seconds = reset_unix_seconds;
+        self
     }
 }
 
@@ -491,6 +510,7 @@ struct WeightedAccountCandidate {
 pub struct QuotaAwareAccountSelector {
     accounts: Vec<QuotaAwareAccountState>,
     weighted_selector: Mutex<WeightedDeficitSelector>,
+    now_unix_seconds: u64,
 }
 
 impl QuotaAwareAccountSelector {
@@ -500,6 +520,17 @@ impl QuotaAwareAccountSelector {
         Self {
             accounts,
             weighted_selector: Mutex::new(WeightedDeficitSelector::default()),
+            now_unix_seconds: 0,
+        }
+    }
+
+    /// Creates a quota-aware selector from account snapshots and a deterministic clock.
+    #[must_use]
+    pub fn new_with_now(accounts: Vec<QuotaAwareAccountState>, now_unix_seconds: u64) -> Self {
+        Self {
+            accounts,
+            weighted_selector: Mutex::new(WeightedDeficitSelector::default()),
+            now_unix_seconds,
         }
     }
 }
@@ -510,7 +541,11 @@ impl UpstreamAccountSelector for QuotaAwareAccountSelector {
         _request: &HttpProxyRequest,
         _token_generation: TokenGeneration,
     ) -> Result<SelectedUpstreamAccount, HttpProxyError> {
-        select_from_account_states(&self.accounts, &self.weighted_selector)
+        select_from_account_states(
+            &self.accounts,
+            &self.weighted_selector,
+            self.now_unix_seconds,
+        )
     }
 }
 
@@ -625,13 +660,18 @@ where
             ));
         }
 
-        select_from_account_states(&selector_accounts, self.weighted_selector.as_ref())
+        select_from_account_states(
+            &selector_accounts,
+            self.weighted_selector.as_ref(),
+            self.now_unix_seconds,
+        )
     }
 }
 
 fn select_from_account_states(
     accounts: &[QuotaAwareAccountState],
     weighted_selector: &Mutex<WeightedDeficitSelector>,
+    now_unix_seconds: u64,
 ) -> Result<SelectedUpstreamAccount, HttpProxyError> {
     let known_fresh_account_exists = accounts.iter().any(|account| {
         account.remaining_headroom > 0
@@ -639,7 +679,9 @@ fn select_from_account_states(
     });
     let weighted_candidates = accounts
         .iter()
-        .filter_map(|account| weighted_candidate_for_account(account, known_fresh_account_exists))
+        .filter_map(|account| {
+            weighted_candidate_for_account(account, known_fresh_account_exists, now_unix_seconds)
+        })
         .collect::<Vec<_>>();
     let selector_input = weighted_candidates
         .iter()
@@ -710,6 +752,7 @@ fn account_state_from_repositories(
         remaining_headroom,
         freshness,
     )
+    .with_optional_reset_unix_seconds(snapshot.reset_unix_seconds())
 }
 
 fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, HttpProxyError> {
@@ -732,6 +775,7 @@ fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, Ht
 fn weighted_candidate_for_account(
     account: &QuotaAwareAccountState,
     known_fresh_account_exists: bool,
+    now_unix_seconds: u64,
 ) -> Option<WeightedAccountCandidate> {
     let candidate = SelectionCandidate::new(
         account.account_id.clone(),
@@ -741,16 +785,44 @@ fn weighted_candidate_for_account(
     match candidate.eligibility(known_fresh_account_exists) {
         Eligibility::Eligible { headroom } => Some(WeightedAccountCandidate {
             account_id: account.account_id.clone(),
-            effective_headroom: headroom,
+            effective_headroom: reset_aware_headroom_weight(
+                headroom,
+                account.reset_unix_seconds,
+                now_unix_seconds,
+            ),
             selection_reason: selection_reason_for_freshness(account.freshness),
         }),
         Eligibility::Penalized { headroom, reason } => Some(WeightedAccountCandidate {
             account_id: account.account_id.clone(),
-            effective_headroom: headroom,
+            effective_headroom: reset_aware_headroom_weight(
+                headroom,
+                account.reset_unix_seconds,
+                now_unix_seconds,
+            ),
             selection_reason: reason,
         }),
         Eligibility::Ineligible { .. } => None,
     }
+}
+
+const RESET_URGENCY_HORIZON_SECONDS: u64 = 604_800;
+const MAX_RESET_URGENCY_MULTIPLIER: u32 = 16;
+
+fn reset_aware_headroom_weight(
+    headroom: u32,
+    reset_unix_seconds: Option<u64>,
+    now_unix_seconds: u64,
+) -> u32 {
+    let Some(reset_unix_seconds) = reset_unix_seconds else {
+        return headroom;
+    };
+    let seconds_until_reset = reset_unix_seconds.saturating_sub(now_unix_seconds);
+    if seconds_until_reset == 0 {
+        return headroom.saturating_mul(MAX_RESET_URGENCY_MULTIPLIER);
+    }
+    let multiplier = (RESET_URGENCY_HORIZON_SECONDS / seconds_until_reset)
+        .clamp(1, u64::from(MAX_RESET_URGENCY_MULTIPLIER));
+    headroom.saturating_mul(u32::try_from(multiplier).unwrap_or(MAX_RESET_URGENCY_MULTIPLIER))
 }
 
 const fn selection_reason_for_freshness(freshness: SnapshotFreshness) -> &'static str {

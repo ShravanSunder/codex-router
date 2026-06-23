@@ -27,10 +27,13 @@ mod tests {
     use crate::account::AccountRecord;
     use crate::account::AccountStatus;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
+    use crate::quota_snapshot::PersistedQuotaStatusRow;
     use crate::quota_snapshot::QuotaSnapshotSource;
+    use crate::quota_snapshot::QuotaStatusState;
     use crate::repositories::AccountStateRepository;
     use crate::repositories::AffinityRepository;
     use crate::repositories::QuotaSnapshotRepository;
+    use crate::repositories::QuotaStatusRepository;
     use crate::sqlite::SqliteStateStore;
     use crate::sqlite::StateStoreError;
 
@@ -50,7 +53,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 1);
+        assert_eq!(store.schema_version(), 2);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -73,6 +76,103 @@ mod tests {
 
         assert_eq!(store.load_account(&account_id), Ok(Some(account)));
         assert_eq!(store.load_quota_snapshot(&account_id), Ok(Some(snapshot)));
+    }
+
+    #[test]
+    fn sqlite_v1_database_migrates_to_v2_quota_status_schema() {
+        let temp_dir = TestTempDir::new("migration_v1_to_v2");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let raw = match rusqlite::Connection::open(&database_path) {
+            Ok(raw) => raw,
+            Err(error) => panic!("raw sqlite should open: {error}"),
+        };
+        if let Err(error) = raw.execute_batch(
+            "
+            CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL
+            );
+            CREATE TABLE quota_snapshots (
+                account_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                route_band TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                stale_penalty INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band)
+            );
+            CREATE TABLE affinity_pins (
+                affinity_key TEXT PRIMARY KEY NOT NULL,
+                account_id TEXT NOT NULL
+            );
+            PRAGMA user_version = 1;
+            ",
+        ) {
+            panic!("v1 fixture should initialize: {error}");
+        }
+        drop(raw);
+
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("v1 database should migrate to v2: {error}"),
+        };
+        assert_eq!(store.schema_version(), 2);
+
+        let status = quota_status_row(account_id("acct_migrated"), "responses", "rate_limit", "5h")
+            .with_status(QuotaStatusState::Fresh)
+            .with_used_percent(25)
+            .with_remaining_headroom(75)
+            .with_effective(true);
+        must_ok(QuotaStatusRepository::upsert_status_row(&store, &status));
+
+        assert_eq!(
+            QuotaStatusRepository::list_status_rows(&store),
+            Ok(vec![status])
+        );
+    }
+
+    #[test]
+    fn sqlite_state_store_rejects_codex_home_path() {
+        let temp_dir = TestTempDir::new("codex_home_state_path");
+        let codex_home = temp_dir.path().join(".codex");
+        must_create_dir(&codex_home);
+        let database_path = codex_home.join("state.sqlite");
+
+        let error = match SqliteStateStore::open(&database_path) {
+            Ok(store) => panic!("state store must reject .codex path, got {store:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            StateStoreError::CodexHomePath {
+                path: database_path
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_state_store_rejects_symlink_parent_path() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TestTempDir::new("symlink_state_path");
+        let real_root = temp_dir.path().join("real-root");
+        let linked_root = temp_dir.path().join("linked-root");
+        must_create_dir(&real_root);
+        if let Err(error) = symlink(&real_root, &linked_root) {
+            panic!("test symlink should create: {error}");
+        }
+        let database_path = linked_root.join("state.sqlite");
+
+        let error = match SqliteStateStore::open(&database_path) {
+            Ok(store) => panic!("state store must reject symlink parent, got {store:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, StateStoreError::SymlinkPath { path: linked_root });
     }
 
     #[test]
@@ -107,6 +207,137 @@ mod tests {
         assert_eq!(
             QuotaSnapshotRepository::load_snapshot_for_route_band(&store, &account_id, "models"),
             Ok(Some(models_snapshot))
+        );
+    }
+
+    #[test]
+    fn quota_status_rows_roundtrip_in_display_order() {
+        let temp_dir = TestTempDir::new("quota_status_rows");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_status_rows");
+        let effective =
+            quota_status_row(account_id.clone(), "responses", "rate_limit", "effective")
+                .with_observed_unix_seconds(1_000)
+                .with_status(QuotaStatusState::Fresh)
+                .with_used_percent(80)
+                .with_remaining_headroom(20)
+                .with_reset_unix_seconds(9_000)
+                .with_limit_window_seconds(604_800)
+                .with_effective(true);
+        let detailed = quota_status_row(account_id, "responses", "rate_limit", "5h")
+            .with_observed_unix_seconds(1_000)
+            .with_status(QuotaStatusState::Fresh)
+            .with_used_percent(25)
+            .with_remaining_headroom(75)
+            .with_reset_unix_seconds(1_800)
+            .with_limit_window_seconds(18_000);
+
+        must_ok(QuotaStatusRepository::upsert_status_row(&store, &detailed));
+        must_ok(QuotaStatusRepository::upsert_status_row(&store, &effective));
+
+        assert_eq!(
+            QuotaStatusRepository::list_status_rows(&store),
+            Ok(vec![effective, detailed])
+        );
+    }
+
+    #[test]
+    fn corrupt_quota_status_percentage_fails_closed() {
+        let temp_dir = TestTempDir::new("corrupt_quota_status_percent");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        must_ok(store.insert_raw_quota_status_for_test(
+            "acct_corrupt_status",
+            "mock_endpoint",
+            1_000,
+            "responses",
+            "rate_limit",
+            "5h",
+            "fresh",
+            Some(150),
+            75,
+            0,
+        ));
+
+        let error = match QuotaStatusRepository::list_status_rows(&store) {
+            Ok(rows) => panic!("corrupt status row should fail closed, got {rows:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            StateStoreError::CorruptQuotaStatus {
+                account_id: "acct_corrupt_status".to_owned(),
+                field: "used_percent",
+            }
+        );
+    }
+
+    #[test]
+    fn route_quota_state_replacement_commits_selector_and_status_rows_atomically() {
+        let temp_dir = TestTempDir::new("route_quota_atomic");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("state store should open and migrate: {error}"),
+        };
+        let atomic_account_id = account_id("acct_atomic");
+        let old_snapshot = PersistedQuotaSnapshot::new(
+            atomic_account_id.clone(),
+            QuotaSnapshotSource::MockEndpoint,
+        )
+        .with_observed_unix_seconds(1_000)
+        .with_route_band("responses", 10);
+        let old_status =
+            quota_status_row(atomic_account_id.clone(), "responses", "rate_limit", "old")
+                .with_observed_unix_seconds(1_000)
+                .with_remaining_headroom(10);
+        must_ok(QuotaStatusRepository::replace_route_quota_state(
+            &store,
+            &old_snapshot,
+            std::slice::from_ref(&old_status),
+        ));
+
+        let new_snapshot = PersistedQuotaSnapshot::new(
+            atomic_account_id.clone(),
+            QuotaSnapshotSource::MockEndpoint,
+        )
+        .with_observed_unix_seconds(2_000)
+        .with_route_band("responses", 90);
+        let bad_status =
+            quota_status_row(account_id("acct_other"), "responses", "rate_limit", "bad")
+                .with_observed_unix_seconds(2_000)
+                .with_remaining_headroom(90);
+        let error = match QuotaStatusRepository::replace_route_quota_state(
+            &store,
+            &new_snapshot,
+            &[bad_status],
+        ) {
+            Ok(()) => panic!("mismatched status row should rollback transaction"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            StateStoreError::CorruptQuotaStatus {
+                field: "account_id_mismatch",
+                ..
+            }
+        ));
+        assert_eq!(
+            store.load_quota_snapshot(&atomic_account_id),
+            Ok(Some(old_snapshot))
+        );
+        assert_eq!(
+            QuotaStatusRepository::list_status_rows(&store),
+            Ok(vec![old_status])
         );
     }
 
@@ -300,6 +531,34 @@ mod tests {
         match AccountId::new(value) {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
+        }
+    }
+
+    fn quota_status_row(
+        account_id: AccountId,
+        route_band: &str,
+        family: &str,
+        window_label: &str,
+    ) -> PersistedQuotaStatusRow {
+        PersistedQuotaStatusRow::new(
+            account_id,
+            QuotaSnapshotSource::MockEndpoint,
+            route_band,
+            family,
+            window_label,
+        )
+    }
+
+    fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("expected Ok, got error: {error}"),
+        }
+    }
+
+    fn must_create_dir(path: &Path) {
+        if let Err(error) = fs::create_dir(path) {
+            panic!("failed to create directory {}: {error}", path.display());
         }
     }
 }

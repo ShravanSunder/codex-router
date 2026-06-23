@@ -24,6 +24,7 @@ mod tests {
 
     use super::package_name;
     use crate::account_tokens::upstream_access_token_key;
+    use crate::account_tokens::upstream_refresh_token_key;
     use crate::file_backend::FileSecretStore;
     use crate::file_backend::SecretStore;
     use crate::model::SecretKey;
@@ -136,6 +137,17 @@ mod tests {
         let key = must_ok(upstream_access_token_key(&account_id));
 
         assert_eq!(key.as_str(), "openai_access_token.acct_primary");
+    }
+
+    #[test]
+    fn upstream_refresh_token_key_is_namespaced_by_account_id() {
+        let account_id = match AccountId::new("acct_primary") {
+            Ok(account_id) => account_id,
+            Err(error) => panic!("account id should parse: {error}"),
+        };
+        let key = must_ok(upstream_refresh_token_key(&account_id));
+
+        assert_eq!(key.as_str(), "openai_refresh_token.acct_primary");
     }
 
     #[test]

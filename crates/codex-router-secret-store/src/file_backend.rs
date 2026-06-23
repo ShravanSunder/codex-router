@@ -79,7 +79,7 @@ impl SecretStore for FileSecretStore {
 }
 
 fn reject_codex_home_path(path: &Path) -> Result<(), SecretStoreError> {
-    if path.components().any(is_codex_component) {
+    if path.components().any(is_codex_or_prodex_component) {
         return Err(SecretStoreError::CodexHomePath {
             path: path.to_path_buf(),
         });
@@ -88,8 +88,8 @@ fn reject_codex_home_path(path: &Path) -> Result<(), SecretStoreError> {
     Ok(())
 }
 
-fn is_codex_component(component: Component<'_>) -> bool {
-    matches!(component, Component::Normal(value) if value == ".codex")
+fn is_codex_or_prodex_component(component: Component<'_>) -> bool {
+    matches!(component, Component::Normal(value) if value == ".codex" || value == ".prodex")
 }
 
 fn reject_symlink_path(path: &Path) -> Result<(), SecretStoreError> {
@@ -202,4 +202,33 @@ fn read_to_string(path: &Path) -> Result<String, SecretStoreError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::FileSecretStore;
+    use crate::model::SecretStoreError;
+
+    #[test]
+    fn file_secret_store_rejects_prodex_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "codex-router-secret-prodex-test-{}",
+            std::process::id()
+        ));
+        let _cleanup_before = fs::remove_dir_all(&root);
+        let secret_root = root.join(".prodex").join("secrets");
+
+        let result = FileSecretStore::open(&secret_root);
+
+        match result {
+            Err(SecretStoreError::CodexHomePath { path }) => {
+                assert_eq!(path, secret_root);
+            }
+            Ok(_) => panic!("secret store should reject .prodex paths"),
+            Err(error) => panic!("unexpected secret store error: {error}"),
+        }
+        let _cleanup_after = fs::remove_dir_all(&root);
+    }
 }
