@@ -547,3 +547,43 @@ secret-store-owned hash-secret loading, state-owned hashed owner records,
 proxy-owned affinity orchestration, route-band policy registry, split output
 ordering, routing-reason precedence, affinity-secret-unavailable failure,
 hash-secret redaction proof, and generated-profile local auth proof.
+
+## R11 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`66dfe14`
+
+Review worktree:
+`/tmp/codex-router-r11-review.8XkrYg`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1447 lines before R11 fixes and was
+read in chunks 1-300, 301-600, 601-900, 901-1200, and 1201-1447.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r11/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- public `routing_reason` lacked a weekly-reset-imminent reason for
+  long-window salvage, so Scenario B could hide why the preferred account won
+- smoke transcript redaction still allowed individual non-allowlisted
+  WebSocket first-frame/body fields to leak
+- previous-response affinity needed an explicit cutover away from
+  `codex-router-selection::affinity` and raw `AffinityKey`
+- route-band identity needed a shared source of truth between proxy route
+  classification and selection policy lookup
+- affinity hash-secret storage needed concrete secret-store API, stable key,
+  entropy/encoding, typed return, and redacted error contract
+- safe-label helper needed concrete unsafe predicates and redacted tag format
+
+Revision applied:
+The spec now defines `preferred_weekly_reset_soon`, smoke transcript
+first-frame/body field allowlisting, previous-response raw-key cutover,
+core-owned `RouteBand`, affinity secret-store API/key/encoding/error contract,
+and `SafeAccountLabel` semantics with deterministic redacted tag format.

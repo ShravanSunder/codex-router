@@ -197,6 +197,23 @@ Rejected or deferred evidence:
 52. Pin installed-Codex e2e profile local auth to
     `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }` and
     reject `env_key` or Authorization-bearer fallback for this goal.
+53. Add `preferred_weekly_reset_soon` so long-window near-reset salvage can be
+    explained directly in default status, JSON, runtime audit, and tests.
+54. Forbid persisted/shared smoke transcripts from emitting individual raw
+    non-allowlisted WebSocket first-frame/body fields such as `model`, `input`,
+    `metadata`, `tools`, prompt text, or request body content.
+55. Cut previous-response routing away from `codex-router-selection::affinity`
+    and raw `AffinityKey`; no v1 previous-response path may import or call that
+    old raw-key surface.
+56. Define `codex-router-core::routes::RouteBand` as the shared route-band
+    identity used by proxy classification, selection policy lookup, and CLI
+    status adapters.
+57. Define affinity hash-secret storage as
+    `load_or_create_router_affinity_hash_secret`, stable key
+    `router_affinity_hash_secret.v1`, 32 random bytes, 64-lowercase-hex
+    persisted encoding, typed core return, and redacted errors.
+58. Define `SafeAccountLabel` helper semantics, minimum unsafe predicates, and
+    `acct-<12 lowercase hex chars>` deterministic redacted tag format.
 
 ## Open Decisions
 

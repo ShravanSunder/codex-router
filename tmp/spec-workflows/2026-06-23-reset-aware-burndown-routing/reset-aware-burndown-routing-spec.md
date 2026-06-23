@@ -114,7 +114,7 @@ burn-down assessment
   owns: reset-aware pressure math, pure routability/exclusion classification
         from supplied facts, and structured explanation
   crate: codex-router-selection::burn_down
-  inputs: BurnDownRouteBandAssessmentInput, fixed v1 route band policy
+  inputs: BurnDownRouteBandAssessmentInput, core RouteBand, fixed v1 route band policy
   exposes: BurnDownRouteBandAssessment { accounts, selected_pool, weighted_candidates, preferred_next }
   must not depend on: codex-router-state, codex-router-proxy, codex-router-cli
 
@@ -163,6 +163,11 @@ Dependency contract:
   deterministic redacted account hash/tag helper. Proxy, CLI, state-backed
   status adapters, traces/logs, and smoke transcript helpers must consume this
   shared helper instead of inventing surface-local account-label sanitizers.
+- `codex-router-core::routes` owns the shared `RouteBand` identifier enum for
+  all route bands that can enter quota assessment. Proxy route classification
+  outputs this core type. Selection policy lookup accepts this core type. CLI
+  status adapters use the same core type. Proxy and selection must not maintain
+  parallel string-only route-band lists.
 - `codex-router-core::affinity` owns typed
   `PreviousResponseId`, `AffinityKeyHash`, and `RouterAffinityHashSecret`
   wrappers plus the one HMAC helper:
@@ -174,6 +179,11 @@ Dependency contract:
   `router_affinity_hash_secret` for the router root. Proxy calls the secret
   store at the edge before affinity lookup/write; state never stores or returns
   the secret.
+- `codex-router-selection::affinity` is removed from previous-response owner
+  lookup/write/resolve scope in this feature. No previous-response path may use
+  the old raw `AffinityKey` or a selection-owned affinity table. Any remaining
+  non-previous-response affinity concept must be renamed and explicitly proven
+  not to read, write, or resolve provider previous-response ids.
 
 ## Burn-Down Assessment Contract
 
@@ -212,10 +222,10 @@ Adapters translate from state DTO enums into this enum.
 configuration. Plan creation may name constants and test fixtures, but must not
 turn these into user-facing config unless a later spec changes the contract.
 
-`codex-router-selection::burn_down` owns the v1 route-band policy registry.
-Proxy and CLI request a policy from selection; they must not carry independent
-route-band policy `match` logic. V1 contains explicit policies for every
-currently classified route band:
+`codex-router-selection::burn_down` owns the v1 route-band policy registry,
+keyed by `codex-router-core::routes::RouteBand`. Proxy and CLI request a policy
+from selection; they must not carry independent route-band policy `match` logic.
+V1 contains explicit policies for every currently classified route band:
 
 - `responses`: quota-managed 5h plus weekly public quota policy
 - `responses_compact`: quota-managed 5h plus weekly public quota policy
@@ -226,6 +236,14 @@ Unknown or unregistered route bands fail closed as `unsupported_route_band`
 before weighted selection. Default quota status renders the user `responses`
 quota route only; it must not emit per-route rows for the other route bands
 unless a future explicit debug or multi-route mode changes the contract.
+
+Route-band drift guard:
+
+- proxy route-classification tests must enumerate every `RouteBand` variant and
+  prove each routed variant has a selection policy
+- selection policy tests must enumerate every `RouteBand` variant and prove
+  lookup returns either an explicit policy or `unsupported_route_band`
+- no proxy-only route-band string may reach `BurnDownRouteBandAssessmentInput`
 
 Fixed v1 policy:
 
@@ -750,6 +768,7 @@ Stable routing reason enum:
 | Enum | Default human phrase |
 | --- | --- |
 | `preferred_weekly_healthier` | `preferred next: weekly healthier` |
+| `preferred_weekly_reset_soon` | `preferred next: weekly reset soon` |
 | `preferred_short_reset_soon` | `preferred next: 5h reset soon` |
 | `preferred_highest_weight` | `preferred next: safest quota` |
 | `available_same_pool` | `available: same pool` |
@@ -771,6 +790,7 @@ Public reason mapping:
 | Assessment outcome | Public `routing_reason` | Human phrase | `next use` |
 | --- | --- | --- | --- |
 | preferred usable account with healthier weekly pressure | `preferred_weekly_healthier` | `preferred next: weekly healthier` | `preferred` |
+| preferred usable account because weekly reset is near | `preferred_weekly_reset_soon` | `preferred next: weekly reset soon` | `preferred` |
 | preferred usable account because 5h reset is near | `preferred_short_reset_soon` | `preferred next: 5h reset soon` | `preferred` |
 | preferred account by neutral selector weight | `preferred_highest_weight` | `preferred next: safest quota` | `preferred` |
 | non-preferred account in the selected pool | `available_same_pool` | `available: same pool` | `available` |
@@ -798,12 +818,14 @@ availability pool selection in this order:
 4. The preferred account in an `unknown` selected pool maps to
    `unknown_fallback_preferred`.
 5. The preferred account in a known selected pool maps to
+   `preferred_weekly_reset_soon` when `long_salvage > 0`.
+6. Else, the preferred account in a known selected pool maps to
    `preferred_weekly_healthier` when its `long_pressure` is strictly lower than
    at least one other known selected-pool candidate, or when another supplied
    known account was held in `reserve` because of long-window pressure.
-6. Else, the preferred account maps to `preferred_short_reset_soon` when
+7. Else, the preferred account maps to `preferred_short_reset_soon` when
    `short_salvage > 0`.
-7. Else, the preferred account maps to `preferred_highest_weight`.
+8. Else, the preferred account maps to `preferred_highest_weight`.
 
 When multiple preferred-account predicates are true, this precedence wins. The
 runtime audit, table/plain status, JSON status, and tests must use the same
@@ -855,7 +877,7 @@ JSON output schema:
       "short_salvage": 0..100 | null,
       "long_salvage": 0..100 | null,
       "salvage_tie_key": { "reset_unix_seconds": 0, "window_seconds": 18000 } | null,
-      "routing_reason": "preferred_weekly_healthier | preferred_short_reset_soon | preferred_highest_weight | available_same_pool | held_reserve | held_unknown | unknown_fallback_preferred | unknown_fallback_available | excluded_disabled | excluded_missing_credential | blocked_window_exhausted | blocked_window_ineligible | unknown_quota_window | missing_reset_time | missing_expected_window | needs_quota_refresh",
+      "routing_reason": "preferred_weekly_healthier | preferred_weekly_reset_soon | preferred_short_reset_soon | preferred_highest_weight | available_same_pool | held_reserve | held_unknown | unknown_fallback_preferred | unknown_fallback_available | excluded_disabled | excluded_missing_credential | blocked_window_exhausted | blocked_window_ineligible | unknown_quota_window | missing_reset_time | missing_expected_window | needs_quota_refresh",
       "routing_weight": 1..100 | null,
       "preferred_next": true | false,
       "window_slots": {
@@ -896,6 +918,22 @@ address, provider-derived identity, token, auth header, or secret-store
 material, the helper must replace it with a deterministic safe hash/tag. Raw
 configured labels are not emitted by default status, logs, traces, smoke
 transcripts, or selection explanation DTOs.
+
+`SafeAccountLabel` helper contract:
+
+- input: configured local label plus canonical `AccountId`
+- output: `SafeAccountLabel`, either a preserved display label or a redacted tag
+- preserved labels must be printable ASCII, contain no control characters, be
+  at most 64 characters, and match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$`
+- labels are unsafe and must be replaced when they contain an email-like `@`,
+  URL, filesystem path separator, `Authorization`, `Bearer`, `Basic`, `sk-`,
+  `sess-`, `oauth`, `refresh`, `token`, `secret`, `keychain`, `1password`,
+  or any non-printable or non-ASCII character
+- redacted tag format is `acct-<12 lowercase hex chars>`, derived from
+  `sha256("codex-router:safe-account-label:v1:" || account_id)` and never from
+  the raw unsafe label
+- every human table/plain row, JSON `safe_account_label`, proxy selection log,
+  trace, audit event, and smoke transcript must use this same output value
 
 Default quota status is account-centric for the user quota route. It must not
 emit separate route-band rows such as `models`, `code_review`, or
@@ -977,6 +1015,11 @@ Ownership:
   load/create behavior for the router root
 - `codex-router-selection` does not own affinity hashing, durable state, secret
   storage, or provider credentials
+- `codex-router-selection::affinity` and raw `AffinityKey` are not previous-
+  response owner APIs in v1. Existing raw-key helper surfaces must be deleted
+  from previous-response routing or renamed for a separately specified
+  non-previous-response use. Tests must prove no previous-response request path
+  imports or calls the old raw-key table.
 - weighted burn-down fallback is allowed only when no previous-response
   affinity key is present
 
@@ -1009,6 +1052,18 @@ Affinity key hash contract:
   `codex-router-state` APIs. It is loaded through `codex-router-secret-store`
   and passed to `codex-router-core::affinity` only long enough to derive
   `AffinityKeyHash`.
+- `codex-router-secret-store` exposes
+  `load_or_create_router_affinity_hash_secret(router_root) ->
+  RouterAffinityHashSecretLoad`, where the result identifies whether the secret
+  was loaded or newly created without exposing the secret value in debug/error
+  output.
+- The stable secret key is `router_affinity_hash_secret.v1`.
+- The persisted value is 32 bytes of CSPRNG entropy encoded as 64 lowercase hex
+  characters and decoded into `RouterAffinityHashSecret([u8; 32])`.
+- Secret-store errors must be redacted: they may expose an error class such as
+  `missing`, `unreadable`, `invalid_encoding`, or `permission_denied`, but must
+  not expose the secret value, secret file path, keychain item identifier, or
+  backend-specific secret identifier.
 - The hash secret is generated once per router root and persisted independently
   from local bearer tokens, OAuth/account credentials, and credential
   generations.
@@ -1027,9 +1082,10 @@ Affinity key hash contract:
 - The hex digest is the full 32-byte HMAC output encoded as 64 lowercase hex
   characters; truncation is forbidden.
 - Raw canonical affinity keys and raw previous response ids are never persisted.
-- All affinity lookup/write APIs accept typed raw previous-response ids at the
-  edge and construct `affinity_key_hash` through one shared helper before
-  storage, logging, tracing, or audit.
+- Proxy-edge affinity extraction accepts typed raw previous-response ids and
+  constructs `affinity_key_hash` through the shared core helper before calling
+  storage, logging, tracing, or audit APIs. State repository APIs accept only
+  `AffinityKeyHash` and owner-record DTOs.
 - Existing raw affinity pins are not migrated. This feature performs a hard
   schema cutover: old raw-key rows are discarded or ignored during the schema
   replacement, and tests must prove no raw-key fallback remains.
@@ -1219,6 +1275,20 @@ All forbidden columns above also forbid `router_affinity_hash_secret`, its
 secret-store identifier, and derived secret material. JSON machine status never
 contains affinity hash secret material.
 
+Smoke transcript WebSocket first-frame policy:
+
+- persisted or shared smoke artifacts may emit only allowlisted safe routing
+  proof fields from first-frame handling:
+  - `first_frame_type=response.create`
+  - token/header absence booleans
+  - route band
+  - selected safe account label/hash
+  - reason enum
+  - selector/credential/upstream-open call counts
+- smoke artifacts must not emit raw values from `model`, `input`, `metadata`,
+  `tools`, prompt text, request body content, or any other non-allowlisted
+  first-frame/body field, even as individual summary fields
+
 ## Proof Expectations
 
 The implementation plan must provide proof at these layers:
@@ -1239,6 +1309,9 @@ The implementation plan must provide proof at these layers:
 - tests proving the route-band policy registry has explicit policies for every
   currently classified route band and fails closed for unregistered route bands
   before weighted selection
+- tests proving proxy route classification, core `RouteBand` variants, and
+  selection policy lookup cannot drift, with every routed `RouteBand` covered by
+  either an explicit policy or `unsupported_route_band`
 - tests proving the exact salvage tie key produces deterministic
   `weighted_candidates`, `preferred_next`, and empty-state
   `WeightedDeficitSelector` agreement when accounts tie on weight and pressure
@@ -1281,13 +1354,17 @@ The implementation plan must provide proof at these layers:
 - plain renderer tests proving ASCII bars, no raw scores, no account ids, and
   the same routing phrases as table mode
 - reason mapping tests from stable enum to human phrase
-- routing reason precedence tests proving overlapping preferred-weekly-health,
-  short-reset-salvage, and highest-weight predicates produce one deterministic
-  `routing_reason`
+- routing reason precedence tests proving overlapping weekly-reset-salvage,
+  preferred-weekly-health, short-reset-salvage, and highest-weight predicates
+  produce one deterministic `routing_reason`
+- Scenario B status proof proving long-window near-reset salvage renders
+  `preferred_weekly_reset_soon`, not only `preferred_highest_weight`
 - safe-label and redaction canary tests for account labels that look like
   emails, provider identities, tokens, auth headers, or secret-store material
 - shared safe-label helper tests proving CLI, proxy logs/traces, JSON, and
   smoke transcript helpers consume one `SafeAccountLabel`/hash implementation
+- shared safe-label helper tests proving unsafe predicate minimums and
+  `acct-<12 lowercase hex chars>` redacted tag format
 - CLI golden/snapshot tests for default human output:
   - healthy multi-account table with Unicode bars
   - limiting-window disagreement between 5h and weekly
@@ -1320,6 +1397,13 @@ The implementation plan must provide proof at these layers:
   `AffinityKeyHash`/owner-record DTOs, store `credential_generation`,
   `route_band`, `source_transport`, and `created_unix_seconds`, and never accept
   or persist raw previous-response ids or raw canonical keys
+- previous-response affinity cutover tests proving no previous-response
+  lookup/write/resolve path imports or calls `codex-router-selection::affinity`
+  or raw `AffinityKey`
+- secret-store affinity-secret tests proving the stable key
+  `router_affinity_hash_secret.v1`, 32-byte entropy, 64-lowercase-hex encoding,
+  typed core return value, loaded/newly-created result state, and redacted error
+  contract
 - affinity hash-secret lifecycle tests proving the secret is generated once per
   router root, persists across server restarts, is independent of local bearer
   token rotation and account credential rotation, has no v1 rotation path, and
@@ -1339,6 +1423,10 @@ The implementation plan must provide proof at these layers:
   fields such as `model`, `input`, `metadata`, `tools`, and prompt text,
   proving only top-level `type` and top-level `previous_response_id` are read
   before selection
+- smoke transcript negative proof with the same non-allowlisted first-frame/body
+  canaries, proving persisted/shared smoke artifacts do not emit raw `model`,
+  `input`, `metadata`, `tools`, prompt text, request body content, or any
+  non-allowlisted first-frame/body field as individual summary fields
 - WebSocket non-blocking proof that delayed or failing quota refresh does not
   block the first valid `/v1/responses` route after bounded first-frame parsing,
   and that selection uses persisted selector rows on that path
@@ -1405,11 +1493,14 @@ chooses:
 - route-band policy registry: `codex-router-selection::burn_down` owns explicit
   policies for `responses`, `responses_compact`, `models`, and
   `memories_trace_summarize`; unknown route bands fail closed
+- route-band identity: `codex-router-core::routes::RouteBand` is the shared
+  identifier type used by proxy classification, selection policy lookup, and
+  CLI status adapters
 - output ordering: `accounts[]` is `account_id` ascending;
   `weighted_candidates[]` is neutral selector order
-- routing reason precedence: weekly-health preferred explanation, then
-  short-reset preferred explanation, then safest-quota fallback after
-  availability and pool mapping
+- routing reason precedence: weekly-reset-salvage preferred explanation, then
+  weekly-health preferred explanation, then short-reset preferred explanation,
+  then safest-quota fallback after availability and pool mapping
 - WebSocket support: `/v1/responses` supported; every other WebSocket path is
   `unsupported_path` and fails closed before selection or upstream open
 - WebSocket selection: valid first `response.create` frame is required before
@@ -1422,6 +1513,11 @@ chooses:
   secret-store owns the hash secret, state stores only hashed owner records, and
   proxy orchestrates extraction, secret loading, lookup/write, and fail-closed
   enforcement
+- previous-response raw-key cutover: no v1 previous-response path may use
+  `codex-router-selection::affinity` or raw `AffinityKey`
+- affinity hash-secret storage: stable secret key
+  `router_affinity_hash_secret.v1`, 32 random bytes, 64-lowercase-hex persisted
+  encoding, typed core return, and redacted errors
 - previous-response owner route eligibility: only `usable` and `reserve`
   owners are valid; `unknown`, `blocked`, and `excluded` owners fail closed
 - default status surfaces: table/plain are human-only and JSON is explicit
@@ -1431,6 +1527,8 @@ chooses:
 - safe-label ownership: `codex-router-core::redaction` owns the shared
   `SafeAccountLabel`/hash helper consumed by CLI, proxy, JSON, logs/traces, and
   smoke transcript helpers
+- safe-label format: preserved printable local labels or
+  `acct-<12 lowercase hex chars>` deterministic tags for unsafe labels
 - generated Codex profile local auth: the e2e and profile helpers use
   `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }`
 - smoke/log transcript policy: allowlisted fields only, no raw bodies, prompts,
