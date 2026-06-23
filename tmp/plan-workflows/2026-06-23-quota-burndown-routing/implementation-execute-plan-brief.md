@@ -175,6 +175,20 @@ Proof:
   - result: pass
   - count: 69 passed, 0 failed
 
-Remaining T3 gap:
+## T3 WebSocket Pinning Checkpoint
 
-- add explicit multi-turn WebSocket same-connection pinning proof
+Implemented:
+
+- added a blocking WebSocket tunnel proof with two `response.create` turns over
+  one local WebSocket connection
+- mock upstream observes one sanitized upstream handshake with one selected
+  bearer token and both turns on the same upstream connection
+
+Proof:
+
+- `cargo test -p codex-router-proxy blocking_websocket_tunnel_pins_one_upstream_account_for_multiple_turns -- --nocapture`
+  - result: pass
+  - count: 1 passed, 0 failed
+- `cargo test -p codex-router-proxy`
+  - result: pass
+  - count: 70 passed, 0 failed

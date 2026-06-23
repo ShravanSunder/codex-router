@@ -4301,4 +4301,148 @@ mod tests {
             Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
         }
     }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn blocking_websocket_tunnel_pins_one_upstream_account_for_multiple_turns() {
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket = match accept_hdr(stream, |request: &Request, response: Response| {
+                let authorization = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                if let Err(error) = upstream_sender.send(("auth".to_owned(), authorization)) {
+                    panic!("mock websocket upstream auth should record: {error}");
+                }
+                Ok(response)
+            }) {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("mock websocket upstream handshake should accept: {error}"),
+            };
+            for turn in 1..=2 {
+                let frame = match websocket.read() {
+                    Ok(message) => message,
+                    Err(error) => {
+                        panic!("mock websocket upstream should read turn {turn}: {error}")
+                    }
+                };
+                if let Err(error) =
+                    upstream_sender.send((format!("turn-{turn}"), frame.to_string()))
+                {
+                    panic!("mock websocket upstream turn should record: {error}");
+                }
+                if let Err(error) =
+                    websocket.send(Message::text(r#"{"type":"response.completed"}"#))
+                {
+                    panic!("mock websocket upstream should complete turn {turn}: {error}");
+                }
+            }
+        });
+
+        let router_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("router websocket listener should bind: {error}"),
+        };
+        let router_address = match router_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("router websocket address should read: {error}"),
+        };
+        let selector = RecordingSelector::new();
+        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let upstream_url = format!("ws://{upstream_address}/v1/responses");
+        let router_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match router_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("router websocket should accept local client: {error}"),
+            };
+            let tunnel =
+                BlockingWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router);
+            match tunnel.handle_connection(stream, upstream_url.as_str(), 1) {
+                Ok(()) => {}
+                Err(error) => panic!("websocket tunnel should complete: {error}"),
+            }
+        });
+
+        let mut request = match format!("ws://{router_address}/v1/responses").into_client_request()
+        {
+            Ok(request) => request,
+            Err(error) => panic!("local websocket request should build: {error}"),
+        };
+        request.headers_mut().insert(
+            "X-Codex-Router-Token",
+            HeaderValue::from_static("current-token"),
+        );
+        let (mut client, _response) = match connect(request) {
+            Ok(connection) => connection,
+            Err(error) => panic!("local websocket client should connect: {error}"),
+        };
+        for turn in 1..=2 {
+            let frame = format!(r#"{{"type":"response.create","turn":{turn}}}"#);
+            if let Err(error) = client.send(Message::text(frame)) {
+                panic!("local websocket client should send turn {turn}: {error}");
+            }
+            let response = match client.read() {
+                Ok(message) => message,
+                Err(error) => panic!("local websocket client should read turn {turn}: {error}"),
+            };
+            assert_eq!(response.to_string(), r#"{"type":"response.completed"}"#);
+        }
+        if let Err(error) = client.close(None) {
+            panic!("local websocket client should close: {error}");
+        }
+
+        assert_eq!(
+            upstream_receiver.recv().unwrap_or_else(|error| {
+                panic!("upstream auth should record: {error}");
+            }),
+            (
+                "auth".to_owned(),
+                "Bearer selected-upstream-token".to_owned()
+            )
+        );
+        assert_eq!(
+            upstream_receiver.recv().unwrap_or_else(|error| {
+                panic!("upstream first turn should record: {error}");
+            }),
+            (
+                "turn-1".to_owned(),
+                r#"{"type":"response.create","turn":1}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            upstream_receiver.recv().unwrap_or_else(|error| {
+                panic!("upstream second turn should record: {error}");
+            }),
+            (
+                "turn-2".to_owned(),
+                r#"{"type":"response.create","turn":2}"#.to_owned()
+            )
+        );
+
+        match router_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("router websocket thread panicked: {error:?}"),
+        }
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
+        }
+    }
 }
