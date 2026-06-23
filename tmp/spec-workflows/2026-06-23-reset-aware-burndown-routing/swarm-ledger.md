@@ -158,6 +158,16 @@ Rejected or deferred evidence:
     user quota route, has one logical row per account with only an optional
     blank-account continuation line, and excludes unrelated route-band rows or
     labels unless a future explicit debug/multi-route mode exists.
+41. Define durable previous-response owner lookup keys as full-length lowercase
+    hex HMAC-SHA-256 over the domain-separated canonical previous-response key,
+    using router-owned secret material. Raw keys are never persisted, helper use
+    is centralized before storage/logging/tracing/audit, and duplicate or
+    ambiguous owner records fail closed.
+42. Hard-cut over affinity storage: existing raw-key rows are discarded or
+    ignored during schema replacement, and no raw-key fallback remains.
+43. Map previous-response owner route eligibility to burn-down availability:
+    `usable` and `reserve` owners are valid; `unknown`, `blocked`, and
+    `excluded` owners fail closed before weighted fallback.
 
 ## Open Decisions
 

@@ -436,3 +436,37 @@ excluded/blocked rows out of `weighted_candidates`, defines previous-response
 owner-record shape and pin-write rules, distinguishes raw local JSON from
 redacted shared artifacts, defines a normative JSON envelope, and adds structural
 status proof guardrails.
+
+## R8 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`c8c02e1886d06c344aa55d35288cf844daacb23b`
+
+Review worktree:
+`/tmp/codex-router-r8-review.RBmbZ8`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1245 lines before R8 fixes and was
+read in chunks 1-250, 251-500, 501-750, 751-1000, and 1001-1245.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r8/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted findings:
+
+- `affinity_key_hash` algorithm, encoding, keyedness, truncation, and collision
+  behavior were underspecified
+- previous-response owner route eligibility was not mapped to burn-down
+  availability classes
+
+Revision applied:
+The spec now defines full-length lowercase-hex HMAC-SHA-256 affinity hashes
+using router-owned secret material, one shared helper before storage/logging/
+tracing/audit, hard schema cutover with no raw-key fallback, duplicate ambiguity
+fail-closed behavior, and continuation owner validity limited to `usable` or
+`reserve` owners.

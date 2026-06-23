@@ -920,9 +920,27 @@ PreviousResponseOwnerRecord {
 The raw previous response id and raw canonical affinity key are sensitive
 routing metadata and must not be emitted in logs, traces, status, smoke
 transcripts, or review artifacts. The durable lookup key is
-`affinity_key_hash = hash("previous_response_id:<value>")`. The record stores
-the selected account id and the selected account's active credential generation
-at the time the upstream response id was observed.
+`affinity_key_hash = hex(HMAC-SHA-256(router_affinity_hash_secret,
+"codex-router:previous_response_id:v1:<value>"))`. The record stores the
+selected account id and the selected account's active credential generation at
+the time the upstream response id was observed.
+
+Affinity key hash contract:
+
+- The hash secret is router-owned secret material and must be stored with the
+  same sensitivity as router bearer/auth material.
+- The hex digest is the full 32-byte HMAC output encoded as 64 lowercase hex
+  characters; truncation is forbidden.
+- Raw canonical affinity keys and raw previous response ids are never persisted.
+- All affinity lookup/write APIs accept typed raw previous-response ids at the
+  edge and construct `affinity_key_hash` through one shared helper before
+  storage, logging, tracing, or audit.
+- Existing raw affinity pins are not migrated. This feature performs a hard
+  schema cutover: old raw-key rows are discarded or ignored during the schema
+  replacement, and tests must prove no raw-key fallback remains.
+- If storage contains more than one owner record for the same
+  `affinity_key_hash`, or if lookup ambiguity is otherwise detected, owner
+  resolution fails closed before weighted fallback.
 
 Owner record creation:
 
@@ -944,6 +962,9 @@ Owner record creation:
 - A later continuation owner hit is valid only when the stored account is still
   enabled, has an active credential, the active credential generation equals the
   stored `credential_generation`, and the account is route-eligible.
+  Route-eligible means burn-down assessment returns `availability=usable` or
+  `availability=reserve` for the owner account. `availability=unknown`,
+  `availability=blocked`, and `availability=excluded` fail closed.
 
 Owner resolution:
 
@@ -962,7 +983,8 @@ Owner resolution:
   owner account if the account is enabled, has an active credential generation,
   and is route-eligible
 - missing owner, disabled owner, stale credential generation, unavailable
-  credential, route-ineligible owner, or exhausted owner fail closed before
+  credential, unknown owner quota, route-ineligible owner, or exhausted owner
+  fail closed before
   weighted fallback
 - a continuation request must never silently replay on a different account
 - failure must be local and audit-safe, with no upstream open and no provider
@@ -973,13 +995,17 @@ Proof must cover:
 - HTTP/SSE owner-record creation from the allowlisted upstream response id field
 - WebSocket owner-record creation from the allowlisted upstream response id
   field after account pinning
+- affinity hash construction uses the exact HMAC-SHA-256 lowercase-hex contract
+  and never persists raw canonical affinity keys or raw previous response ids
 - HTTP/SSE continuation owner hit
 - WebSocket continuation owner hit
 - restart/durable owner lookup
 - unknown previous-response owner
 - disabled owner
 - stale or unavailable credential generation
+- unknown owner quota fails closed
 - route-ineligible or exhausted owner
+- duplicate or ambiguous owner record fails closed
 - malformed affinity metadata
 - no weighted fallback on any continuation-owner failure
 
@@ -1159,6 +1185,10 @@ The implementation plan must provide proof at these layers:
   created only from allowlisted upstream response id fields, store
   `credential_generation`, and never emit raw previous response ids, raw
   affinity keys, raw bodies, prompts, tool args, or full WebSocket frames
+- affinity hash tests proving full-length lowercase-hex HMAC-SHA-256 output,
+  shared helper use before storage/logging/audit, no raw-key persistence, no
+  raw-key fallback after schema cutover, and fail-closed behavior for duplicate
+  or ambiguous owner rows
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload
@@ -1227,6 +1257,8 @@ chooses:
   upstream open; selected account is pinned for connection lifetime
 - previous-response affinity: applies to HTTP/SSE and WebSocket; owner
   resolution failures fail closed before weighted fallback
+- previous-response owner route eligibility: only `usable` and `reserve`
+  owners are valid; `unknown`, `blocked`, and `excluded` owners fail closed
 - default status surfaces: table/plain are human-only and JSON is explicit
   machine/debug output
 - default account display: safe label or hash; JSON uses `safe_account_label`
