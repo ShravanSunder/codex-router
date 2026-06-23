@@ -470,3 +470,35 @@ using router-owned secret material, one shared helper before storage/logging/
 tracing/audit, hard schema cutover with no raw-key fallback, duplicate ambiguity
 fail-closed behavior, and continuation owner validity limited to `usable` or
 `reserve` owners.
+
+## R9 Spec Review
+
+Date: 2026-06-23
+
+Reviewed baseline:
+`5e39282dea9defdfabff60af07593e0605f5592e`
+
+Review worktree:
+`/tmp/codex-router-r9-review.68OnKV`
+
+Coverage:
+`reset-aware-burndown-routing-spec.md` was 1277 lines before R9 fixes and was
+read in chunks 1-260, 261-520, 521-780, 781-1040, and 1041-1277.
+
+Review artifacts:
+`tmp/spec-workflows/2026-06-23-reset-aware-burndown-routing/spec-review-2026-06-23-r9/review-ledger.md`
+
+Phase result:
+needs_revision
+
+Accepted finding:
+
+- `router_affinity_hash_secret` lifecycle and rotation behavior were
+  underspecified for durable owner lookup
+
+Revision applied:
+The spec now generates the affinity hash secret once per router root, persists it
+independently from bearer/account credential rotation, forbids v1 rotation,
+keeps it stable across restarts and refreshes, and requires owner rows to be
+ignored or purged with continuations failing closed when the secret is missing,
+unreadable, or replaced.

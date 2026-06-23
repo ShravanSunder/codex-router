@@ -929,6 +929,16 @@ Affinity key hash contract:
 
 - The hash secret is router-owned secret material and must be stored with the
   same sensitivity as router bearer/auth material.
+- The hash secret is generated once per router root and persisted independently
+  from local bearer tokens, OAuth/account credentials, and credential
+  generations.
+- V1 has no automatic or manual hash-secret rotation path. Local bearer-token
+  rotation, OAuth token refresh, account credential rotation, server restart,
+  and quota refresh must not change `router_affinity_hash_secret`.
+- If the hash secret is missing, unreadable, or replaced, existing owner rows
+  are ignored or purged and continuation requests fail closed before weighted
+  fallback. The router must not regenerate a new secret and treat old owner rows
+  as valid.
 - The hex digest is the full 32-byte HMAC output encoded as 64 lowercase hex
   characters; truncation is forbidden.
 - Raw canonical affinity keys and raw previous response ids are never persisted.
@@ -1189,6 +1199,11 @@ The implementation plan must provide proof at these layers:
   shared helper use before storage/logging/audit, no raw-key persistence, no
   raw-key fallback after schema cutover, and fail-closed behavior for duplicate
   or ambiguous owner rows
+- affinity hash-secret lifecycle tests proving the secret is generated once per
+  router root, persists across server restarts, is independent of local bearer
+  token rotation and account credential rotation, has no v1 rotation path, and
+  causes existing owner rows to be ignored or purged if missing, unreadable, or
+  replaced
 - WebSocket redaction proof with a synthetic canary in first-frame/request-body
   content, proving audit/log/smoke artifacts do not contain the raw body or full
   first-frame payload
@@ -1257,6 +1272,8 @@ chooses:
   upstream open; selected account is pinned for connection lifetime
 - previous-response affinity: applies to HTTP/SSE and WebSocket; owner
   resolution failures fail closed before weighted fallback
+- previous-response affinity hash secret: generated once per router root,
+  independent of bearer/account credential rotation, and non-rotating in v1
 - previous-response owner route eligibility: only `usable` and `reserve`
   owners are valid; `unknown`, `blocked`, and `excluded` owners fail closed
 - default status surfaces: table/plain are human-only and JSON is explicit

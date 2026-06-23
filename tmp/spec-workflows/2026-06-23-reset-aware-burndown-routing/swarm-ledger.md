@@ -168,6 +168,11 @@ Rejected or deferred evidence:
 43. Map previous-response owner route eligibility to burn-down availability:
     `usable` and `reserve` owners are valid; `unknown`, `blocked`, and
     `excluded` owners fail closed before weighted fallback.
+44. Define `router_affinity_hash_secret` lifecycle: generated once per router
+    root, persisted independently from bearer/account credential rotation,
+    stable across restart and refresh, and non-rotating in v1. If it is missing,
+    unreadable, or replaced, existing owner rows are ignored or purged and
+    continuations fail closed.
 
 ## Open Decisions
 
