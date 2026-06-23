@@ -2381,11 +2381,11 @@ exit 42
         assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t████████░░ 75% resets in 2h 46m\t░░░░░░░░░░ - needs probe\t↻ needs probe 5h 75%\tno"
+            "snapshot\tenabled\t████████░░ 75% resets in 2h 46m\t░░░░░░░░░░ - needs probe\t↻ fallback 5h 75%\tnext"
         );
         assert_eq!(
             lines[2],
-            "responses route\tnext: none\twhy: no usable accounts"
+            "responses route\tnext: snapshot\twhy: ↻ fallback 5h 75%"
         );
         assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
@@ -3265,7 +3265,7 @@ exit 42
     }
 
     #[test]
-    fn quota_refresh_partial_window_response_remains_probe_required() {
+    fn quota_refresh_partial_window_response_is_unknown_fallback() {
         let test_root = TestRoot::new("quota-refresh-partial-window");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
@@ -3334,15 +3334,20 @@ exit 42
             status_output
                 .stdout
                 .lines()
-                .any(|line| line.ends_with("\tno"))
+                .any(|line| line.ends_with("\tnext"))
         );
-        assert!(status_output.stdout.contains("responses route\tnext: none"));
+        assert!(status_output.stdout.contains("↻ fallback"));
+        assert!(
+            status_output
+                .stdout
+                .contains("responses route\tnext: partial")
+        );
         assert!(!status_output.stdout.contains("partial-quota-token"));
         assert!(status_output.stderr.is_empty());
     }
 
     #[test]
-    fn quota_refresh_missing_reset_response_remains_probe_required() {
+    fn quota_refresh_missing_reset_response_is_unknown_fallback() {
         let test_root = TestRoot::new("quota-refresh-missing-reset");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
@@ -3415,9 +3420,14 @@ exit 42
             status_output
                 .stdout
                 .lines()
-                .any(|line| line.ends_with("\tno"))
+                .any(|line| line.ends_with("\tnext"))
         );
-        assert!(status_output.stdout.contains("responses route\tnext: none"));
+        assert!(status_output.stdout.contains("↻ fallback"));
+        assert!(
+            status_output
+                .stdout
+                .contains("responses route\tnext: missing-reset")
+        );
         assert!(!status_output.stdout.contains("missing-reset-quota-token"));
         assert!(status_output.stderr.is_empty());
     }

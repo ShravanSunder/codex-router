@@ -1055,8 +1055,8 @@ mod tests {
     }
 
     #[test]
-    fn repository_backed_selector_fails_fast_when_all_accounts_need_probe() {
-        let temp_dir = ProxyTestTempDir::new("repository_selector_all_probe_required");
+    fn repository_backed_selector_uses_unknown_fallback_when_all_accounts_need_probe() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_all_unknown_fallback");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = match SqliteStateStore::open(&database_path) {
             Ok(state) => state,
@@ -1079,15 +1079,16 @@ mod tests {
 
         let selector = RepositoryBackedAccountSelector::new(&state);
 
-        assert_eq!(
-            selector.select_upstream_account(
-                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
-                TokenGeneration::new(1),
-            ),
-            Err(HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
-            })
-        );
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+            TokenGeneration::new(1),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("unknown fallback account should be selected: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), unknown.account_id());
+        assert_eq!(selected.selection_reason(), "fallback");
     }
 
     #[test]

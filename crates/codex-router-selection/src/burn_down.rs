@@ -1,6 +1,8 @@
 //! Reset-aware quota burn-down assessment.
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::redaction::safe_account_label;
+use codex_router_core::routes::RouteBand;
 
 use crate::weighted_deficit::WeightedDeficitSelector;
 
@@ -20,11 +22,12 @@ const DEFAULT_LONG_SALVAGE_CAP: u32 = 20;
 const DEFAULT_RISK_PENALTY_CAP: u32 = 90;
 const DEFAULT_SELECTABLE_WEIGHT_MIN: u32 = 1;
 const DEFAULT_SELECTABLE_WEIGHT_MAX: u32 = 100;
+const DEFAULT_UNKNOWN_FALLBACK_WEIGHT: u32 = 1;
 
 /// Input for one route-band assessment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BurnDownRouteBandAssessmentInput {
-    route_band: String,
+    route_band: RouteBand,
     now_unix_seconds: u64,
     accounts: Vec<BurnDownAccountInput>,
     policy: BurnDownRouteBandPolicy,
@@ -34,29 +37,22 @@ impl BurnDownRouteBandAssessmentInput {
     /// Creates route-band assessment input.
     #[must_use]
     pub fn new(
-        route_band: impl Into<String>,
+        route_band: RouteBand,
         now_unix_seconds: u64,
         accounts: Vec<BurnDownAccountInput>,
     ) -> Self {
         Self {
-            route_band: route_band.into(),
+            route_band,
             now_unix_seconds,
             accounts,
-            policy: BurnDownRouteBandPolicy::default(),
+            policy: policy_for_route_band(route_band),
         }
-    }
-
-    /// Sets the route-band policy.
-    #[must_use]
-    pub const fn with_policy(mut self, policy: BurnDownRouteBandPolicy) -> Self {
-        self.policy = policy;
-        self
     }
 
     /// Returns the route band.
     #[must_use]
-    pub fn route_band(&self) -> &str {
-        &self.route_band
+    pub const fn route_band(&self) -> RouteBand {
+        self.route_band
     }
 }
 
@@ -65,7 +61,6 @@ impl BurnDownRouteBandAssessmentInput {
 pub struct BurnDownAccountInput {
     account_id: AccountId,
     account_label: String,
-    route_band: String,
     windows: Vec<QuotaWindowFact>,
     account_enabled: bool,
     has_active_credential: bool,
@@ -77,13 +72,11 @@ impl BurnDownAccountInput {
     pub fn new(
         account_id: AccountId,
         account_label: impl Into<String>,
-        route_band: impl Into<String>,
         windows: Vec<QuotaWindowFact>,
     ) -> Self {
         Self {
             account_id,
             account_label: account_label.into(),
-            route_band: route_band.into(),
             windows,
             account_enabled: true,
             has_active_credential: true,
@@ -214,16 +207,39 @@ impl Default for BurnDownRouteBandPolicy {
     }
 }
 
+/// Route-band assessment support status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteBandAssessmentStatus {
+    /// Route band is supported by the burn-down scorer.
+    Supported,
+    /// Route band is not supported by the burn-down scorer.
+    UnsupportedRouteBand,
+}
+
 /// Route-band assessment output.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BurnDownRouteBandAssessment {
+pub struct BurnDownRouteBandAssessmentResult {
+    route_band: RouteBand,
+    route_status: RouteBandAssessmentStatus,
     accounts: Vec<BurnDownAccountAssessment>,
     selected_pool: SelectedPool,
     weighted_candidates: Vec<(AccountId, u32)>,
     preferred_next: Option<AccountId>,
 }
 
-impl BurnDownRouteBandAssessment {
+impl BurnDownRouteBandAssessmentResult {
+    /// Returns the assessed route band.
+    #[must_use]
+    pub const fn route_band(&self) -> RouteBand {
+        self.route_band
+    }
+
+    /// Returns the route-band assessment support status.
+    #[must_use]
+    pub const fn route_status(&self) -> RouteBandAssessmentStatus {
+        self.route_status
+    }
+
     /// Returns account assessments in deterministic account order.
     #[must_use]
     pub fn accounts(&self) -> &[BurnDownAccountAssessment] {
@@ -364,8 +380,8 @@ pub enum AccountAvailability {
     Reserve,
     /// Not selectable because known quota is exhausted or ineligible.
     Blocked,
-    /// Not selectable because quota evidence is missing or unknown.
-    ProbeRequired,
+    /// Selectable only as fallback because quota evidence is missing or unknown.
+    Unknown,
     /// Excluded because account metadata disallows routing.
     Excluded,
 }
@@ -377,6 +393,8 @@ pub enum SelectedPool {
     Usable,
     /// Reserve pool selected.
     Reserve,
+    /// Unknown fallback pool selected because no known usable or reserve account exists.
+    Unknown,
     /// No selectable pool exists.
     None,
 }
@@ -435,10 +453,12 @@ pub enum RoutingReason {
     Available,
     /// Selectable only after higher-priority pool empties.
     Held,
+    /// Unknown-quota fallback candidate.
+    Fallback,
+    /// Unknown quota evidence is held behind a known selectable pool.
+    Unknown,
     /// Blocked due to known quota.
     Blocked,
-    /// Needs background quota probe.
-    NeedsProbe,
     /// Excluded by account metadata.
     Excluded,
 }
@@ -498,7 +518,9 @@ struct WindowAssessment {
 
 /// Assesses a route band.
 #[must_use]
-pub fn assess_route_band(input: BurnDownRouteBandAssessmentInput) -> BurnDownRouteBandAssessment {
+pub fn assess_route_band(
+    input: BurnDownRouteBandAssessmentInput,
+) -> BurnDownRouteBandAssessmentResult {
     let mut accounts = input
         .accounts
         .iter()
@@ -516,6 +538,11 @@ pub fn assess_route_band(input: BurnDownRouteBandAssessmentInput) -> BurnDownRou
         .any(|account| account.availability == AccountAvailability::Reserve)
     {
         SelectedPool::Reserve
+    } else if accounts
+        .iter()
+        .any(|account| account.availability == AccountAvailability::Unknown)
+    {
+        SelectedPool::Unknown
     } else {
         SelectedPool::None
     };
@@ -572,7 +599,9 @@ pub fn assess_route_band(input: BurnDownRouteBandAssessmentInput) -> BurnDownRou
         account.routing_reason = routing_reason_for_account(account, selected_pool_for_reason);
     }
 
-    BurnDownRouteBandAssessment {
+    BurnDownRouteBandAssessmentResult {
+        route_band: input.route_band,
+        route_status: RouteBandAssessmentStatus::Supported,
         accounts,
         selected_pool,
         weighted_candidates,
@@ -587,8 +616,10 @@ fn assess_account(
 ) -> BurnDownAccountAssessment {
     let base = BurnDownAccountAssessment {
         account_id: input.account_id.clone(),
-        account_label: input.account_label.clone(),
-        availability: AccountAvailability::ProbeRequired,
+        account_label: safe_account_label(&input.account_label, &input.account_id)
+            .as_str()
+            .to_owned(),
+        availability: AccountAvailability::Unknown,
         freshness: QuotaEvidenceFreshness::Unknown,
         routing_exclusion: RoutingExclusion::None,
         limiting_window: None,
@@ -597,8 +628,8 @@ fn assess_account(
         long_pressure: 0,
         short_salvage: 0,
         long_salvage: 0,
-        routing_weight: None,
-        routing_reason: RoutingReason::NeedsProbe,
+        routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
+        routing_reason: RoutingReason::Unknown,
         preferred_next: false,
         salvage_sort_key: None,
     };
@@ -609,6 +640,7 @@ fn assess_account(
             routing_exclusion: RoutingExclusion::Disabled,
             quota_evidence_reason: QuotaEvidenceReason::AccountDisabled,
             routing_reason: RoutingReason::Excluded,
+            routing_weight: None,
             ..base
         };
     }
@@ -618,6 +650,7 @@ fn assess_account(
             routing_exclusion: RoutingExclusion::MissingCredential,
             quota_evidence_reason: QuotaEvidenceReason::MissingCredential,
             routing_reason: RoutingReason::Excluded,
+            routing_weight: None,
             ..base
         };
     }
@@ -647,6 +680,7 @@ fn assess_account(
             limiting_window: limiting_window(&windows),
             quota_evidence_reason: QuotaEvidenceReason::WindowIneligible,
             routing_reason: RoutingReason::Blocked,
+            routing_weight: None,
             ..base
         };
     }
@@ -667,6 +701,7 @@ fn assess_account(
             limiting_window: limiting_window(&windows),
             quota_evidence_reason: QuotaEvidenceReason::WindowExhausted,
             routing_reason: RoutingReason::Blocked,
+            routing_weight: None,
             ..base
         };
     }
@@ -875,6 +910,7 @@ fn selected_pool_matches(selected_pool: SelectedPool, availability: AccountAvail
         (selected_pool, availability),
         (SelectedPool::Usable, AccountAvailability::Usable)
             | (SelectedPool::Reserve, AccountAvailability::Reserve)
+            | (SelectedPool::Unknown, AccountAvailability::Unknown)
     )
 }
 
@@ -905,7 +941,10 @@ fn routing_reason_for_account(
     match account.availability {
         AccountAvailability::Excluded => RoutingReason::Excluded,
         AccountAvailability::Blocked => RoutingReason::Blocked,
-        AccountAvailability::ProbeRequired => RoutingReason::NeedsProbe,
+        AccountAvailability::Unknown if selected_pool == SelectedPool::Unknown => {
+            RoutingReason::Fallback
+        }
+        AccountAvailability::Unknown => RoutingReason::Unknown,
         AccountAvailability::Usable | AccountAvailability::Reserve if account.preferred_next => {
             RoutingReason::PreferredNext
         }
@@ -973,6 +1012,20 @@ const fn min_u64(left: u64, right: u64) -> u64 {
     if left < right { left } else { right }
 }
 
+const fn policy_for_route_band(_route_band: RouteBand) -> BurnDownRouteBandPolicy {
+    BurnDownRouteBandPolicy {
+        short_window_cutoff_seconds: DEFAULT_SHORT_WINDOW_CUTOFF_SECONDS,
+        reserve_pressure_threshold: DEFAULT_RESERVE_PRESSURE_THRESHOLD,
+        reserve_headroom_threshold: DEFAULT_RESERVE_HEADROOM_THRESHOLD,
+        long_pressure_multiplier: DEFAULT_LONG_PRESSURE_MULTIPLIER,
+        short_salvage_cap: DEFAULT_SHORT_SALVAGE_CAP,
+        long_salvage_cap: DEFAULT_LONG_SALVAGE_CAP,
+        risk_penalty_cap: DEFAULT_RISK_PENALTY_CAP,
+        selectable_weight_min: DEFAULT_SELECTABLE_WEIGHT_MIN,
+        selectable_weight_max: DEFAULT_SELECTABLE_WEIGHT_MAX,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -998,6 +1051,11 @@ mod tests {
         ]));
 
         assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(assessment.route_band(), RouteBand::Responses);
+        assert_eq!(
+            assessment.route_status(),
+            RouteBandAssessmentStatus::Supported
+        );
         assert_eq!(
             assessment.preferred_next().map(AccountId::as_str),
             Some("acct_a")
@@ -1082,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_quota_is_probe_required_and_never_weighted() {
+    fn unknown_quota_is_fallback_only_when_known_pool_exists() {
         let assessment = assess_route_band(input(vec![
             account(
                 "acct_a",
@@ -1106,8 +1164,9 @@ mod tests {
         assert_eq!(assessment.weighted_candidates().len(), 1);
         assert_eq!(assessment.weighted_candidates()[0].0.as_str(), "acct_a");
         let unknown = account_assessment(&assessment, "acct_b");
-        assert_eq!(unknown.availability(), AccountAvailability::ProbeRequired);
-        assert_eq!(unknown.routing_weight(), None);
+        assert_eq!(unknown.availability(), AccountAvailability::Unknown);
+        assert_eq!(unknown.routing_weight(), Some(1));
+        assert_eq!(unknown.routing_reason(), RoutingReason::Unknown);
         assert_eq!(
             unknown.quota_evidence_reason(),
             QuotaEvidenceReason::UnknownQuotaWindow
@@ -1115,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn all_probe_required_accounts_fail_fast_with_no_candidates() {
+    fn all_unknown_accounts_use_fallback_pool_with_candidates() {
         let assessment = assess_route_band(input(vec![
             account("acct_a", Vec::new()),
             account(
@@ -1127,20 +1186,21 @@ mod tests {
             ),
         ]));
 
-        assert_eq!(assessment.selected_pool(), SelectedPool::None);
-        assert!(assessment.weighted_candidates().is_empty());
-        assert_eq!(assessment.preferred_next(), None);
-        assert_account(
-            &assessment,
-            "acct_a",
-            AccountAvailability::ProbeRequired,
-            None,
+        assert_eq!(assessment.selected_pool(), SelectedPool::Unknown);
+        assert_eq!(assessment.weighted_candidates().len(), 2);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_a")
         );
-        assert_account(
-            &assessment,
-            "acct_b",
-            AccountAvailability::ProbeRequired,
-            None,
+        assert_account(&assessment, "acct_a", AccountAvailability::Unknown, Some(1));
+        assert_account(&assessment, "acct_b", AccountAvailability::Unknown, Some(1));
+        assert_eq!(
+            account_assessment(&assessment, "acct_a").routing_reason(),
+            RoutingReason::Fallback
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_b").routing_reason(),
+            RoutingReason::Fallback
         );
     }
 
@@ -1167,8 +1227,10 @@ mod tests {
             account_assessment(&missing_expected, "acct_missing_expected").quota_evidence_reason(),
             QuotaEvidenceReason::MissingExpectedWindow
         );
-        assert!(missing_reset.weighted_candidates().is_empty());
-        assert!(missing_expected.weighted_candidates().is_empty());
+        assert_eq!(missing_reset.selected_pool(), SelectedPool::Unknown);
+        assert_eq!(missing_expected.selected_pool(), SelectedPool::Unknown);
+        assert_eq!(missing_reset.weighted_candidates().len(), 1);
+        assert_eq!(missing_expected.weighted_candidates().len(), 1);
     }
 
     #[test]
@@ -1256,17 +1318,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn account_assessment_uses_safe_display_label() {
+        let assessment = assess_route_band(input(vec![BurnDownAccountInput::new(
+            account_id("acct_secret"),
+            "person@example.com",
+            vec![
+                window(FIVE_HOURS, 80, 4 * 3_600),
+                window(WEEKLY, 80, 5 * 86_400),
+            ],
+        )]));
+
+        let account = account_assessment(&assessment, "acct_secret");
+        assert!(account.account_label().starts_with("acct-"));
+        assert!(!account.account_label().contains("person"));
+        assert!(!account.account_label().contains('@'));
+    }
+
     fn input(accounts: Vec<BurnDownAccountInput>) -> BurnDownRouteBandAssessmentInput {
-        BurnDownRouteBandAssessmentInput::new("responses", NOW, accounts)
+        BurnDownRouteBandAssessmentInput::new(RouteBand::Responses, NOW, accounts)
     }
 
     fn account(account_id_value: &str, windows: Vec<QuotaWindowFact>) -> BurnDownAccountInput {
-        BurnDownAccountInput::new(
-            account_id(account_id_value),
-            account_id_value,
-            "responses",
-            windows,
-        )
+        BurnDownAccountInput::new(account_id(account_id_value), account_id_value, windows)
     }
 
     fn window(
@@ -1292,7 +1366,7 @@ mod tests {
     }
 
     fn account_assessment<'a>(
-        assessment: &'a BurnDownRouteBandAssessment,
+        assessment: &'a BurnDownRouteBandAssessmentResult,
         account_id_value: &str,
     ) -> &'a BurnDownAccountAssessment {
         assessment
@@ -1303,7 +1377,7 @@ mod tests {
     }
 
     fn assert_account(
-        assessment: &BurnDownRouteBandAssessment,
+        assessment: &BurnDownRouteBandAssessmentResult,
         account_id_value: &str,
         availability: AccountAvailability,
         routing_weight: Option<u32>,

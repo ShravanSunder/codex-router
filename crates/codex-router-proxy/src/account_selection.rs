@@ -9,10 +9,12 @@ use std::time::UNIX_EPOCH;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::AffinityKey;
 use codex_router_core::ids::TokenGeneration;
+use codex_router_core::routes::RouteBand;
 use codex_router_quota::snapshot::SnapshotFreshness;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
+use codex_router_selection::burn_down::BurnDownRouteBandAssessmentResult;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
 use codex_router_selection::burn_down::RoutingReason;
@@ -253,7 +255,7 @@ where
         let route_band = route_band_for_request(request)?;
         let selector_inputs = self
             .state_repository
-            .selector_inputs_for_route_band(route_band)
+            .selector_inputs_for_route_band(route_band.as_str())
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
@@ -278,7 +280,7 @@ where
                     reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
                 })?;
         let weighted_selector = weighted_selectors
-            .entry(route_band.to_owned())
+            .entry(route_band.as_str().to_owned())
             .or_insert_with(WeightedDeficitSelector::default);
         let mut account_holds =
             self.account_holds
@@ -307,7 +309,7 @@ where
         }
 
         select_from_burn_down_assessment(
-            route_band,
+            route_band.as_str(),
             &assessment,
             weighted_selector,
             &mut account_holds,
@@ -318,9 +320,9 @@ where
 }
 
 fn select_affinity_owner(
-    route_band: &str,
+    route_band: RouteBand,
     owner_account_id: &AccountId,
-    assessment: &codex_router_selection::burn_down::BurnDownRouteBandAssessment,
+    assessment: &BurnDownRouteBandAssessmentResult,
     weighted_selector: &mut WeightedDeficitSelector,
     account_holds: &mut HashMap<String, AccountHold>,
     now_unix_seconds: u64,
@@ -330,20 +332,20 @@ fn select_affinity_owner(
         .iter()
         .any(|(account_id, _weight)| account_id == owner_account_id)
     {
-        account_holds.remove(route_band);
+        account_holds.remove(route_band.as_str());
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
         });
     }
     if !weighted_selector.record_selection(weighted_candidates, owner_account_id) {
-        account_holds.remove(route_band);
+        account_holds.remove(route_band.as_str());
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
         });
     }
 
     account_holds.insert(
-        route_band.to_owned(),
+        route_band.as_str().to_owned(),
         AccountHold::new(owner_account_id.clone(), now_unix_seconds),
     );
     Ok(SelectedAccountDecision::new(
@@ -373,14 +375,17 @@ fn select_from_account_states_with_selector(
         .iter()
         .map(|account| account_input_from_quota_state(account))
         .collect::<Vec<_>>();
-    let assessment_input =
-        BurnDownRouteBandAssessmentInput::new("responses", current_unix_seconds(), account_inputs);
+    let assessment_input = BurnDownRouteBandAssessmentInput::new(
+        RouteBand::Responses,
+        current_unix_seconds(),
+        account_inputs,
+    );
     let assessment = assess_route_band(assessment_input);
     select_from_burn_down_assessment_without_hold(&assessment, weighted_selector)
 }
 
 fn select_from_burn_down_assessment_without_hold(
-    assessment: &codex_router_selection::burn_down::BurnDownRouteBandAssessment,
+    assessment: &BurnDownRouteBandAssessmentResult,
     weighted_selector: &mut WeightedDeficitSelector,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
     if assessment.selected_pool() == SelectedPool::None {
@@ -411,7 +416,7 @@ fn select_from_burn_down_assessment_without_hold(
 
 fn select_from_burn_down_assessment(
     route_band: &str,
-    assessment: &codex_router_selection::burn_down::BurnDownRouteBandAssessment,
+    assessment: &BurnDownRouteBandAssessmentResult,
     weighted_selector: &mut WeightedDeficitSelector,
     account_holds: &mut HashMap<String, AccountHold>,
     minimum_account_hold_cooldown_seconds: u64,
@@ -504,17 +509,12 @@ fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAcco
         })
         .collect::<Vec<_>>();
 
-    BurnDownAccountInput::new(
-        input.account_id().clone(),
-        input.account_label(),
-        input.route_band(),
-        windows,
-    )
-    .with_account_enabled(input.account_status() == AccountStatus::Enabled)
-    .with_active_credential(input.active_credential_generation().is_some())
+    BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
+        .with_account_enabled(input.account_status() == AccountStatus::Enabled)
+        .with_active_credential(input.active_credential_generation().is_some())
 }
 
-fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, HttpProxyError> {
+fn route_band_for_request(request: &HttpProxyRequest) -> Result<RouteBand, HttpProxyError> {
     let classification_path = path_without_query(request.path());
     match classify_route(
         request.method(),
@@ -522,11 +522,13 @@ fn route_band_for_request(request: &HttpProxyRequest) -> Result<&'static str, Ht
         request.websocket_upgrade(),
     ) {
         RouteClass::Supported(RouteKind::Responses | RouteKind::ResponsesWebSocket) => {
-            Ok("responses")
+            Ok(RouteBand::Responses)
         }
-        RouteClass::Supported(RouteKind::Models) => Ok("models"),
-        RouteClass::Supported(RouteKind::MemoriesTraceSummarize) => Ok("memories_trace_summarize"),
-        RouteClass::Supported(RouteKind::ResponsesCompact) => Ok("responses_compact"),
+        RouteClass::Supported(RouteKind::Models) => Ok(RouteBand::Models),
+        RouteClass::Supported(RouteKind::MemoriesTraceSummarize) => {
+            Ok(RouteBand::MemoriesTraceSummarize)
+        }
+        RouteClass::Supported(RouteKind::ResponsesCompact) => Ok(RouteBand::ResponsesCompact),
         RouteClass::Rejected { reason } => Err(HttpProxyError::Rejected { reason }),
     }
 }
@@ -586,7 +588,6 @@ fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownA
     BurnDownAccountInput::new(
         account.account_id.clone(),
         account.account_id.as_str(),
-        "responses",
         vec![short_window, weekly_window],
     )
 }
@@ -615,8 +616,9 @@ fn selection_reason_for_assessment(assessment: &BurnDownAccountAssessment) -> St
         RoutingReason::PreferredNext => "preferred_next".to_owned(),
         RoutingReason::Available => "available".to_owned(),
         RoutingReason::Held => "held".to_owned(),
+        RoutingReason::Fallback => "fallback".to_owned(),
+        RoutingReason::Unknown => "unknown".to_owned(),
         RoutingReason::Blocked => "blocked".to_owned(),
-        RoutingReason::NeedsProbe => "needs_probe".to_owned(),
         RoutingReason::Excluded => "excluded".to_owned(),
     }
 }

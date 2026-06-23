@@ -48,3 +48,50 @@ Notes:
 - No downstream call sites were changed in T0.
 - T1 will migrate selection to consume these core primitives.
 
+## T1 Pure Burn-Down Assessment Contract
+
+Plan rows:
+
+- RP-01 reset-aware scoring fallback behavior.
+- RP-02 known usable/reserve pools outrank unknown fallback.
+- RP-03 unknown quota is a non-blocking fallback path, not startup failure.
+- RP-12 safe account labels applied to selection/status output.
+
+Files changed:
+
+- `crates/codex-router-selection/src/burn_down.rs`
+- `crates/codex-router-proxy/src/account_selection.rs`
+- `crates/codex-router-proxy/src/lib.rs`
+- `crates/codex-router-cli/src/quota.rs`
+- `crates/codex-router-cli/src/lib.rs`
+
+Implemented:
+
+- `BurnDownRouteBandAssessmentInput` now uses typed `RouteBand`; per-account
+  route-band strings were removed from burn-down input.
+- Assessment output is `BurnDownRouteBandAssessmentResult` with route band and
+  route status fields.
+- Unknown or missing quota evidence now produces an `Unknown` fallback pool with
+  conservative weight `1` when no known usable/reserve accounts exist.
+- Known usable and reserve pools still outrank unknown fallback accounts.
+- Account labels emitted by assessment now use core `safe_account_label`.
+- Proxy and quota CLI were migrated to the typed route-band contract.
+
+Proof:
+
+- `cargo test -p codex-router-selection` passed: 21 tests.
+- `cargo fmt --all -- --check` passed.
+- `cargo test -p codex-router-proxy -p codex-router-cli` passed:
+  60 CLI tests, 71 proxy tests, and doc-test stubs.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 60, core 15, proxy 71, quota 4, secret-store 9,
+  selection 21, state 13, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- Existing tests that previously expected "needs probe -> no route" were
+  updated to the new startup contract: partial/missing window metadata remains
+  visible as "needs probe" in the quota cells while routing uses the fallback
+  account instead of blocking startup.

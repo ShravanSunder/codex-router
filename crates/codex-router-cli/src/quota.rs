@@ -20,6 +20,7 @@ use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
+use codex_router_core::routes::RouteBand;
 use codex_router_selection::burn_down::AccountAvailability;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
 use codex_router_selection::burn_down::BurnDownAccountInput;
@@ -827,7 +828,7 @@ fn quota_status_report(
     }
 
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
-        USER_QUOTA_ROUTE_BAND,
+        RouteBand::Responses,
         now_unix_seconds,
         burn_down_inputs,
     ));
@@ -1110,14 +1111,9 @@ fn burn_down_input_from_display_windows(
         })
         .collect::<Vec<_>>();
 
-    BurnDownAccountInput::new(
-        account.account_id().clone(),
-        account.label(),
-        USER_QUOTA_ROUTE_BAND,
-        facts,
-    )
-    .with_account_enabled(account.status() == AccountStatus::Enabled)
-    .with_active_credential(account.active_credential_generation().is_some())
+    BurnDownAccountInput::new(account.account_id().clone(), account.label(), facts)
+        .with_account_enabled(account.status() == AccountStatus::Enabled)
+        .with_active_credential(account.active_credential_generation().is_some())
 }
 
 fn format_window_cell(
@@ -1166,8 +1162,9 @@ fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
         RoutingReason::PreferredNext => "✓ preferred",
         RoutingReason::Available => "✓ available",
         RoutingReason::Held => "◌ held",
+        RoutingReason::Fallback => "↻ fallback",
+        RoutingReason::Unknown => "↻ unknown",
         RoutingReason::Blocked => "× blocked",
-        RoutingReason::NeedsProbe => "↻ needs probe",
         RoutingReason::Excluded => "× excluded",
     };
     if let Some(limiting_window) = assessment.limiting_window() {
@@ -1188,9 +1185,8 @@ fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
     match assessment.availability() {
         AccountAvailability::Usable => "available",
         AccountAvailability::Reserve => "backup",
-        AccountAvailability::Blocked
-        | AccountAvailability::ProbeRequired
-        | AccountAvailability::Excluded => "no",
+        AccountAvailability::Unknown => "fallback",
+        AccountAvailability::Blocked | AccountAvailability::Excluded => "no",
     }
 }
 
@@ -1325,6 +1321,7 @@ const fn selected_pool_json(value: SelectedPool) -> &'static str {
     match value {
         SelectedPool::Usable => "usable",
         SelectedPool::Reserve => "reserve",
+        SelectedPool::Unknown => "unknown",
         SelectedPool::None => "none",
     }
 }
@@ -1334,7 +1331,7 @@ const fn availability_json(value: AccountAvailability) -> &'static str {
         AccountAvailability::Usable => "usable",
         AccountAvailability::Reserve => "reserve",
         AccountAvailability::Blocked => "blocked",
-        AccountAvailability::ProbeRequired => "probe_required",
+        AccountAvailability::Unknown => "unknown",
         AccountAvailability::Excluded => "excluded",
     }
 }
@@ -1374,8 +1371,9 @@ const fn routing_reason_json(value: RoutingReason) -> &'static str {
         RoutingReason::PreferredNext => "preferred_next",
         RoutingReason::Available => "available",
         RoutingReason::Held => "held",
+        RoutingReason::Fallback => "fallback",
+        RoutingReason::Unknown => "unknown",
         RoutingReason::Blocked => "blocked",
-        RoutingReason::NeedsProbe => "needs_probe",
         RoutingReason::Excluded => "excluded",
     }
 }
