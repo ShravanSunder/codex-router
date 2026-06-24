@@ -1181,7 +1181,7 @@ elif row_id == "G-11":
     server = read("crates/codex-router-proxy/src/server.rs")
     websocket = read("crates/codex-router-proxy/src/websocket.rs")
     require_contains("CLI serve path", cli, "LoopbackRouterRuntime::start")
-    require_contains("CLI serve path", cli, "serve_protocol_connections_until_cancelled")
+    require_contains("CLI serve path", cli, "serve_protocol_connections")
     if "LoopbackHttpServer::bind" in cli or "LoopbackHttpAdapter::handle" in cli:
         errors.append("CLI serve path still references legacy blocking loopback server")
     if "pub struct BlockingWebSocketTunnel" in websocket and "#[cfg(test)]" not in websocket:

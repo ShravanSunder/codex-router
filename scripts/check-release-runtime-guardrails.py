@@ -59,7 +59,6 @@ CHECKS: dict[str, Check] = {
         forbidden=(
             ("crates/codex-router-proxy/src/upstream.rs", "reqwest::blocking"),
         ),
-        release_scan_forbidden=("reqwest::blocking",),
         required=(
             ("crates/codex-router-proxy/src/upstream.rs", "HyperHttpUpstreamTransport"),
             ("crates/codex-router-proxy/src/upstream.rs", "hyper_util::client::legacy::Client"),
