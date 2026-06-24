@@ -7,18 +7,41 @@ use codex_router_core::ids::TokenGeneration;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 
+const TOKENLESS_GENERATION: TokenGeneration = TokenGeneration::new(0);
+
+/// Local auth policy for the loopback router.
+#[derive(Clone, Debug)]
+enum ProxyLocalAuthPolicy {
+    Disabled,
+    Required(LocalRouterAuth),
+}
+
 /// Local auth gate that runs before selection or upstream open.
 #[derive(Clone, Debug)]
 pub struct ProxyLocalAuthGate {
-    auth: Arc<RwLock<LocalRouterAuth>>,
+    auth: Arc<RwLock<ProxyLocalAuthPolicy>>,
 }
 
 impl ProxyLocalAuthGate {
     /// Builds a proxy auth gate.
     #[must_use]
     pub fn new(auth: LocalRouterAuth) -> Self {
+        Self::required(auth)
+    }
+
+    /// Builds a proxy auth gate that does not require a local bearer.
+    #[must_use]
+    pub fn disabled() -> Self {
         Self {
-            auth: Arc::new(RwLock::new(auth)),
+            auth: Arc::new(RwLock::new(ProxyLocalAuthPolicy::Disabled)),
+        }
+    }
+
+    /// Builds a proxy auth gate that requires a local bearer.
+    #[must_use]
+    pub fn required(auth: LocalRouterAuth) -> Self {
+        Self {
+            auth: Arc::new(RwLock::new(ProxyLocalAuthPolicy::Required(auth))),
         }
     }
 
@@ -28,14 +51,16 @@ impl ProxyLocalAuthGate {
         presented_token: Option<&str>,
     ) -> Result<TokenGeneration, LocalAuthError> {
         let auth = self.auth.read().map_err(|_error| LocalAuthError::Wrong)?;
-
-        auth.validate(presented_token)
+        match &*auth {
+            ProxyLocalAuthPolicy::Disabled => Ok(TOKENLESS_GENERATION),
+            ProxyLocalAuthPolicy::Required(auth) => auth.validate(presented_token),
+        }
     }
 
     /// Replaces the active auth snapshot.
     pub fn replace(&self, auth: LocalRouterAuth) {
         if let Ok(mut current_auth) = self.auth.write() {
-            *current_auth = auth;
+            *current_auth = ProxyLocalAuthPolicy::Required(auth);
         }
     }
 
@@ -44,7 +69,10 @@ impl ProxyLocalAuthGate {
     pub fn is_current_generation(&self, generation: TokenGeneration) -> bool {
         self.auth
             .read()
-            .map(|auth| auth.is_current_generation(generation))
+            .map(|auth| match &*auth {
+                ProxyLocalAuthPolicy::Disabled => generation == TOKENLESS_GENERATION,
+                ProxyLocalAuthPolicy::Required(auth) => auth.is_current_generation(generation),
+            })
             .unwrap_or(false)
     }
 }

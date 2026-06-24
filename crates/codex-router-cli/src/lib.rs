@@ -75,33 +75,41 @@ where
     let command = CliCommand::parse(args)?;
     match command {
         CliCommand::Serve(command) => {
-            let secret_store = FileSecretStore::open(&command.secret_root)
-                .map_err(TokenCommandError::SecretStore)?;
-            let token_service = LocalRouterTokenService::new(secret_store.clone());
-            let local_token = token_service.load_current()?;
-            let initial_token_generation = local_token.generation();
             let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
             let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url)?;
             let state_db = command.state_db.clone();
             let secret_root = command.secret_root.clone();
-            let mut runtime_config = LoopbackRouterRuntimeConfig::new(
+            let mut runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
                 bind_address,
                 upstream_endpoint,
                 command.state_db,
                 command.secret_root,
-                local_token,
             )
             .with_max_websocket_upstream_messages(command.max_websocket_upstream_messages);
+            let token_reload_watcher = if command.require_local_token {
+                let secret_store = FileSecretStore::open(&secret_root)
+                    .map_err(TokenCommandError::SecretStore)?;
+                let token_service = LocalRouterTokenService::new(secret_store.clone());
+                let local_token = token_service.load_current()?;
+                let initial_token_generation = local_token.generation();
+                runtime_config = runtime_config.with_required_local_token(local_token);
+                Some((secret_store, initial_token_generation))
+            } else {
+                None
+            };
             if let Some(now_unix_seconds) = command.now_unix_seconds {
                 runtime_config = runtime_config
                     .with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
             }
             let runtime = LoopbackRouterRuntime::start(runtime_config)?;
-            let _token_reload_watcher = LocalTokenReloadWatcher::start(
-                secret_store,
-                runtime.local_auth_reloader(),
-                initial_token_generation,
-            );
+            let _token_reload_watcher =
+                token_reload_watcher.map(|(secret_store, initial_token_generation)| {
+                    LocalTokenReloadWatcher::start(
+                        secret_store,
+                        runtime.local_auth_reloader(),
+                        initial_token_generation,
+                    )
+                });
 
             writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
             let _quota_refresh_worker = if command.background_quota_refresh_enabled {
@@ -150,15 +158,10 @@ where
                 .map_err(CliError::Stdout)?;
         }
         CliCommand::Profile(ProfileCommand::Doctor) => {
-            if context.env_var(LOCAL_TOKEN_ENV_VAR).is_some() {
-                stdout
-                    .write_all(b"CODEX_ROUTER_TOKEN: present\n")
-                    .map_err(CliError::Stdout)?;
-            } else {
-                stdout
-                    .write_all(b"CODEX_ROUTER_TOKEN: missing\n")
-                    .map_err(CliError::Stdout)?;
-            }
+            let _ = context.env_var(LOCAL_TOKEN_ENV_VAR);
+            stdout
+                .write_all(b"local router token: not required\n")
+                .map_err(CliError::Stdout)?;
         }
         CliCommand::Profile(ProfileCommand::Write {
             port,
@@ -423,6 +426,7 @@ struct ServeCommand {
     max_snapshot_age_seconds: u64,
     quota_refresh_interval_seconds: u64,
     background_quota_refresh_enabled: bool,
+    require_local_token: bool,
     max_websocket_upstream_messages: usize,
     max_connections: usize,
 }
@@ -455,6 +459,7 @@ impl ServeCommand {
             max_snapshot_age_seconds: options.max_snapshot_age_seconds.unwrap_or(300),
             quota_refresh_interval_seconds: options.quota_refresh_interval_seconds.unwrap_or(300),
             background_quota_refresh_enabled: !options.disable_background_quota_refresh,
+            require_local_token: options.require_local_token,
             max_websocket_upstream_messages: options
                 .max_websocket_upstream_messages
                 .unwrap_or(usize::MAX),
@@ -474,6 +479,7 @@ struct ServeCommandOptions {
     max_snapshot_age_seconds: Option<u64>,
     quota_refresh_interval_seconds: Option<u64>,
     disable_background_quota_refresh: bool,
+    require_local_token: bool,
     max_websocket_upstream_messages: Option<usize>,
     max_connections: Option<usize>,
 }
@@ -490,6 +496,7 @@ impl ServeCommandOptions {
             max_snapshot_age_seconds: None,
             quota_refresh_interval_seconds: None,
             disable_background_quota_refresh: false,
+            require_local_token: false,
             max_websocket_upstream_messages: None,
             max_connections: None,
         };
@@ -534,6 +541,9 @@ impl ServeCommandOptions {
                 }
                 "--disable-background-quota-refresh" => {
                     options.disable_background_quota_refresh = true;
+                }
+                "--require-local-token" => {
+                    options.require_local_token = true;
                 }
                 "--max-connections" => {
                     let value = parser.next_required_value("--max-connections")?;
@@ -983,10 +993,7 @@ const HELP_TEXT: &str = "\
 codex-router
 
 commands:
-  serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]
-  token init [--router-root <path>]
-  token rotate [--router-root <path>]
-  token export [--router-root <path>] [--shell posix]
+  serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh] [--require-local-token]
   account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets
   account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
@@ -1199,7 +1206,7 @@ mod tests {
         );
 
         for expected_line in [
-            "serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh]",
+            "serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh] [--require-local-token]",
             "account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets",
             "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
             "quota refresh [--router-root <path>] [--base-url <url>]",
@@ -1279,7 +1286,7 @@ mod tests {
         assert!(rendered.contains("wire_api = \"responses\"\n"));
         assert!(rendered.contains("requires_openai_auth = false\n"));
         assert!(rendered.contains("supports_websockets = true\n"));
-        assert!(rendered.contains("env_key = \"CODEX_ROUTER_TOKEN\"\n"));
+        assert!(!rendered.contains("env_key"));
         assert!(!rendered.contains("env_http_headers"));
         assert!(!rendered.contains("sk-"));
         assert!(!rendered.contains("oauth"));
@@ -1373,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_doctor_reports_token_presence_without_token_value() {
+    fn profile_doctor_reports_tokenless_auth_without_token_value() {
         let output = run_cli(
             ["codex-router", "profile", "doctor"],
             CliContext::new(vec![(
@@ -1382,7 +1389,7 @@ mod tests {
             )]),
         );
 
-        assert!(output.stdout.contains("CODEX_ROUTER_TOKEN: present\n"));
+        assert!(output.stdout.contains("local router token: not required\n"));
         assert!(!output.stdout.contains("local-secret-token-canary"));
         assert!(output.stderr.is_empty());
     }
@@ -1420,7 +1427,7 @@ mod tests {
         assert!(
             doctor_output
                 .stdout
-                .contains("CODEX_ROUTER_TOKEN: present\n")
+                .contains("local router token: not required\n")
         );
         assert!(
             !doctor_output
@@ -1833,7 +1840,7 @@ mod tests {
         assert!(output.contains("wire_api = \"responses\"\n"));
         assert!(output.contains("requires_openai_auth = false\n"));
         assert!(output.contains("supports_websockets = true\n"));
-        assert!(output.contains("env_key = \"CODEX_ROUTER_TOKEN\"\n"));
+        assert!(!output.contains("env_key"));
         assert!(!output.contains("env_http_headers"));
         assert!(!output.contains("sk-"));
         assert!(!output.contains("oauth"));
@@ -3911,8 +3918,6 @@ exit 42
         let secret_root = test_root.path().join("secrets");
         let state = must_ok(SqliteStateStore::open(&state_path));
         let secrets = must_ok(FileSecretStore::open(&secret_root));
-        let token_service = LocalRouterTokenService::new(secrets.clone());
-        let local_token = must_ok(token_service.rotate_with_token("current-token"));
         let account_id = account_id("acct_cli_serve");
         let account = AccountRecord::new(account_id.clone(), "cli-serve", AccountStatus::Enabled)
             .with_active_credential_generation(1);
@@ -3958,9 +3963,8 @@ exit 42
         let router_port_text = router_port.to_string();
         let upstream_base_url = format!("http://{upstream_address}/v1");
         let client_thread = thread::spawn(move || {
-            send_loopback_request_with_retry(
+            send_tokenless_loopback_request_with_retry(
                 router_port,
-                local_token.token().expose_secret(),
                 br#"{"model":"gpt-5","serve":true}"#,
             )
         });
@@ -4078,8 +4082,6 @@ exit 42
         let secret_root = test_root.path().join("secrets");
         let state = must_ok(SqliteStateStore::open(&state_path));
         let secrets = must_ok(FileSecretStore::open(&secret_root));
-        let token_service = LocalRouterTokenService::new(secrets.clone());
-        must_ok(token_service.rotate_with_token("current-token"));
         let account_id = account_id("acct_cli_ws");
         let account = AccountRecord::new(account_id.clone(), "cli-ws", AccountStatus::Enabled)
             .with_active_credential_generation(1);
@@ -4143,7 +4145,7 @@ exit 42
         let router_port_text = router_port.to_string();
         let upstream_base_url = format!("http://{upstream_address}/v1");
         let client_thread = thread::spawn(move || {
-            let mut client = connect_websocket_with_retry(router_port, "current-token");
+            let mut client = connect_tokenless_websocket_with_retry(router_port);
             let first_frame = r#"{"type":"response.create","cli":true}"#;
             if let Err(error) = client.send(Message::text(first_frame)) {
                 panic!("local websocket client should send first frame: {error}");
@@ -4614,6 +4616,7 @@ exit 42
                     "--max-snapshot-age-seconds",
                     "60",
                     "--disable-background-quota-refresh",
+                    "--require-local-token",
                     "--max-connections",
                     "3",
                 ],
@@ -5107,6 +5110,27 @@ exit 42
         response
     }
 
+    fn send_tokenless_loopback_request_with_retry(port: u16, body: &[u8]) -> String {
+        let mut client = connect_with_retry(port);
+        let request = format!(
+            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        if let Err(error) = client.write_all(request.as_bytes()) {
+            panic!("client request write should succeed: {error}");
+        }
+        if let Err(error) = client.shutdown(Shutdown::Write) {
+            panic!("client write shutdown should succeed: {error}");
+        }
+        let mut response = String::new();
+        if let Err(error) = client.read_to_string(&mut response) {
+            panic!("client response read should succeed: {error}");
+        }
+
+        response
+    }
+
     fn read_http_request_with_body(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         loop {
@@ -5181,6 +5205,24 @@ exit 42
             request
                 .headers_mut()
                 .insert("X-Codex-Router-Token", header_value);
+            match connect(request) {
+                Ok((client, _response)) => return client,
+                Err(_error) => thread::yield_now(),
+            }
+        }
+
+        panic!("local websocket client should connect to CLI serve listener");
+    }
+
+    fn connect_tokenless_websocket_with_retry(
+        port: u16,
+    ) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+        for _attempt in 0..1_000 {
+            let request = match format!("ws://127.0.0.1:{port}/v1/responses").into_client_request()
+            {
+                Ok(request) => request,
+                Err(error) => panic!("local websocket request should build: {error}"),
+            };
             match connect(request) {
                 Ok((client, _response)) => return client,
                 Err(_error) => thread::yield_now(),

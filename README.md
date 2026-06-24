@@ -40,14 +40,12 @@ test setup. API-key auth is not quota-compatible.
 Start the local router from the same persisted state:
 
 ```shell
-cargo run -p codex-router-cli -- token init
-cargo run -p codex-router-cli -- token export --shell posix
 cargo run -p codex-router-cli -- serve \
   --quota-refresh-interval-seconds 300
 ```
 
-Startup does not block on quota refresh. `serve` reads last-known SQLite quota
-state immediately, starts an immediate background refresh after binding, and
-continues refreshing on the configured schedule. Run `quota refresh` for an
-explicit manual provider fetch, and `quota status` for SQLite-only status
-output.
+Startup does not require `CODEX_ROUTER_TOKEN` and does not block on quota
+refresh. `serve` reads last-known SQLite quota state immediately, starts an
+immediate background refresh after binding, and continues refreshing on the
+configured schedule. Run `quota refresh` for an explicit manual provider fetch,
+and `quota status` for SQLite-only status output.

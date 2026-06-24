@@ -153,7 +153,7 @@ pub struct LoopbackRouterRuntimeConfig {
     upstream_endpoint: UpstreamEndpoint,
     state_database_path: PathBuf,
     secret_store_root: PathBuf,
-    local_token: LocalRouterTokenRecord,
+    local_token: Option<LocalRouterTokenRecord>,
     fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     max_websocket_upstream_messages: usize,
@@ -175,12 +175,40 @@ impl LoopbackRouterRuntimeConfig {
             upstream_endpoint,
             state_database_path,
             secret_store_root,
-            local_token,
+            local_token: Some(local_token),
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             max_websocket_upstream_messages: usize::MAX,
             audit_file_path: None,
         }
+    }
+
+    /// Creates runtime configuration without local bearer-token auth.
+    #[must_use]
+    pub const fn new_tokenless(
+        bind_address: LoopbackBindAddress,
+        upstream_endpoint: UpstreamEndpoint,
+        state_database_path: PathBuf,
+        secret_store_root: PathBuf,
+    ) -> Self {
+        Self {
+            bind_address,
+            upstream_endpoint,
+            state_database_path,
+            secret_store_root,
+            local_token: None,
+            fixed_now_unix_seconds: None,
+            max_snapshot_age_seconds: 300,
+            max_websocket_upstream_messages: usize::MAX,
+            audit_file_path: None,
+        }
+    }
+
+    /// Requires the caller to present a local bearer token before routing.
+    #[must_use]
+    pub fn with_required_local_token(mut self, local_token: LocalRouterTokenRecord) -> Self {
+        self.local_token = Some(local_token);
+        self
     }
 
     /// Sets the selector's quota freshness clock.
@@ -248,10 +276,13 @@ impl LoopbackRouterRuntime {
             &config.secret_store_root,
             runtime_start_unix_seconds,
         )?;
-        let auth_gate = crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
-            config.local_token,
-            Vec::new(),
-        ));
+        let auth_gate = match config.local_token {
+            Some(local_token) => crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
+                local_token,
+                Vec::new(),
+            )),
+            None => crate::local_auth::ProxyLocalAuthGate::disabled(),
+        };
         let upstream_endpoint = config.upstream_endpoint;
         let upstream = HttpUpstreamTransport::new(upstream_endpoint.clone());
         let server = LoopbackServerRuntime::bind(config.bind_address)?;

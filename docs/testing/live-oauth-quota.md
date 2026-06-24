@@ -75,7 +75,6 @@ cargo run -p codex-router-cli -- quota status [--router-root <path>] --all-limit
 cargo run -p codex-router-cli -- profile print --port 8787
 cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
-cargo run -p codex-router-cli -- token export [--router-root <secret-root>] --shell posix
 cargo run -p codex-router-cli -- serve [--state-db <state.sqlite>] [--secret-root <secret-root>] [--upstream-base-url <url>]
 cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label>
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>

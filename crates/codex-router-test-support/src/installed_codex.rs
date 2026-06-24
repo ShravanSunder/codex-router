@@ -183,7 +183,7 @@ fn run_installed_codex_mock_smoke_with_mode(
             router_port,
             state_path,
             secret_root,
-            seed.local_token.clone(),
+            None,
             format!("http://{}/v1", upstream.address()),
             audit_path.clone(),
         )?,
@@ -261,7 +261,6 @@ fn run_installed_codex_mock_smoke_with_mode(
         mode,
         codex_version: codex_version.trim(),
         profile_path: &profile_path,
-        profile_uses_codex_router_token: profile_uses_codex_router_token(&profile_path)?,
         expected_upstream_token: &seed.expected_upstream_token,
         http_sse_codex_status: http_sse_codex_output.as_ref().map(|output| &output.status),
         http_sse_codex_stdout: http_sse_codex_output
@@ -315,7 +314,7 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
             router_port,
             state_path,
             secret_root,
-            seed.local_token,
+            Some(seed.local_token),
             format!("http://{}/v1", upstream.address()),
             audit_path,
         )?,
@@ -606,7 +605,7 @@ fn start_router_once(
     router_port: u16,
     state_path: PathBuf,
     secret_root: PathBuf,
-    local_token: String,
+    local_token: Option<String>,
     upstream_base_url: String,
     audit_path: PathBuf,
 ) -> Result<thread::JoinHandle<Result<(), String>>, String> {
@@ -618,20 +617,22 @@ fn start_router_once(
                 .map_err(|error| format!("failed to build router bind address: {error}"))?;
             let upstream_endpoint = UpstreamEndpoint::new(upstream_base_url)
                 .map_err(|error| format!("failed to build upstream endpoint: {error}"))?;
-            let local_token = codex_router_core::local_auth::LocalRouterTokenRecord::new(
-                SecretString::new(local_token),
-                codex_router_core::ids::TokenGeneration::new(1),
-            );
-            let runtime_config = LoopbackRouterRuntimeConfig::new(
+            let mut runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
                 bind_address,
                 upstream_endpoint,
                 state_path,
                 secret_root,
-                local_token,
             )
             .with_quota_clock(1_030, 60)
             .with_max_websocket_upstream_messages(4)
             .with_audit_file(audit_path);
+            if let Some(local_token) = local_token {
+                let local_token = codex_router_core::local_auth::LocalRouterTokenRecord::new(
+                    SecretString::new(local_token),
+                    codex_router_core::ids::TokenGeneration::new(1),
+                );
+                runtime_config = runtime_config.with_required_local_token(local_token);
+            }
             let runtime = LoopbackRouterRuntime::start(runtime_config)
                 .map_err(|error| format!("failed to start router runtime: {error}"))?;
             if let Err(error) = ready_sender.send(()) {
@@ -687,10 +688,9 @@ fn run_codex_exec(
     codex_home: &Path,
     workdir: &Path,
     last_message_path: &Path,
-    local_token_assignment: &str,
+    _local_token_assignment: &str,
     child_environment: CodexChildEnvironment,
 ) -> Result<Output, String> {
-    let local_token = parse_posix_token_assignment(local_token_assignment)?;
     let CodexChildEnvironment {
         home,
         xdg_config_home,
@@ -726,7 +726,6 @@ fn run_codex_exec(
         .env("XDG_STATE_HOME", xdg_state_home)
         .env("XDG_CACHE_HOME", xdg_cache_home)
         .env("CODEX_HOME", codex_home)
-        .env("CODEX_ROUTER_TOKEN", local_token)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1056,7 +1055,6 @@ struct RedactedTranscriptInput<'a> {
     mode: InstalledCodexSmokeMode,
     codex_version: &'a str,
     profile_path: &'a Path,
-    profile_uses_codex_router_token: bool,
     http_sse_codex_status: Option<&'a ExitStatus>,
     http_sse_codex_stdout: Option<Cow<'a, str>>,
     http_sse_codex_stderr: Option<Cow<'a, str>>,
@@ -1099,8 +1097,8 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         "mode": input.mode.as_str(),
         "codex_version": input.codex_version,
         "profile_written": input.profile_path.exists(),
-        "profile_env_key": "CODEX_ROUTER_TOKEN",
-        "profile_uses_codex_router_token": input.profile_uses_codex_router_token,
+        "profile_env_key": null,
+        "profile_uses_codex_router_token": false,
         "http_sse_codex_status": input.http_sse_codex_status.map(ToString::to_string),
         "http_sse_codex_stdout_contains_smoke_text": input.http_sse_codex_stdout.as_deref().map(|stdout| stdout.contains("codex-router smoke ok")),
         "http_sse_codex_stderr_line_count": input.http_sse_codex_stderr.as_deref().map(str::lines).map(Iterator::count),
@@ -1578,16 +1576,6 @@ fn output_status_text(output: Option<&Output>) -> String {
     output
         .map(|output| output.status.to_string())
         .unwrap_or_else(|| "not-run".to_owned())
-}
-
-fn profile_uses_codex_router_token(profile_path: &Path) -> Result<bool, String> {
-    let profile = fs::read_to_string(profile_path).map_err(|error| {
-        format!(
-            "failed to read generated profile {}: {error}",
-            profile_path.display()
-        )
-    })?;
-    Ok(profile.contains("env_key = \"CODEX_ROUTER_TOKEN\""))
 }
 
 fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, String> {
@@ -2292,7 +2280,6 @@ mod tests {
             mode: InstalledCodexSmokeMode::Combined,
             codex_version: "OpenAI Codex v0.test",
             profile_path: test_root.path(),
-            profile_uses_codex_router_token: true,
             http_sse_codex_status: Some(&success_status()),
             http_sse_codex_stdout: Some(Cow::Borrowed("codex-router smoke ok")),
             http_sse_codex_stderr: Some(Cow::Borrowed("")),

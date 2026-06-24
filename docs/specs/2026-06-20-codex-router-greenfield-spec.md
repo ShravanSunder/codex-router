@@ -37,14 +37,13 @@ base_url = "http://127.0.0.1:18733/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
-env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }
 ```
 
 The router may provide a command that prints this profile text. It must not silently apply it to `~/.codex`. Any command that writes Codex configuration is a home-level mutation and requires a preview-first workflow.
 
 The profile must use a custom provider id. It must not rely on `openai_base_url`, and it must not use built-in provider ids: `openai`, `amazon-bedrock`, `ollama`, or `lmstudio`. Codex allows only limited AWS field overrides for the built-in `amazon-bedrock` provider; `codex-router` is not that provider.
 
-`requires_openai_auth = false` is required because Codex must not attach its own OpenAI credential to router-bound requests. The router attaches upstream account auth after local router authentication and route selection.
+`requires_openai_auth = false` is required because Codex must not attach its own OpenAI credential to router-bound requests. The default generated profile must not require `env_key`, `env_http_headers`, or any other shell environment secret. The router attaches upstream account auth after route selection.
 
 The router does not require separate Codex session stores, separate Codex histories, separate Codex logs, or separate Codex installs. A Codex session is still a Codex session.
 
@@ -222,22 +221,21 @@ Allowed deterministic backend: hardened file store behind the same trait, with p
 
 The hardened file backend is plaintext-at-rest under user-private filesystem permissions. It is acceptable only for deterministic development, CI, tests, emergency recovery, or an explicitly selected local fallback. It must not be the default for normal multi-account OAuth storage and must not be described as encrypted storage.
 
-The local router bearer token is a secret. It must be generated, stored, rotated, and redacted like OAuth-adjacent material. Loopback binding is not authentication.
+The normal local development path is tokenless loopback: `serve` binds only to loopback, requires no `CODEX_ROUTER_TOKEN`, and must not load local-token state before binding. A local router bearer token may exist only as an explicit hardening mode, for example `serve --require-local-token`, and must be generated, stored, rotated, and redacted like OAuth-adjacent material when that mode is selected. Loopback binding is not a substitute for upstream OAuth account isolation.
 
 ## Local Auth And Audit Threat Model
 
-The default local-auth carrier is `env_http_headers = { "X-Codex-Router-Token" = "CODEX_ROUTER_TOKEN" }` in the Codex custom provider profile. Codex omits this header when the environment variable is missing or empty, so the router must treat a missing header as unauthenticated and reject before account selection.
+The default Codex custom provider profile is tokenless and carries no local auth header. The router must accept tokenless loopback HTTP/SSE and WebSocket traffic in this mode, while still stripping caller-supplied auth before forwarding upstream and rejecting obvious auth-smuggling carriers such as cookies, query auth fields, or top-level JSON auth fields. When `--require-local-token` is selected, missing, empty, old, or wrong local tokens must be rejected before account selection or upstream open.
 
 The router must provide read-only activation output:
 
 - profile text for the Codex custom provider
-- a shell-safe command to export `CODEX_ROUTER_TOKEN` for the current shell
-- a doctor check that reports whether the token env var is present without printing the token
+- a doctor check that reports local router tokens are not required in the default path
 - a dry-run profile write preview
 
 Any command that writes `~/.codex/<profile>.config.toml` must be explicit, must have a dry-run mode, and must require an approval flag such as `--approve-codex-home-write`. It must not be part of normal serving or login.
 
-Token rotation invalidates the old local bearer for new HTTP requests and new WebSocket handshakes. Existing WebSocket connections authenticated with the old token must be closed by the router during rotation with a local close reason that does not include secrets. Existing HTTP/SSE responses already committed are allowed to finish, but their reservations must be finalized under the old token generation.
+In explicit local-token mode, token rotation invalidates the old local bearer for new HTTP requests and new WebSocket handshakes. Existing WebSocket connections authenticated with the old token must be closed by the router during rotation with a local close reason that does not include secrets. Existing HTTP/SSE responses already committed are allowed to finish, but their reservations must be finalized under the old token generation.
 
 Audit events must use a positive schema allowlist. Allowed fields are:
 
@@ -415,7 +413,7 @@ Smoke proof:
   against the mock router
 - smoke captures the installed Codex version and the profile used
 - a temp `CODEX_HOME` or equivalent isolated profile fixture is used
-- `CODEX_ROUTER_TOKEN` is injected for the smoke without printing it
+- no `CODEX_ROUTER_TOKEN` or fake provider key is injected for the default installed-Codex smoke
 - smoke starts the router without a live quota endpoint response on the startup path and verifies startup is not quota-blocked
 - smoke captures a redacted quota status table after a background refresh has populated SQLite
 - HTTP/SSE and WebSocket modes are each exercised when enabled

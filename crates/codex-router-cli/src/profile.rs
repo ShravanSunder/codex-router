@@ -30,7 +30,6 @@ base_url = "http://127.0.0.1:{}/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
-env_key = "CODEX_ROUTER_TOKEN"
 "#,
             self.port
         )
