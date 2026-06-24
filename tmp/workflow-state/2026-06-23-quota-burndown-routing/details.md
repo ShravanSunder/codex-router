@@ -1291,6 +1291,60 @@ Remaining before terminal completion:
 - installed-Codex WebSocket e2e
 - implementation review and PR-ready wrapup
 
+## Implementation Checkpoint: T8a Proof Harness Contract
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan checkpoint.
+
+Checkpoint result:
+complete for T8a proof harness inventory and redacted transcript contract.
+
+Evidence:
+
+- Required ignored inventory prefixes now each match exactly one intended
+  harness preflight test:
+  `route_native_harness_inventory_preflight`,
+  `installed_codex_http_sse_harness_inventory_preflight`, and
+  `installed_codex_websocket_harness_inventory_preflight`.
+- `tests/smoke/installed_codex_mock.sh` now accepts
+  `--transport http-sse`, `--transport websocket`, and `--transport all`.
+- Redacted installed-Codex transcript output no longer emits
+  `first_frame_model`, `first_frame_has_input`, or `first_frame_stream`; it
+  emits only the first-frame shape allowlist.
+- `redacted_transcript_omits_forbidden_request_canaries` proves the transcript
+  artifact omits raw prompt, raw model, raw previous-response id, and selected
+  upstream-token canaries.
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --list`:
+  1 test.
+- `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --list`:
+  1 test.
+- `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --list`:
+  1 test.
+- `cargo test -p codex-router-test-support route_native_harness_inventory_preflight -- --ignored --nocapture`:
+  1 passed.
+- `cargo test -p codex-router-test-support installed_codex_http_sse_harness_inventory_preflight -- --ignored --nocapture`:
+  1 passed.
+- `cargo test -p codex-router-test-support installed_codex_websocket_harness_inventory_preflight -- --ignored --nocapture`:
+  1 passed.
+- `tests/smoke/installed_codex_mock.sh --transport http-sse`: 1 passed.
+- `tests/smoke/installed_codex_mock.sh --transport websocket`: 1 passed.
+- `cargo test -p codex-router-test-support -- --nocapture`: 7 passed,
+  5 ignored.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed.
+- `git diff --check`: passed.
+
+Remaining before terminal completion:
+
+- route-native black-box proof for all routed APIs
+- installed-Codex HTTP/SSE e2e
+- installed-Codex WebSocket e2e
+- implementation review and PR-ready wrapup
+
 ## Implementation Checkpoint: Final Lint Gate Unblocked
 
 Date: 2026-06-23

@@ -148,6 +148,63 @@ Notes:
   the configured background interval into the refresh worker remains for the
   later non-blocking refresh slice.
 
+## T8a Proof Harness Contract
+
+Plan rows:
+
+- Route-native ignored test inventory must not silently match zero tests.
+- Installed-Codex HTTP/SSE and WebSocket ignored test inventories must be
+  transport-addressable.
+- Redacted proof artifacts must not contain raw tokens, raw first frames, raw
+  prompts, raw previous-response ids, unsafe labels, or affinity-secret
+  canaries.
+
+Files changed:
+
+- `crates/codex-router-test-support/src/installed_codex.rs`
+- `tests/smoke/installed_codex_mock.sh`
+
+Implemented:
+
+- Added exact-prefix ignored preflight tests for route-native, HTTP/SSE, and
+  WebSocket harness inventory.
+- Added `--transport http-sse|websocket|all` support to the installed-Codex
+  smoke wrapper.
+- Replaced stale first-frame transcript fields with a small allowlisted
+  `first_frame_shape` object.
+- Added transcript payload canary enforcement and a unit test proving prompt,
+  model, previous-response id, and selected upstream-token canaries are omitted.
+
+Proof:
+
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --list`
+  passed: 1 test.
+- `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --list`
+  passed: 1 test.
+- `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --list`
+  passed: 1 test.
+- `cargo test -p codex-router-test-support route_native_harness_inventory_preflight -- --ignored --nocapture`
+  passed: 1 test.
+- `cargo test -p codex-router-test-support installed_codex_http_sse_harness_inventory_preflight -- --ignored --nocapture`
+  passed: 1 test.
+- `cargo test -p codex-router-test-support installed_codex_websocket_harness_inventory_preflight -- --ignored --nocapture`
+  passed: 1 test.
+- `tests/smoke/installed_codex_mock.sh --transport http-sse` passed: 1 test.
+- `tests/smoke/installed_codex_mock.sh --transport websocket` passed: 1 test.
+- `cargo test -p codex-router-test-support -- --nocapture` passed:
+  7 passed, 5 ignored.
+- `cargo fmt --all -- --check` passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed.
+- `git diff --check` passed.
+
+Notes:
+
+- This checkpoint proves harness inventory and artifact redaction. It does not
+  close the remaining route-native black-box or installed-Codex transport e2e
+  gates.
+
 ## T2c Affinity Secret Store Contract
 
 Plan rows:

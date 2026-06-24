@@ -916,18 +916,57 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
             "websocket_local_router_token_in_first_frame": false,
             "websocket_request_frame_count": input.upstream.websocket_request_frame_count,
             "websocket_non_prewarm_request_frame_count": input.upstream.request_frames.iter().filter_map(|frame| serde_json::from_str::<Value>(frame).ok()).filter(is_non_prewarm_response_create_frame).count(),
-            "first_frame_type": first_frame.get("type").and_then(Value::as_str),
-            "first_frame_model": first_frame.get("model").and_then(Value::as_str),
-            "first_frame_has_input": first_frame.get("input").and_then(Value::as_array).is_some_and(|input| !input.is_empty()),
-            "first_frame_stream": first_frame.get("stream").and_then(Value::as_bool),
+            "first_frame_shape": first_frame_shape_summary(&first_frame),
         }
     });
     let payload = serde_json::to_string_pretty(&redacted)
         .map_err(|error| format!("failed to render redacted smoke transcript: {error}"))?;
+    assert_redacted_transcript_payload(&payload, input)?;
     fs::write(&transcript_path, payload)
         .map_err(|error| format!("failed to write smoke transcript: {error}"))?;
 
     Ok(transcript_path)
+}
+
+fn first_frame_shape_summary(first_frame: &Value) -> Value {
+    serde_json::json!({
+        "json_object": first_frame.is_object(),
+        "non_prewarm_response_create": is_non_prewarm_response_create_frame(first_frame),
+    })
+}
+
+fn assert_redacted_transcript_payload(
+    payload: &str,
+    input: RedactedTranscriptInput<'_>,
+) -> Result<(), String> {
+    let forbidden_fragments = [
+        input.http_sse_codex_stdout,
+        input.http_sse_codex_stderr,
+        input.websocket_codex_stdout,
+        input.websocket_codex_stderr,
+        input.upstream.first_frame.as_str(),
+        input
+            .expected_account_label
+            .strip_prefix("unsafe:")
+            .unwrap_or_default(),
+        "first_frame_model",
+        "first_frame_has_input",
+        "first_frame_stream",
+        "local-token-canary",
+        "installed-smoke-matches-token",
+        "prompt-canary",
+        "raw-previous-response-id-canary",
+        "affinity-secret-canary",
+    ];
+    for forbidden in forbidden_fragments {
+        if !forbidden.is_empty() && payload.contains(forbidden) {
+            return Err(format!(
+                "redacted smoke transcript leaked forbidden fragment: {forbidden}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1640,16 +1679,19 @@ mod tests {
 
     use super::MockHttpSseTranscript;
     use super::MockWebSocketTranscript;
+    use super::RedactedTranscriptInput;
     use super::SMOKE_EXPECTED_TEXT;
     use super::SmokeContractAssertion;
     use super::SmokeQuotaStatus;
     use super::SmokeTempRoot;
     use super::assert_codex_visible_output;
     use super::assert_smoke_contract;
+    use super::first_frame_shape_summary;
     use super::run_hostile_no_token_smoke;
     use super::run_installed_codex_mock_smoke;
     use super::run_with_timeout;
     use super::upstream_account_token;
+    use super::write_redacted_transcript;
 
     fn success_status() -> ExitStatus {
         ExitStatus::from_raw(0)
@@ -1781,6 +1823,137 @@ mod tests {
 
         assert!(!error.contains("local-secret-canary"));
         assert!(error.contains("captured stdout/stderr suppressed"));
+    }
+
+    #[test]
+    fn redacted_transcript_omits_forbidden_request_canaries() {
+        let test_root = match SmokeTempRoot::new("redacted-transcript") {
+            Ok(test_root) => test_root,
+            Err(error) => panic!("failed to create temp root: {error}"),
+        };
+        let http_sse_last_message_path = test_root.path().join("http-sse-last-message.txt");
+        let websocket_last_message_path = test_root.path().join("websocket-last-message.txt");
+        let upstream = MockWebSocketTranscript {
+            headers: vec![(
+                "authorization".to_owned(),
+                "Bearer installed-smoke-matches-token".to_owned(),
+            )],
+            first_frame: r#"{"type":"response.create","model":"gpt-5.5","input":[{"role":"user","content":[{"type":"input_text","text":"prompt-canary"}]}],"stream":true,"previous_response_id":"raw-previous-response-id-canary"}"#.to_owned(),
+            request_frames: Vec::new(),
+            websocket_request_frame_count: 1,
+            http_probe_count: 0,
+            http_sse: Some(MockHttpSseTranscript {
+                request_line: "POST /v1/responses HTTP/1.1".to_owned(),
+                headers: vec![(
+                    "authorization".to_owned(),
+                    "Bearer installed-smoke-matches-token".to_owned(),
+                )],
+                body: r#"{"stream":true,"input":"prompt-canary"}"#.to_owned(),
+            }),
+        };
+        let transcript_path = match write_redacted_transcript(RedactedTranscriptInput {
+            codex_version: "OpenAI Codex v0.test",
+            profile_path: test_root.path(),
+            http_sse_codex_status: &success_status(),
+            http_sse_codex_stdout: "codex-router smoke ok",
+            http_sse_codex_stderr: "",
+            http_sse_last_message_path: &http_sse_last_message_path,
+            websocket_codex_status: &success_status(),
+            websocket_codex_stdout: "codex-router smoke ok",
+            websocket_codex_stderr: "",
+            websocket_last_message_path: &websocket_last_message_path,
+            upstream: &upstream,
+            quota_status: &valid_quota_status(),
+            expected_account_label: "matches",
+        }) {
+            Ok(path) => path,
+            Err(error) => panic!("redacted transcript fixture failed: {error}"),
+        };
+        let payload = match fs::read_to_string(&transcript_path) {
+            Ok(payload) => payload,
+            Err(error) => panic!("failed to read transcript fixture: {error}"),
+        };
+
+        for forbidden in [
+            "first_frame_model",
+            "first_frame_has_input",
+            "first_frame_stream",
+            "gpt-5.5",
+            "prompt-canary",
+            "raw-previous-response-id-canary",
+            "installed-smoke-matches-token",
+        ] {
+            assert!(
+                !payload.contains(forbidden),
+                "redacted transcript leaked {forbidden}"
+            );
+        }
+        assert!(payload.contains("first_frame_shape"));
+    }
+
+    #[test]
+    #[ignore = "T8a inventory preflight; route-native proof belongs to the next route-native slice"]
+    fn route_native_harness_inventory_preflight() {
+        let first_frame = serde_json::json!({
+            "type": "response.create",
+            "model": "gpt-5.5",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "prompt-canary"}]}],
+            "stream": true
+        });
+        let summary = first_frame_shape_summary(&first_frame);
+
+        assert_eq!(
+            summary.get("json_object").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            summary
+                .get("non_prewarm_response_create")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(!summary.to_string().contains("prompt-canary"));
+        assert!(!summary.to_string().contains("gpt-5.5"));
+    }
+
+    #[test]
+    #[ignore = "T8a inventory preflight; run full HTTP/SSE smoke through tests/smoke/installed_codex_mock.sh --transport http-sse"]
+    fn installed_codex_http_sse_harness_inventory_preflight() {
+        let routable_upstream_tokens = [upstream_account_token().to_owned()];
+        let quota_status = valid_quota_status();
+        let upstream = valid_transcript(false, false);
+
+        if let Err(error) = assert_smoke_contract(SmokeContractAssertion {
+            http_sse_codex_status: &success_status(),
+            websocket_codex_status: &success_status(),
+            upstream: &upstream,
+            local_token: "local-token-canary",
+            expected_account_label: "matches",
+            routable_upstream_tokens: &routable_upstream_tokens,
+            quota_status: &quota_status,
+        }) {
+            panic!("HTTP/SSE harness preflight failed: {error}");
+        }
+    }
+
+    #[test]
+    #[ignore = "T8a inventory preflight; run full WebSocket smoke through tests/smoke/installed_codex_mock.sh --transport websocket"]
+    fn installed_codex_websocket_harness_inventory_preflight() {
+        let routable_upstream_tokens = [upstream_account_token().to_owned()];
+        let quota_status = valid_quota_status();
+        let upstream = valid_transcript(false, false);
+
+        if let Err(error) = assert_smoke_contract(SmokeContractAssertion {
+            http_sse_codex_status: &success_status(),
+            websocket_codex_status: &success_status(),
+            upstream: &upstream,
+            local_token: "local-token-canary",
+            expected_account_label: "matches",
+            routable_upstream_tokens: &routable_upstream_tokens,
+            quota_status: &quota_status,
+        }) {
+            panic!("WebSocket harness preflight failed: {error}");
+        }
     }
 
     #[test]

@@ -2,6 +2,46 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+transport="all"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --transport)
+      if [[ $# -lt 2 ]]; then
+        echo "--transport requires one of: http-sse, websocket, all" >&2
+        exit 2
+      fi
+      transport="$2"
+      shift 2
+      ;;
+    --help|-h)
+      cat <<'USAGE'
+Usage: tests/smoke/installed_codex_mock.sh [--transport http-sse|websocket|all]
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "${transport}" in
+  http-sse)
+    test_filter="installed_codex_http_sse_"
+    ;;
+  websocket)
+    test_filter="installed_codex_websocket_"
+    ;;
+  all)
+    test_filter="installed_codex_"
+    ;;
+  *)
+    echo "--transport must be one of: http-sse, websocket, all" >&2
+    exit 2
+    ;;
+esac
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
@@ -20,7 +60,7 @@ fi
 
 "${cargo_command[@]}" test \
   -p codex-router-test-support \
-  installed_codex_ \
+  "${test_filter}" \
   -- \
   --ignored \
   --nocapture
