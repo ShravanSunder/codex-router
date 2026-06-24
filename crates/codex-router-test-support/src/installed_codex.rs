@@ -18,6 +18,8 @@ use std::process::ExitStatus;
 use std::process::Output;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Barrier;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -116,6 +118,11 @@ pub fn run_installed_codex_http_sse_mock_smoke() -> Result<InstalledCodexSmokeRe
 /// Runs the installed Codex WebSocket mock smoke.
 pub fn run_installed_codex_websocket_mock_smoke() -> Result<InstalledCodexSmokeReport, String> {
     run_installed_codex_mock_smoke_with_mode(InstalledCodexSmokeMode::WebSocket)
+}
+
+/// Runs three installed Codex WebSocket clients through one router child process.
+pub fn run_installed_codex_three_websocket_mock_e2e() -> Result<InstalledCodexSmokeReport, String> {
+    run_installed_codex_three_websocket_mock_e2e_inner()
 }
 
 fn run_installed_codex_mock_smoke_with_mode(
@@ -284,6 +291,118 @@ fn run_installed_codex_mock_smoke_with_mode(
         router_process: &router_process,
         router_audit: &router_audit,
     })?;
+
+    Ok(InstalledCodexSmokeReport { transcript_path })
+}
+
+fn run_installed_codex_three_websocket_mock_e2e_inner() -> Result<InstalledCodexSmokeReport, String>
+{
+    let smoke_root = SmokeTempRoot::new("installed-codex-three-websocket")?;
+    let router_root = smoke_root.path().join("router");
+    let state_path = router_root.join("state.sqlite");
+    let secret_root = router_root.join("secrets");
+    fs::create_dir_all(&router_root).map_err(|error| {
+        format!(
+            "failed to create temp router root {}: {error}",
+            router_root.display()
+        )
+    })?;
+
+    let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
+    let upstream = MockConcurrentWebSocketUpstream::start(3)?;
+    let seed = seed_router_state(&state_path, &secret_root)?;
+    let router_port = reserve_loopback_port()?;
+    let audit_path = router_root.join("audit").join("events.jsonl");
+    let router_process = start_router_process(
+        router_port,
+        state_path,
+        secret_root,
+        None,
+        format!("http://{}/v1", upstream.address()),
+        audit_path,
+    )?;
+
+    let start_barrier = Arc::new(Barrier::new(3));
+    let mut handles = Vec::new();
+    for client_index in 0..3 {
+        let client_root = smoke_root.path().join(format!("client-{client_index}"));
+        let codex_home = client_root.join("codex-home");
+        let workdir = client_root.join("workdir");
+        let process_home = client_root.join("home");
+        let xdg_config_home = client_root.join("xdg-config");
+        let xdg_state_home = client_root.join("xdg-state");
+        let xdg_cache_home = client_root.join("xdg-cache");
+        for path in [
+            &codex_home,
+            &workdir,
+            &process_home,
+            &xdg_config_home,
+            &xdg_state_home,
+            &xdg_cache_home,
+        ] {
+            fs::create_dir_all(path)
+                .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+        }
+        let profile_writer = CodexRouterProfileWriter::new(&codex_home);
+        let profile = CodexRouterProfile::new(router_port);
+        let profile_preview = profile_writer.dry_run(&profile).map_err(|error| {
+            format!("failed to preview generated Codex profile for client {client_index}: {error}")
+        })?;
+        profile_writer
+            .write(&profile, true, Some(profile_preview.preview_token()))
+            .map_err(|error| {
+                format!(
+                    "failed to write generated Codex profile for client {client_index}: {error}"
+                )
+            })?;
+        let last_message_path = client_root.join("websocket-last-message.txt");
+        let child_environment = CodexChildEnvironment::new(
+            &process_home,
+            &xdg_config_home,
+            &xdg_state_home,
+            &xdg_cache_home,
+        );
+        let barrier = Arc::clone(&start_barrier);
+        handles.push(
+            thread::Builder::new()
+                .name(format!("codex-router-three-client-{client_index}"))
+                .spawn(move || {
+                    barrier.wait();
+                    let output = run_codex_exec(
+                        CodexTransportMode::WebSocket,
+                        &codex_home,
+                        &workdir,
+                        &last_message_path,
+                        "",
+                        child_environment,
+                    )?;
+                    assert_codex_visible_output(
+                        &format!("WebSocket client {client_index}"),
+                        &output,
+                        &last_message_path,
+                    )?;
+                    Ok::<Output, String>(output)
+                })
+                .map_err(|error| {
+                    format!("failed to spawn installed Codex client {client_index}: {error}")
+                })?,
+        );
+    }
+
+    let mut outputs = Vec::new();
+    for (client_index, handle) in handles.into_iter().enumerate() {
+        let output = join_result(handle, &format!("installed Codex client {client_index}"))?;
+        outputs.push(output);
+    }
+    let router_process = router_process.stop("three-client router process")?;
+    let upstream_result = upstream.join()?;
+    let transcript_path = write_redacted_three_websocket_transcript(
+        &codex_version,
+        &router_process,
+        &upstream_result,
+        &outputs,
+        &seed,
+    )?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
 }
@@ -1302,6 +1421,111 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
     Ok(transcript_path)
 }
 
+fn write_redacted_three_websocket_transcript(
+    codex_version: &str,
+    router_process: &RouterProcessObservation,
+    upstream: &ConcurrentWebSocketTranscript,
+    outputs: &[Output],
+    seed: &SmokeSeed,
+) -> Result<PathBuf, String> {
+    let artifact_dir = workspace_root()?.join("tmp").join("smoke");
+    fs::create_dir_all(&artifact_dir).map_err(|error| {
+        format!(
+            "failed to create smoke artifact dir {}: {error}",
+            artifact_dir.display()
+        )
+    })?;
+    let transcript_path = artifact_dir.join(format!(
+        "installed-codex-three-websocket-{}-{}.json",
+        std::process::id(),
+        timestamp_millis()
+    ));
+    let statuses = outputs
+        .iter()
+        .map(|output| {
+            serde_json::json!({
+                "status": output.status.to_string(),
+                "stdout_contains_smoke_text": String::from_utf8_lossy(&output.stdout).contains(SMOKE_EXPECTED_TEXT),
+                "stderr_line_count": String::from_utf8_lossy(&output.stderr).lines().count(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = serde_json::json!({
+        "mode": "three-websocket",
+        "codex_version": codex_version.trim(),
+        "router_process": {
+            "binary_path": router_process.binary_path.display().to_string(),
+            "pid": router_process.pid,
+            "argv": router_process.argv,
+            "listener": router_process.listener,
+            "readiness_line": router_process.readiness_line,
+            "cleanup_result": router_process.cleanup_result,
+            "spawned_real_serve_child": true,
+        },
+        "clients": {
+            "count": outputs.len(),
+            "all_success": outputs.iter().all(|output| output.status.success()),
+            "statuses": statuses,
+        },
+        "upstream": {
+            "expected_sessions": upstream.expected_sessions,
+            "completed_sessions": upstream.completed_sessions,
+            "active_high_water": upstream.active_high_water,
+            "overlap_proven": upstream.active_high_water >= upstream.expected_sessions,
+            "non_prewarm_session_count": upstream.non_prewarm_session_count,
+            "session_frame_counts": upstream.session_frame_counts,
+            "http_probe_count": upstream.http_probe_count,
+        },
+        "shared_router_pid": router_process.pid,
+        "quota_selected_account_safe_label": seed.expected_account_label,
+    });
+    let rendered = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("failed to render three-client transcript: {error}"))?;
+    assert_redacted_three_websocket_payload(&rendered, outputs, seed)?;
+    fs::write(&transcript_path, rendered)
+        .map_err(|error| format!("failed to write three-client transcript: {error}"))?;
+    Ok(transcript_path)
+}
+
+fn assert_redacted_three_websocket_payload(
+    payload: &str,
+    outputs: &[Output],
+    seed: &SmokeSeed,
+) -> Result<(), String> {
+    let forbidden_fragments = [
+        Some(seed.local_token.as_str()),
+        Some(seed.expected_upstream_token.as_str()),
+        Some(seed.local_token_assignment.as_str()),
+        Some("installed-smoke-matches-token"),
+        Some("prompt-canary"),
+        Some("raw-previous-response-id-canary"),
+    ];
+    for forbidden in forbidden_fragments
+        .into_iter()
+        .flatten()
+        .filter(|fragment| !fragment.is_empty())
+    {
+        if payload.contains(forbidden) {
+            return Err(format!(
+                "three-client transcript leaked forbidden fragment: {forbidden}"
+            ));
+        }
+    }
+    for output in outputs {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for forbidden in [stdout.as_ref(), stderr.as_ref()]
+            .into_iter()
+            .filter(|fragment| !fragment.is_empty())
+        {
+            if payload.contains(forbidden) {
+                return Err("three-client transcript leaked captured child output".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn first_frame_shape_summary(first_frame: &Value) -> Value {
     serde_json::json!({
         "json_object": first_frame.is_object(),
@@ -1429,6 +1653,40 @@ struct MockWebSocketUpstream {
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+struct MockConcurrentWebSocketUpstream {
+    address: String,
+    state: Arc<ConcurrentUpstreamSharedState>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConcurrentWebSocketTranscript {
+    expected_sessions: usize,
+    completed_sessions: usize,
+    active_high_water: usize,
+    http_probe_count: usize,
+    session_frame_counts: Vec<usize>,
+    non_prewarm_session_count: usize,
+}
+
+#[derive(Debug)]
+struct ConcurrentUpstreamSharedState {
+    state: Mutex<ConcurrentUpstreamState>,
+    condition: Condvar,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConcurrentUpstreamState {
+    expected_sessions: usize,
+    active_non_prewarm_sessions: usize,
+    active_high_water: usize,
+    completed_sessions: usize,
+    http_probe_count: usize,
+    session_frame_counts: Vec<usize>,
+    non_prewarm_session_count: usize,
 }
 
 struct MockNoConnectionUpstream {
@@ -1603,6 +1861,105 @@ impl Drop for MockWebSocketUpstream {
     }
 }
 
+impl MockConcurrentWebSocketUpstream {
+    fn start(expected_sessions: usize) -> Result<Self, String> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| format!("failed to bind concurrent mock upstream: {error}"))?;
+        listener.set_nonblocking(true).map_err(|error| {
+            format!("failed to configure concurrent mock upstream nonblocking: {error}")
+        })?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("failed to read concurrent upstream address: {error}"))?
+            .to_string();
+        let state = Arc::new(ConcurrentUpstreamSharedState {
+            state: Mutex::new(ConcurrentUpstreamState {
+                expected_sessions,
+                active_non_prewarm_sessions: 0,
+                active_high_water: 0,
+                completed_sessions: 0,
+                http_probe_count: 0,
+                session_frame_counts: Vec::new(),
+                non_prewarm_session_count: 0,
+            }),
+            condition: Condvar::new(),
+        });
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_state = Arc::clone(&state);
+        let thread_shutdown = Arc::clone(&shutdown);
+        let handle = thread::Builder::new()
+            .name("codex-router-three-client-upstream".to_owned())
+            .spawn(move || {
+                run_concurrent_mock_upstream(
+                    listener,
+                    thread_state,
+                    thread_shutdown,
+                    expected_sessions,
+                )
+            })
+            .map_err(|error| format!("failed to spawn concurrent mock upstream: {error}"))?;
+
+        Ok(Self {
+            address,
+            state,
+            shutdown,
+            handle: Some(handle),
+        })
+    }
+
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn join(mut self) -> Result<ConcurrentWebSocketTranscript, String> {
+        self.shutdown.store(true, Ordering::SeqCst);
+        wake_mock_upstream_accept(&self.address);
+        self.state.condition.notify_all();
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| "concurrent mock upstream was already joined".to_owned())?;
+        join_result(handle, "concurrent mock upstream")?;
+        let state = self
+            .state
+            .state
+            .lock()
+            .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?
+            .clone();
+        if state.active_high_water < state.expected_sessions {
+            return Err(format!(
+                "concurrent upstream high-water was {}, expected at least {}",
+                state.active_high_water, state.expected_sessions
+            ));
+        }
+        if state.completed_sessions < state.expected_sessions {
+            return Err(format!(
+                "concurrent upstream completed {} sessions, expected {}",
+                state.completed_sessions, state.expected_sessions
+            ));
+        }
+        Ok(ConcurrentWebSocketTranscript {
+            expected_sessions: state.expected_sessions,
+            completed_sessions: state.completed_sessions,
+            active_high_water: state.active_high_water,
+            http_probe_count: state.http_probe_count,
+            session_frame_counts: state.session_frame_counts,
+            non_prewarm_session_count: state.non_prewarm_session_count,
+        })
+    }
+}
+
+impl Drop for MockConcurrentWebSocketUpstream {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.shutdown.store(true, Ordering::SeqCst);
+            wake_mock_upstream_accept(&self.address);
+            self.state.condition.notify_all();
+            let _ = join_result(handle, "concurrent mock upstream cleanup");
+        }
+    }
+}
+
 fn run_mock_upstream(
     listener: TcpListener,
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
@@ -1666,6 +2023,195 @@ fn run_mock_upstream(
             return Ok(());
         }
     }
+}
+
+fn run_concurrent_mock_upstream(
+    listener: TcpListener,
+    state: Arc<ConcurrentUpstreamSharedState>,
+    shutdown: Arc<AtomicBool>,
+    expected_sessions: usize,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut handles = Vec::new();
+    loop {
+        {
+            let state_guard = state
+                .state
+                .lock()
+                .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+            if state_guard.completed_sessions >= expected_sessions {
+                break;
+            }
+        }
+        if shutdown.load(Ordering::SeqCst) {
+            return Err(
+                "concurrent upstream shut down before expected sessions completed".to_owned(),
+            );
+        }
+        if Instant::now() >= deadline {
+            return Err("concurrent upstream timed out waiting for sessions".to_owned());
+        }
+        match listener.accept() {
+            Ok((stream, _peer)) => {
+                stream.set_nonblocking(false).map_err(|error| {
+                    format!("failed to restore concurrent upstream stream blocking mode: {error}")
+                })?;
+                if !looks_like_websocket_upgrade(&stream)? {
+                    respond_to_http_request(stream)?;
+                    let mut state_guard = state
+                        .state
+                        .lock()
+                        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+                    state_guard.http_probe_count = state_guard.http_probe_count.saturating_add(1);
+                    continue;
+                }
+                let session_state = Arc::clone(&state);
+                let session_shutdown = Arc::clone(&shutdown);
+                handles.push(
+                    thread::Builder::new()
+                        .name("codex-router-three-client-upstream-session".to_owned())
+                        .spawn(move || {
+                            run_concurrent_mock_websocket_session(
+                                stream,
+                                session_state,
+                                session_shutdown,
+                            )
+                        })
+                        .map_err(|error| {
+                            format!("failed to spawn concurrent upstream session: {error}")
+                        })?,
+                );
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(format!("concurrent upstream accept failed: {error}")),
+        }
+    }
+    state.condition.notify_all();
+    for (session_index, handle) in handles.into_iter().enumerate() {
+        join_result(
+            handle,
+            &format!("concurrent upstream session {session_index}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn run_concurrent_mock_websocket_session(
+    stream: std::net::TcpStream,
+    state: Arc<ConcurrentUpstreamSharedState>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|error| {
+            format!("concurrent mock upstream failed to set websocket read timeout: {error}")
+        })?;
+    let mut websocket = accept_hdr(stream, |_request: &Request, response: Response| {
+        Ok(response)
+    })
+    .map_err(|error| format!("concurrent mock upstream websocket handshake failed: {error}"))?;
+    let mut frame_count = 0_usize;
+    for request_index in 0..4 {
+        if shutdown.load(Ordering::SeqCst) {
+            return Err("concurrent mock upstream session shut down before request".to_owned());
+        }
+        let frame = match websocket.read() {
+            Ok(Message::Text(text)) => text.to_string(),
+            Ok(Message::Binary(bytes)) => String::from_utf8(bytes.to_vec()).map_err(|error| {
+                format!("concurrent mock upstream frame was not UTF-8: {error}")
+            })?,
+            Ok(Message::Close(_)) => break,
+            Ok(_other) => continue,
+            Err(_error) => {
+                return Ok(());
+            }
+        };
+        frame_count = frame_count.saturating_add(1);
+        if is_prewarm_request_frame(&frame) {
+            for event in smoke_prewarm_events(request_index) {
+                websocket
+                    .send(Message::Text(event.into()))
+                    .map_err(|error| {
+                        format!("concurrent mock upstream failed to send prewarm event: {error}")
+                    })?;
+            }
+            continue;
+        }
+        register_concurrent_non_prewarm_session(&state)?;
+        wait_for_concurrent_session_barrier(&state)?;
+        for event in smoke_response_events(request_index) {
+            websocket
+                .send(Message::Text(event.into()))
+                .map_err(|error| {
+                    format!("concurrent mock upstream failed to send response event: {error}")
+                })?;
+        }
+        finish_concurrent_non_prewarm_session(&state, frame_count)?;
+        return Ok(());
+    }
+    Err("concurrent mock upstream did not receive non-prewarm request frame".to_owned())
+}
+
+fn register_concurrent_non_prewarm_session(
+    shared: &ConcurrentUpstreamSharedState,
+) -> Result<(), String> {
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    state.active_non_prewarm_sessions = state.active_non_prewarm_sessions.saturating_add(1);
+    state.non_prewarm_session_count = state.non_prewarm_session_count.saturating_add(1);
+    state.active_high_water = state
+        .active_high_water
+        .max(state.active_non_prewarm_sessions);
+    shared.condition.notify_all();
+    Ok(())
+}
+
+fn wait_for_concurrent_session_barrier(
+    shared: &ConcurrentUpstreamSharedState,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    loop {
+        if state.active_high_water >= state.expected_sessions {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "concurrent upstream barrier timed out with active_high_water={} expected={}",
+                state.active_high_water, state.expected_sessions
+            ));
+        }
+        let wait = deadline.saturating_duration_since(now);
+        let (next_state, _timeout) = shared
+            .condition
+            .wait_timeout(state, wait.min(Duration::from_millis(100)))
+            .map_err(|_| "concurrent upstream condition wait poisoned".to_owned())?;
+        state = next_state;
+    }
+}
+
+fn finish_concurrent_non_prewarm_session(
+    shared: &ConcurrentUpstreamSharedState,
+    frame_count: usize,
+) -> Result<(), String> {
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    state.active_non_prewarm_sessions = state.active_non_prewarm_sessions.saturating_sub(1);
+    state.completed_sessions = state.completed_sessions.saturating_add(1);
+    state.session_frame_counts.push(frame_count);
+    shared.condition.notify_all();
+    Ok(())
 }
 
 fn wake_mock_upstream_accept(address: &str) {
@@ -2306,6 +2852,7 @@ mod tests {
     use super::run_hostile_no_token_smoke;
     use super::run_installed_codex_http_sse_mock_smoke;
     use super::run_installed_codex_mock_smoke;
+    use super::run_installed_codex_three_websocket_mock_e2e;
     use super::run_installed_codex_websocket_mock_smoke;
     use super::run_with_timeout;
     use super::upstream_account_token;
@@ -2621,6 +3168,17 @@ mod tests {
         let report = match run_installed_codex_websocket_mock_smoke() {
             Ok(report) => report,
             Err(error) => panic!("installed Codex WebSocket e2e failed: {error}"),
+        };
+
+        assert!(report.transcript_path().exists());
+    }
+
+    #[test]
+    #[ignore = "T8 installed-Codex concurrent WebSocket e2e; run through tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent"]
+    fn three_codex_websocket_concurrent_e2e_shares_router_pid_and_overlaps() {
+        let report = match run_installed_codex_three_websocket_mock_e2e() {
+            Ok(report) => report,
+            Err(error) => panic!("installed Codex concurrent WebSocket e2e failed: {error}"),
         };
 
         assert!(report.transcript_path().exists());
