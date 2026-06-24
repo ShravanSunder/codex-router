@@ -529,6 +529,33 @@ mod tests {
     }
 
     #[test]
+    fn v6_migration_adds_reset_credits_without_losing_existing_quota() {
+        let temp_dir = TestTempDir::new("v6_reset_credits_migration");
+        let database_path = temp_dir.path().join("state.sqlite");
+        create_v6_database_without_reset_credits(&database_path);
+
+        let store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("v6 state store should migrate to current schema: {error}"),
+        };
+
+        assert_eq!(store.schema_version(), 7);
+        let account_id = account_id("acct_v6_reset_credits");
+        let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &store,
+            &account_id,
+            "responses",
+        ) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => panic!("v6 quota snapshot should survive migration"),
+            Err(error) => panic!("v6 quota snapshot should load after migration: {error}"),
+        };
+        assert_eq!(snapshot.remaining_headroom(), 42);
+        assert_eq!(snapshot.reset_unix_seconds(), Some(2_000));
+        assert_eq!(snapshot.reset_credits_available(), None);
+    }
+
+    #[test]
     fn credential_mutation_invalidates_response_backed_alias_family_atomically() {
         let temp_dir = TestTempDir::new("credential_mutation_invalidates_aliases");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -1228,6 +1255,89 @@ mod tests {
             ",
         ) {
             panic!("raw v3 database should initialize: {error}");
+        }
+    }
+
+    fn create_v6_database_without_reset_credits(database_path: &Path) {
+        let connection = match Connection::open(database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("raw v6 database should open: {error}"),
+        };
+        if let Err(error) = connection.execute_batch(
+            "
+            CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                active_credential_generation INTEGER
+            );
+
+            CREATE TABLE quota_snapshots (
+                account_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                route_band TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                stale_penalty INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE affinity_pins (
+                affinity_key TEXT PRIMARY KEY NOT NULL,
+                account_id TEXT NOT NULL
+            );
+
+            CREATE TABLE selector_quota_windows (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                limit_window_seconds INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                effective INTEGER NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band, limit_window_seconds)
+            );
+
+            CREATE TABLE quota_refresh_status (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                last_success_unix_seconds INTEGER,
+                last_attempt_unix_seconds INTEGER,
+                last_error_class TEXT,
+                stale_after_unix_seconds INTEGER,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE previous_response_affinity_owners (
+                affinity_key_hash TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                credential_generation INTEGER NOT NULL,
+                source_transport TEXT NOT NULL,
+                created_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (affinity_key_hash, route_band, account_id)
+            );
+
+            INSERT INTO accounts (
+                account_id, label, status, active_credential_generation
+            ) VALUES (
+                'acct_v6_reset_credits', 'v6-reset-credits', 'enabled', 1
+            );
+
+            INSERT INTO quota_snapshots (
+                account_id, source, observed_unix_seconds, route_band,
+                remaining_headroom, reset_unix_seconds, stale_penalty
+            ) VALUES (
+                'acct_v6_reset_credits', 'mock_endpoint', 1_000, 'responses',
+                42, 2_000, 0
+            );
+
+            PRAGMA user_version = 6;
+            ",
+        ) {
+            panic!("raw v6 database should initialize: {error}");
         }
     }
 }
