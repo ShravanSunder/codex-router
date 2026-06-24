@@ -95,8 +95,17 @@ expected_observation() {
     I-21)
       printf 'listener binds and first request is accepted while broad quota refresh is slow or stalled'
       ;;
+    I-05a)
+      printf 'old single-lane WebSocket reproducer is represented by a blocked-first-WebSocket fixture'
+      ;;
+    I-05b)
+      printf 'async runtime lets survivor WebSocket complete and drains active sessions cleanly'
+      ;;
     I-17b)
       printf 'slow affinity recorder cannot delay WebSocket frame forwarding or close progress'
+      ;;
+    I-18)
+      printf 'served-router WebSocket fixture traverses listener, Hyper upgrade, registry cleanup, and blocked background refresh'
       ;;
     I-19)
       printf 'local/upstream close, runtime shutdown, and active pump cancellation clean up WebSocket sessions'
@@ -783,6 +792,107 @@ payload["touched_targets"] = [
 ]
 payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
 payload["notes"] = "Focused async WebSocket slow-recorder integration test passed; side-effect persistence is spawned after local frame forwarding."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
+    I-05a)
+      if cargo test -p codex-router-proxy loopback_router_runtime_accepts_second_websocket_while_first_is_blocked -- --nocapture; then
+        if ! ensure_guarded_source_paths_clean "$row_id"; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+          exit 1
+        fi
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/lib.rs",
+]
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = "Old-failure equivalent reproducer passed: a second WebSocket is accepted and completed while the first WebSocket handler is intentionally blocked."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
+    I-05b)
+      if cargo test -p codex-router-proxy loopback_router_runtime_accepts_second_websocket_while_first_is_blocked -- --nocapture \
+        && cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture \
+        && cargo test -p codex-router-proxy runtime_shutdown_cancels_active_duplex_pumps -- --nocapture; then
+        if ! ensure_guarded_source_paths_clean "$row_id"; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+          exit 1
+        fi
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/lib.rs",
+]
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = "Async comparison fixtures passed: blocked first WebSocket does not block survivor, served runtime drains active sessions on shutdown, and active duplex pumps cancel cleanly."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
+    I-18)
+      if cargo test -p codex-router-cli served_router_websocket_uses_persisted_quota_while_background_refresh_is_blocked -- --nocapture \
+        && cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture; then
+        if ! ensure_guarded_source_paths_clean "$row_id"; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+          exit 1
+        fi
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-cli/src/lib.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/websocket.rs",
+]
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = "Real served-router WebSocket fixture traversed actual listener, Hyper upgrade, persisted quota selection during blocked refresh, upstream forwarding, and registry shutdown cleanup."
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
