@@ -1291,6 +1291,51 @@ Remaining before terminal completion:
 - installed-Codex WebSocket e2e
 - implementation review and PR-ready wrapup
 
+## Implementation Checkpoint: T8b Route-Native Black-Box Proof
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan checkpoint.
+
+Checkpoint result:
+complete for T8b route-native black-box proof.
+
+Evidence:
+
+- Added `route_native::tests::route_native_black_box_all_supported_routes_and_rejections`
+  under the required `route_native_` ignored-test prefix.
+- The route-native proof starts a real loopback router plus mock upstream and
+  exercises:
+  `POST /v1/responses`, WebSocket `/v1/responses`, `GET /v1/models`,
+  `POST /v1/memories/trace_summarize`, `POST /v1/responses/compact`,
+  unsupported HTTP path, wrong HTTP method, unsupported WebSocket path, and
+  missing WebSocket auth.
+- The fixture seeds one enabled account per route band, so upstream
+  authorization proves route-band-specific quota selection for `responses`,
+  `models`, `memories_trace_summarize`, and `responses_compact`.
+- The transcript records only safe selected labels, method/path, auth presence,
+  local-auth stripping, and body-preservation canary checks; it rejects raw
+  local token, upstream tokens, and affinity-secret identifiers in recorded
+  request bodies.
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --list`:
+  2 tests.
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture`:
+  2 passed.
+- `cargo test -p codex-router-test-support -- --nocapture`: 7 passed,
+  6 ignored.
+- `cargo fmt --all -- --check`: passed.
+- `cargo check --workspace`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo test --workspace`: passed.
+- `git diff --check`: passed.
+
+Remaining before terminal completion:
+
+- installed-Codex HTTP/SSE e2e
+- installed-Codex WebSocket e2e
+- implementation review and PR-ready wrapup
+
 ## Implementation Checkpoint: T8a Proof Harness Contract
 
 Date: 2026-06-23

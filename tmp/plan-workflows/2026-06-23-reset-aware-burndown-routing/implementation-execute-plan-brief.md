@@ -205,6 +205,61 @@ Notes:
   close the remaining route-native black-box or installed-Codex transport e2e
   gates.
 
+## T8b Route-Native Black-Box Proof
+
+Plan rows:
+
+- Served local router plus mock upstream proof for all supported routed APIs.
+- Unsupported HTTP paths and wrong HTTP methods fail locally without upstream
+  traffic.
+- Unsupported WebSocket paths and invalid WebSocket auth fail at the local
+  ingress boundary without upstream traffic.
+- Each successful route proves local auth, route-band-specific selection,
+  upstream auth injection, local-auth stripping, and protocol/body preservation.
+
+Files changed:
+
+- `crates/codex-router-test-support/src/lib.rs`
+- `crates/codex-router-test-support/src/route_native.rs`
+- `crates/codex-router-test-support/src/route_native/client.rs`
+- `crates/codex-router-test-support/src/route_native/fixture.rs`
+- `crates/codex-router-test-support/src/route_native/upstream.rs`
+
+Implemented:
+
+- Added `route_native` test-support module and the required ignored proof test
+  `route_native_black_box_all_supported_routes_and_rejections`.
+- The black-box proof starts an assembled loopback router and mock upstream,
+  then exercises `POST /v1/responses`, WebSocket `/v1/responses`,
+  `GET /v1/models`, `POST /v1/memories/trace_summarize`,
+  `POST /v1/responses/compact`, unsupported HTTP path, wrong HTTP method,
+  unsupported WebSocket path, and missing WebSocket auth.
+- The fixture seeds one account per route band, so the safe selected label
+  derived from upstream auth proves route-band-specific quota selection.
+- Transcript checks prove upstream auth injection, local auth stripping, no
+  unsupported-route upstream traffic, and no raw local/upstream token or
+  affinity-secret identifier in recorded request bodies.
+
+Proof:
+
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --list`
+  passed: 2 tests.
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture`
+  passed: 2 tests.
+- `cargo test -p codex-router-test-support -- --nocapture` passed:
+  7 passed, 6 ignored.
+- `cargo fmt --all -- --check` passed.
+- `cargo check --workspace` passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- `cargo test --workspace` passed.
+- `git diff --check` passed.
+
+Notes:
+
+- A first workspace test run exposed a transient unrelated CLI device-auth
+  helper failure; rerunning that single test passed before the final
+  workspace gate passed.
+
 ## T2c Affinity Secret Store Contract
 
 Plan rows:
