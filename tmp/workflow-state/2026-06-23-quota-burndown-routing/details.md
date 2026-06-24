@@ -1291,6 +1291,45 @@ Remaining before terminal completion:
 - installed-Codex WebSocket e2e
 - implementation review and PR-ready wrapup
 
+## Implementation Checkpoint: T7 Non-Blocking Refresh
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan checkpoint.
+
+Checkpoint result:
+complete for non-blocking refresh proof.
+
+Evidence:
+
+- `served_router_http_uses_persisted_quota_while_background_refresh_is_blocked`
+  proves a real loopback runtime routes HTTP `/v1/responses` from persisted
+  SQLite quota while background quota refresh is blocked inside provider fetch.
+- `served_router_websocket_uses_persisted_quota_while_background_refresh_is_blocked`
+  proves a real loopback runtime routes WebSocket `/v1/responses` from
+  persisted SQLite quota while background quota refresh is blocked inside
+  provider fetch.
+- `quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists`
+  proves quota status renders persisted state immediately with
+  `needs refresh`/stale metadata.
+- `cargo test -p codex-router-cli served_router_ -- --nocapture`: 2 passed.
+- `cargo test -p codex-router-cli quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists -- --nocapture`:
+  1 passed.
+- `cargo test -p codex-router-cli`: 62 passed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed; 2 installed-Codex smoke tests remain
+  ignored by design and require the smoke script gate.
+
+Remaining before terminal completion:
+
+- route-native black-box proof for all routed APIs
+- installed-Codex HTTP/SSE e2e
+- installed-Codex WebSocket e2e
+- implementation review and PR-ready wrapup
+
 ## Implementation Checkpoint: T6 Secret Replacement
 
 Date: 2026-06-23

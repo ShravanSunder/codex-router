@@ -548,3 +548,53 @@ Notes:
 - This closes the remaining T6 secret-loss/replacement proof row at the proxy
   and selector boundary. Installed-Codex transport e2e gates are still ahead in
   T9/T10.
+
+## T7 Non-Blocking Refresh Black-Box Proof
+
+Plan rows:
+
+- Served router remains ready while background quota refresh is delayed.
+- First routed HTTP and WebSocket requests use persisted SQLite quota state
+  while refresh is blocked.
+- `quota status` renders persisted state immediately with stale/needs-refresh
+  notes.
+
+Files changed:
+
+- `crates/codex-router-cli/src/lib.rs`
+
+Implemented:
+
+- Added a blocking quota refresh provider test double that signals once it is
+  inside provider fetch and waits on a release channel.
+- Added HTTP served-router proof that a real loopback runtime routes
+  `/v1/responses` from persisted quota state while the background refresh worker
+  is blocked.
+- Added WebSocket served-router proof that a real loopback runtime routes
+  `/v1/responses` WebSocket from persisted quota state while the background
+  refresh worker is blocked.
+- Reused the existing quota status stale snapshot test for immediate persisted
+  status rendering proof.
+
+Proof:
+
+- `cargo test -p codex-router-cli served_router_ -- --nocapture` passed:
+  2 focused served-router tests.
+- `cargo test -p codex-router-cli quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists -- --nocapture`
+  passed: 1 focused quota status test.
+- `cargo fmt --all -- --check` passed.
+- `git diff --check` passed.
+- `cargo test -p codex-router-cli` passed: 62 tests.
+- `cargo check --workspace` passed.
+- `cargo test --workspace` passed:
+  auth 13, CLI 62, core 15, proxy 87, quota 4, secret-store 11,
+  selection 21, state 18, test-support 6; 2 installed-Codex smoke tests remain
+  ignored by design and are run through `tests/smoke/installed_codex_mock.sh`.
+
+Notes:
+
+- The proof uses bounded channel synchronization, not wall-clock sleeps, to
+  prove the refresh worker is blocked while the served request succeeds.
+- The test landed in `crates/codex-router-cli/src/lib.rs`, where the existing
+  serve/runtime test harness lives; this is a narrow test-only expansion beyond
+  the original T7 write-scope list.
