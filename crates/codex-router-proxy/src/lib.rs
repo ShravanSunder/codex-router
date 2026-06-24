@@ -68,6 +68,8 @@ mod tests {
     use crate::upstream::HttpUpstreamTransport;
     use crate::upstream::UpstreamEndpoint;
     use crate::upstream::UpstreamRequestBuilder;
+    use crate::websocket::AsyncAuthenticatedWebSocketRouter;
+    use crate::websocket::AsyncProviderCredentialResolver;
     use crate::websocket::AsyncWebSocketTunnel;
     use crate::websocket::AuthenticatedWebSocketRouter;
     use crate::websocket::BlockingWebSocketTunnel;
@@ -124,6 +126,7 @@ mod tests {
     use codex_router_state::sqlite::SqliteStateStore;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
+    use futures_util::future::BoxFuture;
     use std::cell::RefCell;
     use std::env;
     use std::fs;
@@ -5150,6 +5153,42 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingAsyncSelector {
+        recorded: Arc<Mutex<Vec<(String, TokenGeneration)>>>,
+    }
+
+    impl RecordingAsyncSelector {
+        fn take_recorded(&self) -> Vec<(String, TokenGeneration)> {
+            lock_test_mutex(&self.recorded, "async selector records")
+                .drain(..)
+                .collect()
+        }
+    }
+
+    impl AsyncAccountDecisionSelector for RecordingAsyncSelector {
+        fn select_upstream_account<'a>(
+            &'a self,
+            request: &'a HttpProxyRequest,
+            token_generation: TokenGeneration,
+            _affinity_secret: Option<&'a RouterAffinityHashSecret>,
+        ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
+            Box::pin(async move {
+                lock_test_mutex(&self.recorded, "async selector records")
+                    .push((request.path().to_owned(), token_generation));
+                let account_id = match codex_router_core::ids::AccountId::new("acct_selected") {
+                    Ok(account_id) => account_id,
+                    Err(error) => {
+                        return Err(HttpProxyError::Upstream {
+                            message: format!("test account id failed: {error}"),
+                        });
+                    }
+                };
+                Ok(SelectedAccountDecision::new(account_id, "test_selection"))
+            })
+        }
+    }
+
     struct RejectingSelector {
         reason: QuotaAwareAccountSelectorError,
         recorded: RefCell<Vec<(String, TokenGeneration)>>,
@@ -5211,6 +5250,44 @@ mod tests {
                 self.access_token.clone(),
                 1,
             ))
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingAsyncProviderCredentialResolver {
+        access_token: SecretString,
+        recorded: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingAsyncProviderCredentialResolver {
+        fn new(access_token: &str) -> Self {
+            Self {
+                access_token: SecretString::new(access_token),
+                recorded: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn take_recorded(&self) -> Vec<String> {
+            lock_test_mutex(&self.recorded, "async credential records")
+                .drain(..)
+                .collect()
+        }
+    }
+
+    impl AsyncProviderCredentialResolver for RecordingAsyncProviderCredentialResolver {
+        fn resolve_provider_credentials<'a>(
+            &'a self,
+            account_id: &'a codex_router_core::ids::AccountId,
+        ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
+            Box::pin(async move {
+                lock_test_mutex(&self.recorded, "async credential records")
+                    .push(account_id.as_str().to_owned());
+                Ok(ResolvedProviderCredential::new(
+                    account_id.clone(),
+                    self.access_token.clone(),
+                    1,
+                ))
+            })
         }
     }
 
@@ -5430,6 +5507,54 @@ mod tests {
         assert_eq!(
             headers.values("authorization"),
             vec!["Bearer selected-upstream-token"]
+        );
+        assert_eq!(headers.value("x-codex-router-token"), None);
+    }
+
+    #[tokio::test]
+    async fn async_authenticated_websocket_router_selects_after_local_auth_and_first_frame() {
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let selector = RecordingAsyncSelector::default();
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
+        let auth_gate = local_auth_gate();
+        let router = AsyncAuthenticatedWebSocketRouter::new(
+            &auth_gate,
+            &selector,
+            &resolver,
+            &protocol_router,
+        )
+        .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+        let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
+
+        let decision = match router
+            .route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                frame.clone(),
+            )
+            .await
+        {
+            Ok(decision) => decision,
+            Err(error) => panic!("async authenticated websocket should route: {error:?}"),
+        };
+
+        assert_eq!(
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))],
+        );
+        assert_eq!(resolver.take_recorded(), vec!["acct_selected".to_owned()],);
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            token_generation,
+            headers,
+            first_frame,
+            affinity_owner_context,
+        } = decision;
+        assert_eq!(token_generation, TokenGeneration::new(1));
+        assert_eq!(first_frame, frame);
+        assert!(affinity_owner_context.is_some());
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer selected-upstream-token"],
         );
         assert_eq!(headers.value("x-codex-router-token"), None);
     }
@@ -6100,8 +6225,8 @@ mod tests {
             Err(error) => panic!("router websocket listener address should read: {error}"),
         };
         let auth_gate = local_auth_gate();
-        let selector = RecordingSelector::new();
-        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let selector = RecordingAsyncSelector::default();
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
             .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
@@ -6243,8 +6368,8 @@ mod tests {
             Err(error) => panic!("router websocket listener address should read: {error}"),
         };
         let auth_gate = local_auth_gate();
-        let selector = RecordingSelector::new();
-        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let selector = RecordingAsyncSelector::default();
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
             .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
@@ -6337,8 +6462,8 @@ mod tests {
             Err(error) => panic!("router websocket listener address should read: {error}"),
         };
         let auth_gate = local_auth_gate();
-        let selector = RecordingSelector::new();
-        let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
+        let selector = RecordingAsyncSelector::default();
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
         let recorder = RecordingAffinityOwnerRecorder::default();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)

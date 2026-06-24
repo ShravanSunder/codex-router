@@ -11,7 +11,9 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::affinity::PreviousResponseId;
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::affinity::hash_previous_response_id;
@@ -32,6 +34,7 @@ use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
+use futures_util::future::BoxFuture;
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -48,6 +51,7 @@ use tungstenite::http::HeaderName;
 use tungstenite::http::HeaderValue;
 
 use crate::account_selection::AccountDecisionSelector;
+use crate::account_selection::AsyncAccountDecisionSelector;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
@@ -277,6 +281,31 @@ where
     affinity_secret_provider: Option<&'a dyn HttpAffinitySecretProvider>,
 }
 
+/// Resolves provider credentials for async WebSocket runtime callers.
+pub trait AsyncProviderCredentialResolver {
+    /// Resolves credentials immediately before provider egress.
+    fn resolve_provider_credentials<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>>;
+}
+
+/// Async WebSocket router that composes local auth, async account selection,
+/// and async credential resolution.
+#[derive(Clone, Copy)]
+pub struct AsyncAuthenticatedWebSocketRouter<'a, S, C>
+where
+    S: AsyncAccountDecisionSelector,
+    C: AsyncProviderCredentialResolver,
+{
+    auth_gate: &'a ProxyLocalAuthGate,
+    selector: &'a S,
+    credential_resolver: &'a C,
+    protocol_router: &'a WebSocketProtocolRouter,
+    audit_sink: Option<&'a AuditFileSink>,
+    affinity_secret_provider: Option<&'a dyn HttpAffinitySecretProvider>,
+}
+
 impl<'a, S, C> AuthenticatedWebSocketRouter<'a, S, C>
 where
     S: AccountDecisionSelector,
@@ -438,6 +467,170 @@ where
     }
 }
 
+impl<'a, S, C> AsyncAuthenticatedWebSocketRouter<'a, S, C>
+where
+    S: AsyncAccountDecisionSelector,
+    C: AsyncProviderCredentialResolver,
+{
+    /// Creates an async authenticated WebSocket router.
+    #[must_use]
+    pub const fn new(
+        auth_gate: &'a ProxyLocalAuthGate,
+        selector: &'a S,
+        credential_resolver: &'a C,
+        protocol_router: &'a WebSocketProtocolRouter,
+    ) -> Self {
+        Self {
+            auth_gate,
+            selector,
+            credential_resolver,
+            protocol_router,
+            audit_sink: None,
+            affinity_secret_provider: None,
+        }
+    }
+
+    /// Adds a private audit sink.
+    #[must_use]
+    pub const fn with_audit_sink(mut self, audit_sink: &'a AuditFileSink) -> Self {
+        self.audit_sink = Some(audit_sink);
+        self
+    }
+
+    /// Adds the router-owned affinity secret provider.
+    #[must_use]
+    pub const fn with_affinity_secret_provider(
+        mut self,
+        affinity_secret_provider: &'a dyn HttpAffinitySecretProvider,
+    ) -> Self {
+        self.affinity_secret_provider = Some(affinity_secret_provider);
+        self
+    }
+
+    fn emit_audit_event(&self, event: AuditEvent) {
+        if let Some(audit_sink) = self.audit_sink {
+            append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
+        }
+    }
+
+    /// Routes one authenticated WebSocket first frame without blocking on
+    /// selector or credential resolution.
+    pub async fn route_first_frame(
+        &self,
+        handshake: WebSocketHandshakeRequest,
+        first_frame: WebSocketFrame,
+    ) -> Result<WebSocketFirstFrameDecision, WebSocketCloseReason> {
+        let presented_token = match extract_presented_local_token_from_request(
+            handshake.header_value("x-codex-router-token"),
+            handshake.header_value("authorization"),
+            handshake.header_value("cookie"),
+            "",
+            &[],
+            false,
+        ) {
+            Ok(presented_token) => presented_token,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::WebSocket,
+                    AuditRouteKind::ResponsesWebSocket,
+                    reason,
+                ));
+                return Err(WebSocketCloseReason::LocalAuth { reason });
+            }
+        };
+        let token_generation = match self.auth_gate.authorize(presented_token) {
+            Ok(generation) => generation,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::WebSocket,
+                    AuditRouteKind::ResponsesWebSocket,
+                    reason,
+                ));
+                return Err(WebSocketCloseReason::LocalAuth { reason });
+            }
+        };
+        let first_frame_bytes = self
+            .protocol_router
+            .validate_first_frame(&first_frame)
+            .inspect_err(|_reason| {
+                self.emit_audit_event(websocket_first_frame_rejection_audit_event(None));
+            })?
+            .to_vec();
+        let selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
+            .with_websocket_upgrade(true)
+            .with_body(first_frame_bytes);
+        let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
+            self.emit_audit_event(websocket_selection_rejection_audit_event());
+            WebSocketCloseReason::Selection
+        })?;
+        let selected = self
+            .selector
+            .select_upstream_account(&selection_request, token_generation, Some(&affinity_secret))
+            .await
+            .map_err(|_error| {
+                self.emit_audit_event(websocket_selection_rejection_audit_event());
+                WebSocketCloseReason::Selection
+            })?;
+        let account_hash = redacted_account_hash(selected.account_id());
+        let resolved = self
+            .credential_resolver
+            .resolve_provider_credentials(selected.account_id())
+            .await
+            .map_err(|_reason| {
+                self.emit_audit_event(websocket_credential_rejection_audit_event(
+                    account_hash.clone(),
+                ));
+                WebSocketCloseReason::ProviderCredential
+            })?;
+
+        let decision = self
+            .protocol_router
+            .route_first_frame(
+                handshake,
+                first_frame,
+                resolved.access_token().clone(),
+                resolved.chatgpt_account_id(),
+            )
+            .inspect_err(|_reason| {
+                self.emit_audit_event(websocket_first_frame_rejection_audit_event(Some(
+                    account_hash.clone(),
+                )));
+            })?;
+        self.emit_audit_event(allowed_audit_event(
+            TransportKind::WebSocket,
+            AuditRouteKind::ResponsesWebSocket,
+            account_hash,
+        ));
+
+        Ok(match decision {
+            WebSocketFirstFrameDecision::OpenUpstream {
+                headers,
+                first_frame,
+                affinity_owner_context: _,
+                ..
+            } => WebSocketFirstFrameDecision::OpenUpstream {
+                token_generation,
+                headers,
+                first_frame,
+                affinity_owner_context: Some(WebSocketAffinityOwnerContext::new(
+                    affinity_secret,
+                    selected.account_id().clone(),
+                    resolved.credential_generation(),
+                )),
+            },
+        })
+    }
+
+    fn load_affinity_secret(&self) -> Result<RouterAffinityHashSecret, WebSocketCloseReason> {
+        let provider = self
+            .affinity_secret_provider
+            .ok_or(WebSocketCloseReason::Selection)?;
+        provider
+            .load_or_create_affinity_secret()
+            .map_err(|_error| WebSocketCloseReason::Selection)
+    }
+}
+
 fn websocket_selection_rejection_audit_event() -> AuditEvent {
     AuditEvent::proxy_decision(AuditEventFields {
         request_id: RequestId::new("local_proxy_request"),
@@ -544,10 +737,10 @@ where
 #[derive(Clone)]
 pub struct AsyncWebSocketTunnel<'a, S, C>
 where
-    S: AccountDecisionSelector,
-    C: ProviderCredentialResolver,
+    S: AsyncAccountDecisionSelector,
+    C: AsyncProviderCredentialResolver,
 {
-    router: AuthenticatedWebSocketRouter<'a, S, C>,
+    router: AsyncAuthenticatedWebSocketRouter<'a, S, C>,
     affinity_owner_recorder: Option<&'a dyn HttpAffinityOwnerRecorder>,
 }
 
@@ -739,8 +932,8 @@ where
 
 impl<'a, S, C> AsyncWebSocketTunnel<'a, S, C>
 where
-    S: AccountDecisionSelector,
-    C: ProviderCredentialResolver,
+    S: AsyncAccountDecisionSelector,
+    C: AsyncProviderCredentialResolver,
 {
     /// Creates an async WebSocket tunnel.
     #[must_use]
@@ -751,7 +944,7 @@ where
         protocol_router: &'a WebSocketProtocolRouter,
     ) -> Self {
         Self {
-            router: AuthenticatedWebSocketRouter::new(
+            router: AsyncAuthenticatedWebSocketRouter::new(
                 auth_gate,
                 selector,
                 credential_resolver,
@@ -771,7 +964,7 @@ where
         audit_sink: &'a AuditFileSink,
     ) -> Self {
         Self {
-            router: AuthenticatedWebSocketRouter::new(
+            router: AsyncAuthenticatedWebSocketRouter::new(
                 auth_gate,
                 selector,
                 credential_resolver,
@@ -836,6 +1029,7 @@ where
         let decision = self
             .router
             .route_first_frame(handshake, first_frame)
+            .await
             .map_err(WebSocketTunnelError::CloseReason)?;
         let WebSocketFirstFrameDecision::OpenUpstream {
             token_generation: _,
