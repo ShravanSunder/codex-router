@@ -146,6 +146,29 @@ Remaining before terminal completion:
 - PR readiness wrapup with fresh GitHub/CI state, subject to API rate-limit
   availability
 
+## Current Phase Update: PR Wrapup Gate Open
+
+Fresh GitHub REST state for commit `6e99ec0`:
+
+- branch `main` is pushed and clean locally at `origin/main`
+- GitHub check runs for `6e99ec0` are complete and green:
+  `Workflow lint = success`, `Rust = success`
+- open PR query for `ShravanSunder/codex-router` returned no open PRs
+- closed PR history shows PR #2 (`OAuth quota runtime and account cycling`) was
+  merged before the later proof/review-fix commits landed directly on `main`
+
+Terminal status:
+
+- implementation proof and implementation-review follow-up fixes are complete
+  with evidence
+- PR-created/updated readiness is not complete because no open PR currently
+  contains the latest `main` proof/review-fix commits
+- creating a no-diff PR from current `main` to `main` would not prove the goal;
+  continuing the PR gate requires an explicit packaging strategy, such as
+  accepting the direct-to-main push as the terminal artifact or creating a
+  non-default-base review PR that intentionally compares the final product
+  branch against an older base
+
 ## Current Phase Update: Plan Review Findings Folded Into Plan
 
 The first `plan-review-swarm` pass for the R20 implementation plan returned
