@@ -377,6 +377,7 @@ main() {
 import glob
 import json
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -607,10 +608,12 @@ elif row_id == "E-09":
 receipt["status_after"] = "[x] passed" if not errors else "[ ] pending"
 receipt["result"] = "pass" if not errors else "fail"
 receipt["exit_code"] = 0 if not errors else 1
+evidence_artifact_path = receipt_path.parent / "three-websocket-soak-transcript.json"
+shutil.copyfile(artifact_path, evidence_artifact_path)
 try:
-    artifact_path_value = str(artifact_path.resolve().relative_to(Path.cwd().resolve()))
+    artifact_path_value = str(evidence_artifact_path.resolve().relative_to(Path.cwd().resolve()))
 except ValueError:
-    artifact_path_value = str(artifact_path)
+    artifact_path_value = str(evidence_artifact_path)
 receipt["artifact_paths"] = [artifact_path_value]
 receipt["freshness_check"] = "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged"
 receipt["artifact_source"] = artifact_source
