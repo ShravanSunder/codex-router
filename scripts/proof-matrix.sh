@@ -1328,9 +1328,24 @@ PY
       exit $?
       ;;
     G-21)
+      structural_hashes_before=$(mktemp "${TMPDIR:-/tmp}/codex-router-structural-before.XXXXXX")
+      structural_hashes_after=$(mktemp "${TMPDIR:-/tmp}/codex-router-structural-after.XXXXXX")
+      find "$EVIDENCE_ROOT/structural" -maxdepth 1 -type f -name 'G-*.json' \
+        ! -name 'G-21.json' -print0 2>/dev/null \
+        | sort -z \
+        | xargs -0 shasum -a 256 > "$structural_hashes_before" || true
       for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23; do
         CODEX_ROUTER_PROOF_VERIFY_ONLY=1 "$0" "$guardrail_row" >/dev/null
       done
+      find "$EVIDENCE_ROOT/structural" -maxdepth 1 -type f -name 'G-*.json' \
+        ! -name 'G-21.json' -print0 2>/dev/null \
+        | sort -z \
+        | xargs -0 shasum -a 256 > "$structural_hashes_after" || true
+      if ! cmp -s "$structural_hashes_before" "$structural_hashes_after"; then
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        printf 'proof row %s failed; verify-only guardrail rows mutated persisted evidence; receipt: %s\n' "$row_id" "$receipt" >&2
+        exit 1
+      fi
       if ! ensure_guarded_source_paths_clean "$row_id"; then
         receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
         printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
