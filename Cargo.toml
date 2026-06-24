@@ -40,7 +40,7 @@ sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.18"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
-tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
 
 [workspace.lints.rust]

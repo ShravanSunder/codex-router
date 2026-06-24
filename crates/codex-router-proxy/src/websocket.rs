@@ -30,7 +30,13 @@ use codex_router_core::redaction::SecretString;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+use futures_util::SinkExt;
+use futures_util::StreamExt;
 use thiserror::Error;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::connect_async;
 use tungstenite::Message;
 use tungstenite::WebSocket;
 use tungstenite::accept_hdr;
@@ -534,6 +540,17 @@ where
     affinity_owner_recorder: Option<&'a dyn HttpAffinityOwnerRecorder>,
 }
 
+/// Async WebSocket tunnel that uses the authenticated first-frame router.
+#[derive(Clone)]
+pub struct AsyncWebSocketTunnel<'a, S, C>
+where
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
+{
+    router: AuthenticatedWebSocketRouter<'a, S, C>,
+    affinity_owner_recorder: Option<&'a dyn HttpAffinityOwnerRecorder>,
+}
+
 impl<'a, S, C> BlockingWebSocketTunnel<'a, S, C>
 where
     S: AccountDecisionSelector,
@@ -716,6 +733,186 @@ where
                 self.affinity_owner_recorder,
                 affinity_owner_context.as_ref(),
             )?;
+        }
+    }
+}
+
+impl<'a, S, C> AsyncWebSocketTunnel<'a, S, C>
+where
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
+{
+    /// Creates an async WebSocket tunnel.
+    #[must_use]
+    pub fn new(
+        auth_gate: &'a ProxyLocalAuthGate,
+        selector: &'a S,
+        credential_resolver: &'a C,
+        protocol_router: &'a WebSocketProtocolRouter,
+    ) -> Self {
+        Self {
+            router: AuthenticatedWebSocketRouter::new(
+                auth_gate,
+                selector,
+                credential_resolver,
+                protocol_router,
+            ),
+            affinity_owner_recorder: None,
+        }
+    }
+
+    /// Creates an async WebSocket tunnel with a private audit sink.
+    #[must_use]
+    pub fn new_with_audit_sink(
+        auth_gate: &'a ProxyLocalAuthGate,
+        selector: &'a S,
+        credential_resolver: &'a C,
+        protocol_router: &'a WebSocketProtocolRouter,
+        audit_sink: &'a AuditFileSink,
+    ) -> Self {
+        Self {
+            router: AuthenticatedWebSocketRouter::new(
+                auth_gate,
+                selector,
+                credential_resolver,
+                protocol_router,
+            )
+            .with_audit_sink(audit_sink),
+            affinity_owner_recorder: None,
+        }
+    }
+
+    /// Adds the router-owned affinity secret provider.
+    #[must_use]
+    pub fn with_affinity_secret_provider(
+        mut self,
+        affinity_secret_provider: &'a dyn HttpAffinitySecretProvider,
+    ) -> Self {
+        self.router = self
+            .router
+            .with_affinity_secret_provider(affinity_secret_provider);
+        self
+    }
+
+    /// Adds the previous-response owner recorder.
+    #[must_use]
+    pub fn with_affinity_owner_recorder(
+        mut self,
+        affinity_owner_recorder: &'a dyn HttpAffinityOwnerRecorder,
+    ) -> Self {
+        self.affinity_owner_recorder = Some(affinity_owner_recorder);
+        self
+    }
+
+    /// Handles one already-upgraded local WebSocket stream.
+    pub async fn handle_upgraded_connection<LocalStream>(
+        &self,
+        mut local_websocket: WebSocketStream<LocalStream>,
+        handshake: WebSocketHandshakeRequest,
+        upstream_url: &str,
+        max_upstream_messages: usize,
+    ) -> Result<(), WebSocketTunnelError>
+    where
+        LocalStream: AsyncRead + AsyncWrite + Unpin,
+    {
+        let first_message =
+            match tokio::time::timeout(Duration::from_millis(250), local_websocket.next()).await {
+                Ok(Some(Ok(message))) => message,
+                Ok(Some(Err(error))) => return Err(WebSocketTunnelError::Transport(error)),
+                Ok(None) => {
+                    local_websocket.close(None).await?;
+                    return Err(WebSocketTunnelError::CloseReason(
+                        WebSocketCloseReason::FirstFrameTimeout,
+                    ));
+                }
+                Err(_elapsed) => {
+                    local_websocket.close(None).await?;
+                    return Err(WebSocketTunnelError::CloseReason(
+                        WebSocketCloseReason::FirstFrameTimeout,
+                    ));
+                }
+            };
+        let first_frame = frame_from_message(first_message);
+        let decision = self
+            .router
+            .route_first_frame(handshake, first_frame)
+            .map_err(WebSocketTunnelError::CloseReason)?;
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            token_generation: _,
+            headers,
+            first_frame,
+            affinity_owner_context,
+        } = decision;
+
+        let mut upstream_request = upstream_url.into_client_request()?;
+        apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
+        let (mut upstream_websocket, _response) = connect_async(upstream_request).await?;
+        upstream_websocket
+            .send(message_from_frame(first_frame)?)
+            .await?;
+
+        forward_duplex_until_complete(
+            &mut local_websocket,
+            &mut upstream_websocket,
+            max_upstream_messages,
+            self.affinity_owner_recorder,
+            affinity_owner_context.as_ref(),
+        )
+        .await
+    }
+}
+
+async fn forward_duplex_until_complete<LocalStream, UpstreamStream>(
+    local_websocket: &mut WebSocketStream<LocalStream>,
+    upstream_websocket: &mut WebSocketStream<UpstreamStream>,
+    max_upstream_messages: usize,
+    affinity_owner_recorder: Option<&dyn HttpAffinityOwnerRecorder>,
+    affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
+) -> Result<(), WebSocketTunnelError>
+where
+    LocalStream: AsyncRead + AsyncWrite + Unpin,
+    UpstreamStream: AsyncRead + AsyncWrite + Unpin,
+{
+    if max_upstream_messages == 0 {
+        local_websocket.close(None).await?;
+        upstream_websocket.close(None).await?;
+        return Ok(());
+    }
+
+    let mut upstream_message_count = 0_usize;
+    loop {
+        tokio::select! {
+            local_message = local_websocket.next() => {
+                let Some(local_message) = local_message else {
+                    upstream_websocket.close(None).await?;
+                    return Ok(());
+                };
+                let local_message = local_message?;
+                let is_close = matches!(local_message, Message::Close(_));
+                upstream_websocket.send(local_message).await?;
+                if is_close {
+                    return Ok(());
+                }
+            }
+            upstream_message = upstream_websocket.next() => {
+                let Some(upstream_message) = upstream_message else {
+                    local_websocket.close(None).await?;
+                    return Ok(());
+                };
+                let upstream_message = upstream_message?;
+                let is_close = matches!(upstream_message, Message::Close(_));
+                let is_completed = is_response_completed(&upstream_message);
+                record_websocket_affinity_owner(
+                    &upstream_message,
+                    affinity_owner_recorder,
+                    affinity_owner_context,
+                );
+                local_websocket.send(upstream_message).await?;
+                upstream_message_count = upstream_message_count.saturating_add(1);
+                if is_close || is_completed || upstream_message_count >= max_upstream_messages {
+                    return Ok(());
+                }
+            }
         }
     }
 }

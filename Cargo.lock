@@ -149,7 +149,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "tungstenite 0.28.0",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -1831,12 +1831,9 @@ dependencies = [
  "httparse",
  "log",
  "rand",
- "rustls",
- "rustls-pki-types",
  "sha1",
  "thiserror",
  "utf-8",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -1855,6 +1852,7 @@ dependencies = [
  "rustls-pki-types",
  "sha1",
  "thiserror",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
