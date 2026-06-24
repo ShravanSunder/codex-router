@@ -10,6 +10,8 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditFileSink;
@@ -152,7 +154,7 @@ pub struct LoopbackRouterRuntimeConfig {
     state_database_path: PathBuf,
     secret_store_root: PathBuf,
     local_token: LocalRouterTokenRecord,
-    now_unix_seconds: u64,
+    fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     max_websocket_upstream_messages: usize,
     audit_file_path: Option<PathBuf>,
@@ -174,7 +176,7 @@ impl LoopbackRouterRuntimeConfig {
             state_database_path,
             secret_store_root,
             local_token,
-            now_unix_seconds: 0,
+            fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             max_websocket_upstream_messages: usize::MAX,
             audit_file_path: None,
@@ -188,7 +190,7 @@ impl LoopbackRouterRuntimeConfig {
         now_unix_seconds: u64,
         max_snapshot_age_seconds: u64,
     ) -> Self {
-        self.now_unix_seconds = now_unix_seconds;
+        self.fixed_now_unix_seconds = Some(now_unix_seconds);
         self.max_snapshot_age_seconds = max_snapshot_age_seconds;
         self
     }
@@ -226,7 +228,7 @@ pub struct LoopbackRouterRuntime {
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
-    now_unix_seconds: u64,
+    fixed_now_unix_seconds: Option<u64>,
 }
 
 impl LoopbackRouterRuntime {
@@ -237,10 +239,13 @@ impl LoopbackRouterRuntime {
         let affinity_owner_recorder = Arc::new(SqliteAffinityOwnerRecorder::new(
             config.state_database_path.clone(),
         ));
+        let runtime_start_unix_seconds = config
+            .fixed_now_unix_seconds
+            .unwrap_or_else(current_unix_seconds);
         let credential_resolver = ProxyCredentialResolver::open(
             &config.state_database_path,
             &config.secret_store_root,
-            config.now_unix_seconds,
+            runtime_start_unix_seconds,
         )?;
         let auth_gate = crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
             config.local_token,
@@ -265,7 +270,7 @@ impl LoopbackRouterRuntime {
             audit_sink,
             weighted_selectors: Default::default(),
             account_holds: Default::default(),
-            now_unix_seconds: config.now_unix_seconds,
+            fixed_now_unix_seconds: config.fixed_now_unix_seconds,
         })
     }
 
@@ -455,15 +460,21 @@ impl LoopbackRouterRuntime {
     fn repository_backed_account_selector(
         &self,
     ) -> RepositoryBackedAccountSelector<'_, SqliteStateStore> {
-        let now_unix_seconds = self.now_unix_seconds;
+        let fixed_now_unix_seconds = self.fixed_now_unix_seconds;
         RepositoryBackedAccountSelector::new_with_runtime(
             &self.state_store,
             Arc::clone(&self.weighted_selectors),
             Arc::clone(&self.account_holds),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
-            Arc::new(move || now_unix_seconds),
+            Arc::new(move || fixed_now_unix_seconds.unwrap_or_else(current_unix_seconds)),
         )
     }
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Thread-safe handle for replacing local auth without sharing the full runtime.

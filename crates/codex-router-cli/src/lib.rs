@@ -9,8 +9,6 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use codex_router_proxy::server::LocalAuthReloader;
@@ -86,15 +84,18 @@ where
             let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url)?;
             let state_db = command.state_db.clone();
             let secret_root = command.secret_root.clone();
-            let runtime_config = LoopbackRouterRuntimeConfig::new(
+            let mut runtime_config = LoopbackRouterRuntimeConfig::new(
                 bind_address,
                 upstream_endpoint,
                 command.state_db,
                 command.secret_root,
                 local_token,
             )
-            .with_quota_clock(command.now_unix_seconds, command.max_snapshot_age_seconds)
             .with_max_websocket_upstream_messages(command.max_websocket_upstream_messages);
+            if let Some(now_unix_seconds) = command.now_unix_seconds {
+                runtime_config = runtime_config
+                    .with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
+            }
             let runtime = LoopbackRouterRuntime::start(runtime_config)?;
             let _token_reload_watcher = LocalTokenReloadWatcher::start(
                 secret_store,
@@ -418,7 +419,7 @@ struct ServeCommand {
     state_db: PathBuf,
     secret_root: PathBuf,
     upstream_base_url: String,
-    now_unix_seconds: u64,
+    now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     quota_refresh_interval_seconds: u64,
     background_quota_refresh_enabled: bool,
@@ -450,9 +451,7 @@ impl ServeCommand {
             state_db,
             secret_root,
             upstream_base_url,
-            now_unix_seconds: options
-                .now_unix_seconds
-                .map_or_else(current_unix_seconds, Ok)?,
+            now_unix_seconds: options.now_unix_seconds,
             max_snapshot_age_seconds: options.max_snapshot_age_seconds.unwrap_or(300),
             quota_refresh_interval_seconds: options.quota_refresh_interval_seconds.unwrap_or(300),
             background_quota_refresh_enabled: !options.disable_background_quota_refresh,
@@ -858,13 +857,6 @@ fn parse_usize_option(option: &'static str, value: &str) -> Result<usize, CliErr
         })
 }
 
-fn current_unix_seconds() -> Result<u64, CliError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(CliError::SystemClock)
-}
-
 /// CLI execution failure.
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -936,10 +928,6 @@ pub enum CliError {
         /// Raw argument.
         value: OsString,
     },
-
-    /// System clock is before Unix epoch.
-    #[error("system clock is before Unix epoch: {0}")]
-    SystemClock(std::time::SystemTimeError),
 
     /// Profile write failed.
     #[error(transparent)]
@@ -1037,8 +1025,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use std::time::Instant;
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
     use tungstenite::Message;
     use tungstenite::accept_hdr;
     use tungstenite::client::IntoClientRequest;
@@ -4033,8 +4019,7 @@ exit 42
     }
 
     #[test]
-    fn serve_command_defaults_quota_clock_to_system_time() {
-        let before_parse = test_current_unix_seconds();
+    fn serve_command_defaults_to_live_runtime_clock() {
         let command = match CliCommand::parse([
             OsString::from("serve"),
             OsString::from("--state-db"),
@@ -4048,11 +4033,23 @@ exit 42
             Ok(other) => panic!("serve command should parse, got {other:?}"),
             Err(error) => panic!("serve command should parse: {error}"),
         };
-        let after_parse = test_current_unix_seconds();
 
-        assert!(command.now_unix_seconds >= before_parse);
-        assert!(command.now_unix_seconds <= after_parse);
-        assert_ne!(command.now_unix_seconds, 0);
+        assert_eq!(command.now_unix_seconds, None);
+    }
+
+    #[test]
+    fn serve_command_accepts_explicit_fixed_quota_clock() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--now-unix-seconds"),
+            OsString::from("12345"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(other) => panic!("serve command should parse, got {other:?}"),
+            Err(error) => panic!("serve command should parse: {error}"),
+        };
+
+        assert_eq!(command.now_unix_seconds, Some(12_345));
     }
 
     #[test]
@@ -5038,13 +5035,6 @@ exit 42
         match path.to_str() {
             Some(path) => path,
             None => panic!("test path must be UTF-8"),
-        }
-    }
-
-    fn test_current_unix_seconds() -> u64 {
-        match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_secs(),
-            Err(error) => panic!("system clock should be after unix epoch: {error}"),
         }
     }
 

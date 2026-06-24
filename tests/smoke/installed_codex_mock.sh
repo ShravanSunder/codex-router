@@ -63,4 +63,5 @@ fi
   "${test_filter}" \
   -- \
   --ignored \
-  --nocapture
+  --nocapture \
+  --test-threads=1

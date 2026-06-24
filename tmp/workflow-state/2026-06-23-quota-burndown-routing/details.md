@@ -58,31 +58,31 @@ When older sections mention `phase_result` or rejected generated-profile auth
 shapes, the active source of truth is the required-reading list above, the
 latest orchestrator event, and the current primary spec.
 
-## Current Phase Update: Implementation Review Fixes Folded
+## Current Phase Update: Second Implementation Review Fixes Folded
 
-Implementation-review findings accepted after the T8/T9/T10 checkpoints have
-been folded into the implementation and proof harness:
+The second implementation-review pass found real proof and runtime gaps. The
+accepted findings have been folded into code, smoke harnesses, and evidence:
 
-- installed-Codex HTTP/SSE and WebSocket proof is transport-specific and each
-  transport now asserts the exact expected upstream account, not merely any
-  routable account token.
-- redacted installed-Codex evidence now records `mode`,
-  `profile_env_key = CODEX_ROUTER_TOKEN`, local-auth carrier/validation,
-  local-auth stripping, safe selected label/tag, and
-  `selected_expected_account = true` per transport without temp paths or token
-  material.
-- loopback runtime account selection now uses the configured quota clock,
-  keeping live routing aligned with quota status and persisted selector state.
-- HTTP/SSE local-auth smuggling detection normalizes percent-encoded and
-  separator-variant auth field names.
-- previous-response affinity is scoped to affinity-capable routes; non-capable
-  routes forward top-level `previous_response_id` as ordinary upstream payload.
-- reserve affinity owners remain valid when the owner is usable or reserve but
-  outside the current weighted selected pool.
-- route-native proof now asserts query preservation, HTTP body canaries, and
-  non-capable compact `previous_response_id` pass-through.
-- installed-Codex smoke runtime cleanup now drains and joins router/upstream
-  threads on failure paths.
+- local-auth smuggling now rejects `;` query separators, `refresh_token`,
+  `bearer`, malformed JSON bodies that mention auth-carrier names, and
+  non-object bodies that mention auth-carrier names.
+- production `serve` no longer freezes the selector clock at CLI parse/startup.
+  Runtime selection uses a live clock by default; `--now-unix-seconds` remains
+  an explicit deterministic test override.
+- non-capable compact-route affinity proof now uses two accounts plus a valid
+  conflicting affinity owner and secret, proving `previous_response_id` is
+  forwarded as normal payload instead of influencing selection.
+- route-native proof now keeps the mock upstream alive after expected successes
+  and fails if local-rejection probes reach upstream; WebSocket first-frame
+  preservation has an explicit canary assertion.
+- installed-Codex receipts now require router audit evidence for
+  `local_auth_result = valid` and `outcome = allowed` before setting
+  `local_auth_validated = true`.
+- installed-Codex mock upstream cleanup now has an explicit shutdown/wakeup path
+  instead of waiting for the operational accept timeout on early failures.
+- `tests/smoke/installed_codex_mock.sh` runs ignored installed-Codex e2e tests
+  serially, because the all-transport wrapper launches real `codex exec`
+  processes and parallel execution caused harness-only failures.
 - Follow-up recorded: replace the hand-rolled CLI parser with `clap` after this
   quota-routing proof is stable.
 
@@ -91,12 +91,19 @@ Fresh proof:
 - `cargo test -p codex-router-proxy local_auth -- --nocapture`: 12 passed.
 - `cargo test -p codex-router-proxy repository_backed_selector_ -- --nocapture`:
   17 passed.
+- `cargo test -p codex-router-cli 'serve_command_' -- --nocapture`: 6 passed.
+- `cargo test -p codex-router-test-support redacted_transcript_omits_forbidden_request_canaries -- --nocapture`:
+  1 passed.
 - `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture`:
   2 passed.
 - `tests/smoke/installed_codex_mock.sh --transport http-sse`: 2 passed.
 - `tests/smoke/installed_codex_mock.sh --transport websocket`: 2 passed.
+- `cargo test -p codex-router-test-support installed_codex_mock_smoke_exercises_generated_profile_token_and_websocket -- --ignored --nocapture --test-threads=1`:
+  1 passed.
+- `tests/smoke/installed_codex_mock.sh`: 6 passed.
 - installed-Codex evidence copy selected transcripts by JSON `mode` and
-  verified `selected_expected_account = true`.
+  verified `selected_expected_account = true`,
+  `local_auth_audit_observed = true`, and local-auth stripping per transport.
 - installed-Codex evidence redaction scan passed.
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.

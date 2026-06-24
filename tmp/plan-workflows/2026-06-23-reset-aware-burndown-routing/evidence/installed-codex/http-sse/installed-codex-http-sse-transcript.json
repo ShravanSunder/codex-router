@@ -3,6 +3,7 @@
   "expected_account_label": "ssdev",
   "http_sse": {
     "actual_safe_label": "ssdev",
+    "local_auth_audit_observed": true,
     "local_auth_carrier": "authorization_bearer",
     "local_auth_stripped_before_upstream": true,
     "local_auth_validated": true,
@@ -44,6 +45,7 @@
       "json_object": false,
       "non_prewarm_response_create": false
     },
+    "local_auth_audit_observed": null,
     "local_auth_carrier": null,
     "local_auth_stripped_before_upstream": null,
     "local_auth_validated": null,

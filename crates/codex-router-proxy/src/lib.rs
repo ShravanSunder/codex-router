@@ -1528,30 +1528,52 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let compact = AccountRecord::new(
-            account_id("acct_compact"),
-            "compact",
+        let preferred = AccountRecord::new(
+            account_id("acct_compact_preferred"),
+            "compact-preferred",
+            AccountStatus::Enabled,
+        );
+        let affinity_owner = AccountRecord::new(
+            account_id("acct_compact_affinity_owner"),
+            "compact-affinity-owner",
             AccountStatus::Enabled,
         );
         persist_account_with_selector_window_specs(
             &state,
-            &compact,
+            &preferred,
             "responses_compact",
             &[(18_000, 100, true), (604_800, 100, false)],
         );
+        persist_account_with_selector_window_specs(
+            &state,
+            &affinity_owner,
+            "responses_compact",
+            &[(18_000, 40, true), (604_800, 40, false)],
+        );
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner_for_route(
+            &state,
+            "resp_passthrough",
+            &affinity_secret,
+            affinity_owner.account_id(),
+            RouteBand::ResponsesCompact,
+        ) {
+            panic!("compact affinity owner should persist: {error}");
+        }
 
         let selector = RepositoryBackedAccountSelector::new(&state);
         let selected = match selector.select_upstream_account(
             &HttpProxyRequest::new(Method::Post, "/v1/responses/compact")
                 .with_body(br#"{"previous_response_id":"resp_passthrough"}"#.to_vec()),
             TokenGeneration::new(1),
-            None,
+            Some(&affinity_secret),
         ) {
             Ok(selected) => selected,
             Err(error) => panic!("non-capable route should ignore affinity field: {error}"),
         };
 
-        assert_eq!(selected.account_id(), compact.account_id());
+        assert_eq!(selected.account_id(), preferred.account_id());
+        assert_ne!(selected.selection_reason(), "previous_response_affinity");
     }
 
     #[test]
@@ -3965,6 +3987,22 @@ mod tests {
         affinity_secret: &RouterAffinityHashSecret,
         account_id: &codex_router_core::ids::AccountId,
     ) -> Result<(), codex_router_state::sqlite::StateStoreError> {
+        persist_previous_response_owner_for_route(
+            state,
+            previous_response_id,
+            affinity_secret,
+            account_id,
+            RouteBand::Responses,
+        )
+    }
+
+    fn persist_previous_response_owner_for_route(
+        state: &SqliteStateStore,
+        previous_response_id: &str,
+        affinity_secret: &RouterAffinityHashSecret,
+        account_id: &codex_router_core::ids::AccountId,
+        route_band: RouteBand,
+    ) -> Result<(), codex_router_state::sqlite::StateStoreError> {
         let previous_response_id = match PreviousResponseId::new(previous_response_id) {
             Ok(previous_response_id) => previous_response_id,
             Err(error) => panic!("previous response id should parse: {error}"),
@@ -3978,7 +4016,7 @@ mod tests {
             affinity_key_hash,
             account_id.clone(),
             1,
-            codex_router_core::routes::RouteBand::Responses,
+            route_band,
             AffinitySourceTransport::HttpSse,
             test_unix_seconds(),
         );

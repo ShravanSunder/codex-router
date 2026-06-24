@@ -16,6 +16,8 @@ use std::process::Output;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -166,6 +168,7 @@ fn run_installed_codex_mock_smoke_with_mode(
     let upstream = MockWebSocketUpstream::start(mode)?;
     let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
+    let audit_path = router_root.join("audit").join("events.jsonl");
     let profile_writer = CodexRouterProfileWriter::new(&codex_home);
     let profile = CodexRouterProfile::new(router_port);
     let profile_preview = profile_writer
@@ -182,6 +185,7 @@ fn run_installed_codex_mock_smoke_with_mode(
             secret_root,
             seed.local_token.clone(),
             format!("http://{}/v1", upstream.address()),
+            audit_path.clone(),
         )?,
     );
 
@@ -226,6 +230,8 @@ fn run_installed_codex_mock_smoke_with_mode(
         None
     };
     router_thread.join("router runtime")?;
+    let router_audit = RouterAuditObservation::from_file(&audit_path)?;
+    router_audit.require_mode(mode)?;
     let upstream_result = upstream.join().map_err(|error| {
         format!(
             "{error}; websocket_codex_status={}; websocket_stdout={}; websocket_stderr={}",
@@ -280,6 +286,7 @@ fn run_installed_codex_mock_smoke_with_mode(
         upstream: &upstream_result,
         quota_status: &seed.quota_status,
         expected_account_label: &seed.expected_account_label,
+        router_audit: &router_audit,
     })?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
@@ -301,6 +308,7 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
     let upstream = MockNoConnectionUpstream::start(Duration::from_secs(3))?;
     let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
+    let audit_path = router_root.join("audit").join("events.jsonl");
     let router_thread = RouterThreadGuard::new(
         router_port,
         start_router_once(
@@ -309,6 +317,7 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
             secret_root,
             seed.local_token,
             format!("http://{}/v1", upstream.address()),
+            audit_path,
         )?,
     );
 
@@ -599,6 +608,7 @@ fn start_router_once(
     secret_root: PathBuf,
     local_token: String,
     upstream_base_url: String,
+    audit_path: PathBuf,
 ) -> Result<thread::JoinHandle<Result<(), String>>, String> {
     let (ready_sender, ready_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
@@ -612,18 +622,18 @@ fn start_router_once(
                 SecretString::new(local_token),
                 codex_router_core::ids::TokenGeneration::new(1),
             );
-            let runtime = LoopbackRouterRuntime::start(
-                LoopbackRouterRuntimeConfig::new(
-                    bind_address,
-                    upstream_endpoint,
-                    state_path,
-                    secret_root,
-                    local_token,
-                )
-                .with_quota_clock(1_030, 60)
-                .with_max_websocket_upstream_messages(4),
+            let runtime_config = LoopbackRouterRuntimeConfig::new(
+                bind_address,
+                upstream_endpoint,
+                state_path,
+                secret_root,
+                local_token,
             )
-            .map_err(|error| format!("failed to start router runtime: {error}"))?;
+            .with_quota_clock(1_030, 60)
+            .with_max_websocket_upstream_messages(4)
+            .with_audit_file(audit_path);
+            let runtime = LoopbackRouterRuntime::start(runtime_config)
+                .map_err(|error| format!("failed to start router runtime: {error}"))?;
             if let Err(error) = ready_sender.send(()) {
                 return Err(format!("failed to signal router readiness: {error}"));
             }
@@ -990,6 +1000,58 @@ fn upstream_label_from_authorization_header(authorization: Option<String>) -> Op
     ))?)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouterAuditObservation {
+    http_sse_local_auth_validated: bool,
+    websocket_local_auth_validated: bool,
+}
+
+impl RouterAuditObservation {
+    fn from_file(path: &Path) -> Result<Self, String> {
+        let audit_contents = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read router audit file {}: {error}",
+                path.display()
+            )
+        })?;
+        let mut observation = Self {
+            http_sse_local_auth_validated: false,
+            websocket_local_auth_validated: false,
+        };
+        for line in audit_contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let value = serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("router audit event was invalid JSON: {error}"))?;
+            if value.get("local_auth_result").and_then(Value::as_str) != Some("valid")
+                || value.get("outcome").and_then(Value::as_str) != Some("allowed")
+            {
+                continue;
+            }
+            match value.get("transport_kind").and_then(Value::as_str) {
+                Some("http") => observation.http_sse_local_auth_validated = true,
+                Some("web_socket") => observation.websocket_local_auth_validated = true,
+                _ => {}
+            }
+        }
+
+        Ok(observation)
+    }
+
+    fn require_mode(&self, mode: InstalledCodexSmokeMode) -> Result<(), String> {
+        if mode.requires_http_sse() && !self.http_sse_local_auth_validated {
+            return Err("router audit did not record valid allowed HTTP/SSE local auth".to_owned());
+        }
+        if mode.requires_websocket() && !self.websocket_local_auth_validated {
+            return Err(
+                "router audit did not record valid allowed WebSocket local auth".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
 struct RedactedTranscriptInput<'a> {
     mode: InstalledCodexSmokeMode,
     codex_version: &'a str,
@@ -1007,6 +1069,7 @@ struct RedactedTranscriptInput<'a> {
     quota_status: &'a SmokeQuotaStatus,
     expected_account_label: &'a str,
     expected_upstream_token: &'a str,
+    router_audit: &'a RouterAuditObservation,
 }
 
 fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathBuf, String> {
@@ -1063,7 +1126,8 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         "http_sse": {
             "ran": input.mode.requires_http_sse(),
             "local_auth_carrier": input.mode.requires_http_sse().then_some("authorization_bearer"),
-            "local_auth_validated": input.mode.requires_http_sse().then_some(true),
+            "local_auth_validated": input.mode.requires_http_sse().then_some(input.router_audit.http_sse_local_auth_validated),
+            "local_auth_audit_observed": input.mode.requires_http_sse().then_some(input.router_audit.http_sse_local_auth_validated),
             "local_auth_stripped_before_upstream": input.mode.requires_http_sse().then_some(input.upstream.http_sse.as_ref().and_then(|request| request.header("x-codex-router-token")).is_none()),
             "upstream_auth_redacted_present": input.upstream.http_sse.as_ref().and_then(|request| request.header("authorization")).map(|_| true),
             "selected_expected_account": input.upstream.http_sse.as_ref().and_then(|request| authorization_header_matches_expected(request.header("authorization"), input.expected_upstream_token)),
@@ -1075,7 +1139,8 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         "websocket": {
             "ran": input.mode.requires_websocket(),
             "local_auth_carrier": input.mode.requires_websocket().then_some("authorization_bearer"),
-            "local_auth_validated": input.mode.requires_websocket().then_some(true),
+            "local_auth_validated": input.mode.requires_websocket().then_some(input.router_audit.websocket_local_auth_validated),
+            "local_auth_audit_observed": input.mode.requires_websocket().then_some(input.router_audit.websocket_local_auth_validated),
             "local_auth_stripped_before_upstream": input.mode.requires_websocket().then_some(input.upstream.header("x-codex-router-token").is_none()),
             "upstream_auth_redacted_present": input.upstream.header("authorization").map(|_| true),
             "selected_expected_account": authorization_header_matches_expected(input.upstream.header("authorization"), input.expected_upstream_token),
@@ -1225,6 +1290,7 @@ impl MockHttpSseTranscript {
 struct MockWebSocketUpstream {
     address: String,
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
+    shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
@@ -1320,15 +1386,18 @@ impl MockWebSocketUpstream {
             .map_err(|error| format!("failed to read mock upstream address: {error}"))?
             .to_string();
         let transcript = Arc::new(Mutex::new(None));
+        let shutdown = Arc::new(AtomicBool::new(false));
         let thread_transcript = Arc::clone(&transcript);
+        let thread_shutdown = Arc::clone(&shutdown);
         let handle = thread::Builder::new()
             .name("codex-router-installed-smoke-upstream".to_owned())
-            .spawn(move || run_mock_upstream(listener, thread_transcript, mode))
+            .spawn(move || run_mock_upstream(listener, thread_transcript, thread_shutdown, mode))
             .map_err(|error| format!("failed to spawn mock upstream thread: {error}"))?;
 
         Ok(Self {
             address,
             transcript,
+            shutdown,
             handle: Some(handle),
         })
     }
@@ -1356,6 +1425,8 @@ impl MockWebSocketUpstream {
 impl Drop for MockWebSocketUpstream {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
+            self.shutdown.store(true, Ordering::SeqCst);
+            wake_mock_upstream_accept(&self.address);
             let _ = join_result(handle, "mock websocket upstream cleanup");
         }
     }
@@ -1364,6 +1435,7 @@ impl Drop for MockWebSocketUpstream {
 fn run_mock_upstream(
     listener: TcpListener,
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
+    shutdown: Arc<AtomicBool>,
     mode: InstalledCodexSmokeMode,
 ) -> Result<(), String> {
     let mut http_probe_count = 0_usize;
@@ -1371,7 +1443,13 @@ fn run_mock_upstream(
     let mut http_sse = None;
     loop {
         let deadline = Instant::now() + UPSTREAM_ACCEPT_TIMEOUT;
-        let stream = accept_with_deadline(&listener, deadline, http_probe_count, http_sse_count)?;
+        let stream = accept_with_deadline(
+            &listener,
+            &shutdown,
+            deadline,
+            http_probe_count,
+            http_sse_count,
+        )?;
         if !looks_like_websocket_upgrade(&stream)? {
             match respond_to_http_request(stream)? {
                 MockHttpRequestResult::Probe => http_probe_count += 1,
@@ -1395,6 +1473,12 @@ fn run_mock_upstream(
         }
         run_mock_websocket(stream, transcript, http_probe_count, http_sse.take())?;
         return Ok(());
+    }
+}
+
+fn wake_mock_upstream_accept(address: &str) {
+    if let Ok(stream) = std::net::TcpStream::connect(address) {
+        let _ = stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -1438,13 +1522,23 @@ fn run_no_connection_upstream(listener: TcpListener, timeout: Duration) -> Resul
 
 fn accept_with_deadline(
     listener: &TcpListener,
+    shutdown: &AtomicBool,
     deadline: Instant,
     http_probe_count: usize,
     http_sse_count: usize,
 ) -> Result<std::net::TcpStream, String> {
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return Err("mock upstream shut down before expected request arrived".to_owned());
+        }
         match listener.accept() {
             Ok((stream, _peer)) => {
+                if shutdown.load(Ordering::SeqCst) {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    return Err(
+                        "mock upstream shut down before expected request arrived".to_owned()
+                    );
+                }
                 stream.set_nonblocking(false).map_err(|error| {
                     format!("failed to restore accepted stream blocking mode: {error}")
                 })?;
@@ -2009,6 +2103,7 @@ mod tests {
     use super::MockHttpSseTranscript;
     use super::MockWebSocketTranscript;
     use super::RedactedTranscriptInput;
+    use super::RouterAuditObservation;
     use super::SMOKE_EXPECTED_TEXT;
     use super::SmokeContractAssertion;
     use super::SmokeQuotaStatus;
@@ -2069,6 +2164,13 @@ mod tests {
             table: "matches 5h weekly resets available routing next use\n".to_owned(),
             plain: "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use\nmatches\tenabled\t██████████ 91% resets in 4h\t██████░░░░ 54% resets in 6d\t-\t✓ preferred 5h 91%\tnext\nresponses route\tnext: matches\twhy: ✓ preferred 5h 91%\n".to_owned(),
             json: r#"{"preferred_next_account_id":"acct_matches","accounts":[{"account_id":"acct_matches","safe_account_label":"matches"}]}"#.to_owned(),
+        }
+    }
+
+    fn valid_router_audit_observation() -> RouterAuditObservation {
+        RouterAuditObservation {
+            http_sse_local_auth_validated: true,
+            websocket_local_auth_validated: true,
         }
     }
 
@@ -2203,6 +2305,7 @@ mod tests {
             quota_status: &valid_quota_status(),
             expected_account_label: "matches",
             expected_upstream_token: upstream_account_token(),
+            router_audit: &valid_router_audit_observation(),
         }) {
             Ok(path) => path,
             Err(error) => panic!("redacted transcript fixture failed: {error}"),

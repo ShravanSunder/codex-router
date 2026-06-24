@@ -111,7 +111,7 @@ fn has_forbidden_query_auth_carrier(path: &str) -> bool {
         return false;
     };
 
-    query.split('&').any(|pair| {
+    query.split(['&', ';']).any(|pair| {
         let name = pair.split_once('=').map_or(pair, |(name, _value)| name);
         canonical_auth_field_name(name)
             .as_deref()
@@ -128,16 +128,29 @@ fn has_forbidden_cookie_auth_carrier(cookie_header: Option<&str>) -> bool {
 
 pub(crate) fn has_forbidden_top_level_json_auth_carrier(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
+        return body_mentions_forbidden_auth_carrier(body);
     };
     let Some(object) = value.as_object() else {
-        return false;
+        return body_mentions_forbidden_auth_carrier(body);
     };
 
     object
         .keys()
         .filter_map(|key| canonical_auth_field_name(key))
         .any(|key| is_forbidden_auth_field_name(&key))
+}
+
+fn body_mentions_forbidden_auth_carrier(body: &[u8]) -> bool {
+    let body = String::from_utf8_lossy(body);
+    body.split(|character: char| {
+        !(character.is_ascii_alphanumeric()
+            || character == '%'
+            || character == '-'
+            || character == '_'
+            || character == '.')
+    })
+    .filter_map(canonical_auth_field_name)
+    .any(|field_name| is_forbidden_auth_field_name(&field_name))
 }
 
 fn canonical_auth_field_name(name: &str) -> Option<String> {
@@ -191,7 +204,9 @@ fn is_forbidden_auth_field_name(name: &str) -> bool {
             | "codex-router-token"
             | "codex_router_token"
             | "access_token"
+            | "refresh_token"
             | "api_key"
+            | "bearer"
             | "token"
     )
 }
@@ -252,6 +267,17 @@ mod tests {
                 Some("router-token"),
                 None,
                 None,
+                "/v1/responses?ok=1;token=router-token",
+                b"{}",
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
                 "/v1/responses?authoriz%61tion=router-token",
                 b"{}",
                 true,
@@ -285,8 +311,63 @@ mod tests {
                 Some("router-token"),
                 None,
                 None,
+                "/v1/responses?refresh_token=router-token",
+                b"{}",
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
                 "/v1/responses",
                 br#"{"x-codex-router-token":"router-token"}"#,
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#"{"bearer":"router-token"}"#,
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#"{"refresh_token":"router-token"}"#,
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#"{"token":"router-token""#,
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#""token=router-token""#,
                 true,
             ),
             Err(LocalAuthError::Wrong)

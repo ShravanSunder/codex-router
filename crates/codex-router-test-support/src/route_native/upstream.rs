@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -7,6 +8,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use tungstenite::Message;
 use tungstenite::accept_hdr;
@@ -18,6 +21,9 @@ use super::fixture::contains_route_native_upstream_token;
 use super::fixture::join_result;
 use super::fixture::selected_account_label_from_authorization;
 
+const ROUTE_NATIVE_EXPECTED_ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
+const ROUTE_NATIVE_EXTRA_UPSTREAM_OBSERVATION: Duration = Duration::from_secs(2);
+
 pub(super) struct RouteNativeUpstream {
     address: SocketAddr,
     transcript: Arc<Mutex<Vec<RouteNativeRecordedRequest>>>,
@@ -28,6 +34,9 @@ impl RouteNativeUpstream {
     pub(super) fn start(expected_connections: usize) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind route-native upstream: {error}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("failed to configure route-native upstream: {error}"))?;
         let address = listener
             .local_addr()
             .map_err(|error| format!("failed to read route-native upstream address: {error}"))?;
@@ -197,6 +206,13 @@ pub(super) fn assert_route_native_transcript(
                 .to_owned(),
         );
     }
+    let websocket = request_for(transcript, "WEBSOCKET", "/v1/responses")?;
+    if !websocket.body().contains(r#""type":"response.create""#)
+        || !websocket.body().contains(r#""model":"gpt-route-native""#)
+        || !websocket.body().contains("route-native websocket canary")
+    {
+        return Err("route-native websocket first frame was not preserved".to_owned());
+    }
     for expected in [
         (
             "POST".to_owned(),
@@ -258,16 +274,69 @@ fn run_route_native_upstream(
     expected_connections: usize,
 ) -> Result<(), String> {
     for _ in 0..expected_connections {
-        let (mut stream, _) = listener
-            .accept()
-            .map_err(|error| format!("route-native upstream accept failed: {error}"))?;
-        if looks_like_websocket_upgrade(&stream)? {
-            handle_upstream_websocket(stream, &transcript)?;
-        } else {
-            handle_upstream_http(&mut stream, &transcript)?;
-        }
+        let stream = accept_route_native_stream(
+            &listener,
+            Instant::now() + ROUTE_NATIVE_EXPECTED_ACCEPT_TIMEOUT,
+            "expected routed request",
+        )?;
+        handle_route_native_stream(stream, &transcript)?;
+    }
+
+    let observation_deadline = Instant::now() + ROUTE_NATIVE_EXTRA_UPSTREAM_OBSERVATION;
+    while let Some(stream) =
+        try_accept_route_native_stream(&listener, observation_deadline, "unexpected extra request")?
+    {
+        handle_route_native_stream(stream, &transcript)?;
     }
     Ok(())
+}
+
+fn handle_route_native_stream(
+    mut stream: TcpStream,
+    transcript: &Arc<Mutex<Vec<RouteNativeRecordedRequest>>>,
+) -> Result<(), String> {
+    if looks_like_websocket_upgrade(&stream)? {
+        handle_upstream_websocket(stream, transcript)
+    } else {
+        handle_upstream_http(&mut stream, transcript)
+    }
+}
+
+fn accept_route_native_stream(
+    listener: &TcpListener,
+    deadline: Instant,
+    label: &str,
+) -> Result<TcpStream, String> {
+    try_accept_route_native_stream(listener, deadline, label)?
+        .ok_or_else(|| format!("route-native upstream timed out waiting for {label}"))
+}
+
+fn try_accept_route_native_stream(
+    listener: &TcpListener,
+    deadline: Instant,
+    label: &str,
+) -> Result<Option<TcpStream>, String> {
+    loop {
+        match listener.accept() {
+            Ok((stream, _peer)) => {
+                stream.set_nonblocking(false).map_err(|error| {
+                    format!("route-native upstream failed to restore blocking stream: {error}")
+                })?;
+                return Ok(Some(stream));
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "route-native upstream accept failed while waiting for {label}: {error}"
+                ));
+            }
+        }
+    }
 }
 
 fn handle_upstream_http(

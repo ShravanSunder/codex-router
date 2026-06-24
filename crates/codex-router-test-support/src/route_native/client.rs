@@ -55,7 +55,7 @@ pub(super) fn send_websocket_request(
         .map_err(|error| format!("route-native websocket connect failed: {error}"))?;
     client
         .send(Message::text(
-            r#"{"type":"response.create","model":"gpt-route-native","input":[],"stream":true}"#,
+            r#"{"type":"response.create","model":"gpt-route-native","input":[{"role":"user","content":[{"type":"input_text","text":"route-native websocket canary"}]}],"stream":true}"#,
         ))
         .map_err(|error| format!("route-native websocket send failed: {error}"))?;
     client
