@@ -112,20 +112,21 @@ Latest implementation-review finding fixes after `cbe736a`:
   exit 0 with guardrails scanning the release `codex-router-proxy/src/*.rs`
   surface after stripping `#[cfg(test)]` items.
 
-Freshness note:
-- The five-minute soak artifact below is still the last completed long-run
-  artifact, but it predates the latest implementation-review fixes. Final
-  PR-ready proof requires a fresh post-commit `tests/smoke/installed_codex_mock.sh
-  --transport websocket --scenario soak` run and fresh E-02/E-03/E-04/E-05/E-06/E-08
-  row validation.
+Fresh post-review long-run proof:
+- `tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak`
+  exit 0 at `c60fb47d2f383444b9060ef7e955343cc1ea19d3`; 1 passed; 303.81s.
+- Fresh artifact:
+  `tmp/smoke/installed-codex-three-websocket-84866-1782332221488.json`.
+- `scripts/proof-matrix.sh` rows E-02/E-03/E-04/E-05/E-06/E-08
+  exit 0 against that artifact.
 
 Five-minute soak artifact:
-- `tmp/smoke/installed-codex-three-websocket-90038-1782329647884.json`
-- git_head=8478fa8791597d8e1115e54c52e6a57f7c105ecf.
+- `tmp/smoke/installed-codex-three-websocket-84866-1782332221488.json`
+- git_head=c60fb47d2f383444b9060ef7e955343cc1ea19d3.
 - clients.all_success=true, count=3.
 - upstream.active_high_water=3, completed_sessions=3,
-  final_active_sessions=0, real_overlap_duration_ms=301006,
-  in_overlap_session_event_counts=[13,11,13],
+  final_active_sessions=0, real_overlap_duration_ms=301022,
+  in_overlap_session_event_counts=[13,13,11],
   normal_close_sessions=3, abnormal_close_sessions=0,
   session_close_outcomes=[normal,normal,normal].
 - upstream.multi_step_interleave_completed=true,
@@ -136,8 +137,7 @@ Five-minute soak artifact:
   registered_sessions=3, closed_sessions=3,
   completed_response_sessions=7,
   forwarded_upstream_messages=51,
-  completed_session_forwarded_upstream_message_counts=[2,2,2,5,15,15,18],
-  final_session_forwarded_upstream_message_counts=[16,16,19],
+  final_session_forwarded_upstream_message_counts=[16,19,16],
   handled_connections=3.
 - socket_cleanup.established_count=0, close_wait_count=0,
   raw_state_counts=[].
