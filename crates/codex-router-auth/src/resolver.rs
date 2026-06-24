@@ -155,6 +155,16 @@ pub trait CredentialRefreshClient {
     ) -> Result<AccountCredentialBundle, CredentialResolverError>;
 }
 
+/// Test-only refresh commit failpoints for cancellation-safety coverage.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefreshCommitFailpoint {
+    /// Fail after writing the next-generation secret and before state commit.
+    AfterSecretWrite,
+    /// Fail after state commit and before returning to the caller.
+    AfterStateCommit,
+}
+
 /// Refresh client used when runtime refresh is intentionally unavailable.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NoopCredentialRefreshClient;
@@ -326,6 +336,8 @@ where
     refresh_client: C,
     now_unix_seconds: u64,
     refresh_leases: RefreshLeaseRegistry,
+    #[cfg(test)]
+    refresh_commit_failpoint: Option<RefreshCommitFailpoint>,
 }
 
 impl<'a, S, C> RouterCredentialResolver<'a, S, C>
@@ -347,6 +359,8 @@ where
             refresh_client,
             now_unix_seconds,
             refresh_leases: RefreshLeaseRegistry::new(),
+            #[cfg(test)]
+            refresh_commit_failpoint: None,
         }
     }
 
@@ -365,7 +379,17 @@ where
             refresh_client,
             now_unix_seconds,
             refresh_leases,
+            #[cfg(test)]
+            refresh_commit_failpoint: None,
         }
+    }
+
+    /// Adds a test-only failpoint for credential refresh commit windows.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_refresh_commit_failpoint(mut self, failpoint: RefreshCommitFailpoint) -> Self {
+        self.refresh_commit_failpoint = Some(failpoint);
+        self
     }
 
     fn read_active_bundle(
@@ -430,6 +454,10 @@ where
                 &refreshed.to_secret_string().map_err(map_secret_error)?,
             )
             .map_err(map_secret_error)?;
+        #[cfg(test)]
+        if self.refresh_commit_failpoint == Some(RefreshCommitFailpoint::AfterSecretWrite) {
+            return Err(CredentialResolverError::RefreshUnavailable);
+        }
         self.state_repository
             .activate_account_credential_generation_and_invalidate_quota(
                 account_id,
@@ -437,6 +465,10 @@ where
                 AccountStatus::Enabled,
             )
             .map_err(map_state_error)?;
+        #[cfg(test)]
+        if self.refresh_commit_failpoint == Some(RefreshCommitFailpoint::AfterStateCommit) {
+            return Err(CredentialResolverError::RefreshUnavailable);
+        }
 
         Ok((refreshed_generation, refreshed))
     }

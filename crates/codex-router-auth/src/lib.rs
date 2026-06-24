@@ -57,6 +57,7 @@ mod tests {
     use crate::resolver::NoopCredentialRefreshClient;
     use crate::resolver::OpenAiOAuthRefreshClient;
     use crate::resolver::ProviderCredentialResolver;
+    use crate::resolver::RefreshCommitFailpoint;
     use crate::resolver::RefreshLeaseRegistry;
     use crate::resolver::RouterCredentialResolver;
     use crate::router_credentials::RouterCredentialBundle;
@@ -303,6 +304,126 @@ mod tests {
             refreshed.access_token().expose_secret(),
             "refreshed-access-token-canary"
         );
+    }
+
+    #[test]
+    fn credential_resolver_failpoint_after_secret_write_keeps_old_generation_authoritative() {
+        let temp_dir = AuthTestTempDir::new("refresh-after-secret-write-failpoint");
+        let state = must_ok(SqliteStateStore::open(
+            &temp_dir.path().join("state.sqlite"),
+        ));
+        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let account_id = account_id("acct_secret_write_failpoint");
+        let account =
+            AccountRecord::new(account_id.clone(), "secret-write", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "old-access-token-canary",
+                        Some("refresh-token-canary".to_owned()),
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let refresh_client = RecordingRefreshClient::new_for_account(
+            "acct_secret_write_failpoint",
+            "refresh-token-canary",
+            AccountCredentialBundle::imported_codex_auth(
+                "new-access-token-canary",
+                Some("new-refresh-token-canary".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000),
+        );
+        let resolver = RouterCredentialResolver::new(&state, &secrets, refresh_client, 1_000)
+            .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterSecretWrite);
+
+        assert_eq!(
+            resolver.resolve_provider_credentials(&account_id),
+            Err(CredentialResolverError::RefreshUnavailable)
+        );
+        let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("account should remain registered"));
+        assert_eq!(loaded_account.active_credential_generation(), Some(1));
+        let old_bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
+            secrets.read_secret(&expired_key),
+        )));
+        assert_eq!(
+            old_bundle.access_token().expose_secret(),
+            "old-access-token-canary"
+        );
+        let new_key = must_ok(account_credential_bundle_key(&account_id, 2));
+        let orphaned_new_bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
+            secrets.read_secret(&new_key),
+        )));
+        assert_eq!(
+            orphaned_new_bundle.access_token().expose_secret(),
+            "new-access-token-canary"
+        );
+    }
+
+    #[test]
+    fn credential_resolver_failpoint_after_state_commit_is_committed_on_retry() {
+        let temp_dir = AuthTestTempDir::new("refresh-after-state-commit-failpoint");
+        let state = must_ok(SqliteStateStore::open(
+            &temp_dir.path().join("state.sqlite"),
+        ));
+        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let account_id = account_id("acct_state_commit_failpoint");
+        let account =
+            AccountRecord::new(account_id.clone(), "state-commit", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &expired_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "old-state-access-token-canary",
+                        Some("state-refresh-token-canary".to_owned()),
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let refresh_client = RecordingRefreshClient::new_for_account(
+            "acct_state_commit_failpoint",
+            "state-refresh-token-canary",
+            AccountCredentialBundle::imported_codex_auth(
+                "new-state-access-token-canary",
+                Some("new-state-refresh-token-canary".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000)
+                .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterStateCommit);
+
+        assert_eq!(
+            resolver.resolve_provider_credentials(&account_id),
+            Err(CredentialResolverError::RefreshUnavailable)
+        );
+
+        let retry_resolver =
+            RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
+        let resolved = must_ok(retry_resolver.resolve_provider_credentials(&account_id));
+        assert_eq!(
+            resolved.access_token().expose_secret(),
+            "new-state-access-token-canary"
+        );
+        assert_eq!(resolved.credential_generation(), 2);
+        assert_eq!(refresh_client.calls(), 1);
+        let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .unwrap_or_else(|| panic!("account should remain registered"));
+        assert_eq!(loaded_account.active_credential_generation(), Some(2));
     }
 
     #[test]
