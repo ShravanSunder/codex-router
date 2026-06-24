@@ -36,7 +36,7 @@ Known remaining gaps:
 
 ## Git Scope
 
-Review commits from `7749909` through `3e9ef44`, especially:
+Review commits from `7749909` through `9e02458`, especially:
 - `7749909 feat: use hyper tungstenite serve runtime`
 - `9ac7e96 feat: stream http upstream with hyper`
 - `6140ab5 test: add release runtime guardrails`
@@ -46,6 +46,8 @@ Review commits from `7749909` through `3e9ef44`, especially:
 - `e62e50f fix: keep websocket sessions alive through continuations`
 - `e2f959b test: align websocket lifecycle tests with continuations`
 - `3e9ef44 fix: harden websocket proof gates`
+- `46da5b6 test: record hardened websocket proof evidence`
+- `9e02458 test: allow evidence-only proof commits`
 
 Changed implementation surfaces:
 - `crates/codex-router-proxy/src/server.rs`
@@ -72,7 +74,7 @@ Proof artifacts:
 - `tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent`
   exit 0, 1 passed.
 - `tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak`
-  exit 0, 1 passed, 302.69s.
+  exit 0, 1 passed, 302.16s.
 - `cargo test --workspace -- --nocapture`
   exit 0, 266 passed, 0 failed, 10 ignored.
 - `scripts/proof-matrix.sh` rows E-02/E-03/E-04/E-05/E-06/E-08
@@ -81,13 +83,13 @@ Proof artifacts:
   exit 0.
 
 Five-minute soak artifact:
-- `tmp/smoke/installed-codex-three-websocket-24532-1782325226459.json`
-- git_head=3e9ef44e5a5ada9462a97559efb1bcd64d85e40e.
+- `tmp/smoke/installed-codex-three-websocket-48900-1782325868001.json`
+- git_head=9e024582824dba3d7de9b30236eee47240650a2b.
 - clients.all_success=true, count=3.
 - upstream.active_high_water=3, completed_sessions=3,
-  final_active_sessions=0, overlap_duration_ms=300026,
-  real_overlap_duration_ms=300024,
-  session_frame_counts=[2,3,2], session_event_counts=[12,15,12].
+  final_active_sessions=0, overlap_duration_ms=300016,
+  real_overlap_duration_ms=300016,
+  session_frame_counts=[2,2,3], session_event_counts=[12,12,15].
 - upstream.multi_step_interleave_completed=true,
   multi_step_followup_frame_count=1,
   multi_step_followup_active_session_count=3,
@@ -97,7 +99,7 @@ Five-minute soak artifact:
   completed_response_sessions=7,
   forwarded_upstream_messages=45,
   completed_session_forwarded_upstream_message_counts=[2,2,2,5,14,17,14],
-  final_session_forwarded_upstream_message_counts=[14,17,14],
+  final_session_forwarded_upstream_message_counts=[14,14,17],
   handled_connections=3.
 - socket_cleanup.established_count=0, close_wait_count=0,
   raw_state_counts=[].

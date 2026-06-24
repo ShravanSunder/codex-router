@@ -1,7 +1,7 @@
 # Execution Receipt: T8c Live WebSocket Registry Proof
 
-Timestamp: 2026-06-24T18:20:50Z
-Proof HEAD: 3e9ef44e5a5ada9462a97559efb1bcd64d85e40e
+Timestamp: 2026-06-24T20:00:40Z
+Proof HEAD: 9e024582824dba3d7de9b30236eee47240650a2b
 
 ## Scope
 
@@ -52,7 +52,7 @@ result: 1 passed, 0 failed, finished in 6.17s after live registry report asserti
 ```text
 tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak
 exit: 0
-result: 1 passed, 0 failed, finished in 302.69s.
+result: 1 passed, 0 failed, finished in 302.16s.
 ```
 
 ```text
@@ -64,8 +64,8 @@ result: all six E rows passed and wrote row-local artifacts.
 Five-minute artifact summary:
 
 ```text
-artifact=tmp/smoke/installed-codex-three-websocket-24532-1782325226459.json
-git_head=3e9ef44e5a5ada9462a97559efb1bcd64d85e40e
+artifact=tmp/smoke/installed-codex-three-websocket-48900-1782325868001.json
+git_head=9e024582824dba3d7de9b30236eee47240650a2b
 mode=three-websocket-soak
 clients.all_success=true
 shared_router_pid=<recorded in artifact>
@@ -73,10 +73,10 @@ upstream.active_high_water=3
 upstream.completed_sessions=3
 upstream.final_active_sessions=0
 upstream.hold_duration_ms=300000
-upstream.overlap_duration_ms=300026
-upstream.real_overlap_duration_ms=300024
-upstream.session_frame_counts=[2, 3, 2]
-upstream.session_event_counts=[12, 15, 12]
+upstream.overlap_duration_ms=300016
+upstream.real_overlap_duration_ms=300016
+upstream.session_frame_counts=[2, 2, 3]
+upstream.session_event_counts=[12, 12, 15]
 upstream.multi_step_interleave_completed=true
 upstream.multi_step_followup_frame_count=1
 upstream.multi_step_followup_active_session_count=3
@@ -89,7 +89,7 @@ router_websocket_registry.completed_response_sessions=7
 router_websocket_registry.forwarded_upstream_messages=45
 router_websocket_registry.handled_connections=3
 router_websocket_registry.completed_session_forwarded_upstream_message_counts=[2, 2, 2, 5, 14, 17, 14]
-router_websocket_registry.final_session_forwarded_upstream_message_counts=[14, 17, 14]
+router_websocket_registry.final_session_forwarded_upstream_message_counts=[14, 14, 17]
 socket_cleanup.established_count=0
 socket_cleanup.close_wait_count=0
 socket_cleanup.raw_state_counts=[]
@@ -105,5 +105,5 @@ evidence:
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/execution-receipts/T8c-live-websocket-registry-proof.md`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/e2e/E-02.json`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/e2e/E-06.json`
-recommended_next_workflow: `shravan-dev-workflow:implementation-execute-plan`
-recommended_transition_reason: Continue implementation execution for remaining E-05/E-08 proof decisions, then run implementation-review-swarm and PR wrapup.
+recommended_next_workflow: `shravan-dev-workflow:implementation-review-swarm`
+recommended_transition_reason: Run implementation-review-swarm on the updated proof packet, then PR wrapup if review is clean.
