@@ -3957,10 +3957,7 @@ exit 42
                 Ok(connection) => connection,
                 Err(error) => panic!("mock upstream should accept: {error}"),
             };
-            let mut request = String::new();
-            if let Err(error) = stream.read_to_string(&mut request) {
-                panic!("mock upstream should read request: {error}");
-            }
+            let request = read_http_request_with_body(&mut stream);
             if let Err(error) = upstream_sender.send(request) {
                 panic!("mock upstream request should record: {error}");
             }
@@ -4588,10 +4585,7 @@ exit 42
                 Ok(connection) => connection,
                 Err(error) => panic!("mock HTTP upstream should accept after rotation: {error}"),
             };
-            let mut request = String::new();
-            if let Err(error) = stream.read_to_string(&mut request) {
-                panic!("mock HTTP upstream should read request: {error}");
-            }
+            let request = read_http_request_with_body(&mut stream);
             if let Err(error) = upstream_sender.send(request) {
                 panic!("mock HTTP upstream request should record: {error}");
             }
@@ -5105,7 +5099,7 @@ exit 42
     fn send_loopback_request_with_retry(port: u16, token: &str, body: &[u8]) -> String {
         let mut client = connect_with_retry(port);
         let request = format!(
-            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Codex-Router-Token: {token}\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nX-Codex-Router-Token: {token}\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             String::from_utf8_lossy(body)
         );
@@ -5126,7 +5120,7 @@ exit 42
     fn send_tokenless_loopback_request_with_retry(port: u16, body: &[u8]) -> String {
         let mut client = connect_with_retry(port);
         let request = format!(
-            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             String::from_utf8_lossy(body)
         );

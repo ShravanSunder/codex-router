@@ -1,5 +1,6 @@
 //! HTTP and SSE proxy handling without network binding.
 
+use bytes::Bytes;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_core::affinity::PreviousResponseId;
@@ -21,7 +22,10 @@ use codex_router_core::redaction::SecretString;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+use futures_util::future::BoxFuture;
+use http_body_util::combinators::BoxBody;
 use std::collections::hash_map::DefaultHasher;
+use std::error::Error as StdError;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::io;
@@ -292,6 +296,50 @@ impl StreamingHttpProxyResponse {
     }
 }
 
+/// Error type used by async HTTP response bodies.
+pub type AsyncHttpBodyError = Box<dyn StdError + Send + Sync>;
+
+/// HTTP proxy response whose body is owned by Hyper async streaming.
+pub struct AsyncStreamingHttpProxyResponse {
+    status: u16,
+    headers: HeaderCollection,
+    body: BoxBody<Bytes, AsyncHttpBodyError>,
+}
+
+impl AsyncStreamingHttpProxyResponse {
+    /// Creates an async streaming proxy response.
+    #[must_use]
+    pub fn new(
+        status: u16,
+        headers: HeaderCollection,
+        body: BoxBody<Bytes, AsyncHttpBodyError>,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    /// Returns status.
+    #[must_use]
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Returns headers.
+    #[must_use]
+    pub const fn headers(&self) -> &HeaderCollection {
+        &self.headers
+    }
+
+    /// Consumes the response into its fields.
+    #[must_use]
+    pub fn into_parts(self) -> (u16, HeaderCollection, BoxBody<Bytes, AsyncHttpBodyError>) {
+        (self.status, self.headers, self.body)
+    }
+}
+
 /// Upstream transport boundary.
 pub trait UpstreamHttpTransport {
     /// Sends a sanitized upstream request.
@@ -305,6 +353,15 @@ pub trait StreamingUpstreamHttpTransport {
         &self,
         request: UpstreamHttpRequest,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError>;
+}
+
+/// Async upstream transport boundary for Hyper-owned HTTP/SSE response bodies.
+pub trait AsyncStreamingUpstreamHttpTransport: Send + Sync {
+    /// Sends a sanitized upstream request and streams the response body.
+    fn send_streaming<'a>(
+        &'a self,
+        request: UpstreamHttpRequest,
+    ) -> BoxFuture<'a, Result<AsyncStreamingHttpProxyResponse, HttpProxyError>>;
 }
 
 /// HTTP proxy failure.
@@ -360,6 +417,54 @@ pub trait StreamingHttpRequestHandler {
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError>;
 }
 
+/// Sanitized upstream HTTP/SSE request plus response-side completion metadata.
+pub struct PreparedStreamingHttpProxyRequest {
+    upstream_request: UpstreamHttpRequest,
+    completion: StreamingHttpProxyCompletion,
+}
+
+impl PreparedStreamingHttpProxyRequest {
+    /// Consumes the prepared request into the upstream request and completion data.
+    #[must_use]
+    pub fn into_parts(self) -> (UpstreamHttpRequest, StreamingHttpProxyCompletion) {
+        (self.upstream_request, self.completion)
+    }
+}
+
+/// Metadata needed after an upstream response is committed.
+pub struct StreamingHttpProxyCompletion {
+    affinity_secret: Option<RouterAffinityHashSecret>,
+    account_id: AccountId,
+    credential_generation: u64,
+    allowed_audit_event: AuditEvent,
+}
+
+impl StreamingHttpProxyCompletion {
+    /// Returns the affinity secret for response-owner recording.
+    #[must_use]
+    pub const fn affinity_secret(&self) -> Option<&RouterAffinityHashSecret> {
+        self.affinity_secret.as_ref()
+    }
+
+    /// Returns selected account id.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns selected credential generation.
+    #[must_use]
+    pub const fn credential_generation(&self) -> u64 {
+        self.credential_generation
+    }
+
+    /// Returns the allowed audit event.
+    #[must_use]
+    pub const fn allowed_audit_event(&self) -> &AuditEvent {
+        &self.allowed_audit_event
+    }
+}
+
 /// Provides router-owned affinity secret material to HTTP/SSE selection.
 pub trait HttpAffinitySecretProvider: Send + Sync {
     /// Loads or creates the router affinity secret.
@@ -377,32 +482,15 @@ pub trait HttpAffinityOwnerRecorder: Send + Sync {
 
 /// HTTP/SSE proxy service.
 #[derive(Clone, Copy, Debug)]
-pub struct HttpProxyService<'a, T>
-where
-    T: UpstreamHttpTransport,
-{
+pub struct HttpProxyService<'a, T> {
     upstream: &'a T,
 }
 
-impl<'a, T> HttpProxyService<'a, T>
-where
-    T: UpstreamHttpTransport,
-{
+impl<'a, T> HttpProxyService<'a, T> {
     /// Creates a proxy service.
     #[must_use]
     pub const fn new(upstream: &'a T) -> Self {
         Self { upstream }
-    }
-
-    /// Handles one HTTP/SSE request.
-    pub fn handle(
-        &self,
-        request: HttpProxyRequest,
-        provider_bearer_token: SecretString,
-        chatgpt_account_id: Option<&str>,
-    ) -> Result<HttpProxyResponse, HttpProxyError> {
-        self.build_upstream_request(request, provider_bearer_token, chatgpt_account_id)
-            .and_then(|request| self.upstream.send(request))
     }
 
     fn build_upstream_request(
@@ -443,6 +531,22 @@ where
 
 impl<'a, T> HttpProxyService<'a, T>
 where
+    T: UpstreamHttpTransport,
+{
+    /// Handles one HTTP/SSE request.
+    pub fn handle(
+        &self,
+        request: HttpProxyRequest,
+        provider_bearer_token: SecretString,
+        chatgpt_account_id: Option<&str>,
+    ) -> Result<HttpProxyResponse, HttpProxyError> {
+        self.build_upstream_request(request, provider_bearer_token, chatgpt_account_id)
+            .and_then(|request| self.upstream.send(request))
+    }
+}
+
+impl<'a, T> HttpProxyService<'a, T>
+where
     T: UpstreamHttpTransport + StreamingUpstreamHttpTransport,
 {
     /// Handles one HTTP/SSE request without buffering the response body.
@@ -459,12 +563,7 @@ where
 
 /// HTTP/SSE service that composes local auth, account selection, and forwarding.
 #[derive(Clone)]
-pub struct AuthenticatedHttpProxyService<'a, T, S, C>
-where
-    T: UpstreamHttpTransport,
-    S: AccountDecisionSelector,
-    C: ProviderCredentialResolver,
-{
+pub struct AuthenticatedHttpProxyService<'a, T, S, C> {
     auth_gate: &'a ProxyLocalAuthGate,
     selector: &'a S,
     credential_resolver: &'a C,
@@ -474,12 +573,7 @@ where
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
 }
 
-impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C>
-where
-    T: UpstreamHttpTransport,
-    S: AccountDecisionSelector,
-    C: ProviderCredentialResolver,
-{
+impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C> {
     /// Creates an authenticated HTTP proxy service.
     #[must_use]
     pub const fn new(
@@ -546,6 +640,87 @@ where
         if let Some(audit_sink) = self.audit_sink {
             append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
         }
+    }
+}
+
+impl<T, S, C> AuthenticatedHttpProxyService<'_, T, S, C>
+where
+    S: AccountDecisionSelector,
+    C: ProviderCredentialResolver,
+{
+    /// Prepares one sanitized upstream HTTP/SSE request without opening upstream.
+    pub fn prepare_streaming_request(
+        &self,
+        request: HttpProxyRequest,
+    ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
+        let audit_route_kind = audit_route_kind_for_request(&request);
+        let presented_token = match extract_presented_local_token_from_request(
+            request.header_value("x-codex-router-token"),
+            request.header_value("authorization"),
+            request.header_value("cookie"),
+            request.path(),
+            request.body(),
+            true,
+        ) {
+            Ok(presented_token) => presented_token,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::Http,
+                    audit_route_kind,
+                    reason,
+                ));
+                return Err(HttpProxyError::LocalAuth { reason });
+            }
+        };
+        let token_generation = match self.auth_gate.authorize(presented_token) {
+            Ok(generation) => generation,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::Http,
+                    audit_route_kind,
+                    reason,
+                ));
+                return Err(HttpProxyError::LocalAuth { reason });
+            }
+        };
+        let affinity_secret = self.load_affinity_secret_for_request(&request)?;
+        let selected = self
+            .selector
+            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
+            .inspect_err(|_error| {
+                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
+            })?;
+        let account_hash = redacted_account_hash(selected.account_id());
+        let resolved = self
+            .credential_resolver
+            .resolve_provider_credentials(selected.account_id())
+            .map_err(|reason| {
+                self.emit_audit_event(http_credential_rejection_audit_event(
+                    audit_route_kind,
+                    account_hash.clone(),
+                ));
+                HttpProxyError::ProviderCredential { reason }
+            })?;
+        let upstream_request = self.proxy.build_upstream_request(
+            request,
+            resolved.access_token().clone(),
+            resolved.chatgpt_account_id(),
+        )?;
+        let completion = StreamingHttpProxyCompletion {
+            affinity_secret,
+            account_id: selected.account_id().clone(),
+            credential_generation: resolved.credential_generation(),
+            allowed_audit_event: allowed_audit_event(
+                TransportKind::Http,
+                audit_route_kind,
+                account_hash,
+            ),
+        };
+
+        Ok(PreparedStreamingHttpProxyRequest {
+            upstream_request,
+            completion,
+        })
     }
 }
 
@@ -639,71 +814,16 @@ where
         &self,
         request: HttpProxyRequest,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
-        let audit_route_kind = audit_route_kind_for_request(&request);
-        let presented_token = match extract_presented_local_token_from_request(
-            request.header_value("x-codex-router-token"),
-            request.header_value("authorization"),
-            request.header_value("cookie"),
-            request.path(),
-            request.body(),
-            true,
-        ) {
-            Ok(presented_token) => presented_token,
-            Err(reason) => {
-                self.emit_audit_event(local_auth_rejection_audit_event(
-                    TransportKind::Http,
-                    audit_route_kind,
-                    reason,
-                ));
-                return Err(HttpProxyError::LocalAuth { reason });
-            }
-        };
-        let token_generation = match self.auth_gate.authorize(presented_token) {
-            Ok(generation) => generation,
-            Err(reason) => {
-                self.emit_audit_event(local_auth_rejection_audit_event(
-                    TransportKind::Http,
-                    audit_route_kind,
-                    reason,
-                ));
-                return Err(HttpProxyError::LocalAuth { reason });
-            }
-        };
-        let affinity_secret = self.load_affinity_secret_for_request(&request)?;
-        let selected = self
-            .selector
-            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
-            .inspect_err(|_error| {
-                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
-            })?;
-        let account_hash = redacted_account_hash(selected.account_id());
-        let resolved = self
-            .credential_resolver
-            .resolve_provider_credentials(selected.account_id())
-            .map_err(|reason| {
-                self.emit_audit_event(http_credential_rejection_audit_event(
-                    audit_route_kind,
-                    account_hash.clone(),
-                ));
-                HttpProxyError::ProviderCredential { reason }
-            })?;
-
-        let response = self.proxy.handle_streaming(
-            request,
-            resolved.access_token().clone(),
-            resolved.chatgpt_account_id(),
-        )?;
+        let prepared = self.prepare_streaming_request(request)?;
+        let (upstream_request, completion) = prepared.into_parts();
+        let response = self.proxy.upstream.send_streaming(upstream_request)?;
         let response = self.wrap_streaming_response_owner_recorder(
             response,
-            affinity_secret,
-            selected.account_id().clone(),
-            resolved.credential_generation(),
+            completion.affinity_secret,
+            completion.account_id,
+            completion.credential_generation,
         );
-        self.emit_audit_event(allowed_audit_event(
-            TransportKind::Http,
-            audit_route_kind,
-            account_hash,
-        ));
+        self.emit_audit_event(completion.allowed_audit_event);
 
         Ok(response)
     }
@@ -711,7 +831,6 @@ where
 
 impl<T, S, C> AuthenticatedHttpProxyService<'_, T, S, C>
 where
-    T: UpstreamHttpTransport,
     S: AccountDecisionSelector,
     C: ProviderCredentialResolver,
 {
@@ -964,7 +1083,7 @@ fn audit_route_kind_for_request(request: &HttpProxyRequest) -> AuditRouteKind {
     }
 }
 
-fn extract_response_id_from_body(
+pub(crate) fn extract_response_id_from_body(
     body: &[u8],
 ) -> Result<Option<PreviousResponseId>, HttpProxyError> {
     if let Some(response_id) = extract_json_response_id(body)? {

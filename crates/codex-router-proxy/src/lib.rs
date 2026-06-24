@@ -84,6 +84,7 @@ mod tests {
     use codex_router_auth::resolver::ProviderCredentialResolver;
     use codex_router_auth::resolver::ResolvedProviderCredential;
     use codex_router_auth::resolver::RouterCredentialResolver;
+    use codex_router_core::affinity::AffinityKeyHash;
     use codex_router_core::affinity::PreviousResponseId;
     use codex_router_core::affinity::RouterAffinityHashSecret;
     use codex_router_core::affinity::hash_previous_response_id;
@@ -365,10 +366,7 @@ mod tests {
                 Ok(connection) => connection,
                 Err(error) => panic!("mock upstream should accept one connection: {error}"),
             };
-            let mut request = String::new();
-            if let Err(error) = stream.read_to_string(&mut request) {
-                panic!("mock upstream should read request: {error}");
-            }
+            let request = read_test_http_request(&mut stream);
             if let Err(error) = request_sender.send(request) {
                 panic!("mock upstream request should record: {error}");
             }
@@ -2716,10 +2714,7 @@ mod tests {
                 Ok(connection) => connection,
                 Err(error) => panic!("mock upstream should accept: {error}"),
             };
-            let mut request = String::new();
-            if let Err(error) = stream.read_to_string(&mut request) {
-                panic!("mock upstream should read request: {error}");
-            }
+            let request = read_test_http_request(&mut stream);
             if let Err(error) = upstream_sender.send(request) {
                 panic!("mock upstream request should record: {error}");
             }
@@ -2799,11 +2794,7 @@ mod tests {
             &must_ok(PreviousResponseId::new("resp_runtime")),
         ));
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
-        let owner_lookup = must_ok(AffinityRepository::load_previous_response_owner(
-            &runtime_state,
-            &owner_hash,
-            codex_router_core::routes::RouteBand::Responses.as_str(),
-        ));
+        let owner_lookup = wait_for_previous_response_owner(&runtime_state, &owner_hash);
         let PreviousResponseAffinityOwnerLookup::Found(owner) = owner_lookup else {
             panic!("runtime should persist response owner row: {owner_lookup:?}");
         };
@@ -4509,7 +4500,7 @@ mod tests {
             Err(error) => panic!("client should connect to loopback listener: {error}"),
         };
         let request = format!(
-            "{request_line}Host: 127.0.0.1\r\nX-Codex-Router-Token: current-token\r\nContent-Length: {}\r\n\r\n{}",
+            "{request_line}Host: 127.0.0.1\r\nConnection: close\r\nX-Codex-Router-Token: current-token\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             String::from_utf8_lossy(body)
         );
@@ -4663,6 +4654,26 @@ mod tests {
         }
 
         String::from_utf8_lossy(&request_bytes[..body_end]).into_owned()
+    }
+
+    fn wait_for_previous_response_owner(
+        state: &SqliteStateStore,
+        owner_hash: &AffinityKeyHash,
+    ) -> PreviousResponseAffinityOwnerLookup {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let owner_lookup = must_ok(AffinityRepository::load_previous_response_owner(
+                state,
+                owner_hash,
+                RouteBand::Responses.as_str(),
+            ));
+            if !matches!(owner_lookup, PreviousResponseAffinityOwnerLookup::Missing)
+                || Instant::now() >= deadline
+            {
+                return owner_lookup;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn read_http_response_headers(stream: &mut TcpStream) -> String {

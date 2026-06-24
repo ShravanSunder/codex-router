@@ -28,9 +28,7 @@ use http::StatusCode;
 use http::Uri;
 use http_body_util::BodyExt;
 use http_body_util::Empty;
-use http_body_util::StreamBody;
 use http_body_util::combinators::BoxBody;
-use hyper::body::Frame;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -39,6 +37,7 @@ use tokio::net::TcpListener as TokioTcpListener;
 use tokio_util::sync::CancellationToken;
 
 use codex_router_core::affinity::RouterAffinityHashSecret;
+use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
@@ -46,8 +45,10 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
+use codex_router_core::routes::RouteBand;
 use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
 use codex_router_secret_store::model::SecretStoreError;
+use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -62,6 +63,10 @@ use crate::account_selection::RouteBandWeightedSelectors;
 use crate::credential_runtime::ProxyCredentialResolver;
 use crate::credential_runtime::ProxyCredentialResolverOpenError;
 use crate::headers::Header;
+use crate::headers::HeaderCollection;
+use crate::http_sse::AsyncHttpBodyError;
+use crate::http_sse::AsyncStreamingHttpProxyResponse;
+use crate::http_sse::AsyncStreamingUpstreamHttpTransport;
 use crate::http_sse::AuthenticatedHttpProxyService;
 use crate::http_sse::HttpAffinityOwnerRecorder;
 use crate::http_sse::HttpAffinitySecretProvider;
@@ -71,10 +76,15 @@ use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::HttpProxyResponse;
 #[cfg(test)]
 use crate::http_sse::HttpRequestHandler;
+use crate::http_sse::PreparedStreamingHttpProxyRequest;
 use crate::http_sse::StderrAuditFailureReporter;
+use crate::http_sse::StreamingHttpProxyCompletion;
+#[cfg(test)]
 use crate::http_sse::StreamingHttpProxyResponse;
+#[cfg(test)]
 use crate::http_sse::StreamingHttpRequestHandler;
 use crate::http_sse::append_audit_event_with_reporter;
+use crate::http_sse::extract_response_id_from_body;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::local_auth::extract_presented_local_token_from_request;
 use crate::routes::Method;
@@ -82,7 +92,7 @@ use crate::routes::RouteClass;
 use crate::routes::classify_route;
 use crate::secret_store_factory::ProxyRuntimeSecretStore;
 use crate::secret_store_factory::open_proxy_secret_store;
-use crate::upstream::HttpUpstreamTransport;
+use crate::upstream::HyperHttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
 use crate::websocket::AsyncProviderCredentialResolver;
 use crate::websocket::AsyncWebSocketTunnel;
@@ -395,7 +405,7 @@ pub struct LoopbackRouterRuntime {
     secret_store: ProxyRuntimeSecretStore,
     affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
-    upstream: HttpUpstreamTransport,
+    upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
     max_websocket_upstream_messages: usize,
     websocket_revocations: WebSocketRevocationRegistry,
@@ -424,7 +434,7 @@ impl LoopbackRouterRuntime {
             None => crate::local_auth::ProxyLocalAuthGate::disabled(),
         };
         let upstream_endpoint = config.upstream_endpoint;
-        let upstream = HttpUpstreamTransport::new(upstream_endpoint.clone());
+        let upstream = HyperHttpUpstreamTransport::new(upstream_endpoint.clone());
         let server = runtime.block_on(AsyncLoopbackServerRuntime::bind(config.bind_address))?;
         let audit_sink = config.audit_file_path.map(AuditFileSink::new);
 
@@ -552,7 +562,7 @@ struct LoopbackProtocolConnectionHandler {
     secret_store: ProxyRuntimeSecretStore,
     affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
-    upstream: HttpUpstreamTransport,
+    upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
     max_websocket_upstream_messages: usize,
     websocket_revocations: WebSocketRevocationRegistry,
@@ -606,7 +616,7 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
         upgrade_tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    ) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+    ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         match HyperProtocolSwitchpoint::classify(request.method(), request.uri(), request.headers())
         {
             HyperProtocolDispatch::WebSocketUpgrade => {
@@ -621,7 +631,7 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         mut request: HttpRequest<Incoming>,
         upgrade_tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    ) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+    ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         let path = request
             .uri()
             .path_and_query()
@@ -651,7 +661,10 @@ impl LoopbackProtocolConnectionHandler {
         });
         upgrade_tasks.lock().await.push(upgrade_task);
 
-        upgrade_response.map(|body| body.boxed())
+        upgrade_response.map(|body| {
+            body.map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
+                .boxed()
+        })
     }
 
     async fn handle_hyper_websocket_upgraded(
@@ -708,66 +721,34 @@ impl LoopbackProtocolConnectionHandler {
     async fn handle_hyper_http_request(
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
-    ) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+    ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         let request = match hyper_request_to_proxy_request(request).await {
             Ok(request) => request,
             Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
         };
-        let (metadata_sender, metadata_receiver) = tokio::sync::oneshot::channel();
-        let _worker = tokio::task::spawn_blocking(move || {
-            let response = self.handle_blocking_streaming_http_request(request);
-            let mut response = match response {
-                Ok(response) => response,
-                Err(error) => {
-                    let _send_result = metadata_sender.send(Err(error));
-                    return;
-                }
-            };
-            let (body_sender, body_receiver) = tokio::sync::mpsc::channel(8);
-            let metadata = StreamingHttpResponseMetadata {
-                status: response.status(),
-                headers: response.headers().clone(),
-                body_receiver,
-            };
-            if metadata_sender.send(Ok(metadata)).is_err() {
-                return;
-            }
+        let prepare_context = Arc::clone(&self);
+        let prepared = tokio::task::spawn_blocking(move || {
+            prepare_context.prepare_streaming_http_request(request)
+        })
+        .await;
+        let prepared = match prepared {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => return http_error_response(error),
+            Err(_error) => return empty_response(StatusCode::BAD_GATEWAY),
+        };
+        let (upstream_request, completion) = prepared.into_parts();
+        let response = match self.upstream.send_streaming(upstream_request).await {
+            Ok(response) => response,
+            Err(error) => return http_error_response(error),
+        };
 
-            let mut buffer = [0_u8; 8192];
-            loop {
-                let read = match response.body_mut().read(&mut buffer) {
-                    Ok(read) => read,
-                    Err(_error) => return,
-                };
-                if read == 0 {
-                    return;
-                }
-                if body_sender
-                    .blocking_send(Bytes::copy_from_slice(&buffer[..read]))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
-        match metadata_receiver.await {
-            Ok(Ok(metadata)) => streaming_http_response_to_hyper(metadata),
-            Ok(Err(HttpProxyError::LocalAuth { .. })) => empty_response(StatusCode::UNAUTHORIZED),
-            Ok(Err(HttpProxyError::Selection { .. })) => {
-                empty_response(StatusCode::SERVICE_UNAVAILABLE)
-            }
-            Ok(Err(HttpProxyError::ProviderCredential { .. })) => {
-                empty_response(StatusCode::BAD_GATEWAY)
-            }
-            Ok(Err(_error)) => empty_response(StatusCode::BAD_GATEWAY),
-            Err(_error) => empty_response(StatusCode::BAD_GATEWAY),
-        }
+        self.async_streaming_http_response_to_hyper(response, completion)
     }
 
-    fn handle_blocking_streaming_http_request(
+    fn prepare_streaming_http_request(
         &self,
         request: HttpProxyRequest,
-    ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
+    ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
         let state_store = SqliteStateStore::open(&self.state_database_path).map_err(|_error| {
             HttpProxyError::Selection {
                 reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
@@ -792,14 +773,36 @@ impl LoopbackProtocolConnectionHandler {
         } else {
             service
         };
-        service.handle_streaming_request(request)
+        service.prepare_streaming_request(request)
+    }
+
+    fn async_streaming_http_response_to_hyper(
+        &self,
+        response: AsyncStreamingHttpProxyResponse,
+        completion: crate::http_sse::StreamingHttpProxyCompletion,
+    ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        if let Some(audit_sink) = &self.audit_sink {
+            append_audit_event_with_reporter(
+                audit_sink,
+                completion.allowed_audit_event(),
+                &StderrAuditFailureReporter,
+            );
+        }
+        let (status, headers, body) = response.into_parts();
+        async_streaming_http_response_to_hyper(
+            status,
+            headers,
+            body,
+            completion,
+            Arc::clone(&self.affinity_owner_recorder),
+        )
     }
 
     fn preflight_hyper_websocket_request(
         &self,
         request: &HttpRequest<Incoming>,
         path: &str,
-    ) -> Option<HttpResponse<BoxBody<Bytes, Infallible>>> {
+    ) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
         let subprotocol = header_value(request.headers(), "sec-websocket-protocol");
         let router_token = header_value(request.headers(), "x-codex-router-token");
         let authorization = header_value(request.headers(), "authorization");
@@ -989,43 +992,90 @@ fn method_from_hyper(method: &HttpMethod) -> Method {
     }
 }
 
-struct StreamingHttpResponseMetadata {
+fn async_streaming_http_response_to_hyper(
     status: u16,
-    headers: crate::headers::HeaderCollection,
-    body_receiver: tokio::sync::mpsc::Receiver<Bytes>,
-}
-
-fn streaming_http_response_to_hyper(
-    metadata: StreamingHttpResponseMetadata,
-) -> HttpResponse<BoxBody<Bytes, Infallible>> {
-    let mut builder = HttpResponse::builder().status(metadata.status);
-    for header in metadata.headers.as_slice() {
+    headers: HeaderCollection,
+    body: BoxBody<Bytes, AsyncHttpBodyError>,
+    completion: StreamingHttpProxyCompletion,
+    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    let body = record_affinity_owner_from_async_body(body, completion, affinity_owner_recorder);
+    let mut builder = HttpResponse::builder().status(status);
+    for header in headers.as_slice() {
         builder = builder.header(header.name(), header.value());
     }
     builder
-        .body(receiver_body(metadata.body_receiver))
+        .body(body)
         .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
 }
 
-fn receiver_body(receiver: tokio::sync::mpsc::Receiver<Bytes>) -> BoxBody<Bytes, Infallible> {
-    let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
-        receiver
-            .recv()
-            .await
-            .map(|chunk| (Ok(Frame::data(chunk)), receiver))
-    });
-    StreamBody::new(stream).boxed()
+fn record_affinity_owner_from_async_body(
+    body: BoxBody<Bytes, AsyncHttpBodyError>,
+    completion: StreamingHttpProxyCompletion,
+    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+) -> BoxBody<Bytes, AsyncHttpBodyError> {
+    let Some(affinity_secret) = completion.affinity_secret().cloned() else {
+        return body;
+    };
+    let account_id = completion.account_id().clone();
+    let credential_generation = completion.credential_generation();
+    let mut buffered = Vec::new();
+    let mut recorded = false;
+
+    body.map_frame(move |frame| {
+        if !recorded && let Some(data) = frame.data_ref() {
+            buffered.extend_from_slice(data);
+            if let Ok(Some(response_id)) = extract_response_id_from_body(&buffered) {
+                recorded = true;
+                let recorder = Arc::clone(&affinity_owner_recorder);
+                let account_id = account_id.clone();
+                let affinity_secret = affinity_secret.clone();
+                tokio::task::spawn_blocking(move || {
+                    let Ok(affinity_key_hash) =
+                        hash_previous_response_id(&affinity_secret, &response_id)
+                    else {
+                        return;
+                    };
+                    let owner = PreviousResponseAffinityOwnerRecord::new(
+                        affinity_key_hash,
+                        account_id,
+                        credential_generation,
+                        RouteBand::Responses,
+                        AffinitySourceTransport::HttpSse,
+                        current_unix_seconds().map_or(0, |seconds| seconds),
+                    );
+                    let _record_result = recorder.record_affinity_owner(&owner);
+                });
+            }
+        }
+
+        frame
+    })
+    .boxed()
 }
 
-fn empty_response(status: StatusCode) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    match error {
+        HttpProxyError::LocalAuth { .. } => empty_response(StatusCode::UNAUTHORIZED),
+        HttpProxyError::Selection { .. } => empty_response(StatusCode::SERVICE_UNAVAILABLE),
+        HttpProxyError::ProviderCredential { .. } | HttpProxyError::Upstream { .. } => {
+            empty_response(StatusCode::BAD_GATEWAY)
+        }
+        HttpProxyError::Rejected { .. } => empty_response(StatusCode::NOT_FOUND),
+    }
+}
+
+fn empty_response(status: StatusCode) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     HttpResponse::builder()
         .status(status)
         .body(empty_body())
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 
-fn empty_body() -> BoxBody<Bytes, Infallible> {
-    Empty::<Bytes>::new().boxed()
+fn empty_body() -> BoxBody<Bytes, AsyncHttpBodyError> {
+    Empty::<Bytes>::new()
+        .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
+        .boxed()
 }
 
 #[derive(Clone, Debug)]

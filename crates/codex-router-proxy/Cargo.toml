@@ -21,6 +21,7 @@ http.workspace = true
 http-body-util.workspace = true
 httparse.workspace = true
 hyper.workspace = true
+hyper-rustls.workspace = true
 hyper-tungstenite.workspace = true
 hyper-util.workspace = true
 reqwest.workspace = true

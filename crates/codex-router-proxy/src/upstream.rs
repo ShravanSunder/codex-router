@@ -1,22 +1,44 @@
 //! Upstream request construction.
 
+use std::convert::Infallible;
+#[cfg(test)]
 use std::io::Cursor;
+#[cfg(test)]
 use std::io::Read;
+#[cfg(test)]
 use std::io::Write;
+#[cfg(test)]
 use std::net::Shutdown;
+#[cfg(test)]
 use std::net::TcpStream;
 
+use bytes::Bytes;
 use codex_router_core::redaction::SecretString;
+use futures_util::future::BoxFuture;
+use http_body_util::BodyExt;
+use http_body_util::Full;
+use hyper_rustls::HttpsConnector;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use thiserror::Error;
 
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
+use crate::http_sse::AsyncHttpBodyError;
+use crate::http_sse::AsyncStreamingHttpProxyResponse;
+use crate::http_sse::AsyncStreamingUpstreamHttpTransport;
 use crate::http_sse::HttpProxyError;
+#[cfg(test)]
 use crate::http_sse::HttpProxyResponse;
+#[cfg(test)]
 use crate::http_sse::StreamingHttpProxyResponse;
+#[cfg(test)]
 use crate::http_sse::StreamingUpstreamHttpTransport;
 use crate::http_sse::UpstreamHttpRequest;
+#[cfg(test)]
 use crate::http_sse::UpstreamHttpTransport;
 use crate::routes::RouteKind;
 
@@ -113,11 +135,13 @@ pub enum UpstreamEndpointError {
 }
 
 /// Blocking HTTP/1.1 upstream transport for local/mock HTTP endpoints.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpUpstreamTransport {
     endpoint: UpstreamEndpoint,
 }
 
+#[cfg(test)]
 impl HttpUpstreamTransport {
     /// Creates an HTTP upstream transport.
     #[must_use]
@@ -126,12 +150,14 @@ impl HttpUpstreamTransport {
     }
 }
 
+#[cfg(test)]
 impl UpstreamHttpTransport for HttpUpstreamTransport {
     fn send(&self, request: UpstreamHttpRequest) -> Result<HttpProxyResponse, HttpProxyError> {
         self.send_streaming(request)?.into_buffered()
     }
 }
 
+#[cfg(test)]
 impl StreamingUpstreamHttpTransport for HttpUpstreamTransport {
     fn send_streaming(
         &self,
@@ -151,6 +177,85 @@ impl StreamingUpstreamHttpTransport for HttpUpstreamTransport {
     }
 }
 
+/// Hyper-backed async HTTP/SSE upstream transport.
+#[derive(Clone)]
+pub struct HyperHttpUpstreamTransport {
+    endpoint: UpstreamEndpoint,
+    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+}
+
+impl HyperHttpUpstreamTransport {
+    /// Creates a Hyper HTTP upstream transport.
+    #[must_use]
+    pub fn new(endpoint: UpstreamEndpoint) -> Self {
+        let connector = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build();
+        let client = Client::builder(TokioExecutor::new()).build(connector);
+
+        Self { endpoint, client }
+    }
+
+    async fn send_streaming_inner(
+        &self,
+        request: UpstreamHttpRequest,
+    ) -> Result<AsyncStreamingHttpProxyResponse, HttpProxyError> {
+        if self.endpoint.base_url.ends_with("/backend-api")
+            && request.route_kind() == RouteKind::Models
+        {
+            return Ok(chatgpt_backend_models_async_response());
+        }
+
+        let uri = self
+            .endpoint
+            .url_for_path(request.path())
+            .parse::<http::Uri>()
+            .map_err(|_error| HttpProxyError::Upstream {
+                message: "upstream URI was invalid".to_owned(),
+            })?;
+        let mut builder = http::Request::builder()
+            .method(hyper_method(&request))
+            .uri(uri);
+        for header in request.headers().as_slice() {
+            builder = builder.header(header.name(), header.value());
+        }
+        let request = builder
+            .body(Full::new(Bytes::copy_from_slice(request.body())))
+            .map_err(|_error| HttpProxyError::Upstream {
+                message: "failed building upstream request".to_owned(),
+            })?;
+        let response =
+            self.client
+                .request(request)
+                .await
+                .map_err(|error| HttpProxyError::Upstream {
+                    message: error.to_string(),
+                })?;
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers())?;
+        let body = response.into_body().map_err(incoming_body_error).boxed();
+
+        Ok(AsyncStreamingHttpProxyResponse::new(
+            status,
+            HeaderCollection::new(headers),
+            body,
+        ))
+    }
+}
+
+impl AsyncStreamingUpstreamHttpTransport for HyperHttpUpstreamTransport {
+    fn send_streaming<'a>(
+        &'a self,
+        request: UpstreamHttpRequest,
+    ) -> BoxFuture<'a, Result<AsyncStreamingHttpProxyResponse, HttpProxyError>> {
+        Box::pin(async move { self.send_streaming_inner(request).await })
+    }
+}
+
+#[cfg(test)]
 fn chatgpt_backend_models_response() -> StreamingHttpProxyResponse {
     StreamingHttpProxyResponse::new(
         200,
@@ -159,6 +264,35 @@ fn chatgpt_backend_models_response() -> StreamingHttpProxyResponse {
     )
 }
 
+fn chatgpt_backend_models_async_response() -> AsyncStreamingHttpProxyResponse {
+    let body = Full::new(Bytes::from_static(br#"{"models":[]}"#))
+        .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
+        .boxed();
+
+    AsyncStreamingHttpProxyResponse::new(
+        200,
+        HeaderCollection::new(vec![Header::new("Content-Type", "application/json")]),
+        body,
+    )
+}
+
+fn response_headers(headers: &http::HeaderMap) -> Result<Vec<Header>, HttpProxyError> {
+    let mut response_headers = Vec::new();
+    for (name, value) in headers {
+        let value = value.to_str().map_err(|_error| HttpProxyError::Upstream {
+            message: "upstream response header was not utf-8".to_owned(),
+        })?;
+        response_headers.push(Header::new(name.as_str(), value));
+    }
+
+    Ok(response_headers)
+}
+
+fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
+    Box::new(error)
+}
+
+#[cfg(test)]
 fn send_http_request(
     endpoint: &UpstreamEndpoint,
     request: UpstreamHttpRequest,
@@ -173,6 +307,7 @@ fn send_http_request(
     parse_streaming_response(stream)
 }
 
+#[cfg(test)]
 fn send_https_request(
     endpoint: &UpstreamEndpoint,
     request: UpstreamHttpRequest,
@@ -206,12 +341,14 @@ fn send_https_request(
     ))
 }
 
+#[cfg(test)]
 struct ParsedHttpTarget {
     host: String,
     port: u16,
     path: String,
 }
 
+#[cfg(test)]
 impl ParsedHttpTarget {
     fn parse(endpoint: &UpstreamEndpoint, request_path: &str) -> Result<Self, HttpProxyError> {
         let Some(authority_and_path) = endpoint.base_url.strip_prefix("http://") else {
@@ -248,6 +385,7 @@ impl ParsedHttpTarget {
     }
 }
 
+#[cfg(test)]
 fn parse_authority(authority: &str) -> Result<(String, u16), HttpProxyError> {
     let (host, port_text) = authority
         .rsplit_once(':')
@@ -263,6 +401,7 @@ fn parse_authority(authority: &str) -> Result<(String, u16), HttpProxyError> {
     Ok((host.to_owned(), port))
 }
 
+#[cfg(test)]
 fn write_request(
     stream: &mut TcpStream,
     target: &ParsedHttpTarget,
@@ -287,6 +426,7 @@ fn write_request(
     stream.write_all(request.body()).map_err(upstream_io_error)
 }
 
+#[cfg(test)]
 fn method_text(request: &UpstreamHttpRequest) -> &'static str {
     match request.method() {
         crate::routes::Method::Get => "GET",
@@ -295,6 +435,7 @@ fn method_text(request: &UpstreamHttpRequest) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn reqwest_method(request: &UpstreamHttpRequest) -> reqwest::Method {
     match request.method() {
         crate::routes::Method::Get => reqwest::Method::GET,
@@ -302,6 +443,14 @@ fn reqwest_method(request: &UpstreamHttpRequest) -> reqwest::Method {
     }
 }
 
+fn hyper_method(request: &UpstreamHttpRequest) -> http::Method {
+    match request.method() {
+        crate::routes::Method::Get => http::Method::GET,
+        crate::routes::Method::Post | crate::routes::Method::Other => http::Method::POST,
+    }
+}
+
+#[cfg(test)]
 fn parse_streaming_response(
     mut stream: TcpStream,
 ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
@@ -363,11 +512,13 @@ fn parse_streaming_response(
     ))
 }
 
+#[cfg(test)]
 struct PrefixThenReader<R> {
     prefix: Cursor<Vec<u8>>,
     rest: R,
 }
 
+#[cfg(test)]
 impl<R> PrefixThenReader<R> {
     fn new(prefix: Vec<u8>, rest: R) -> Self {
         Self {
@@ -377,6 +528,7 @@ impl<R> PrefixThenReader<R> {
     }
 }
 
+#[cfg(test)]
 impl<R> Read for PrefixThenReader<R>
 where
     R: Read,
@@ -391,12 +543,14 @@ where
     }
 }
 
+#[cfg(test)]
 fn upstream_io_error(error: std::io::Error) -> HttpProxyError {
     HttpProxyError::Upstream {
         message: error.to_string(),
     }
 }
 
+#[cfg(test)]
 fn reqwest_error(error: reqwest::Error) -> HttpProxyError {
     HttpProxyError::Upstream {
         message: error.to_string(),

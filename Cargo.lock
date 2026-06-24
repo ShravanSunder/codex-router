@@ -144,6 +144,7 @@ dependencies = [
  "http-body-util",
  "httparse",
  "hyper",
+ "hyper-rustls",
  "hyper-tungstenite",
  "hyper-util",
  "reqwest",
