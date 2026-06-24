@@ -70,6 +70,7 @@ const UPSTREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(300);
 const SOAK_COMMAND_TIMEOUT_SLACK: Duration = Duration::from_secs(90);
 const SOAK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const SOAK_PROOF_MARGIN: Duration = Duration::from_secs(1);
 const ROUTER_REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,11 +131,17 @@ impl ConcurrentUpstreamConfig {
         }
     }
 
-    const fn soak(expected_sessions: usize, hold_duration: Duration) -> Self {
+    fn soak(expected_sessions: usize, hold_duration: Duration) -> Self {
+        let heartbeat_interval = hold_duration
+            .checked_div(4)
+            .filter(|duration| !duration.is_zero())
+            .map_or(SOAK_HEARTBEAT_INTERVAL, |duration| {
+                duration.min(SOAK_HEARTBEAT_INTERVAL)
+            });
         Self {
             expected_sessions,
             hold_duration,
-            heartbeat_interval: SOAK_HEARTBEAT_INTERVAL,
+            heartbeat_interval,
         }
     }
 }
@@ -2848,7 +2855,7 @@ fn run_concurrent_mock_websocket_session(
         register_concurrent_non_prewarm_session(&state)?;
         let overlap_started_at = wait_for_concurrent_session_barrier(&state)?;
         let run_multi_step_interleave = claim_multi_step_interleave(&state)?;
-        let event_count = if run_multi_step_interleave {
+        let (event_count, in_overlap_event_count) = if run_multi_step_interleave {
             send_concurrent_multi_step_response_events(
                 &mut websocket,
                 request_index,
@@ -2863,13 +2870,20 @@ fn run_concurrent_mock_websocket_session(
                 request_index,
                 overlap_started_at,
                 config,
+                &state,
             )?
         };
         let close_outcome = match websocket.close(None) {
             Ok(()) => "normal".to_owned(),
             Err(error) => format!("abnormal:{error}"),
         };
-        finish_concurrent_non_prewarm_session(&state, frame_count, event_count, close_outcome)?;
+        finish_concurrent_non_prewarm_session(
+            &state,
+            frame_count,
+            event_count,
+            in_overlap_event_count,
+            close_outcome,
+        )?;
         return Ok(());
     }
     Err("concurrent mock upstream did not receive non-prewarm request frame".to_owned())
@@ -2961,17 +2975,13 @@ fn finish_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
     frame_count: usize,
     event_count: usize,
+    in_overlap_event_count: usize,
     close_outcome: String,
 ) -> Result<(), String> {
     let mut state = shared
         .state
         .lock()
         .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
-    let in_overlap_event_count = if state.active_non_prewarm_sessions >= state.expected_sessions {
-        event_count
-    } else {
-        0
-    };
     if close_outcome == "normal" {
         state.normal_close_sessions = state.normal_close_sessions.saturating_add(1);
     } else {
@@ -3004,14 +3014,18 @@ fn send_concurrent_response_events(
     request_index: usize,
     overlap_started_at: Instant,
     config: ConcurrentUpstreamConfig,
-) -> Result<usize, String> {
+    state: &ConcurrentUpstreamSharedState,
+) -> Result<(usize, usize), String> {
     let response_events = smoke_response_events(request_index);
     let mut event_count = 0_usize;
+    let mut in_overlap_event_count = 0_usize;
     send_concurrent_response_event(websocket, &response_events[0])?;
     event_count = event_count.saturating_add(1);
+    in_overlap_event_count =
+        in_overlap_event_count.saturating_add(usize::from(is_concurrent_overlap_active(state)?));
 
     if !config.hold_duration.is_zero() {
-        let hold_deadline = overlap_started_at + config.hold_duration;
+        let hold_deadline = overlap_started_at + config.hold_duration + SOAK_PROOF_MARGIN;
         let mut heartbeat_index = 0_usize;
         while Instant::now() < hold_deadline {
             let remaining = hold_deadline.saturating_duration_since(Instant::now());
@@ -3028,15 +3042,19 @@ fn send_concurrent_response_events(
             send_concurrent_response_event(websocket, &heartbeat)?;
             heartbeat_index = heartbeat_index.saturating_add(1);
             event_count = event_count.saturating_add(1);
+            in_overlap_event_count = in_overlap_event_count
+                .saturating_add(usize::from(is_concurrent_overlap_active(state)?));
         }
     }
 
     for event in response_events.iter().skip(1) {
         send_concurrent_response_event(websocket, event)?;
         event_count = event_count.saturating_add(1);
+        in_overlap_event_count = in_overlap_event_count
+            .saturating_add(usize::from(is_concurrent_overlap_active(state)?));
     }
 
-    Ok(event_count)
+    Ok((event_count, in_overlap_event_count))
 }
 
 fn send_concurrent_multi_step_response_events(
@@ -3046,9 +3064,10 @@ fn send_concurrent_multi_step_response_events(
     config: ConcurrentUpstreamConfig,
     state: &ConcurrentUpstreamSharedState,
     frame_count: &mut usize,
-) -> Result<usize, String> {
+) -> Result<(usize, usize), String> {
     let call_id = format!("codex-router-tool-call-{request_index}");
     let mut event_count = 0_usize;
+    let mut in_overlap_event_count = 0_usize;
     let response_id = format!("resp-smoke-tool-{request_index}");
     send_concurrent_response_event(
         websocket,
@@ -3059,6 +3078,8 @@ fn send_concurrent_multi_step_response_events(
         .to_string(),
     )?;
     event_count = event_count.saturating_add(1);
+    in_overlap_event_count =
+        in_overlap_event_count.saturating_add(usize::from(is_concurrent_overlap_active(state)?));
 
     let tool_arguments = serde_json::json!({
         "command": "printf codex-router-tool-ok",
@@ -3079,6 +3100,8 @@ fn send_concurrent_multi_step_response_events(
         .to_string(),
     )?;
     event_count = event_count.saturating_add(1);
+    in_overlap_event_count =
+        in_overlap_event_count.saturating_add(usize::from(is_concurrent_overlap_active(state)?));
     send_concurrent_response_event(
         websocket,
         &serde_json::json!({
@@ -3097,6 +3120,8 @@ fn send_concurrent_multi_step_response_events(
         .to_string(),
     )?;
     event_count = event_count.saturating_add(1);
+    in_overlap_event_count =
+        in_overlap_event_count.saturating_add(usize::from(is_concurrent_overlap_active(state)?));
 
     let followup_frame = read_concurrent_text_frame(websocket)?;
     *frame_count = frame_count.saturating_add(1);
@@ -3106,7 +3131,7 @@ fn send_concurrent_multi_step_response_events(
     complete_multi_step_interleave(state, 1)?;
 
     if !config.hold_duration.is_zero() {
-        let hold_deadline = overlap_started_at + config.hold_duration;
+        let hold_deadline = overlap_started_at + config.hold_duration + SOAK_PROOF_MARGIN;
         let mut heartbeat_index = 0_usize;
         while Instant::now() < hold_deadline {
             let remaining = hold_deadline.saturating_duration_since(Instant::now());
@@ -3123,14 +3148,26 @@ fn send_concurrent_multi_step_response_events(
             send_concurrent_response_event(websocket, &heartbeat)?;
             heartbeat_index = heartbeat_index.saturating_add(1);
             event_count = event_count.saturating_add(1);
+            in_overlap_event_count = in_overlap_event_count
+                .saturating_add(usize::from(is_concurrent_overlap_active(state)?));
         }
     }
 
     for event in smoke_response_events(request_index.saturating_add(10)) {
         send_concurrent_response_event(websocket, &event)?;
         event_count = event_count.saturating_add(1);
+        in_overlap_event_count = in_overlap_event_count
+            .saturating_add(usize::from(is_concurrent_overlap_active(state)?));
     }
-    Ok(event_count)
+    Ok((event_count, in_overlap_event_count))
+}
+
+fn is_concurrent_overlap_active(shared: &ConcurrentUpstreamSharedState) -> Result<bool, String> {
+    let state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    Ok(state.active_non_prewarm_sessions >= state.expected_sessions)
 }
 
 fn read_concurrent_text_frame(
