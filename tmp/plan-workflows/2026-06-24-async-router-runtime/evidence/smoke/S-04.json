@@ -8,7 +8,7 @@
   "expected_observation": "installed Codex mock upstream proves deterministic WebSocket behavior without fallback/reconnect/retry",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "eb50e1122bf600a816a1236222152c3deaaec290",
+  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
   "layer": "smoke",
   "notes": "Installed Codex WebSocket mock upstream smoke passed deterministic runtime/no-fallback contract.",
   "owner": "T7",
@@ -18,7 +18,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T21:58:54Z",
+  "timestamp_utc": "2026-06-24T22:25:22Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",

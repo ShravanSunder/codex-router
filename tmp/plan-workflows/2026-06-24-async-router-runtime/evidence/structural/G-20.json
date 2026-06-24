@@ -6,7 +6,7 @@
   "expected_observation": "pump-side side-effect non-blocking regression remains in the permanent suite",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "eb50e1122bf600a816a1236222152c3deaaec290",
+  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
   "layer": "structural",
   "notes": "Structural/inventory guard passed.",
   "owner": "T6",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T21:58:43Z",
+  "timestamp_utc": "2026-06-24T22:25:01Z",
   "touched_targets": [
     "scripts/proof-matrix.sh",
     "scripts/check-release-runtime-guardrails.py",

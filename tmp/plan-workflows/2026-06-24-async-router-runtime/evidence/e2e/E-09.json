@@ -9,7 +9,7 @@
   "expected_observation": "three-WebSocket artifact allowlist redaction passes and negative canaries are absent",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "eb50e1122bf600a816a1236222152c3deaaec290",
+  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -23,21 +23,24 @@
       "count": 3,
       "statuses": [
         {
-          "pid": 12006,
+          "pid": 92204,
           "status": "exit status: 0",
           "stderr_line_count": 28,
+          "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         },
         {
-          "pid": 12007,
-          "status": "exit status: 0",
-          "stderr_line_count": 28,
-          "stdout_contains_smoke_text": true
-        },
-        {
-          "pid": 12005,
+          "pid": 92203,
           "status": "exit status: 0",
           "stderr_line_count": 32,
+          "stderr_transport_error_markers": [],
+          "stdout_contains_smoke_text": true
+        },
+        {
+          "pid": 92202,
+          "status": "exit status: 0",
+          "stderr_line_count": 28,
+          "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         }
       ]
@@ -45,6 +48,11 @@
     "mode": "three-websocket-soak",
     "router_websocket_registry": {
       "active_sessions": 0,
+      "closed_session_ids": [
+        2,
+        3,
+        1
+      ],
       "closed_sessions": 3,
       "completed_response_sessions": 7,
       "completed_session_forwarded_upstream_message_counts": [
@@ -52,18 +60,32 @@
         2,
         2,
         5,
-        15,
         18,
+        15,
         15
       ],
+      "completed_session_ids": [
+        2,
+        1,
+        3,
+        2,
+        2,
+        3,
+        1
+      ],
       "final_session_forwarded_upstream_message_counts": [
-        16,
         19,
+        16,
         16
       ],
       "forwarded_upstream_messages": 51,
       "handled_connections": 3,
       "high_water_sessions": 3,
+      "registered_session_ids": [
+        1,
+        2,
+        3
+      ],
       "registered_sessions": 3
     },
     "socket_cleanup": {
@@ -82,43 +104,48 @@
       "hold_duration_ms": 300000,
       "http_probe_count": 0,
       "in_overlap_session_event_counts": [
-        13,
-        13,
+        16,
+        11,
         11
       ],
       "multi_step_completed_before_overlap_end": true,
       "multi_step_followup_active_session_count": 3,
       "multi_step_followup_frame_count": 1,
-      "multi_step_followup_unix_ms": 1782337855069,
+      "multi_step_followup_unix_ms": 1782339928682,
       "multi_step_interleave_completed": true,
       "non_prewarm_session_count": 3,
       "normal_close_sessions": 3,
-      "overlap_completed_unix_ms": 1782338156141,
-      "overlap_duration_ms": 301094,
+      "overlap_completed_unix_ms": 1782340229696,
+      "overlap_duration_ms": 301035,
       "overlap_proven": true,
-      "overlap_started_unix_ms": 1782337855047,
-      "real_overlap_completed_unix_ms": 1782338156133,
-      "real_overlap_duration_ms": 301086,
+      "overlap_started_unix_ms": 1782339928661,
+      "real_overlap_completed_unix_ms": 1782340229695,
+      "real_overlap_duration_ms": 301034,
       "session_close_outcomes": [
         "normal",
         "normal",
         "normal"
       ],
       "session_event_counts": [
-        13,
         16,
+        13,
         13
       ],
       "session_frame_counts": [
-        2,
         3,
+        2,
         2
+      ],
+      "upstream_session_ids": [
+        1,
+        2,
+        3
       ]
     }
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T21:58:55Z",
+  "timestamp_utc": "2026-06-24T22:30:37Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",
