@@ -669,6 +669,7 @@ PY
         receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$row_id" "$receipt" "$artifact_path" "$smoke_output_file" <<'PY'
 import json
+import shutil
 import sys
 from pathlib import Path
 row_id = sys.argv[1]
@@ -698,9 +699,11 @@ if row_id == "S-04":
     if upstream.get("handshake_count") != 1:
         errors.append("serial WebSocket smoke did not record exactly one upstream handshake")
 try:
-    artifact_path_value = str(artifact_path.resolve().relative_to(Path.cwd().resolve()))
+    evidence_artifact_path = path.parent / f"{row_id}-transcript.json"
+    shutil.copyfile(artifact_path, evidence_artifact_path)
+    artifact_path_value = str(evidence_artifact_path.resolve().relative_to(Path.cwd().resolve()))
 except ValueError:
-    artifact_path_value = str(artifact_path)
+    artifact_path_value = str(evidence_artifact_path)
 payload["status_after"] = "[x] passed" if not errors else "[ ] pending"
 payload["result"] = "pass" if not errors else "fail"
 payload["exit_code"] = 0 if not errors else 1
