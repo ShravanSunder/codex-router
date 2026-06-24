@@ -39,6 +39,8 @@ row_owner() {
   case "$1" in
     U-06|U-07|I-16) printf 'T2' ;;
     I-21) printf 'T1/T2' ;;
+    I-19) printf 'T5' ;;
+    I-20) printf 'T4/T5' ;;
     I-17b) printf 'T5/T6' ;;
     S-01|S-02|S-03|S-04) printf 'T7' ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) printf 'T8' ;;
