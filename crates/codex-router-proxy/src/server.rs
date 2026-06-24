@@ -25,6 +25,7 @@ use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
+use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RepositoryBackedAccountSelector;
 use crate::account_selection::RouteBandAccountHolds;
 use crate::account_selection::RouteBandWeightedSelectors;
@@ -225,6 +226,7 @@ pub struct LoopbackRouterRuntime {
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
+    now_unix_seconds: u64,
 }
 
 impl LoopbackRouterRuntime {
@@ -263,6 +265,7 @@ impl LoopbackRouterRuntime {
             audit_sink,
             weighted_selectors: Default::default(),
             account_holds: Default::default(),
+            now_unix_seconds: config.now_unix_seconds,
         })
     }
 
@@ -301,11 +304,7 @@ impl LoopbackRouterRuntime {
             .listener()
             .try_clone()
             .map_err(LoopbackRouterRuntimeError::ListenerClone)?;
-        let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
-            &self.state_store,
-            Arc::clone(&self.weighted_selectors),
-            Arc::clone(&self.account_holds),
-        );
+        let selector = self.repository_backed_account_selector();
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,
@@ -397,11 +396,7 @@ impl LoopbackRouterRuntime {
                 }
             }
 
-            let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
-                &self.state_store,
-                Arc::clone(&self.weighted_selectors),
-                Arc::clone(&self.account_holds),
-            );
+            let selector = self.repository_backed_account_selector();
             let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
             let tunnel = if let Some(audit_sink) = &self.audit_sink {
                 BlockingWebSocketTunnel::new_with_revocation_registry_and_audit_sink(
@@ -439,11 +434,7 @@ impl LoopbackRouterRuntime {
             return Ok(());
         }
 
-        let selector = RepositoryBackedAccountSelector::new_with_weighted_selector(
-            &self.state_store,
-            Arc::clone(&self.weighted_selectors),
-            Arc::clone(&self.account_holds),
-        );
+        let selector = self.repository_backed_account_selector();
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,
@@ -459,6 +450,19 @@ impl LoopbackRouterRuntime {
         };
         LoopbackHttpAdapter::handle_streaming_connection(stream, &service)
             .map_err(LoopbackRouterRuntimeError::Connection)
+    }
+
+    fn repository_backed_account_selector(
+        &self,
+    ) -> RepositoryBackedAccountSelector<'_, SqliteStateStore> {
+        let now_unix_seconds = self.now_unix_seconds;
+        RepositoryBackedAccountSelector::new_with_runtime(
+            &self.state_store,
+            Arc::clone(&self.weighted_selectors),
+            Arc::clone(&self.account_holds),
+            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(move || now_unix_seconds),
+        )
     }
 }
 

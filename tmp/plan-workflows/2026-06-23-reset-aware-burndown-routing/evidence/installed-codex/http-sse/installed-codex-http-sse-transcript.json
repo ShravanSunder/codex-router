@@ -1,38 +1,65 @@
 {
   "codex_version": "codex-cli 0.142.0",
   "expected_account_label": "ssdev",
+  "http_sse": {
+    "actual_safe_label": "ssdev",
+    "local_auth_carrier": "authorization_bearer",
+    "local_auth_stripped_before_upstream": true,
+    "local_auth_validated": true,
+    "local_router_token_in_body": false,
+    "ran": true,
+    "request_line": "POST /v1/responses HTTP/1.1",
+    "selected_expected_account": true,
+    "stream_requested": true,
+    "upstream_auth_redacted_present": true
+  },
   "http_sse_codex_status": "exit status: 0",
   "http_sse_codex_stderr_line_count": 18,
   "http_sse_codex_stdout_contains_smoke_text": true,
-  "http_sse_last_message_path": "/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T/codex-router-installed-codex-6228-1782262739399/http-sse-last-message.txt",
-  "profile_path": "/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T/codex-router-installed-codex-6228-1782262739399/codex-home/codex-router.config.toml",
+  "http_sse_last_message_written": true,
+  "mode": "http-sse",
+  "profile_env_key": "CODEX_ROUTER_TOKEN",
+  "profile_uses_codex_router_token": true,
+  "profile_written": true,
   "quota_status": {
     "json_selected_account_label": "ssdev",
     "plain_contains_expected_account": true,
     "plain_marks_next": true,
+    "selected_account_tag": "acct-a22505bc0460",
     "table_contains_expected_account": true
   },
   "router_completed": true,
+  "selected_account": {
+    "routing_reason": "preferred_next",
+    "safe_label": "ssdev",
+    "safe_tag": "acct-a22505bc0460"
+  },
   "upstream": {
-    "authorization_header": "<redacted-present>",
+    "handshake_count": 0,
+    "http_probe_count": 0
+  },
+  "websocket": {
+    "actual_safe_label": null,
     "first_frame_shape": {
-      "json_object": true,
+      "json_object": false,
       "non_prewarm_response_create": false
     },
-    "handshake_count": 1,
-    "http_probe_count": 0,
-    "http_sse_authorization_header": "<redacted-present>",
-    "http_sse_local_router_header_present": false,
-    "http_sse_local_router_token_in_body": false,
-    "http_sse_request_line": "POST /v1/responses HTTP/1.1",
-    "http_sse_stream_requested": true,
-    "local_router_header_present": false,
-    "websocket_local_router_token_in_first_frame": false,
-    "websocket_non_prewarm_request_frame_count": 1,
-    "websocket_request_frame_count": 2
+    "local_auth_carrier": null,
+    "local_auth_stripped_before_upstream": null,
+    "local_auth_validated": null,
+    "local_router_token_in_first_frame": false,
+    "non_prewarm_request_frame_count": 0,
+    "ran": false,
+    "request_frame_count": 0,
+    "routed_response_create_shape": {
+      "non_prewarm_response_create": false,
+      "present": false
+    },
+    "selected_expected_account": null,
+    "upstream_auth_redacted_present": null
   },
-  "websocket_codex_status": "exit status: 0",
-  "websocket_codex_stderr_line_count": 18,
-  "websocket_codex_stdout_contains_smoke_text": true,
-  "websocket_last_message_path": "/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T/codex-router-installed-codex-6228-1782262739399/websocket-last-message.txt"
+  "websocket_codex_status": null,
+  "websocket_codex_stderr_line_count": null,
+  "websocket_codex_stdout_contains_smoke_text": null,
+  "websocket_last_message_written": false
 }

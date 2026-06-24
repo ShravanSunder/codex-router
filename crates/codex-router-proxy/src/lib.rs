@@ -1474,6 +1474,87 @@ mod tests {
     }
 
     #[test]
+    fn repository_backed_selector_allows_reserve_affinity_owner_outside_selected_pool() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_reserve_affinity_owner");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 5, true), (604_800, 80, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 90, true), (604_800, 20, false)],
+        );
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
+            &state,
+            "resp_beta",
+            &affinity_secret,
+            beta.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_body(br#"{"previous_response_id":"resp_beta"}"#.to_vec()),
+            TokenGeneration::new(1),
+            Some(&affinity_secret),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("reserve affinity owner should remain usable: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), beta.account_id());
+        assert_eq!(selected.selection_reason(), "previous_response_affinity");
+    }
+
+    #[test]
+    fn repository_backed_selector_ignores_previous_response_id_for_non_capable_routes() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_non_capable_previous_response");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let compact = AccountRecord::new(
+            account_id("acct_compact"),
+            "compact",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &compact,
+            "responses_compact",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses/compact")
+                .with_body(br#"{"previous_response_id":"resp_passthrough"}"#.to_vec()),
+            TokenGeneration::new(1),
+            None,
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("non-capable route should ignore affinity field: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), compact.account_id());
+    }
+
+    #[test]
     fn repository_backed_selector_affinity_missing_owner_fails_closed() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_missing_owner");
         let database_path = temp_dir.path().join("state.sqlite");

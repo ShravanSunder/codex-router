@@ -112,11 +112,10 @@ fn has_forbidden_query_auth_carrier(path: &str) -> bool {
     };
 
     query.split('&').any(|pair| {
-        let name = pair
-            .split_once('=')
-            .map_or(pair, |(name, _value)| name)
-            .to_ascii_lowercase();
-        is_forbidden_auth_field_name(&name)
+        let name = pair.split_once('=').map_or(pair, |(name, _value)| name);
+        canonical_auth_field_name(name)
+            .as_deref()
+            .is_some_and(is_forbidden_auth_field_name)
     })
 }
 
@@ -137,8 +136,50 @@ pub(crate) fn has_forbidden_top_level_json_auth_carrier(body: &[u8]) -> bool {
 
     object
         .keys()
-        .map(|key| key.to_ascii_lowercase())
+        .filter_map(|key| canonical_auth_field_name(key))
         .any(|key| is_forbidden_auth_field_name(&key))
+}
+
+fn canonical_auth_field_name(name: &str) -> Option<String> {
+    let decoded = percent_decode(name)?;
+    Some(
+        decoded
+            .trim()
+            .chars()
+            .map(|character| match character {
+                '-' | '_' | '.' | ' ' => '_',
+                other => other.to_ascii_lowercase(),
+            })
+            .collect::<String>(),
+    )
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            output.push(hex_value(high)? << 4 | hex_value(low)?);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+
+    String::from_utf8(output).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn is_forbidden_auth_field_name(name: &str) -> bool {
@@ -146,6 +187,7 @@ fn is_forbidden_auth_field_name(name: &str) -> bool {
         name,
         "authorization"
             | "x-codex-router-token"
+            | "x_codex_router_token"
             | "codex-router-token"
             | "codex_router_token"
             | "access_token"
@@ -209,6 +251,28 @@ mod tests {
             extract_presented_local_token_from_request(
                 Some("router-token"),
                 None,
+                None,
+                "/v1/responses?authoriz%61tion=router-token",
+                b"{}",
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses?x.codex.router.token=router-token",
+                b"{}",
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
                 Some("session=router-token"),
                 "/v1/responses",
                 b"{}",
@@ -223,6 +287,17 @@ mod tests {
                 None,
                 "/v1/responses",
                 br#"{"x-codex-router-token":"router-token"}"#,
+                true,
+            ),
+            Err(LocalAuthError::Wrong)
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#"{"x.codex.router.token":"router-token"}"#,
                 true,
             ),
             Err(LocalAuthError::Wrong)

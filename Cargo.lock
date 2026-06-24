@@ -176,6 +176,7 @@ dependencies = [
  "codex-router-secret-store",
  "codex-router-state",
  "serde_json",
+ "sha2",
  "tungstenite",
 ]
 

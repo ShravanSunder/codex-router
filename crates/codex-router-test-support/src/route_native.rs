@@ -58,7 +58,7 @@ pub fn run_route_native_black_box() -> Result<RouteNativeReport, String> {
         router_address,
         "POST",
         "/v1/responses/compact",
-        br#"{"input":"compact canary"}"#,
+        br#"{"input":"compact canary","previous_response_id":"resp_compact_passthrough"}"#,
     )?;
     assert_success_response(&compact, "POST /v1/responses/compact")?;
 

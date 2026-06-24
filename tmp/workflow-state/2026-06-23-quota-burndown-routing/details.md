@@ -34,6 +34,8 @@ Out of scope unless explicitly brought back into this goal:
 
 - merging the PR
 - unrelated OAuth/keychain work not required by quota routing/status proof
+- replacing the hand-rolled CLI parser with `clap`; track as a follow-up
+  cleanup slice after the quota routing proof is stable
 - destructive cleanup of unrelated dirty worktree files
 - weakening or deleting proof gates to make the lifecycle pass
 
@@ -55,6 +57,56 @@ Historical phase updates below are retained as a log, not active instructions.
 When older sections mention `phase_result` or rejected generated-profile auth
 shapes, the active source of truth is the required-reading list above, the
 latest orchestrator event, and the current primary spec.
+
+## Current Phase Update: Implementation Review Fixes Folded
+
+Implementation-review findings accepted after the T8/T9/T10 checkpoints have
+been folded into the implementation and proof harness:
+
+- installed-Codex HTTP/SSE and WebSocket proof is transport-specific and each
+  transport now asserts the exact expected upstream account, not merely any
+  routable account token.
+- redacted installed-Codex evidence now records `mode`,
+  `profile_env_key = CODEX_ROUTER_TOKEN`, local-auth carrier/validation,
+  local-auth stripping, safe selected label/tag, and
+  `selected_expected_account = true` per transport without temp paths or token
+  material.
+- loopback runtime account selection now uses the configured quota clock,
+  keeping live routing aligned with quota status and persisted selector state.
+- HTTP/SSE local-auth smuggling detection normalizes percent-encoded and
+  separator-variant auth field names.
+- previous-response affinity is scoped to affinity-capable routes; non-capable
+  routes forward top-level `previous_response_id` as ordinary upstream payload.
+- reserve affinity owners remain valid when the owner is usable or reserve but
+  outside the current weighted selected pool.
+- route-native proof now asserts query preservation, HTTP body canaries, and
+  non-capable compact `previous_response_id` pass-through.
+- installed-Codex smoke runtime cleanup now drains and joins router/upstream
+  threads on failure paths.
+- Follow-up recorded: replace the hand-rolled CLI parser with `clap` after this
+  quota-routing proof is stable.
+
+Fresh proof:
+
+- `cargo test -p codex-router-proxy local_auth -- --nocapture`: 12 passed.
+- `cargo test -p codex-router-proxy repository_backed_selector_ -- --nocapture`:
+  17 passed.
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture`:
+  2 passed.
+- `tests/smoke/installed_codex_mock.sh --transport http-sse`: 2 passed.
+- `tests/smoke/installed_codex_mock.sh --transport websocket`: 2 passed.
+- installed-Codex evidence copy selected transcripts by JSON `mode` and
+  verified `selected_expected_account = true`.
+- installed-Codex evidence redaction scan passed.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed.
+
+Remaining before terminal completion:
+
+- rerun implementation-review-swarm against the updated diff
+- PR readiness wrapup with fresh checks/review-thread state
 
 ## Current Phase Update: Plan Review Findings Folded Into Plan
 

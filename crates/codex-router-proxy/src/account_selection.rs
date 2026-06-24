@@ -13,6 +13,7 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::routes::RouteBand;
 use codex_router_quota::snapshot::SnapshotFreshness;
+use codex_router_selection::burn_down::AccountAvailability;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
@@ -256,7 +257,8 @@ where
         _token_generation: TokenGeneration,
         affinity_secret: Option<&RouterAffinityHashSecret>,
     ) -> Result<SelectedAccountDecision, HttpProxyError> {
-        let route_band = route_band_for_request(request)?;
+        let route_kind = route_kind_for_request(request)?;
+        let route_band = route_kind.route_band();
         let now_unix_seconds = (self.clock)();
         let selector_inputs = self
             .state_repository
@@ -292,7 +294,9 @@ where
                 .map_err(|_error| HttpProxyError::Selection {
                     reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
                 })?;
-        if let Some(previous_response_id) = previous_response_id(request)? {
+        if route_kind.previous_response_affinity_capable()
+            && let Some(previous_response_id) = previous_response_id(request)?
+        {
             let affinity_secret = affinity_secret.ok_or(HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::SecretUnavailable,
             })?;
@@ -348,11 +352,13 @@ fn select_affinity_owner(
     account_holds: &mut HashMap<String, AccountHold>,
     now_unix_seconds: u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
-    let weighted_candidates = assessment.weighted_candidates();
-    if !weighted_candidates
-        .iter()
-        .any(|(account_id, _weight)| account_id == owner_account_id)
-    {
+    if !assessment.accounts().iter().any(|account| {
+        account.account_id() == owner_account_id
+            && matches!(
+                account.availability(),
+                AccountAvailability::Usable | AccountAvailability::Reserve
+            )
+    }) {
         account_holds.remove(route_band.as_str());
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
@@ -528,14 +534,16 @@ fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAcco
         .with_active_credential(input.active_credential_generation().is_some())
 }
 
-fn route_band_for_request(request: &HttpProxyRequest) -> Result<RouteBand, HttpProxyError> {
+fn route_kind_for_request(
+    request: &HttpProxyRequest,
+) -> Result<crate::routes::RouteKind, HttpProxyError> {
     let classification_path = path_without_query(request.path());
     match classify_route(
         request.method(),
         classification_path,
         request.websocket_upgrade(),
     ) {
-        RouteClass::Supported(route_kind) => Ok(route_kind.route_band()),
+        RouteClass::Supported(route_kind) => Ok(route_kind),
         RouteClass::Rejected { reason } => Err(HttpProxyError::Rejected { reason }),
     }
 }

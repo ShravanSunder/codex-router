@@ -82,6 +82,7 @@ impl RouteNativeTranscript {
 pub struct RouteNativeRecordedRequest {
     method: String,
     path: String,
+    full_path: String,
     authorization_present: bool,
     selected_account_label: Option<String>,
     local_auth_header_present: bool,
@@ -99,6 +100,18 @@ impl RouteNativeRecordedRequest {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Returns the recorded upstream path including any query string.
+    #[must_use]
+    pub fn full_path(&self) -> &str {
+        &self.full_path
+    }
+
+    /// Returns the recorded upstream body.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
     }
 
     /// Returns whether upstream Authorization was present.
@@ -159,6 +172,31 @@ pub(super) fn assert_route_native_transcript(
             request.selected_account_label().map(str::to_owned),
         );
     }
+    let responses = request_for(transcript, "POST", "/v1/responses")?;
+    if responses.full_path() != "/v1/responses?route_native=1" {
+        return Err(format!(
+            "route-native responses request did not preserve query: {}",
+            responses.full_path()
+        ));
+    }
+    if !responses.body().contains("route-native prompt") {
+        return Err("route-native responses body did not preserve prompt canary".to_owned());
+    }
+    let memories = request_for(transcript, "POST", "/v1/memories/trace_summarize")?;
+    if !memories.body().contains("trace summary canary") {
+        return Err("route-native memories body did not preserve trace canary".to_owned());
+    }
+    let compact = request_for(transcript, "POST", "/v1/responses/compact")?;
+    if !compact.body().contains("compact canary")
+        || !compact
+            .body()
+            .contains(r#""previous_response_id":"resp_compact_passthrough""#)
+    {
+        return Err(
+            "route-native compact body did not preserve non-capable previous_response_id payload"
+                .to_owned(),
+        );
+    }
     for expected in [
         (
             "POST".to_owned(),
@@ -200,6 +238,18 @@ pub(super) fn assert_route_native_transcript(
     }
 
     Ok(())
+}
+
+fn request_for<'a>(
+    transcript: &'a RouteNativeTranscript,
+    method: &str,
+    path: &str,
+) -> Result<&'a RouteNativeRecordedRequest, String> {
+    transcript
+        .requests()
+        .iter()
+        .find(|request| request.method() == method && request.path() == path)
+        .ok_or_else(|| format!("route-native upstream missed request {method} {path}"))
 }
 
 fn run_route_native_upstream(
@@ -292,6 +342,7 @@ fn handle_upstream_websocket(
         .push(RouteNativeRecordedRequest {
             method: "WEBSOCKET".to_owned(),
             path: "/v1/responses".to_owned(),
+            full_path: "/v1/responses".to_owned(),
             authorization_present,
             selected_account_label,
             local_auth_header_present,
@@ -350,13 +401,11 @@ fn recorded_from_http_request(raw_request: &str) -> Result<RouteNativeRecordedRe
         .next()
         .ok_or_else(|| "route-native HTTP request missed method".to_owned())?
         .to_owned();
-    let path = parts
+    let full_path = parts
         .next()
         .ok_or_else(|| "route-native HTTP request missed path".to_owned())?
-        .split('?')
-        .next()
-        .unwrap_or("")
         .to_owned();
+    let path = full_path.split('?').next().unwrap_or("").to_owned();
     let headers = lines
         .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -380,6 +429,7 @@ fn recorded_from_http_request(raw_request: &str) -> Result<RouteNativeRecordedRe
     Ok(RouteNativeRecordedRequest {
         method,
         path,
+        full_path,
         authorization_present,
         selected_account_label,
         local_auth_header_present,

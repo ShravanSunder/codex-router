@@ -1,5 +1,6 @@
 //! Installed Codex smoke harness.
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
@@ -49,6 +50,8 @@ use codex_router_state::repositories::QuotaSnapshotRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::SqliteStateStore;
 use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
 use tungstenite::Message;
 use tungstenite::accept_hdr;
 use tungstenite::client::IntoClientRequest;
@@ -59,6 +62,31 @@ use tungstenite::handshake::server::Response;
 const SMOKE_EXPECTED_TEXT: &str = "codex-router smoke ok";
 const CODEX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(35);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstalledCodexSmokeMode {
+    HttpSse,
+    WebSocket,
+    Combined,
+}
+
+impl InstalledCodexSmokeMode {
+    const fn requires_http_sse(self) -> bool {
+        matches!(self, Self::HttpSse | Self::Combined)
+    }
+
+    const fn requires_websocket(self) -> bool {
+        matches!(self, Self::WebSocket | Self::Combined)
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::HttpSse => "http-sse",
+            Self::WebSocket => "websocket",
+            Self::Combined => "combined",
+        }
+    }
+}
 
 /// Redacted report produced by the installed Codex smoke harness.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,6 +104,22 @@ impl InstalledCodexSmokeReport {
 
 /// Runs the installed Codex mock smoke.
 pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, String> {
+    run_installed_codex_mock_smoke_with_mode(InstalledCodexSmokeMode::Combined)
+}
+
+/// Runs the installed Codex HTTP/SSE mock smoke.
+pub fn run_installed_codex_http_sse_mock_smoke() -> Result<InstalledCodexSmokeReport, String> {
+    run_installed_codex_mock_smoke_with_mode(InstalledCodexSmokeMode::HttpSse)
+}
+
+/// Runs the installed Codex WebSocket mock smoke.
+pub fn run_installed_codex_websocket_mock_smoke() -> Result<InstalledCodexSmokeReport, String> {
+    run_installed_codex_mock_smoke_with_mode(InstalledCodexSmokeMode::WebSocket)
+}
+
+fn run_installed_codex_mock_smoke_with_mode(
+    mode: InstalledCodexSmokeMode,
+) -> Result<InstalledCodexSmokeReport, String> {
     let smoke_root = SmokeTempRoot::new("installed-codex")?;
     let codex_home = smoke_root.path().join("codex-home");
     let workdir = smoke_root.path().join("workdir");
@@ -119,7 +163,7 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
     })?;
 
     let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
-    let upstream = MockWebSocketUpstream::start()?;
+    let upstream = MockWebSocketUpstream::start(mode)?;
     let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
     let profile_writer = CodexRouterProfileWriter::new(&codex_home);
@@ -130,82 +174,109 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
     let profile_path = profile_writer
         .write(&profile, true, Some(profile_preview.preview_token()))
         .map_err(|error| format!("failed to write generated Codex profile: {error}"))?;
-    let router_thread = start_router_once(
+    let router_thread = RouterThreadGuard::new(
         router_port,
-        state_path,
-        secret_root,
-        seed.local_token.clone(),
-        format!("http://{}/v1", upstream.address()),
-    )?;
+        start_router_once(
+            router_port,
+            state_path,
+            secret_root,
+            seed.local_token.clone(),
+            format!("http://{}/v1", upstream.address()),
+        )?,
+    );
 
     let http_sse_last_message_path = smoke_root.path().join("http-sse-last-message.txt");
-    let http_sse_codex_output = run_codex_exec(
-        CodexTransportMode::HttpSse,
-        &codex_home,
-        &workdir,
-        &http_sse_last_message_path,
-        &seed.local_token_assignment,
-        CodexChildEnvironment::new(
-            &process_home,
-            &xdg_config_home,
-            &xdg_state_home,
-            &xdg_cache_home,
-        ),
-    )?;
-    assert_codex_visible_output(
-        "HTTP/SSE",
-        &http_sse_codex_output,
-        &http_sse_last_message_path,
-    )?;
+    let http_sse_codex_output = if mode.requires_http_sse() {
+        let output = run_codex_exec(
+            CodexTransportMode::HttpSse,
+            &codex_home,
+            &workdir,
+            &http_sse_last_message_path,
+            &seed.local_token_assignment,
+            CodexChildEnvironment::new(
+                &process_home,
+                &xdg_config_home,
+                &xdg_state_home,
+                &xdg_cache_home,
+            ),
+        )?;
+        assert_codex_visible_output("HTTP/SSE", &output, &http_sse_last_message_path)?;
+        Some(output)
+    } else {
+        None
+    };
     let websocket_last_message_path = smoke_root.path().join("websocket-last-message.txt");
-    let websocket_codex_output = run_codex_exec(
-        CodexTransportMode::WebSocket,
-        &codex_home,
-        &workdir,
-        &websocket_last_message_path,
-        &seed.local_token_assignment,
-        CodexChildEnvironment::new(
-            &process_home,
-            &xdg_config_home,
-            &xdg_state_home,
-            &xdg_cache_home,
-        ),
-    )?;
-    assert_codex_visible_output(
-        "WebSocket",
-        &websocket_codex_output,
-        &websocket_last_message_path,
-    )?;
-    drain_optional_router_connections(router_port, 16);
-    join_result(router_thread, "router runtime")?;
+    let websocket_codex_output = if mode.requires_websocket() {
+        let output = run_codex_exec(
+            CodexTransportMode::WebSocket,
+            &codex_home,
+            &workdir,
+            &websocket_last_message_path,
+            &seed.local_token_assignment,
+            CodexChildEnvironment::new(
+                &process_home,
+                &xdg_config_home,
+                &xdg_state_home,
+                &xdg_cache_home,
+            ),
+        )?;
+        assert_codex_visible_output("WebSocket", &output, &websocket_last_message_path)?;
+        Some(output)
+    } else {
+        None
+    };
+    router_thread.join("router runtime")?;
     let upstream_result = upstream.join().map_err(|error| {
         format!(
             "{error}; websocket_codex_status={}; websocket_stdout={}; websocket_stderr={}",
-            websocket_codex_output.status,
-            redacted_command_text(&websocket_codex_output.stdout, &seed),
-            redacted_command_text(&websocket_codex_output.stderr, &seed)
+            output_status_text(websocket_codex_output.as_ref()),
+            redacted_optional_command_text(
+                websocket_codex_output.as_ref().map(|output| &output.stdout),
+                &seed
+            ),
+            redacted_optional_command_text(
+                websocket_codex_output.as_ref().map(|output| &output.stderr),
+                &seed
+            )
         )
     })?;
     assert_smoke_contract(SmokeContractAssertion {
-        http_sse_codex_status: &http_sse_codex_output.status,
-        websocket_codex_status: &websocket_codex_output.status,
+        mode,
+        http_sse_codex_status: http_sse_codex_output.as_ref().map(|output| &output.status),
+        websocket_codex_status: websocket_codex_output.as_ref().map(|output| &output.status),
         upstream: &upstream_result,
         local_token: &seed.local_token,
         expected_account_label: &seed.expected_account_label,
+        expected_upstream_token: &seed.expected_upstream_token,
         routable_upstream_tokens: &seed.routable_upstream_tokens,
         quota_status: &seed.quota_status,
     })?;
     let transcript_path = write_redacted_transcript(RedactedTranscriptInput {
+        mode,
         codex_version: codex_version.trim(),
         profile_path: &profile_path,
-        http_sse_codex_status: &http_sse_codex_output.status,
-        http_sse_codex_stdout: &String::from_utf8_lossy(&http_sse_codex_output.stdout),
-        http_sse_codex_stderr: &String::from_utf8_lossy(&http_sse_codex_output.stderr),
-        http_sse_last_message_path: &http_sse_last_message_path,
-        websocket_codex_status: &websocket_codex_output.status,
-        websocket_codex_stdout: &String::from_utf8_lossy(&websocket_codex_output.stdout),
-        websocket_codex_stderr: &String::from_utf8_lossy(&websocket_codex_output.stderr),
-        websocket_last_message_path: &websocket_last_message_path,
+        profile_uses_codex_router_token: profile_uses_codex_router_token(&profile_path)?,
+        expected_upstream_token: &seed.expected_upstream_token,
+        http_sse_codex_status: http_sse_codex_output.as_ref().map(|output| &output.status),
+        http_sse_codex_stdout: http_sse_codex_output
+            .as_ref()
+            .map(|output| String::from_utf8_lossy(&output.stdout)),
+        http_sse_codex_stderr: http_sse_codex_output
+            .as_ref()
+            .map(|output| String::from_utf8_lossy(&output.stderr)),
+        http_sse_last_message_path: mode
+            .requires_http_sse()
+            .then_some(http_sse_last_message_path.as_path()),
+        websocket_codex_status: websocket_codex_output.as_ref().map(|output| &output.status),
+        websocket_codex_stdout: websocket_codex_output
+            .as_ref()
+            .map(|output| String::from_utf8_lossy(&output.stdout)),
+        websocket_codex_stderr: websocket_codex_output
+            .as_ref()
+            .map(|output| String::from_utf8_lossy(&output.stderr)),
+        websocket_last_message_path: mode
+            .requires_websocket()
+            .then_some(websocket_last_message_path.as_path()),
         upstream: &upstream_result,
         quota_status: &seed.quota_status,
         expected_account_label: &seed.expected_account_label,
@@ -230,17 +301,19 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
     let upstream = MockNoConnectionUpstream::start(Duration::from_secs(3))?;
     let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
-    let router_thread = start_router_once(
+    let router_thread = RouterThreadGuard::new(
         router_port,
-        state_path,
-        secret_root,
-        seed.local_token,
-        format!("http://{}/v1", upstream.address()),
-    )?;
+        start_router_once(
+            router_port,
+            state_path,
+            secret_root,
+            seed.local_token,
+            format!("http://{}/v1", upstream.address()),
+        )?,
+    );
 
     send_hostile_no_token_websocket(router_port)?;
-    drain_optional_router_connections(router_port, 15);
-    join_result(router_thread, "hostile no-token router runtime")?;
+    router_thread.join("hostile no-token router runtime")?;
     let upstream_connection_count = upstream.join()?;
     if upstream_connection_count != 0 {
         return Err(format!(
@@ -280,6 +353,39 @@ struct SmokeAccountFixture {
     weekly_status: SelectorQuotaWindowStatus,
 }
 
+const SMOKE_ACCOUNT_FIXTURES: &[SmokeAccountFixture] = &[
+    SmokeAccountFixture {
+        account_id: "acct_askluna",
+        label: "askluna",
+        upstream_token: "installed-smoke-askluna-token",
+        short_remaining: 100,
+        short_reset: 17_900,
+        weekly_remaining: 0,
+        weekly_reset: 130_600,
+        weekly_status: SelectorQuotaWindowStatus::Ineligible,
+    },
+    SmokeAccountFixture {
+        account_id: "acct_matches",
+        label: "matches",
+        upstream_token: "installed-smoke-matches-token",
+        short_remaining: 91,
+        short_reset: 16_000,
+        weekly_remaining: 54,
+        weekly_reset: 525_000,
+        weekly_status: SelectorQuotaWindowStatus::Eligible,
+    },
+    SmokeAccountFixture {
+        account_id: "acct_ssdev",
+        label: "ssdev",
+        upstream_token: "installed-smoke-ssdev-token",
+        short_remaining: 100,
+        short_reset: 15_000,
+        weekly_remaining: 16,
+        weekly_reset: 120_000,
+        weekly_status: SelectorQuotaWindowStatus::Eligible,
+    },
+];
+
 fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed, String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open smoke SQLite state: {error}"))?;
@@ -296,45 +402,13 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
     );
     let exported_token = parse_posix_token_assignment(&local_token_assignment)?;
 
-    let fixtures = [
-        SmokeAccountFixture {
-            account_id: "acct_askluna",
-            label: "askluna",
-            upstream_token: "installed-smoke-askluna-token",
-            short_remaining: 100,
-            short_reset: 17_900,
-            weekly_remaining: 0,
-            weekly_reset: 130_600,
-            weekly_status: SelectorQuotaWindowStatus::Ineligible,
-        },
-        SmokeAccountFixture {
-            account_id: "acct_matches",
-            label: "matches",
-            upstream_token: "installed-smoke-matches-token",
-            short_remaining: 91,
-            short_reset: 16_000,
-            weekly_remaining: 54,
-            weekly_reset: 525_000,
-            weekly_status: SelectorQuotaWindowStatus::Eligible,
-        },
-        SmokeAccountFixture {
-            account_id: "acct_ssdev",
-            label: "ssdev",
-            upstream_token: "installed-smoke-ssdev-token",
-            short_remaining: 100,
-            short_reset: 15_000,
-            weekly_remaining: 16,
-            weekly_reset: 120_000,
-            weekly_status: SelectorQuotaWindowStatus::Eligible,
-        },
-    ];
-    for fixture in fixtures {
-        seed_smoke_account(&state, &secrets, fixture)?;
+    for fixture in SMOKE_ACCOUNT_FIXTURES {
+        seed_smoke_account(&state, &secrets, *fixture)?;
     }
 
     let quota_status = capture_quota_status(state_path)?;
     let selected_account_id = selected_account_id_from_status_json(&quota_status.json)?;
-    let selected_fixture = fixtures
+    let selected_fixture = SMOKE_ACCOUNT_FIXTURES
         .iter()
         .find(|fixture| fixture.account_id == selected_account_id)
         .ok_or_else(|| {
@@ -346,7 +420,7 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
         local_token: exported_token,
         expected_account_label: selected_fixture.label.to_owned(),
         expected_upstream_token: selected_fixture.upstream_token.to_owned(),
-        routable_upstream_tokens: fixtures
+        routable_upstream_tokens: SMOKE_ACCOUNT_FIXTURES
             .iter()
             .filter(|fixture| fixture.weekly_status == SelectorQuotaWindowStatus::Eligible)
             .map(|fixture| fixture.upstream_token.to_owned())
@@ -510,6 +584,13 @@ fn selected_account_label_from_status_json(payload: &str) -> Result<String, Stri
             })
         })
         .ok_or_else(|| "quota status json did not include selected account label".to_owned())
+}
+
+fn smoke_account_label_from_upstream_token(token: &str) -> Option<&'static str> {
+    SMOKE_ACCOUNT_FIXTURES
+        .iter()
+        .find(|fixture| fixture.upstream_token == token)
+        .map(|fixture| fixture.label)
 }
 
 fn start_router_once(
@@ -704,106 +785,51 @@ fn assert_codex_visible_output(
 }
 
 struct SmokeContractAssertion<'a> {
-    http_sse_codex_status: &'a ExitStatus,
-    websocket_codex_status: &'a ExitStatus,
+    mode: InstalledCodexSmokeMode,
+    http_sse_codex_status: Option<&'a ExitStatus>,
+    websocket_codex_status: Option<&'a ExitStatus>,
     upstream: &'a MockWebSocketTranscript,
     local_token: &'a str,
     expected_account_label: &'a str,
+    expected_upstream_token: &'a str,
     routable_upstream_tokens: &'a [String],
     quota_status: &'a SmokeQuotaStatus,
 }
 
 fn assert_smoke_contract(assertion: SmokeContractAssertion<'_>) -> Result<(), String> {
-    if !assertion.http_sse_codex_status.success() {
+    if let Some(status) = assertion.http_sse_codex_status
+        && !status.success()
+    {
         return Err(format!(
-            "installed codex HTTP/SSE smoke exited with status {}",
-            assertion.http_sse_codex_status
+            "installed codex HTTP/SSE smoke exited with status {status}"
         ));
     }
-    if !assertion.websocket_codex_status.success() {
+    if let Some(status) = assertion.websocket_codex_status
+        && !status.success()
+    {
         return Err(format!(
-            "installed codex WebSocket smoke exited with status {}",
-            assertion.websocket_codex_status
+            "installed codex WebSocket smoke exited with status {status}"
         ));
     }
-    let authorization = assertion
-        .upstream
-        .header("authorization")
-        .ok_or_else(|| "mock upstream did not receive Authorization header".to_owned())?;
-    let websocket_token = authorization
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| "mock upstream Authorization header was not bearer".to_owned())?;
-    if !assertion
-        .routable_upstream_tokens
-        .iter()
-        .any(|token| token == websocket_token)
+    let http_sse_authorization = if assertion.mode.requires_http_sse() {
+        Some(assert_http_sse_contract(&assertion)?)
+    } else {
+        None
+    };
+    let websocket_authorization = if assertion.mode.requires_websocket() {
+        Some(assert_websocket_contract(&assertion)?)
+    } else {
+        None
+    };
+    if assertion.mode == InstalledCodexSmokeMode::Combined
+        && http_sse_authorization != websocket_authorization
     {
-        return Err(
-            "mock upstream WebSocket token was not one of the routable account tokens".to_owned(),
-        );
-    }
-    if assertion.upstream.header("x-codex-router-token").is_some() {
-        return Err("mock upstream websocket received local router token header".to_owned());
-    }
-    if assertion
-        .upstream
-        .request_frames
-        .iter()
-        .any(|frame| frame.contains(assertion.local_token))
-    {
-        return Err("mock upstream websocket frame leaked local router token".to_owned());
-    }
-    let http_sse =
-        assertion.upstream.http_sse.as_ref().ok_or_else(|| {
-            "mock upstream did not capture HTTP/SSE /v1/responses traffic".to_owned()
-        })?;
-    if !http_sse.request_line.starts_with("POST /v1/responses ") {
         return Err(format!(
-            "HTTP/SSE request was not POST /v1/responses: {}",
-            http_sse.request_line
+            "WebSocket did not reuse the held HTTP/SSE account inside cooldown; expected_account_hint={}; http_sse_authorization={}; websocket_authorization={}",
+            assertion.expected_account_label,
+            http_sse_authorization.unwrap_or_else(|| "<missing>".to_owned()),
+            websocket_authorization.unwrap_or_else(|| "<missing>".to_owned())
         ));
-    }
-    if http_sse.header("x-codex-router-token").is_some() {
-        return Err("HTTP/SSE request leaked local router token header upstream".to_owned());
-    }
-    if http_sse.body.contains(assertion.local_token) {
-        return Err("HTTP/SSE request body leaked local router token upstream".to_owned());
-    }
-    if !http_sse.body.contains("\"stream\":true") {
-        return Err("HTTP/SSE request did not ask for a streaming response".to_owned());
-    }
-    let http_sse_authorization = http_sse
-        .header("authorization")
-        .ok_or_else(|| "HTTP/SSE request did not receive an Authorization header".to_owned())?;
-    let http_sse_token = http_sse_authorization
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| "HTTP/SSE Authorization header was not bearer".to_owned())?;
-    if !assertion
-        .routable_upstream_tokens
-        .iter()
-        .any(|token| token == http_sse_token)
-    {
-        return Err("HTTP/SSE token was not one of the routable account tokens".to_owned());
-    }
-    if http_sse_authorization != authorization {
-        return Err(format!(
-            "WebSocket did not reuse the held HTTP/SSE account inside cooldown; expected_account_hint={}; http_sse_authorization={http_sse_authorization}; websocket_authorization={authorization}",
-            assertion.expected_account_label
-        ));
-    }
-    if assertion.upstream.websocket_request_frame_count == 0 {
-        return Err("mock upstream did not receive a WebSocket request frame".to_owned());
-    }
-    if !assertion
-        .upstream
-        .request_frames
-        .iter()
-        .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
-        .any(|value| is_non_prewarm_response_create_frame(&value))
-    {
-        return Err(
-            "mock upstream did not receive a non-prewarm WebSocket response request".to_owned(),
-        );
     }
     if !assertion
         .quota_status
@@ -848,20 +874,139 @@ fn assert_smoke_contract(assertion: SmokeContractAssertion<'_>) -> Result<(), St
     Ok(())
 }
 
+fn assert_http_sse_contract(assertion: &SmokeContractAssertion<'_>) -> Result<String, String> {
+    let http_sse =
+        assertion.upstream.http_sse.as_ref().ok_or_else(|| {
+            "mock upstream did not capture HTTP/SSE /v1/responses traffic".to_owned()
+        })?;
+    if !http_sse.request_line.starts_with("POST /v1/responses ") {
+        return Err(format!(
+            "HTTP/SSE request was not POST /v1/responses: {}",
+            http_sse.request_line
+        ));
+    }
+    if http_sse.header("x-codex-router-token").is_some() {
+        return Err("HTTP/SSE request leaked local router token header upstream".to_owned());
+    }
+    if http_sse.body.contains(assertion.local_token) {
+        return Err("HTTP/SSE request body leaked local router token upstream".to_owned());
+    }
+    if !http_sse.body.contains("\"stream\":true") {
+        return Err("HTTP/SSE request did not ask for a streaming response".to_owned());
+    }
+    let authorization = http_sse
+        .header("authorization")
+        .ok_or_else(|| "HTTP/SSE request did not receive an Authorization header".to_owned())?;
+    let token = authorization
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| "HTTP/SSE Authorization header was not bearer".to_owned())?;
+    if !assertion
+        .routable_upstream_tokens
+        .iter()
+        .any(|routable_token| routable_token == token)
+    {
+        return Err("HTTP/SSE token was not one of the routable account tokens".to_owned());
+    }
+    if token != assertion.expected_upstream_token {
+        return Err(format!(
+            "HTTP/SSE selected a different upstream account than expected; expected_label={}; actual_label={}",
+            assertion.expected_account_label,
+            smoke_account_label_from_upstream_token(token).unwrap_or("<unknown>")
+        ));
+    }
+
+    Ok(authorization)
+}
+
+fn assert_websocket_contract(assertion: &SmokeContractAssertion<'_>) -> Result<String, String> {
+    let authorization = assertion
+        .upstream
+        .header("authorization")
+        .ok_or_else(|| "mock upstream did not receive Authorization header".to_owned())?;
+    let websocket_token = authorization
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| "mock upstream Authorization header was not bearer".to_owned())?;
+    if !assertion
+        .routable_upstream_tokens
+        .iter()
+        .any(|token| token == websocket_token)
+    {
+        return Err(
+            "mock upstream WebSocket token was not one of the routable account tokens".to_owned(),
+        );
+    }
+    if websocket_token != assertion.expected_upstream_token {
+        return Err(format!(
+            "mock upstream WebSocket selected a different account than expected; expected_label={}; actual_label={}",
+            assertion.expected_account_label,
+            smoke_account_label_from_upstream_token(websocket_token).unwrap_or("<unknown>")
+        ));
+    }
+    if assertion.upstream.header("x-codex-router-token").is_some() {
+        return Err("mock upstream websocket received local router token header".to_owned());
+    }
+    if assertion
+        .upstream
+        .request_frames
+        .iter()
+        .any(|frame| frame.contains(assertion.local_token))
+    {
+        return Err("mock upstream websocket frame leaked local router token".to_owned());
+    }
+    if assertion.upstream.websocket_request_frame_count == 0 {
+        return Err("mock upstream did not receive a WebSocket request frame".to_owned());
+    }
+    if !assertion
+        .upstream
+        .request_frames
+        .iter()
+        .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
+        .any(|value| is_non_prewarm_response_create_frame(&value))
+    {
+        return Err(
+            "mock upstream did not receive a non-prewarm WebSocket response request".to_owned(),
+        );
+    }
+
+    Ok(authorization)
+}
+
+fn bearer_token_from_authorization_header(authorization: Option<&str>) -> Option<&str> {
+    authorization?.strip_prefix("Bearer ")
+}
+
+fn authorization_header_matches_expected(
+    authorization: Option<String>,
+    expected_token: &str,
+) -> Option<bool> {
+    let authorization = authorization?;
+    Some(bearer_token_from_authorization_header(Some(&authorization))? == expected_token)
+}
+
+fn upstream_label_from_authorization_header(authorization: Option<String>) -> Option<&'static str> {
+    let authorization = authorization?;
+    smoke_account_label_from_upstream_token(bearer_token_from_authorization_header(Some(
+        &authorization,
+    ))?)
+}
+
 struct RedactedTranscriptInput<'a> {
+    mode: InstalledCodexSmokeMode,
     codex_version: &'a str,
     profile_path: &'a Path,
-    http_sse_codex_status: &'a ExitStatus,
-    http_sse_codex_stdout: &'a str,
-    http_sse_codex_stderr: &'a str,
-    http_sse_last_message_path: &'a Path,
-    websocket_codex_status: &'a ExitStatus,
-    websocket_codex_stdout: &'a str,
-    websocket_codex_stderr: &'a str,
-    websocket_last_message_path: &'a Path,
+    profile_uses_codex_router_token: bool,
+    http_sse_codex_status: Option<&'a ExitStatus>,
+    http_sse_codex_stdout: Option<Cow<'a, str>>,
+    http_sse_codex_stderr: Option<Cow<'a, str>>,
+    http_sse_last_message_path: Option<&'a Path>,
+    websocket_codex_status: Option<&'a ExitStatus>,
+    websocket_codex_stdout: Option<Cow<'a, str>>,
+    websocket_codex_stderr: Option<Cow<'a, str>>,
+    websocket_last_message_path: Option<&'a Path>,
     upstream: &'a MockWebSocketTranscript,
     quota_status: &'a SmokeQuotaStatus,
     expected_account_label: &'a str,
+    expected_upstream_token: &'a str,
 }
 
 fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathBuf, String> {
@@ -884,39 +1029,66 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         timestamp_millis()
     ));
     let first_frame = input.upstream.first_frame_json().unwrap_or(Value::Null);
+    let selected_account_id = selected_account_id_from_status_json(&input.quota_status.json)?;
+    let selected_account_tag = safe_account_tag(&selected_account_id);
+    let selected_account_label = selected_account_label_from_status_json(&input.quota_status.json)?;
     let redacted = serde_json::json!({
+        "mode": input.mode.as_str(),
         "codex_version": input.codex_version,
-        "profile_path": input.profile_path.display().to_string(),
-        "http_sse_codex_status": input.http_sse_codex_status.to_string(),
-        "http_sse_codex_stdout_contains_smoke_text": input.http_sse_codex_stdout.contains("codex-router smoke ok"),
-        "http_sse_codex_stderr_line_count": input.http_sse_codex_stderr.lines().count(),
-        "http_sse_last_message_path": input.http_sse_last_message_path.display().to_string(),
-        "websocket_codex_status": input.websocket_codex_status.to_string(),
-        "websocket_codex_stdout_contains_smoke_text": input.websocket_codex_stdout.contains("codex-router smoke ok"),
-        "websocket_codex_stderr_line_count": input.websocket_codex_stderr.lines().count(),
-        "websocket_last_message_path": input.websocket_last_message_path.display().to_string(),
+        "profile_written": input.profile_path.exists(),
+        "profile_env_key": "CODEX_ROUTER_TOKEN",
+        "profile_uses_codex_router_token": input.profile_uses_codex_router_token,
+        "http_sse_codex_status": input.http_sse_codex_status.map(ToString::to_string),
+        "http_sse_codex_stdout_contains_smoke_text": input.http_sse_codex_stdout.as_deref().map(|stdout| stdout.contains("codex-router smoke ok")),
+        "http_sse_codex_stderr_line_count": input.http_sse_codex_stderr.as_deref().map(str::lines).map(Iterator::count),
+        "http_sse_last_message_written": input.http_sse_last_message_path.is_some_and(Path::exists),
+        "websocket_codex_status": input.websocket_codex_status.map(ToString::to_string),
+        "websocket_codex_stdout_contains_smoke_text": input.websocket_codex_stdout.as_deref().map(|stdout| stdout.contains("codex-router smoke ok")),
+        "websocket_codex_stderr_line_count": input.websocket_codex_stderr.as_deref().map(str::lines).map(Iterator::count),
+        "websocket_last_message_written": input.websocket_last_message_path.is_some_and(Path::exists),
         "expected_account_label": input.expected_account_label,
+        "selected_account": {
+            "safe_label": selected_account_label,
+            "safe_tag": selected_account_tag,
+            "routing_reason": "preferred_next",
+        },
         "quota_status": {
             "table_contains_expected_account": input.quota_status.table.contains(input.expected_account_label),
             "plain_contains_expected_account": input.quota_status.plain.contains(input.expected_account_label),
             "plain_marks_next": input.quota_status.plain.contains("\tnext"),
-            "json_selected_account_label": selected_account_label_from_status_json(&input.quota_status.json).ok(),
+            "json_selected_account_label": selected_account_label,
+            "selected_account_tag": selected_account_tag,
         },
         "router_completed": true,
-        "upstream": {
-            "handshake_count": 1,
-            "http_probe_count": input.upstream.http_probe_count,
-            "http_sse_request_line": input.upstream.http_sse.as_ref().map(|request| request.request_line.as_str()),
-            "http_sse_authorization_header": input.upstream.http_sse.as_ref().and_then(|request| request.header("authorization")).map(|_| "<redacted-present>"),
-            "http_sse_local_router_header_present": input.upstream.http_sse.as_ref().and_then(|request| request.header("x-codex-router-token")).is_some(),
-            "http_sse_stream_requested": input.upstream.http_sse.as_ref().map(|request| request.body.contains("\"stream\":true")),
-            "http_sse_local_router_token_in_body": false,
-            "authorization_header": input.upstream.header("authorization").map(|_| "<redacted-present>"),
-            "local_router_header_present": input.upstream.header("x-codex-router-token").is_some(),
-            "websocket_local_router_token_in_first_frame": false,
-            "websocket_request_frame_count": input.upstream.websocket_request_frame_count,
-            "websocket_non_prewarm_request_frame_count": input.upstream.request_frames.iter().filter_map(|frame| serde_json::from_str::<Value>(frame).ok()).filter(is_non_prewarm_response_create_frame).count(),
+        "http_sse": {
+            "ran": input.mode.requires_http_sse(),
+            "local_auth_carrier": input.mode.requires_http_sse().then_some("authorization_bearer"),
+            "local_auth_validated": input.mode.requires_http_sse().then_some(true),
+            "local_auth_stripped_before_upstream": input.mode.requires_http_sse().then_some(input.upstream.http_sse.as_ref().and_then(|request| request.header("x-codex-router-token")).is_none()),
+            "upstream_auth_redacted_present": input.upstream.http_sse.as_ref().and_then(|request| request.header("authorization")).map(|_| true),
+            "selected_expected_account": input.upstream.http_sse.as_ref().and_then(|request| authorization_header_matches_expected(request.header("authorization"), input.expected_upstream_token)),
+            "actual_safe_label": input.upstream.http_sse.as_ref().and_then(|request| upstream_label_from_authorization_header(request.header("authorization"))),
+            "request_line": input.upstream.http_sse.as_ref().map(|request| request.request_line.as_str()),
+            "stream_requested": input.upstream.http_sse.as_ref().map(|request| request.body.contains("\"stream\":true")),
+            "local_router_token_in_body": false,
+        },
+        "websocket": {
+            "ran": input.mode.requires_websocket(),
+            "local_auth_carrier": input.mode.requires_websocket().then_some("authorization_bearer"),
+            "local_auth_validated": input.mode.requires_websocket().then_some(true),
+            "local_auth_stripped_before_upstream": input.mode.requires_websocket().then_some(input.upstream.header("x-codex-router-token").is_none()),
+            "upstream_auth_redacted_present": input.upstream.header("authorization").map(|_| true),
+            "selected_expected_account": authorization_header_matches_expected(input.upstream.header("authorization"), input.expected_upstream_token),
+            "actual_safe_label": upstream_label_from_authorization_header(input.upstream.header("authorization")),
+            "local_router_token_in_first_frame": false,
+            "request_frame_count": input.upstream.websocket_request_frame_count,
+            "non_prewarm_request_frame_count": input.upstream.request_frames.iter().filter_map(|frame| serde_json::from_str::<Value>(frame).ok()).filter(is_non_prewarm_response_create_frame).count(),
             "first_frame_shape": first_frame_shape_summary(&first_frame),
+            "routed_response_create_shape": response_create_frame_shape_summary(input.upstream),
+        },
+        "upstream": {
+            "handshake_count": input.upstream.websocket_handshake_count(),
+            "http_probe_count": input.upstream.http_probe_count,
         }
     });
     let payload = serde_json::to_string_pretty(&redacted)
@@ -935,31 +1107,69 @@ fn first_frame_shape_summary(first_frame: &Value) -> Value {
     })
 }
 
+fn response_create_frame_shape_summary(upstream: &MockWebSocketTranscript) -> Value {
+    let response_create = upstream
+        .request_frames
+        .iter()
+        .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
+        .find(is_non_prewarm_response_create_frame)
+        .unwrap_or(Value::Null);
+    serde_json::json!({
+        "present": response_create.is_object(),
+        "non_prewarm_response_create": is_non_prewarm_response_create_frame(&response_create),
+    })
+}
+
+fn safe_account_tag(account_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codex-router:smoke-selected-account:v1:");
+    hasher.update(account_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut output = String::from("acct-");
+    for byte in digest.iter().take(6) {
+        output.push(hex_digit(byte >> 4));
+        output.push(hex_digit(byte & 0x0f));
+    }
+    output
+}
+
+fn hex_digit(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0' + nibble),
+        10..=15 => char::from(b'a' + (nibble - 10)),
+        _ => unreachable!("nibble is masked to four bits"),
+    }
+}
+
 fn assert_redacted_transcript_payload(
     payload: &str,
     input: RedactedTranscriptInput<'_>,
 ) -> Result<(), String> {
     let forbidden_fragments = [
-        input.http_sse_codex_stdout,
-        input.http_sse_codex_stderr,
-        input.websocket_codex_stdout,
-        input.websocket_codex_stderr,
-        input.upstream.first_frame.as_str(),
+        input.http_sse_codex_stdout.as_deref(),
+        input.http_sse_codex_stderr.as_deref(),
+        input.websocket_codex_stdout.as_deref(),
+        input.websocket_codex_stderr.as_deref(),
+        (!input.upstream.first_frame.is_empty()).then_some(input.upstream.first_frame.as_str()),
         input
             .expected_account_label
             .strip_prefix("unsafe:")
-            .unwrap_or_default(),
-        "first_frame_model",
-        "first_frame_has_input",
-        "first_frame_stream",
-        "local-token-canary",
-        "installed-smoke-matches-token",
-        "prompt-canary",
-        "raw-previous-response-id-canary",
-        "affinity-secret-canary",
+            .filter(|value| !value.is_empty()),
+        Some("first_frame_model"),
+        Some("first_frame_has_input"),
+        Some("first_frame_stream"),
+        Some("local-token-canary"),
+        Some("installed-smoke-matches-token"),
+        Some("prompt-canary"),
+        Some("raw-previous-response-id-canary"),
+        Some("affinity-secret-canary"),
     ];
-    for forbidden in forbidden_fragments {
-        if !forbidden.is_empty() && payload.contains(forbidden) {
+    for forbidden in forbidden_fragments
+        .into_iter()
+        .flatten()
+        .filter(|fragment| !fragment.is_empty())
+    {
+        if payload.contains(forbidden) {
             return Err(format!(
                 "redacted smoke transcript leaked forbidden fragment: {forbidden}"
             ));
@@ -990,6 +1200,10 @@ impl MockWebSocketTranscript {
     fn first_frame_json(&self) -> Option<Value> {
         serde_json::from_str(&self.first_frame).ok()
     }
+
+    const fn websocket_handshake_count(&self) -> usize {
+        if self.headers.is_empty() { 0 } else { 1 }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1011,12 +1225,44 @@ impl MockHttpSseTranscript {
 struct MockWebSocketUpstream {
     address: String,
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
-    handle: thread::JoinHandle<Result<(), String>>,
+    handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
 struct MockNoConnectionUpstream {
     address: String,
-    handle: thread::JoinHandle<Result<usize, String>>,
+    handle: Option<thread::JoinHandle<Result<usize, String>>>,
+}
+
+struct RouterThreadGuard {
+    router_port: u16,
+    handle: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+impl RouterThreadGuard {
+    fn new(router_port: u16, handle: thread::JoinHandle<Result<(), String>>) -> Self {
+        Self {
+            router_port,
+            handle: Some(handle),
+        }
+    }
+
+    fn join(mut self, label: &str) -> Result<(), String> {
+        drain_optional_router_connections(self.router_port, 16);
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| format!("{label} was already joined"))?;
+        join_result(handle, label)
+    }
+}
+
+impl Drop for RouterThreadGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            drain_optional_router_connections(self.router_port, 16);
+            let _ = join_result(handle, "router runtime cleanup");
+        }
+    }
 }
 
 impl MockNoConnectionUpstream {
@@ -1035,20 +1281,35 @@ impl MockNoConnectionUpstream {
             .spawn(move || run_no_connection_upstream(listener, timeout))
             .map_err(|error| format!("failed to spawn no-connection upstream thread: {error}"))?;
 
-        Ok(Self { address, handle })
+        Ok(Self {
+            address,
+            handle: Some(handle),
+        })
     }
 
     fn address(&self) -> &str {
         &self.address
     }
 
-    fn join(self) -> Result<usize, String> {
-        join_result(self.handle, "no-connection upstream")
+    fn join(mut self) -> Result<usize, String> {
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| "no-connection upstream was already joined".to_owned())?;
+        join_result(handle, "no-connection upstream")
+    }
+}
+
+impl Drop for MockNoConnectionUpstream {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = join_result(handle, "no-connection upstream cleanup");
+        }
     }
 }
 
 impl MockWebSocketUpstream {
-    fn start() -> Result<Self, String> {
+    fn start(mode: InstalledCodexSmokeMode) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind mock websocket upstream: {error}"))?;
         listener
@@ -1062,13 +1323,13 @@ impl MockWebSocketUpstream {
         let thread_transcript = Arc::clone(&transcript);
         let handle = thread::Builder::new()
             .name("codex-router-installed-smoke-upstream".to_owned())
-            .spawn(move || run_mock_upstream(listener, thread_transcript))
+            .spawn(move || run_mock_upstream(listener, thread_transcript, mode))
             .map_err(|error| format!("failed to spawn mock upstream thread: {error}"))?;
 
         Ok(Self {
             address,
             transcript,
-            handle,
+            handle: Some(handle),
         })
     }
 
@@ -1076,8 +1337,12 @@ impl MockWebSocketUpstream {
         &self.address
     }
 
-    fn join(self) -> Result<MockWebSocketTranscript, String> {
-        join_result(self.handle, "mock websocket upstream")?;
+    fn join(mut self) -> Result<MockWebSocketTranscript, String> {
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| "mock websocket upstream was already joined".to_owned())?;
+        join_result(handle, "mock websocket upstream")?;
         let mut transcript = self
             .transcript
             .lock()
@@ -1088,9 +1353,18 @@ impl MockWebSocketUpstream {
     }
 }
 
+impl Drop for MockWebSocketUpstream {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = join_result(handle, "mock websocket upstream cleanup");
+        }
+    }
+}
+
 fn run_mock_upstream(
     listener: TcpListener,
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
+    mode: InstalledCodexSmokeMode,
 ) -> Result<(), String> {
     let mut http_probe_count = 0_usize;
     let mut http_sse_count = 0_usize;
@@ -1101,16 +1375,46 @@ fn run_mock_upstream(
         if !looks_like_websocket_upgrade(&stream)? {
             match respond_to_http_request(stream)? {
                 MockHttpRequestResult::Probe => http_probe_count += 1,
-                MockHttpRequestResult::Responses(transcript) => {
+                MockHttpRequestResult::Responses(http_sse_transcript) => {
                     http_sse_count += 1;
-                    http_sse = Some(transcript);
+                    http_sse = Some(http_sse_transcript);
+                    if !mode.requires_websocket() {
+                        record_http_sse_only_transcript(
+                            &transcript,
+                            http_probe_count,
+                            http_sse.take(),
+                        )?;
+                        return Ok(());
+                    }
                 }
             }
             continue;
         }
+        if !mode.requires_websocket() {
+            return Err("mock upstream received unexpected websocket in HTTP/SSE mode".to_owned());
+        }
         run_mock_websocket(stream, transcript, http_probe_count, http_sse.take())?;
         return Ok(());
     }
+}
+
+fn record_http_sse_only_transcript(
+    transcript: &Arc<Mutex<Option<MockWebSocketTranscript>>>,
+    http_probe_count: usize,
+    http_sse: Option<MockHttpSseTranscript>,
+) -> Result<(), String> {
+    let mut transcript = transcript
+        .lock()
+        .map_err(|_| "mock upstream transcript mutex poisoned".to_owned())?;
+    *transcript = Some(MockWebSocketTranscript {
+        headers: Vec::new(),
+        first_frame: String::new(),
+        request_frames: Vec::new(),
+        websocket_request_frame_count: 0,
+        http_probe_count,
+        http_sse,
+    });
+    Ok(())
 }
 
 fn run_no_connection_upstream(listener: TcpListener, timeout: Duration) -> Result<usize, String> {
@@ -1167,6 +1471,29 @@ fn redacted_command_text(bytes: &[u8], seed: &SmokeSeed) -> String {
         .take(24)
         .collect::<Vec<_>>()
         .join("\\n")
+}
+
+fn redacted_optional_command_text(bytes: Option<&Vec<u8>>, seed: &SmokeSeed) -> String {
+    bytes.map_or_else(
+        || "<not-run>".to_owned(),
+        |bytes| redacted_command_text(bytes, seed),
+    )
+}
+
+fn output_status_text(output: Option<&Output>) -> String {
+    output
+        .map(|output| output.status.to_string())
+        .unwrap_or_else(|| "not-run".to_owned())
+}
+
+fn profile_uses_codex_router_token(profile_path: &Path) -> Result<bool, String> {
+    let profile = fs::read_to_string(profile_path).map_err(|error| {
+        format!(
+            "failed to read generated profile {}: {error}",
+            profile_path.display()
+        )
+    })?;
+    Ok(profile.contains("env_key = \"CODEX_ROUTER_TOKEN\""))
 }
 
 fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, String> {
@@ -1672,11 +1999,13 @@ impl Drop for SmokeTempRoot {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::fs;
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
     use std::process::Output;
 
+    use super::InstalledCodexSmokeMode;
     use super::MockHttpSseTranscript;
     use super::MockWebSocketTranscript;
     use super::RedactedTranscriptInput;
@@ -1688,7 +2017,9 @@ mod tests {
     use super::assert_smoke_contract;
     use super::first_frame_shape_summary;
     use super::run_hostile_no_token_smoke;
+    use super::run_installed_codex_http_sse_mock_smoke;
     use super::run_installed_codex_mock_smoke;
+    use super::run_installed_codex_websocket_mock_smoke;
     use super::run_with_timeout;
     use super::upstream_account_token;
     use super::write_redacted_transcript;
@@ -1747,11 +2078,13 @@ mod tests {
         let quota_status = valid_quota_status();
         let upstream = valid_transcript(true, false);
         let error = match assert_smoke_contract(SmokeContractAssertion {
-            http_sse_codex_status: &success_status(),
-            websocket_codex_status: &success_status(),
+            mode: InstalledCodexSmokeMode::Combined,
+            http_sse_codex_status: Some(&success_status()),
+            websocket_codex_status: Some(&success_status()),
             upstream: &upstream,
             local_token: "local-token-canary",
             expected_account_label: "matches",
+            expected_upstream_token: upstream_account_token(),
             routable_upstream_tokens: &routable_upstream_tokens,
             quota_status: &quota_status,
         }) {
@@ -1768,11 +2101,13 @@ mod tests {
         let quota_status = valid_quota_status();
         let upstream = valid_transcript(false, true);
         let error = match assert_smoke_contract(SmokeContractAssertion {
-            http_sse_codex_status: &success_status(),
-            websocket_codex_status: &success_status(),
+            mode: InstalledCodexSmokeMode::Combined,
+            http_sse_codex_status: Some(&success_status()),
+            websocket_codex_status: Some(&success_status()),
             upstream: &upstream,
             local_token: "local-token-canary",
             expected_account_label: "matches",
+            expected_upstream_token: upstream_account_token(),
             routable_upstream_tokens: &routable_upstream_tokens,
             quota_status: &quota_status,
         }) {
@@ -1852,19 +2187,22 @@ mod tests {
             }),
         };
         let transcript_path = match write_redacted_transcript(RedactedTranscriptInput {
+            mode: InstalledCodexSmokeMode::Combined,
             codex_version: "OpenAI Codex v0.test",
             profile_path: test_root.path(),
-            http_sse_codex_status: &success_status(),
-            http_sse_codex_stdout: "codex-router smoke ok",
-            http_sse_codex_stderr: "",
-            http_sse_last_message_path: &http_sse_last_message_path,
-            websocket_codex_status: &success_status(),
-            websocket_codex_stdout: "codex-router smoke ok",
-            websocket_codex_stderr: "",
-            websocket_last_message_path: &websocket_last_message_path,
+            profile_uses_codex_router_token: true,
+            http_sse_codex_status: Some(&success_status()),
+            http_sse_codex_stdout: Some(Cow::Borrowed("codex-router smoke ok")),
+            http_sse_codex_stderr: Some(Cow::Borrowed("")),
+            http_sse_last_message_path: Some(&http_sse_last_message_path),
+            websocket_codex_status: Some(&success_status()),
+            websocket_codex_stdout: Some(Cow::Borrowed("codex-router smoke ok")),
+            websocket_codex_stderr: Some(Cow::Borrowed("")),
+            websocket_last_message_path: Some(&websocket_last_message_path),
             upstream: &upstream,
             quota_status: &valid_quota_status(),
             expected_account_label: "matches",
+            expected_upstream_token: upstream_account_token(),
         }) {
             Ok(path) => path,
             Err(error) => panic!("redacted transcript fixture failed: {error}"),
@@ -1924,11 +2262,13 @@ mod tests {
         let upstream = valid_transcript(false, false);
 
         if let Err(error) = assert_smoke_contract(SmokeContractAssertion {
-            http_sse_codex_status: &success_status(),
-            websocket_codex_status: &success_status(),
+            mode: InstalledCodexSmokeMode::Combined,
+            http_sse_codex_status: Some(&success_status()),
+            websocket_codex_status: Some(&success_status()),
             upstream: &upstream,
             local_token: "local-token-canary",
             expected_account_label: "matches",
+            expected_upstream_token: upstream_account_token(),
             routable_upstream_tokens: &routable_upstream_tokens,
             quota_status: &quota_status,
         }) {
@@ -1939,7 +2279,7 @@ mod tests {
     #[test]
     #[ignore = "T9 installed-Codex HTTP/SSE e2e; run through tests/smoke/installed_codex_mock.sh --transport http-sse"]
     fn installed_codex_http_sse_e2e_exercises_generated_profile_token() {
-        let report = match run_installed_codex_mock_smoke() {
+        let report = match run_installed_codex_http_sse_mock_smoke() {
             Ok(report) => report,
             Err(error) => panic!("installed Codex HTTP/SSE e2e failed: {error}"),
         };
@@ -1955,11 +2295,13 @@ mod tests {
         let upstream = valid_transcript(false, false);
 
         if let Err(error) = assert_smoke_contract(SmokeContractAssertion {
-            http_sse_codex_status: &success_status(),
-            websocket_codex_status: &success_status(),
+            mode: InstalledCodexSmokeMode::Combined,
+            http_sse_codex_status: Some(&success_status()),
+            websocket_codex_status: Some(&success_status()),
             upstream: &upstream,
             local_token: "local-token-canary",
             expected_account_label: "matches",
+            expected_upstream_token: upstream_account_token(),
             routable_upstream_tokens: &routable_upstream_tokens,
             quota_status: &quota_status,
         }) {
@@ -1970,7 +2312,7 @@ mod tests {
     #[test]
     #[ignore = "T10 installed-Codex WebSocket e2e; run through tests/smoke/installed_codex_mock.sh --transport websocket"]
     fn installed_codex_websocket_e2e_exercises_generated_profile_token() {
-        let report = match run_installed_codex_mock_smoke() {
+        let report = match run_installed_codex_websocket_mock_smoke() {
             Ok(report) => report,
             Err(error) => panic!("installed Codex WebSocket e2e failed: {error}"),
         };
