@@ -998,6 +998,101 @@ mod registry_tests {
     }
 }
 
+#[cfg(test)]
+mod async_forwarding_tests {
+    use super::TokenGeneration;
+    use super::WebSocketRevocationRegistry;
+    use super::WebSocketTunnelError;
+    use super::forward_duplex_until_complete;
+    use futures_util::SinkExt;
+    use futures_util::StreamExt;
+    use tokio::io::duplex;
+    use tokio_tungstenite::WebSocketStream;
+    use tungstenite::Message;
+    use tungstenite::protocol::Role;
+
+    #[tokio::test]
+    async fn reset_during_new_turn_after_prior_completion_is_reported() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let mut router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let mut router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                &mut router_local_websocket,
+                &mut router_upstream_websocket,
+                &session,
+                10,
+                None,
+                None,
+                &revocation,
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first local frame should send: {error}"));
+            let first_upstream_frame = match upstream_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("first upstream frame should be valid: {error}"),
+                None => panic!("upstream should receive first frame"),
+            };
+            assert_eq!(
+                first_upstream_frame.to_string(),
+                r#"{"type":"response.create","turn":1}"#
+            );
+            upstream_websocket
+                .send(Message::text(r#"{"type":"response.completed","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first completion should send: {error}"));
+            let first_client_response = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("first client response should be valid: {error}"),
+                None => panic!("client should receive first completion"),
+            };
+            assert_eq!(
+                first_client_response.to_string(),
+                r#"{"type":"response.completed","turn":1}"#
+            );
+
+            client_websocket
+                .send(Message::text(
+                    r#"{"type":"conversation.item.create","turn":2}"#,
+                ))
+                .await
+                .unwrap_or_else(|error| panic!("second local frame should send: {error}"));
+            let second_upstream_frame = match upstream_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("second upstream frame should be valid: {error}"),
+                None => panic!("upstream should receive second frame"),
+            };
+            assert_eq!(
+                second_upstream_frame.to_string(),
+                r#"{"type":"conversation.item.create","turn":2}"#
+            );
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            matches!(router_result, Err(WebSocketTunnelError::Transport(_))),
+            "reset before the second turn completes must be reported, got {router_result:?}"
+        );
+    }
+}
+
 /// Blocking WebSocket tunnel that uses the authenticated first-frame router.
 #[cfg(test)]
 #[derive(Clone)]
@@ -1369,7 +1464,7 @@ where
     }
 
     let mut upstream_message_count = 0_usize;
-    let mut forwarded_response_completed = false;
+    let mut response_outstanding = true;
     loop {
         tokio::select! {
             () = revocation.cancelled() => {
@@ -1385,8 +1480,7 @@ where
                 let local_message = match local_message {
                     Ok(message) => message,
                     Err(error)
-                        if forwarded_response_completed
-                            && is_reset_without_closing_handshake(&error) =>
+                        if !response_outstanding && is_reset_without_closing_handshake(&error) =>
                     {
                         upstream_websocket.close(None).await?;
                         return Ok(());
@@ -1398,6 +1492,7 @@ where
                 if is_close {
                     return Ok(());
                 }
+                response_outstanding = true;
             }
             upstream_message = upstream_websocket.next() => {
                 let Some(upstream_message) = upstream_message else {
@@ -1407,8 +1502,7 @@ where
                 let upstream_message = match upstream_message {
                     Ok(message) => message,
                     Err(error)
-                        if forwarded_response_completed
-                            && is_reset_without_closing_handshake(&error) =>
+                        if !response_outstanding && is_reset_without_closing_handshake(&error) =>
                     {
                         local_websocket.close(None).await?;
                         return Ok(());
@@ -1432,7 +1526,7 @@ where
                 }
                 upstream_message_count = upstream_message_count.saturating_add(1);
                 if is_completed {
-                    forwarded_response_completed = true;
+                    response_outstanding = false;
                     session_registration.note_response_completed();
                 }
                 if is_close || upstream_message_count >= max_upstream_messages {

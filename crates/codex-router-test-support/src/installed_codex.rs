@@ -544,13 +544,30 @@ fn assert_concurrent_websocket_contract(
             ));
         }
         if upstream
-            .session_event_counts
+            .in_overlap_session_event_counts
             .iter()
             .any(|event_count| *event_count < 3)
         {
             return Err(format!(
-                "soak session event counts were {:?}, expected at least 3 each",
-                upstream.session_event_counts
+                "soak in-overlap session event counts were {:?}, expected at least 3 each",
+                upstream.in_overlap_session_event_counts
+            ));
+        }
+        if upstream.in_overlap_session_event_counts.len() < config.upstream.expected_sessions {
+            return Err(format!(
+                "soak in-overlap session event counts {:?} had fewer entries than expected sessions {}",
+                upstream.in_overlap_session_event_counts, config.upstream.expected_sessions
+            ));
+        }
+        if upstream.normal_close_sessions < config.upstream.expected_sessions
+            || upstream.abnormal_close_sessions != 0
+        {
+            return Err(format!(
+                "soak close outcomes were {:?}; normal={} abnormal={} expected all {} normal",
+                upstream.session_close_outcomes,
+                upstream.normal_close_sessions,
+                upstream.abnormal_close_sessions,
+                config.upstream.expected_sessions
             ));
         }
         if !upstream.multi_step_interleave_completed {
@@ -1938,7 +1955,11 @@ fn write_redacted_three_websocket_transcript(
             "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
             "session_frame_counts": input.upstream.session_frame_counts,
             "session_event_counts": input.upstream.session_event_counts,
+            "in_overlap_session_event_counts": input.upstream.in_overlap_session_event_counts,
             "http_probe_count": input.upstream.http_probe_count,
+            "normal_close_sessions": input.upstream.normal_close_sessions,
+            "abnormal_close_sessions": input.upstream.abnormal_close_sessions,
+            "session_close_outcomes": input.upstream.session_close_outcomes,
             "multi_step_interleave_completed": input.upstream.multi_step_interleave_completed,
             "multi_step_followup_frame_count": input.upstream.multi_step_followup_frame_count,
             "multi_step_followup_active_session_count": input.upstream.multi_step_followup_active_session_count,
@@ -2209,7 +2230,11 @@ struct ConcurrentWebSocketTranscript {
     http_probe_count: usize,
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
+    in_overlap_session_event_counts: Vec<usize>,
     non_prewarm_session_count: usize,
+    normal_close_sessions: usize,
+    abnormal_close_sessions: usize,
+    session_close_outcomes: Vec<String>,
     multi_step_interleave_completed: bool,
     multi_step_followup_frame_count: usize,
     multi_step_followup_active_session_count: usize,
@@ -2238,7 +2263,11 @@ struct ConcurrentUpstreamState {
     http_probe_count: usize,
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
+    in_overlap_session_event_counts: Vec<usize>,
     non_prewarm_session_count: usize,
+    normal_close_sessions: usize,
+    abnormal_close_sessions: usize,
+    session_close_outcomes: Vec<String>,
     multi_step_interleave_claimed: bool,
     multi_step_interleave_completed: bool,
     multi_step_followup_frame_count: usize,
@@ -2519,7 +2548,11 @@ impl MockConcurrentWebSocketUpstream {
                 http_probe_count: 0,
                 session_frame_counts: Vec::new(),
                 session_event_counts: Vec::new(),
+                in_overlap_session_event_counts: Vec::new(),
                 non_prewarm_session_count: 0,
+                normal_close_sessions: 0,
+                abnormal_close_sessions: 0,
+                session_close_outcomes: Vec::new(),
                 multi_step_interleave_claimed: false,
                 multi_step_interleave_completed: false,
                 multi_step_followup_frame_count: 0,
@@ -2592,7 +2625,11 @@ impl MockConcurrentWebSocketUpstream {
             http_probe_count: state.http_probe_count,
             session_frame_counts: state.session_frame_counts,
             session_event_counts: state.session_event_counts,
+            in_overlap_session_event_counts: state.in_overlap_session_event_counts,
             non_prewarm_session_count: state.non_prewarm_session_count,
+            normal_close_sessions: state.normal_close_sessions,
+            abnormal_close_sessions: state.abnormal_close_sessions,
+            session_close_outcomes: state.session_close_outcomes,
             multi_step_interleave_completed: state.multi_step_interleave_completed,
             multi_step_followup_frame_count: state.multi_step_followup_frame_count,
             multi_step_followup_active_session_count: state
@@ -2828,7 +2865,11 @@ fn run_concurrent_mock_websocket_session(
                 config,
             )?
         };
-        finish_concurrent_non_prewarm_session(&state, frame_count, event_count)?;
+        let close_outcome = match websocket.close(None) {
+            Ok(()) => "normal".to_owned(),
+            Err(error) => format!("abnormal:{error}"),
+        };
+        finish_concurrent_non_prewarm_session(&state, frame_count, event_count, close_outcome)?;
         return Ok(());
     }
     Err("concurrent mock upstream did not receive non-prewarm request frame".to_owned())
@@ -2920,11 +2961,23 @@ fn finish_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
     frame_count: usize,
     event_count: usize,
+    close_outcome: String,
 ) -> Result<(), String> {
     let mut state = shared
         .state
         .lock()
         .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    let in_overlap_event_count = if state.active_non_prewarm_sessions >= state.expected_sessions {
+        event_count
+    } else {
+        0
+    };
+    if close_outcome == "normal" {
+        state.normal_close_sessions = state.normal_close_sessions.saturating_add(1);
+    } else {
+        state.abnormal_close_sessions = state.abnormal_close_sessions.saturating_add(1);
+    }
+    state.session_close_outcomes.push(close_outcome);
     state.active_non_prewarm_sessions = state.active_non_prewarm_sessions.saturating_sub(1);
     if state.overlap_started_unix_ms.is_some()
         && state.real_overlap_completed_unix_ms.is_none()
@@ -2939,6 +2992,9 @@ fn finish_concurrent_non_prewarm_session(
     }
     state.session_frame_counts.push(frame_count);
     state.session_event_counts.push(event_count);
+    state
+        .in_overlap_session_event_counts
+        .push(in_overlap_event_count);
     shared.condition.notify_all();
     Ok(())
 }

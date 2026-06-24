@@ -317,6 +317,21 @@ pub struct LoopbackRouterRuntimeConfig {
     websocket_registry_report_file: Option<PathBuf>,
 }
 
+/// Receives diagnostics from detached loopback connection tasks.
+pub trait LoopbackConnectionErrorReporter: Send + Sync {
+    /// Reports one redacted loopback connection diagnostic.
+    fn report_connection_error(&self, diagnostic: &str);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StderrLoopbackConnectionErrorReporter;
+
+impl LoopbackConnectionErrorReporter for StderrLoopbackConnectionErrorReporter {
+    fn report_connection_error(&self, diagnostic: &str) {
+        eprintln!("{diagnostic}");
+    }
+}
+
 impl LoopbackRouterRuntimeConfig {
     /// Creates runtime configuration with conservative quota freshness defaults.
     #[must_use]
@@ -424,6 +439,7 @@ pub struct LoopbackRouterRuntime {
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     fixed_now_unix_seconds: Option<u64>,
+    connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
 }
 
 impl LoopbackRouterRuntime {
@@ -466,6 +482,7 @@ impl LoopbackRouterRuntime {
             weighted_selectors: Default::default(),
             account_holds: Default::default(),
             fixed_now_unix_seconds: config.fixed_now_unix_seconds,
+            connection_error_reporter: Arc::new(StderrLoopbackConnectionErrorReporter),
         })
     }
 
@@ -515,28 +532,60 @@ impl LoopbackRouterRuntime {
         max_connections: usize,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         self.runtime
-            .block_on(self.serve_protocol_connections_async(max_connections))
+            .block_on(self.serve_protocol_connections_async(max_connections, None))
+    }
+
+    /// Serves HTTP/SSE or WebSocket connections until the bound or cancellation.
+    pub fn serve_protocol_connections_until_cancelled(
+        &self,
+        max_connections: usize,
+        shutdown: CancellationToken,
+    ) -> Result<usize, LoopbackRouterRuntimeError> {
+        self.runtime
+            .block_on(self.serve_protocol_connections_async(max_connections, Some(shutdown)))
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_connection_error_reporter(
+        mut self,
+        reporter: Arc<dyn LoopbackConnectionErrorReporter>,
+    ) -> Self {
+        self.connection_error_reporter = reporter;
+        self
     }
 
     async fn serve_protocol_connections_async(
         &self,
         max_connections: usize,
+        shutdown: Option<CancellationToken>,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         let mut handled_connections = 0_usize;
         let mut handlers = Vec::new();
         let connection_handler = Arc::new(self.protocol_connection_handler());
         while handled_connections < max_connections {
-            let (stream, _peer_addr) = self
-                .server
-                .listener
-                .accept()
-                .await
-                .map_err(LoopbackRouterRuntimeError::Accept)?;
+            let (stream, _peer_addr) = if let Some(shutdown) = shutdown.as_ref() {
+                tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    accepted = self.server.listener.accept() => {
+                        accepted.map_err(LoopbackRouterRuntimeError::Accept)?
+                    }
+                }
+            } else {
+                self.server
+                    .listener
+                    .accept()
+                    .await
+                    .map_err(LoopbackRouterRuntimeError::Accept)?
+            };
             let handler_context = Arc::clone(&connection_handler);
             let handler =
                 tokio::spawn(async move { handler_context.handle_hyper_connection(stream).await });
             if max_connections == usize::MAX {
-                drop(handler);
+                supervise_detached_connection_handler(
+                    handler,
+                    Arc::clone(&self.connection_error_reporter),
+                );
             } else {
                 handlers.push(handler);
             }
@@ -571,6 +620,23 @@ impl LoopbackRouterRuntime {
             fixed_now_unix_seconds: self.fixed_now_unix_seconds,
         }
     }
+}
+
+fn supervise_detached_connection_handler(
+    handler: UpgradeTaskHandle,
+    reporter: Arc<dyn LoopbackConnectionErrorReporter>,
+) {
+    tokio::spawn(async move {
+        match handler.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => reporter.report_connection_error(&format!(
+                "codex-router loopback connection failed: {error}"
+            )),
+            Err(source) => reporter.report_connection_error(&format!(
+                "codex-router loopback connection task failed: {source}"
+            )),
+        }
+    });
 }
 
 #[derive(Clone)]

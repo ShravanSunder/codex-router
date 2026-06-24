@@ -109,7 +109,7 @@ freshness_guard() {
     I-21) printf 'crates/codex-router-cli/src/lib.rs crates/codex-router-proxy/src/server.rs crates/codex-router-quota/src/* crates/codex-router-state/src/*' ;;
     U-*) printf 'crates/codex-router-proxy/src/* crates/codex-router-core/src/* crates/codex-router-selection/src/*' ;;
     I-*) printf 'crates/codex-router-proxy/src/* crates/codex-router-cli/src/* crates/codex-router-state/src/* crates/codex-router-auth/src/*' ;;
-    S-*|E-*) printf 'crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/*' ;;
+    S-*|E-*) printf 'crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh' ;;
     G-*) printf 'Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*' ;;
     P-*) printf 'tmp/plan-workflows/2026-06-24-async-router-runtime/* tmp/spec-workflows/2026-06-24-async-router-runtime/*' ;;
   esac
@@ -274,6 +274,7 @@ if artifact.get("git_head") != receipt.get("git_head"):
         "crates/codex-router-proxy/src/websocket.rs",
         "crates/codex-router-proxy/src/server.rs",
         "crates/codex-router-cli/src/lib.rs",
+        "scripts/proof-matrix.sh",
     ]
     diff_result = subprocess.run(
         ["git", "diff", "--quiet", f"{artifact.get('git_head')}..{receipt.get('git_head')}", "--", *source_paths],
@@ -316,12 +317,12 @@ elif row_id == "E-04":
     valid_final_counts = [count for count in counts if isinstance(count, int) and count >= 3]
     if len(valid_final_counts) < 3:
         errors.append(f"final-session forwarded counts do not prove three unique sessions with >=3 frames: {counts}")
-    session_event_counts = upstream.get("session_event_counts", [])
-    if not isinstance(session_event_counts, list):
-        errors.append("session_event_counts is not a list")
-        session_event_counts = []
-    if sum(1 for count in session_event_counts if isinstance(count, int) and count >= 3) < 3:
-        errors.append(f"upstream session_event_counts do not prove three unique non-prewarm sessions with >=3 events: {session_event_counts}")
+    in_overlap_event_counts = upstream.get("in_overlap_session_event_counts", [])
+    if not isinstance(in_overlap_event_counts, list):
+        errors.append("in_overlap_session_event_counts is not a list")
+        in_overlap_event_counts = []
+    if sum(1 for count in in_overlap_event_counts if isinstance(count, int) and count >= 3) < 3:
+        errors.append(f"upstream in_overlap_session_event_counts do not prove three unique non-prewarm sessions with >=3 in-overlap events: {in_overlap_event_counts}")
     if registry.get("forwarded_upstream_messages", 0) < 9:
         errors.append("forwarded_upstream_messages is below 9")
 elif row_id == "E-05":
@@ -345,6 +346,15 @@ elif row_id == "E-06":
     if registry.get("completed_response_sessions", 0) < 3:
         errors.append("router registry completed_response_sessions is below 3")
 elif row_id == "E-08":
+    if upstream.get("normal_close_sessions", 0) < 3:
+        errors.append("upstream normal_close_sessions is below 3")
+    if upstream.get("abnormal_close_sessions") != 0:
+        errors.append("upstream abnormal_close_sessions is not 0")
+    close_outcomes = upstream.get("session_close_outcomes", [])
+    if not isinstance(close_outcomes, list) or len(close_outcomes) < 3:
+        errors.append("upstream session_close_outcomes is missing or incomplete")
+    elif any(outcome != "normal" for outcome in close_outcomes):
+        errors.append(f"upstream session_close_outcomes contains non-normal outcomes: {close_outcomes}")
     if socket_cleanup.get("established_count") != 0:
         errors.append("socket cleanup established_count is not 0")
     if socket_cleanup.get("close_wait_count") != 0:
@@ -364,6 +374,7 @@ receipt["touched_targets"] = [
     "crates/codex-router-proxy/src/websocket.rs",
     "crates/codex-router-proxy/src/server.rs",
     "crates/codex-router-cli/src/lib.rs",
+    "scripts/proof-matrix.sh",
 ]
 receipt["notes"] = "Validated explicit installed-Codex three-WebSocket soak artifact." if not errors else "; ".join(errors)
 receipt["soak_summary"] = {

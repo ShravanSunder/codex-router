@@ -172,6 +172,27 @@ mod tests {
         }
     }
 
+    struct ChannelConnectionErrorReporter {
+        sender: Mutex<mpsc::Sender<String>>,
+    }
+
+    impl ChannelConnectionErrorReporter {
+        fn new(sender: mpsc::Sender<String>) -> Self {
+            Self {
+                sender: Mutex::new(sender),
+            }
+        }
+    }
+
+    impl crate::server::LoopbackConnectionErrorReporter for ChannelConnectionErrorReporter {
+        fn report_connection_error(&self, diagnostic: &str) {
+            let Ok(sender) = self.sender.lock() else {
+                return;
+            };
+            let _send_result = sender.send(diagnostic.to_owned());
+        }
+    }
+
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct FixedAffinitySecretProvider {
         secret: RouterAffinityHashSecret,
@@ -4381,6 +4402,78 @@ mod tests {
                 panic!("server should stop waiting for first websocket frame promptly: {error}");
             }
         }
+    }
+
+    #[test]
+    fn loopback_router_runtime_reports_detached_unbounded_websocket_failures() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_unbounded_error_report");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new("http://127.0.0.1:1/v1") {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        );
+        let (error_sender, error_receiver) = mpsc::channel();
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime.with_connection_error_reporter(Arc::new(
+                ChannelConnectionErrorReporter::new(error_sender),
+            )),
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown_for_thread = shutdown.clone();
+        let server_thread = thread::spawn(move || {
+            runtime.serve_protocol_connections_until_cancelled(usize::MAX, shutdown_for_thread)
+        });
+
+        let mut request = match format!("ws://{router_address}/v1/responses").into_client_request()
+        {
+            Ok(request) => request,
+            Err(error) => panic!("local websocket request should build: {error}"),
+        };
+        request.headers_mut().insert(
+            "X-Codex-Router-Token",
+            HeaderValue::from_static("current-token"),
+        );
+        let (client, _response) = match connect(request) {
+            Ok(connection) => connection,
+            Err(error) => panic!("local websocket client should connect: {error}"),
+        };
+
+        let diagnostic = match error_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(diagnostic) => diagnostic,
+            Err(error) => {
+                shutdown.cancel();
+                drop(client);
+                panic!("unbounded websocket failure should be reported: {error}");
+            }
+        };
+        drop(client);
+        shutdown.cancel();
+        match server_thread.join() {
+            Ok(Ok(handled)) => assert!(handled >= 1, "server should accept the failing websocket"),
+            Ok(Err(error)) => panic!("unbounded serve should report but not return error: {error}"),
+            Err(error) => panic!("server thread panicked: {error:?}"),
+        }
+        assert!(
+            diagnostic.contains("FirstFrameTimeout"),
+            "diagnostic should include the websocket failure reason, got {diagnostic}"
+        );
     }
 
     #[test]
