@@ -566,6 +566,16 @@ impl LoopbackRouterRuntime {
         self
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_affinity_owner_recorder(
+        mut self,
+        recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    ) -> Self {
+        self.affinity_owner_recorder = recorder;
+        self
+    }
+
     async fn serve_protocol_connections_async(
         &self,
         max_connections: usize,
@@ -573,6 +583,7 @@ impl LoopbackRouterRuntime {
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         let mut handled_connections = 0_usize;
         let mut handlers = JoinSet::new();
+        let mut first_connection_error = None;
         let session_shutdown = shutdown.clone().unwrap_or_default();
         let affinity_record_tasks = TaskTracker::new();
         let connection_handler =
@@ -586,7 +597,13 @@ impl LoopbackRouterRuntime {
                     tokio::select! {
                         () = shutdown.cancelled() => break None,
                         joined = handlers.join_next(), if !handlers.is_empty() => {
-                            handle_optional_connection_join_result(joined)?;
+                            if store_optional_connection_join_error(
+                                &mut first_connection_error,
+                                joined,
+                            ) {
+                                session_shutdown.cancel();
+                                break None;
+                            }
                         }
                         accepted = self.server.listener.accept() => {
                             let (stream, _peer_addr) = accepted.map_err(LoopbackRouterRuntimeError::Accept)?;
@@ -598,7 +615,13 @@ impl LoopbackRouterRuntime {
                 loop {
                     tokio::select! {
                         joined = handlers.join_next(), if !handlers.is_empty() => {
-                            handle_optional_connection_join_result(joined)?;
+                            if store_optional_connection_join_error(
+                                &mut first_connection_error,
+                                joined,
+                            ) {
+                                session_shutdown.cancel();
+                                break None;
+                            }
                         }
                         accepted = self.server.listener.accept() => {
                             let (stream, _peer_addr) = accepted.map_err(LoopbackRouterRuntimeError::Accept)?;
@@ -628,19 +651,22 @@ impl LoopbackRouterRuntime {
             handled_connections += 1;
         }
 
-        if let Some(shutdown) = shutdown.as_ref()
-            && shutdown.is_cancelled()
+        if first_connection_error.is_some()
+            || matches!(shutdown.as_ref(), Some(shutdown) if shutdown.is_cancelled())
         {
             session_shutdown.cancel();
         }
 
         while let Some(joined) = handlers.join_next().await {
-            handle_connection_join_result(joined)?;
+            store_connection_join_error(&mut first_connection_error, joined);
         }
         affinity_record_tasks.close();
         affinity_record_tasks.wait().await;
 
-        Ok(handled_connections)
+        match first_connection_error {
+            Some(error) => Err(error),
+            None => Ok(handled_connections),
+        }
     }
 
     fn protocol_connection_handler(
@@ -679,12 +705,28 @@ fn handle_connection_join_result(
     }
 }
 
-fn handle_optional_connection_join_result(
+fn store_connection_join_error(
+    first_connection_error: &mut Option<LoopbackRouterRuntimeError>,
+    joined: Result<Result<(), LoopbackRouterRuntimeError>, JoinError>,
+) -> bool {
+    match handle_connection_join_result(joined) {
+        Ok(()) => false,
+        Err(error) => {
+            if first_connection_error.is_none() {
+                *first_connection_error = Some(error);
+            }
+            true
+        }
+    }
+}
+
+fn store_optional_connection_join_error(
+    first_connection_error: &mut Option<LoopbackRouterRuntimeError>,
     joined: Option<Result<Result<(), LoopbackRouterRuntimeError>, JoinError>>,
-) -> Result<(), LoopbackRouterRuntimeError> {
+) -> bool {
     match joined {
-        Some(joined) => handle_connection_join_result(joined),
-        None => Ok(()),
+        Some(joined) => store_connection_join_error(first_connection_error, joined),
+        None => false,
     }
 }
 

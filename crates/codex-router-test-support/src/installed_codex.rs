@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::BufRead;
@@ -1986,6 +1987,7 @@ fn write_redacted_three_websocket_transcript(
     let router_binary_path = sanitized_artifact_path(&input.router_process.binary_path)?;
     let router_argv = sanitized_router_argv(&input.router_process.argv);
     let runtime_correlations = runtime_correlations_for_three_websocket(input);
+    let session_continuity = session_continuity_for_three_websocket(input);
     let payload = serde_json::json!({
         "git_head": current_git_head()?,
         "mode": input.mode,
@@ -2019,6 +2021,7 @@ fn write_redacted_three_websocket_transcript(
             "statuses": statuses,
         },
         "runtime_correlations": runtime_correlations,
+        "session_continuity": session_continuity,
         "upstream": {
             "expected_sessions": input.upstream.expected_sessions,
             "completed_sessions": input.upstream.completed_sessions,
@@ -2071,27 +2074,47 @@ fn runtime_correlations_for_three_websocket(
         .iter()
         .enumerate()
         .map(|(index, run)| {
+            let stderr = String::from_utf8_lossy(&run.output.stderr);
+            let markers = stderr_transport_error_markers(&stderr);
             serde_json::json!({
                 "client_index": index,
                 "client_pid": run.pid,
                 "router_pid": input.router_process.pid,
-                "router_session_id": input.registry_report.and_then(|report| report.completed_session_ids.get(index).copied()),
-                "router_session_id_observed": input.registry_report.and_then(|report| report.completed_session_ids.get(index)).is_some(),
-                "upstream_session_id": input.upstream.upstream_session_ids.get(index).copied(),
-                "upstream_session_id_observed": input.upstream.upstream_session_ids.get(index).is_some(),
-                "transport": if stderr_transport_error_markers(&String::from_utf8_lossy(&run.output.stderr)).is_empty() { "websocket" } else { "websocket_error" },
+                "transport": if markers.is_empty() { "websocket" } else { "websocket_error" },
                 "transport_observed_from_client_stderr": true,
-                "handshake_count": input.upstream.upstream_session_ids.get(index).map(|_session_id| 1),
-                "handshake_count_observed": input.upstream.upstream_session_ids.get(index).is_some(),
-                "frame_count": input.upstream.session_frame_counts.get(index).copied(),
-                "event_count": input.upstream.session_event_counts.get(index).copied(),
-                "in_overlap_event_count": input.upstream.in_overlap_session_event_counts.get(index).copied(),
-                "overlap_started_unix_ms": input.upstream.overlap_started_unix_ms,
-                "overlap_completed_unix_ms": input.upstream.real_overlap_completed_unix_ms.or(input.upstream.overlap_completed_unix_ms),
-                "close_reason": input.upstream.session_close_outcomes.get(index).map(String::as_str),
+                "stderr_transport_error_markers": markers,
+                "stdout_contains_smoke_text": String::from_utf8_lossy(&run.output.stdout).contains(SMOKE_EXPECTED_TEXT),
             })
         })
         .collect()
+}
+
+fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<'_>) -> Value {
+    let registry_registered_ids = input
+        .registry_report
+        .map(|report| report.registered_session_ids.as_slice())
+        .unwrap_or_default();
+    let registry_closed_ids = input
+        .registry_report
+        .map(|report| report.closed_session_ids.as_slice())
+        .unwrap_or_default();
+    let upstream_session_ids = input.upstream.upstream_session_ids.as_slice();
+    serde_json::json!({
+        "per_client_session_join_key_observed": false,
+        "correlation_level": "aggregate_unique_sessions",
+        "router_registered_unique_session_count": unique_u64_count(registry_registered_ids),
+        "router_closed_unique_session_count": unique_u64_count(registry_closed_ids),
+        "upstream_unique_session_count": unique_u64_count(upstream_session_ids),
+        "router_registered_session_ids": registry_registered_ids,
+        "router_closed_session_ids": registry_closed_ids,
+        "upstream_session_ids": upstream_session_ids,
+        "router_pid": input.router_process.pid,
+        "shared_router_pid": input.router_process.pid,
+    })
+}
+
+fn unique_u64_count(values: &[u64]) -> usize {
+    values.iter().copied().collect::<BTreeSet<_>>().len()
 }
 
 fn stderr_transport_error_markers(stderr: &str) -> Vec<&'static str> {

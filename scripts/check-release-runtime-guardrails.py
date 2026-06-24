@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,8 +137,18 @@ CHECKS: dict[str, Check] = {
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("row_id", choices=sorted(CHECKS))
+    parser.add_argument("row_id", nargs="?", choices=sorted(CHECKS))
+    parser.add_argument(
+        "--print-release-source-paths",
+        action="store_true",
+        help="Print the resolved release runtime source paths as JSON and exit.",
+    )
     args = parser.parse_args()
+    if args.print_release_source_paths:
+        print(json.dumps(release_runtime_source_paths(), indent=2))
+        return 0
+    if args.row_id is None:
+        parser.error("row_id is required unless --print-release-source-paths is set")
     check = CHECKS[args.row_id]
     production_sources: dict[str, str] = {}
     release_sources = release_runtime_sources()
@@ -242,8 +253,17 @@ def strip_cfg_test_items(path: Path) -> str:
 
 
 def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
-    EVIDENCE_ROOT.mkdir(parents=True, exist_ok=True)
-    receipt_path = EVIDENCE_ROOT / f"{check.row_id}.json"
+    if os.environ.get("CODEX_ROUTER_PROOF_VERIFY_ONLY") == "1":
+        receipt = tempfile.NamedTemporaryFile(
+            delete=False,
+            prefix=f"codex-router-guardrail-{check.row_id}-",
+            suffix=".json",
+        )
+        receipt_path = Path(receipt.name)
+        receipt.close()
+    else:
+        EVIDENCE_ROOT.mkdir(parents=True, exist_ok=True)
+        receipt_path = EVIDENCE_ROOT / f"{check.row_id}.json"
     payload = {
         "schema_version": 1,
         "row_id": check.row_id,

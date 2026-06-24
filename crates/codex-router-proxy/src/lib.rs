@@ -267,6 +267,15 @@ mod tests {
         }
     }
 
+    impl crate::http_sse::AsyncHttpAffinityOwnerRecorder for BlockingAffinityOwnerRecorder {
+        fn record_affinity_owner<'a>(
+            &'a self,
+            owner: PreviousResponseAffinityOwnerRecord,
+        ) -> BoxFuture<'a, Result<(), HttpProxyError>> {
+            Box::pin(async move { HttpAffinityOwnerRecorder::record_affinity_owner(self, &owner) })
+        }
+    }
+
     async fn wait_for_affinity_records(
         recorder: &RecordingAffinityOwnerRecorder,
         expected_count: usize,
@@ -4472,7 +4481,173 @@ mod tests {
     }
 
     #[test]
-    fn loopback_router_runtime_reports_unbounded_websocket_failures_on_shutdown() {
+    #[allow(clippy::result_large_err)]
+    fn loopback_router_runtime_drains_affinity_tasks_after_handler_error() {
+        let temp_dir = ProxyTestTempDir::new("runtime_error_drains_affinity_tasks");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_ws_error_drain"),
+            "ws-error-drain",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &account,
+            90,
+            "error-drain-token",
+        );
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket =
+                match accept_hdr(stream, |_request: &Request, response: Response| {
+                    Ok(response)
+                }) {
+                    Ok(websocket) => websocket,
+                    Err(error) => {
+                        panic!("mock websocket upstream handshake should accept: {error}")
+                    }
+                };
+            match websocket.read() {
+                Ok(_message) => {}
+                Err(error) => panic!("mock websocket upstream should read first frame: {error}"),
+            }
+            if let Err(error) = websocket.send(Message::text(
+                r#"{"type":"response.completed","response":{"id":"resp_error_drain"}}"#,
+            )) {
+                panic!("mock websocket upstream should send completion: {error}");
+            }
+        });
+
+        let (recorder_entered_sender, recorder_entered_receiver) = mpsc::channel();
+        let (recorder_release_sender, recorder_release_receiver) = mpsc::channel();
+        let recorder = Arc::new(BlockingAffinityOwnerRecorder::new(
+            recorder_entered_sender,
+            recorder_release_receiver,
+        ));
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime.with_affinity_owner_recorder(recorder.clone()),
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let result = runtime
+                .serve_protocol_connections(2)
+                .map_err(|error| error.to_string());
+            if let Err(error) = done_sender.send(result) {
+                panic!("server completion should send: {error}");
+            }
+        });
+
+        let mut successful_request =
+            match format!("ws://{router_address}/v1/responses").into_client_request() {
+                Ok(request) => request,
+                Err(error) => panic!("local websocket request should build: {error}"),
+            };
+        successful_request.headers_mut().insert(
+            "X-Codex-Router-Token",
+            HeaderValue::from_static("current-token"),
+        );
+        let (mut successful_client, _response) = match connect(successful_request) {
+            Ok(connection) => connection,
+            Err(error) => panic!("successful local websocket should connect: {error}"),
+        };
+        if let Err(error) = successful_client.send(Message::text(r#"{"type":"response.create"}"#)) {
+            panic!("successful local websocket should send first frame: {error}");
+        }
+        match recorder_entered_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => {}
+            Err(error) => panic!("blocking recorder should be entered: {error}"),
+        }
+
+        let mut timeout_request =
+            match format!("ws://{router_address}/v1/responses").into_client_request() {
+                Ok(request) => request,
+                Err(error) => panic!("timeout websocket request should build: {error}"),
+            };
+        timeout_request.headers_mut().insert(
+            "X-Codex-Router-Token",
+            HeaderValue::from_static("current-token"),
+        );
+        let (timeout_client, _response) = match connect(timeout_request) {
+            Ok(connection) => connection,
+            Err(error) => panic!("timeout local websocket should connect: {error}"),
+        };
+
+        match done_receiver.recv_timeout(Duration::from_millis(750)) {
+            Ok(result) => panic!("serve returned before affinity task drained: {result:?}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("server result channel should remain open: {error}"),
+        }
+        if let Err(error) = recorder_release_sender.send(()) {
+            panic!("blocking recorder release should send: {error}");
+        }
+        drop(successful_client);
+        drop(timeout_client);
+        match done_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(Err(error)) => assert!(
+                error.contains("FirstFrameTimeout"),
+                "serve should return stored handler error after draining affinity task, got {error}"
+            ),
+            Ok(Ok(handled)) => {
+                panic!("serve should return stored handler error, handled={handled}")
+            }
+            Err(error) => panic!("serve should return after recorder release: {error}"),
+        }
+        match server_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("server thread panicked: {error:?}"),
+        }
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("upstream thread panicked: {error:?}"),
+        }
+        assert_eq!(recorder.records_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn loopback_router_runtime_cancels_unbounded_websocket_before_first_frame_timeout() {
         let temp_dir = ProxyTestTempDir::new("runtime_websocket_unbounded_error_report");
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
@@ -4519,17 +4694,12 @@ mod tests {
             Err(error) => panic!("local websocket client should connect: {error}"),
         };
 
-        thread::sleep(Duration::from_millis(350));
+        thread::sleep(Duration::from_millis(100));
         shutdown.cancel();
         drop(client);
         match server_thread.join() {
-            Ok(Ok(handled)) => panic!(
-                "unbounded cancelled serve should propagate the websocket failure, handled={handled}"
-            ),
-            Ok(Err(error)) => assert!(
-                error.to_string().contains("FirstFrameTimeout"),
-                "unbounded cancelled serve should return websocket failure reason, got {error}"
-            ),
+            Ok(Ok(handled)) => assert!(handled >= 1, "server should accept websocket"),
+            Ok(Err(error)) => panic!("shutdown should cancel first-frame wait cleanly: {error}"),
             Err(error) => panic!("server thread panicked: {error:?}"),
         }
     }

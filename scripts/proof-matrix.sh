@@ -72,7 +72,7 @@ expected_observation() {
       printf 'router-owned WebSocket registry records high-water 3 and zero active after completion'
       ;;
     E-07)
-      printf 'per-runtime client/router/upstream correlation and positive WebSocket continuity are present'
+      printf 'three client processes share one router PID with aggregate unique router/upstream WebSocket session continuity and clean client transports'
       ;;
     E-08)
       printf 'live router socket table has no leaked ESTABLISHED or CLOSE_WAIT TCP sessions after completion'
@@ -526,14 +526,37 @@ elif row_id == "E-07":
     upstream_session_ids = upstream.get("upstream_session_ids")
     if not isinstance(upstream_session_ids, list) or len(upstream_session_ids) < 3:
         errors.append("upstream_session_ids missing observed upstream session ids")
+        upstream_session_ids = []
     counts = registry.get("final_session_forwarded_upstream_message_counts", [])
     if not isinstance(counts, list) or len(counts) < 3:
         errors.append("router registry final per-session counters are missing")
     if upstream.get("http_probe_count") != 0:
         errors.append("unexpected HTTP probe count in WebSocket continuity artifact")
+    continuity = artifact.get("session_continuity")
+    if not isinstance(continuity, dict):
+        errors.append("session_continuity object is missing")
+        continuity = {}
+    if continuity.get("per_client_session_join_key_observed") is not False:
+        errors.append("session_continuity must not claim a per-client session join key")
+    if continuity.get("correlation_level") != "aggregate_unique_sessions":
+        errors.append("session_continuity correlation_level is not aggregate_unique_sessions")
+    registered_ids = registry.get("registered_session_ids") if isinstance(registry.get("registered_session_ids"), list) else []
+    closed_ids = registry.get("closed_session_ids") if isinstance(registry.get("closed_session_ids"), list) else []
+    if len(set(registered_ids)) < 3:
+        errors.append(f"router registered_session_ids do not contain three unique ids: {registered_ids}")
+    if len(set(closed_ids)) < 3:
+        errors.append(f"router closed_session_ids do not contain three unique ids: {closed_ids}")
+    if len(set(upstream_session_ids)) < 3:
+        errors.append(f"upstream_session_ids do not contain three unique ids: {upstream_session_ids}")
+    if continuity.get("router_registered_unique_session_count") != len(set(registered_ids)):
+        errors.append("session_continuity router_registered_unique_session_count does not match registry")
+    if continuity.get("router_closed_unique_session_count") != len(set(closed_ids)):
+        errors.append("session_continuity router_closed_unique_session_count does not match registry")
+    if continuity.get("upstream_unique_session_count") != len(set(upstream_session_ids)):
+        errors.append("session_continuity upstream_unique_session_count does not match upstream")
     correlations = artifact.get("runtime_correlations")
     if not isinstance(correlations, list) or len(correlations) != 3:
-        errors.append("runtime_correlations must contain exactly three runtime entries")
+        errors.append("runtime_correlations must contain exactly three client process entries")
         correlations = []
     for index, correlation in enumerate(correlations):
         if not isinstance(correlation, dict):
@@ -542,44 +565,24 @@ elif row_id == "E-07":
         required_fields = [
             "client_pid",
             "router_pid",
-            "router_session_id",
-            "upstream_session_id",
-            "router_session_id_observed",
-            "upstream_session_id_observed",
             "transport",
             "transport_observed_from_client_stderr",
-            "handshake_count",
-            "handshake_count_observed",
-            "frame_count",
-            "event_count",
-            "in_overlap_event_count",
-            "overlap_started_unix_ms",
-            "overlap_completed_unix_ms",
-            "close_reason",
+            "stderr_transport_error_markers",
+            "stdout_contains_smoke_text",
         ]
         for field in required_fields:
             if correlation.get(field) in (None, ""):
                 errors.append(f"runtime correlation {index} missing {field}")
         if correlation.get("transport") != "websocket":
             errors.append(f"runtime correlation {index} transport is not websocket")
-        if correlation.get("router_session_id_observed") is not True:
-            errors.append(f"runtime correlation {index} router_session_id is not observed")
-        if correlation.get("upstream_session_id_observed") is not True:
-            errors.append(f"runtime correlation {index} upstream_session_id is not observed")
+        if correlation.get("stderr_transport_error_markers") != []:
+            errors.append(f"runtime correlation {index} has transport error markers")
         if correlation.get("transport_observed_from_client_stderr") is not True:
             errors.append(f"runtime correlation {index} transport was not derived from client stderr")
-        if correlation.get("handshake_count_observed") is not True:
-            errors.append(f"runtime correlation {index} handshake_count is not observed")
+        if correlation.get("stdout_contains_smoke_text") is not True:
+            errors.append(f"runtime correlation {index} stdout did not contain smoke text")
         if correlation.get("router_pid") != router_process.get("pid"):
             errors.append(f"runtime correlation {index} router_pid does not match router process")
-        if correlation.get("handshake_count") != 1:
-            errors.append(f"runtime correlation {index} handshake_count is not 1")
-        if isinstance(correlation.get("frame_count"), int) and correlation["frame_count"] < 1:
-            errors.append(f"runtime correlation {index} frame_count is below 1")
-        if isinstance(correlation.get("event_count"), int) and correlation["event_count"] < 3:
-            errors.append(f"runtime correlation {index} event_count is below 3")
-        if isinstance(correlation.get("in_overlap_event_count"), int) and correlation["in_overlap_event_count"] < 3:
-            errors.append(f"runtime correlation {index} in_overlap_event_count is below 3")
 elif row_id == "E-08":
     if upstream.get("normal_close_sessions", 0) < 3:
         errors.append("upstream normal_close_sessions is below 3")
@@ -624,6 +627,7 @@ elif row_id == "E-09":
         "router_process",
         "router_websocket_registry",
         "runtime_correlations",
+        "session_continuity",
         "shared_router_pid",
         "socket_cleanup",
         "upstream",
@@ -690,17 +694,17 @@ PY
       smoke_output_file=$(mktemp "${TMPDIR:-/tmp}/codex-router-${row_id}-smoke.XXXXXX")
       if tests/smoke/installed_codex_mock.sh --transport websocket --scenario serial 2>&1 | tee "$smoke_output_file"; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
         artifact_path=$(awk '/codex_router_installed_codex_artifact=/{sub(/^.*codex_router_installed_codex_artifact=/, ""); value=$0} END{print value}' "$smoke_output_file")
         if [[ -z "$artifact_path" || ! -f "$artifact_path" ]]; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; serial installed-Codex smoke did not emit a durable artifact path; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$row_id" "$receipt" "$artifact_path" "$smoke_output_file" <<'PY'
 import json
 import shutil
@@ -764,7 +768,7 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
@@ -775,11 +779,11 @@ PY
         && cargo test -p codex-router-proxy loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_accept -- --nocapture \
         && cargo test -p codex-router-proxy authenticated_websocket_router_rejects_first_frame_auth_smuggling_before_selection -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -802,18 +806,18 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
     I-17b)
       if cargo test -p codex-router-proxy async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -834,18 +838,18 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
     I-05a)
       if cargo test -p codex-router-proxy legacy_single_lane_accept_loop_reproducer_blocks_second_client_until_first_finishes -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -866,7 +870,7 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
@@ -875,11 +879,11 @@ PY
         && cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture \
         && cargo test -p codex-router-proxy runtime_shutdown_cancels_active_duplex_pumps -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -901,7 +905,7 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
@@ -909,11 +913,11 @@ PY
       if cargo test -p codex-router-cli served_router_websocket_uses_persisted_quota_while_background_refresh_is_blocked -- --nocapture \
         && cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -935,7 +939,7 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
@@ -947,11 +951,11 @@ PY
         && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_during_new_turn_after_prior_completion_is_reported -- --nocapture \
         && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -973,7 +977,7 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
@@ -982,11 +986,11 @@ PY
         && cargo test -p codex-router-proxy websocket_first_direct_response_create_payload_selects_and_forwards_unchanged -- --nocapture \
         && cargo test -p codex-router-proxy async_websocket_tunnel_forwards_first_frame_and_second_local_frame -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
           exit 1
         fi
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -1007,7 +1011,7 @@ PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
@@ -1063,11 +1067,11 @@ PY
       then
         if cargo test -p codex-router-cli served_router_http_uses_persisted_quota_while_background_refresh_is_blocked -- --nocapture; then
           if ! ensure_guarded_source_paths_clean "$row_id"; then
-            receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+            receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
             printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
             exit 1
           fi
-          receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+          receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
           python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -1090,17 +1094,17 @@ PY
           exit 0
         fi
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
     G-06|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-22)
       if ! ensure_guarded_source_paths_clean "$row_id"; then
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
         printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
         exit 1
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
       if python3 - "$row_id" "$receipt" <<'PY'
 import json
 import re
@@ -1153,22 +1157,41 @@ elif row_id == "G-08":
     for marker in ["hyper_tungstenite::upgrade", "AsyncWebSocketTunnel", "handle_upgraded_connection"]:
         require_contains("release serve switchpoint", server, marker)
 elif row_id == "G-09":
-    checker = read("scripts/check-release-runtime-guardrails.py")
-    for marker in ["release_runtime_source_paths", "strip_cfg_test_items", "release_scan_forbidden", "RELEASE_RUNTIME_CRATES"]:
-        require_contains("release reachability checker", checker, marker)
-    for crate_name in [
-        "codex-router-auth",
-        "codex-router-cli",
-        "codex-router-core",
-        "codex-router-proxy",
-        "codex-router-quota",
-        "codex-router-secret-store",
-        "codex-router-selection",
-        "codex-router-state",
-    ]:
-        require_contains("release reachability checker", checker, f'"{crate_name}"')
-    if "codex-router-test-support" in checker:
-        errors.append("release reachability checker explicitly includes test-support crate")
+    result = subprocess.run(
+        ["scripts/check-release-runtime-guardrails.py", "--print-release-source-paths"],
+        cwd=repo,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        errors.append(f"release source path resolver failed: {result.stderr.strip()}")
+        source_paths = []
+    else:
+        try:
+            source_paths = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            errors.append(f"release source path resolver did not emit JSON: {error}")
+            source_paths = []
+    required_paths = {
+        "crates/codex-router-proxy/src/server.rs",
+        "crates/codex-router-proxy/src/websocket.rs",
+        "crates/codex-router-proxy/src/upstream.rs",
+        "crates/codex-router-proxy/src/http_sse.rs",
+    }
+    source_path_set = set(source_paths)
+    missing_paths = sorted(required_paths - source_path_set)
+    if missing_paths:
+        errors.append(f"release source path resolver missed required files: {missing_paths}")
+    forbidden_prefixes = ["crates/codex-router-test-support/"]
+    forbidden_paths = [
+        path
+        for path in source_paths
+        if any(path.startswith(prefix) for prefix in forbidden_prefixes)
+    ]
+    if forbidden_paths:
+        errors.append(f"release source path resolver included test-support files: {forbidden_paths[:5]}")
 elif row_id == "G-10":
     root_manifest = read("Cargo.toml")
     proxy_manifest = read("crates/codex-router-proxy/Cargo.toml")
@@ -1191,13 +1214,32 @@ elif row_id == "G-11":
 elif row_id == "G-12":
     websocket = read("crates/codex-router-proxy/src/websocket.rs")
     server = read("crates/codex-router-proxy/src/server.rs")
-    proxy_tests = test_list("codex-router-proxy")
     for marker in ["unbounded_channel", "mpsc::unbounded"]:
         if marker in websocket or marker in server:
             errors.append(f"runtime contains unbounded channel marker: {marker}")
     require_contains("affinity write tracker", websocket, "TaskTracker")
     require_contains("affinity write tracker", server, "affinity_record_tasks.wait().await")
-    require_contains("permanent test inventory", proxy_tests, "async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder")
+    result = subprocess.run(
+        [
+            "cargo",
+            "test",
+            "-p",
+            "codex-router-proxy",
+            "async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder",
+            "--",
+            "--nocapture",
+        ],
+        cwd=repo,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        errors.append(
+            "slow affinity recorder behavioral proof failed: "
+            + (result.stderr.strip() or result.stdout.strip())
+        )
 elif row_id in {"G-13", "G-14", "G-15", "G-16", "G-19", "G-20"}:
     proxy_tests = test_list("codex-router-proxy")
     cli_tests = test_list("codex-router-cli") if row_id in {"G-16", "G-19"} else ""
@@ -1290,11 +1332,11 @@ PY
         CODEX_ROUTER_PROOF_VERIFY_ONLY=1 "$0" "$guardrail_row" >/dev/null
       done
       if ! ensure_guarded_source_paths_clean "$row_id"; then
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
         printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
         exit 1
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
       python3 - "$receipt" <<'PY'
 import json
 import sys
@@ -1338,7 +1380,7 @@ PY
   esac
 
   local receipt
-  receipt=$(write_receipt "$row_id" "$layer" "$owner" "pending_unimplemented" 3)
+  receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pending_unimplemented" 3)
   printf 'proof row %s is pending; receipt: %s\n' "$row_id" "$receipt" >&2
   exit 3
 }

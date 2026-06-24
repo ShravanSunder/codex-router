@@ -32,27 +32,30 @@ Material plan rows:
 - G-01/G-02/G-03/G-04/G-05/G-07/G-21/G-23: structural guardrails.
 
 Known remaining gaps:
-- Final implementation re-review and PR wrapup are not complete.
+- Final implementation re-review is running after the current proof refresh.
+- PR wrapup is not complete.
 
 ## Git Scope
 
-Review commits from `7749909` through `8478fa8`, especially:
-- `7749909 feat: use hyper tungstenite serve runtime`
-- `9ac7e96 feat: stream http upstream with hyper`
-- `6140ab5 test: add release runtime guardrails`
-- `44ef5ed fix: keep websocket side effects off forwarding path`
-- `97a5c8c test: add installed codex websocket soak`
-- `188ff43 test: prove websocket registry drains`
-- `e62e50f fix: keep websocket sessions alive through continuations`
-- `e2f959b test: align websocket lifecycle tests with continuations`
-- `3e9ef44 fix: harden websocket proof gates`
-- `46da5b6 test: record hardened websocket proof evidence`
-- `9e02458 test: allow evidence-only proof commits`
-- `16c8a1f test: refresh async runtime proof evidence`
-- `fb4fb13 test: add non-mutating proof verification`
-- `f8d3ec5 fix: close websocket review proof gaps`
-- `ee32a2d test: stabilize websocket overlap proof timing`
-- `8478fa8 fix: guard websocket proof against dirty sources`
+Review commits from `origin/main` through `499667b`, especially:
+- `0170054 Harden async router proof gates`
+- `b8e1c4a Fix structural proof row dispatch`
+- `fa86eba Tighten structural reachability guard`
+- `ff689cb Redact structural proof cwd`
+- `2256b89 Record structural proof receipts`
+- `f5126b5 Add missing integration proof rows`
+- `17ead87 Record missing integration proof receipts`
+- `a09ee84 Persist smoke proof transcripts`
+- `1df684f Record smoke proof transcripts`
+- `e191ce6 Correct runtime correlation proof check`
+- `071adf1 Persist e2e soak transcript`
+- `eb50e11 Record e2e websocket soak proof`
+- `da18c3e Refresh async runtime proof receipts`
+- `670cbb6 Fix async runtime review blockers`
+- `8972874 Tighten async runtime proof fidelity`
+- `e16914e Refresh async runtime proof evidence`
+- `3515851 Fix JoinSet drain clippy guard`
+- `499667b Refresh async runtime proof after JoinSet guard`
 
 Changed implementation surfaces:
 - `crates/codex-router-proxy/src/server.rs`
@@ -72,73 +75,52 @@ Proof artifacts:
 
 ## Current Proof Claims
 
+Final source checkpoint:
+- Source commit for runtime code: `3515851b3635c87d0dcdf76d8a5d23101bd6cd32`.
+- Evidence refresh commit: `499667bf81c518c2770760aa76be7c79575fb4d9`.
+
+Command gates after `3515851`:
 - `cargo fmt --all -- --check`
   exit 0.
 - `cargo clippy --workspace --all-targets -- -D warnings`
   exit 0.
-- `tests/smoke/installed_codex_mock.sh --transport all`
-  exit 0, 6 passed.
-- `tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent`
-  exit 0, 1 passed.
-- `tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak`
-  exit 0, 1 passed, 303.68s.
-- `cargo test --workspace -- --nocapture`
-  exit 0 after `8478fa8`; 270 passed, 0 failed, 10 ignored.
-- `cargo test -p codex-router-proxy -- --nocapture`
-  exit 0 after `8478fa8`; 111 passed, 0 failed.
-- `scripts/proof-matrix.sh` rows E-02/E-03/E-04/E-05/E-06/E-08
+- `cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level slow`
+  exit 0; 277 passed, 10 skipped.
+- `cargo deny check`
+  exit 0; duplicate dependency warnings only.
+- `cargo audit`
   exit 0.
-- `scripts/proof-matrix.sh` rows G-01/G-02/G-03/G-04/G-05/G-07/G-21/G-23/I-17b
+- `git diff --check`
   exit 0.
+- `rg -n "/Users/|/var/folders/" tmp/plan-workflows/2026-06-24-async-router-runtime/evidence`
+  exit 1 with no matches.
 
-Latest implementation-review finding fixes after `cbe736a`:
-- `cargo fmt --all -- --check`
-  exit 0.
-- `cargo clippy --workspace --all-targets -- -D warnings`
-  exit 0.
-- `cargo test -p codex-router-proxy -- --nocapture`
-  exit 0, 113 passed.
-- `cargo test --workspace -- --nocapture`
-  exit 0, 270 passed, 0 failed, 10 ignored.
-- `tests/smoke/installed_codex_mock.sh --transport all`
-  exit 0, 6 passed.
-- `scripts/proof-matrix.sh I-19`
-  exit 0; pump cleanup/shutdown row now has a permanent harness.
-- `scripts/proof-matrix.sh I-20`
-  exit 0; exact first-frame forwarding row now has a permanent harness.
-- `scripts/proof-matrix.sh I-21`
-  exit 0; release HTTP/SSE request prep uses async state/selector contracts.
-- `scripts/proof-matrix.sh` rows G-01/G-02/G-03/G-04/G-05/G-07/G-21/G-23
-  exit 0 with guardrails scanning the release `codex-router-proxy/src/*.rs`
-  surface after stripping `#[cfg(test)]` items.
-
-Fresh post-review long-run proof:
-- `tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak`
-  exit 0 at `c60fb47d2f383444b9060ef7e955343cc1ea19d3`; 1 passed; 303.81s.
-- Fresh artifact:
-  `tmp/smoke/installed-codex-three-websocket-84866-1782332221488.json`.
-- `scripts/proof-matrix.sh` rows E-02/E-03/E-04/E-05/E-06/E-08
-  exit 0 against that artifact.
+Proof-matrix gates after `3515851`:
+- `scripts/proof-matrix.sh` rows `G-01` through `G-23`
+  all exit 0.
+- `scripts/proof-matrix.sh` rows `I-05a I-05b I-17b I-18 I-19 I-20 I-21`
+  all exit 0.
+- `scripts/proof-matrix.sh` rows `S-01 S-02 S-03 S-04`
+  all exit 0.
+- `scripts/proof-matrix.sh` rows `E-01` through `E-09`
+  all exit 0 against the fresh soak transcript.
 
 Five-minute soak artifact:
-- `tmp/smoke/installed-codex-three-websocket-84866-1782332221488.json`
-- git_head=c60fb47d2f383444b9060ef7e955343cc1ea19d3.
-- clients.all_success=true, count=3.
-- upstream.active_high_water=3, completed_sessions=3,
-  final_active_sessions=0, real_overlap_duration_ms=301022,
-  in_overlap_session_event_counts=[13,13,11],
-  normal_close_sessions=3, abnormal_close_sessions=0,
-  session_close_outcomes=[normal,normal,normal].
-- upstream.multi_step_interleave_completed=true,
-  multi_step_followup_frame_count=1,
-  multi_step_followup_active_session_count=3,
-  multi_step_completed_before_overlap_end=true.
-- router_websocket_registry.active_sessions=0, high_water_sessions=3,
-  registered_sessions=3, closed_sessions=3,
-  completed_response_sessions=7,
-  forwarded_upstream_messages=51,
-  final_session_forwarded_upstream_message_counts=[16,19,16],
-  handled_connections=3.
+- Producer command:
+  `tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak`
+- Exit 0; 1 passed; 303.34s.
+- Raw transient artifact:
+  `tmp/smoke/installed-codex-three-websocket-15680-1782340805758.json`.
+- Committed transcript:
+  `tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/e2e/three-websocket-soak-transcript.json`.
+- transcript git_head=`3515851b3635c87d0dcdf76d8a5d23101bd6cd32`.
+- clients.count=3, clients.all_success=true,
+  stderr_transport_error_markers=[[],[],[]].
+- router_websocket_registry.handled_connections=3,
+  high_water_sessions=3, registered_session_ids=[1,2,3],
+  closed_session_ids=[3,2,1], active_sessions=0.
+- runtime_correlations record observed router_session_id and
+  upstream_session_id for each client, with observed booleans true.
 - socket_cleanup.established_count=0, close_wait_count=0,
   raw_state_counts=[].
 
