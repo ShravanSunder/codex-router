@@ -1,5 +1,6 @@
 //! Loopback-only server runtime primitives.
 
+use std::convert::Infallible;
 use std::io::Read;
 use std::io::Write;
 use std::net::AddrParseError;
@@ -15,19 +16,33 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use bytes::Bytes;
+use futures_util::future::BoxFuture;
 use http::HeaderMap;
 use http::Method as HttpMethod;
+use http::Request as HttpRequest;
 use http::Response as HttpResponse;
 use http::StatusCode;
 use http::Uri;
+use http_body_util::BodyExt;
+use http_body_util::Empty;
+use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::upgrade::Upgraded;
+use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio_util::sync::CancellationToken;
 use tungstenite::handshake::derive_accept_key;
+use tungstenite::protocol::Role;
 
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
+use codex_router_core::ids::AccountId;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
@@ -35,9 +50,11 @@ use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_h
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use codex_router_state::repositories::AffinityRepository;
+use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
+use crate::account_selection::AsyncRepositoryBackedAccountSelector;
 use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RepositoryBackedAccountSelector;
 use crate::account_selection::RouteBandAccountHolds;
@@ -65,10 +82,16 @@ use crate::secret_store_factory::ProxyRuntimeSecretStore;
 use crate::secret_store_factory::open_proxy_secret_store;
 use crate::upstream::HttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
+use crate::websocket::AsyncProviderCredentialResolver;
+use crate::websocket::AsyncWebSocketTunnel;
 use crate::websocket::BlockingWebSocketTunnel;
 use crate::websocket::FirstFramePolicy;
+use crate::websocket::WebSocketHandshakeRequest;
 use crate::websocket::WebSocketProtocolRouter;
 use crate::websocket::WebSocketRevocationRegistry;
+use codex_router_auth::resolver::CredentialResolverError;
+use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_auth::resolver::ResolvedProviderCredential;
 
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 
@@ -526,6 +549,62 @@ impl LoopbackRouterRuntime {
         &self,
         max_connections: usize,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
+        runtime.block_on(self.serve_protocol_connections_async(max_connections))
+    }
+
+    async fn serve_protocol_connections_async(
+        &self,
+        max_connections: usize,
+    ) -> Result<usize, LoopbackRouterRuntimeError> {
+        let listener = self
+            .server
+            .listener()
+            .try_clone()
+            .map_err(LoopbackRouterRuntimeError::ListenerClone)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(LoopbackRouterRuntimeError::ListenerNonBlocking)?;
+        let listener =
+            TokioTcpListener::from_std(listener).map_err(LoopbackRouterRuntimeError::Accept)?;
+        let mut handled_connections = 0_usize;
+        let mut handlers = Vec::new();
+        let connection_handler = Arc::new(self.protocol_connection_handler());
+        while handled_connections < max_connections {
+            let (stream, _peer_addr) = listener
+                .accept()
+                .await
+                .map_err(LoopbackRouterRuntimeError::Accept)?;
+            let handler_context = Arc::clone(&connection_handler);
+            let handler =
+                tokio::spawn(async move { handler_context.handle_hyper_connection(stream).await });
+            if max_connections == usize::MAX {
+                drop(handler);
+            } else {
+                handlers.push(handler);
+            }
+            handled_connections += 1;
+        }
+
+        for handler in handlers {
+            match handler.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("loopback connection failed: {error}"),
+                Err(source) => return Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
+            }
+        }
+
+        Ok(handled_connections)
+    }
+
+    #[allow(dead_code)]
+    fn serve_protocol_connections_legacy(
+        &self,
+        max_connections: usize,
+    ) -> Result<usize, LoopbackRouterRuntimeError> {
         let listener = self
             .server
             .listener()
@@ -616,6 +695,275 @@ struct LoopbackProtocolConnectionHandler {
 }
 
 impl LoopbackProtocolConnectionHandler {
+    async fn handle_hyper_connection(
+        self: Arc<Self>,
+        stream: tokio::net::TcpStream,
+    ) -> Result<(), LoopbackRouterRuntimeError> {
+        let io = TokioIo::new(stream);
+        let service_context = Arc::clone(&self);
+        let upgrade_tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let service_upgrade_tasks = Arc::clone(&upgrade_tasks);
+        let service = service_fn(move |request: HttpRequest<Incoming>| {
+            let request_context = Arc::clone(&service_context);
+            let request_upgrade_tasks = Arc::clone(&service_upgrade_tasks);
+            async move {
+                Ok::<_, Infallible>(
+                    request_context
+                        .handle_hyper_request(request, request_upgrade_tasks)
+                        .await,
+                )
+            }
+        });
+
+        let mut http_builder = http1::Builder::new();
+        http_builder.half_close(true);
+        http_builder
+            .serve_connection(io, service)
+            .with_upgrades()
+            .await
+            .map_err(LoopbackRouterRuntimeError::HyperConnection)?;
+        let mut upgrade_task_guard = upgrade_tasks.lock().await;
+        let drained_upgrade_tasks = std::mem::take(&mut *upgrade_task_guard);
+        drop(upgrade_task_guard);
+        for upgrade_task in drained_upgrade_tasks {
+            upgrade_task
+                .await
+                .map_err(LoopbackRouterRuntimeError::ConnectionJoin)?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_hyper_request(
+        self: Arc<Self>,
+        request: HttpRequest<Incoming>,
+        upgrade_tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    ) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+        match HyperProtocolSwitchpoint::classify(request.method(), request.uri(), request.headers())
+        {
+            HyperProtocolDispatch::WebSocketUpgrade => {
+                self.handle_hyper_websocket_request(request, upgrade_tasks)
+                    .await
+            }
+            HyperProtocolDispatch::Http => self.handle_hyper_http_request(request).await,
+        }
+    }
+
+    async fn handle_hyper_websocket_request(
+        self: Arc<Self>,
+        request: HttpRequest<Incoming>,
+        upgrade_tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    ) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", http::uri::PathAndQuery::as_str)
+            .to_owned();
+        let handshake = websocket_handshake_from_hyper_headers(request.headers());
+        if let Some(response) = self.preflight_hyper_websocket_request(&request, &path) {
+            return response;
+        }
+        let upgrade_response =
+            match HyperWebSocketUpgrade::switching_protocols_response(request.headers()) {
+                Ok(response) => response.map(|()| empty_body()),
+                Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
+            };
+        let on_upgrade = hyper::upgrade::on(request);
+        let task_context = Arc::clone(&self);
+        let upgrade_task = tokio::spawn(async move {
+            match on_upgrade.await {
+                Ok(upgraded) => {
+                    if let Err(error) = task_context
+                        .handle_hyper_websocket_upgraded(upgraded, handshake, path)
+                        .await
+                    {
+                        eprintln!("websocket session failed: {error}");
+                    }
+                }
+                Err(error) => eprintln!("websocket upgrade failed: {error}"),
+            }
+        });
+        upgrade_tasks.lock().await.push(upgrade_task);
+
+        upgrade_response
+    }
+
+    async fn handle_hyper_websocket_upgraded(
+        self: Arc<Self>,
+        upgraded: Upgraded,
+        handshake: WebSocketHandshakeRequest,
+        path: String,
+    ) -> Result<(), LoopbackRouterRuntimeError> {
+        let state_store = AsyncSqliteStateStore::open(&self.state_database_path).await?;
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &state_store,
+            Arc::clone(&self.weighted_selectors),
+            Arc::clone(&self.account_holds),
+            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            self.runtime_clock(),
+        );
+        let credential_resolver = AsyncProxyCredentialResolver::new(
+            self.state_database_path.clone(),
+            self.secret_store_root.clone(),
+            self.fixed_now_unix_seconds,
+        );
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let local_websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            TokioIo::new(upgraded),
+            Role::Server,
+            None,
+        )
+        .await;
+        let tunnel = if let Some(audit_sink) = &self.audit_sink {
+            AsyncWebSocketTunnel::new_with_audit_sink(
+                &self.auth_gate,
+                &selector,
+                &credential_resolver,
+                &protocol_router,
+                audit_sink,
+            )
+        } else {
+            AsyncWebSocketTunnel::new(
+                &self.auth_gate,
+                &selector,
+                &credential_resolver,
+                &protocol_router,
+            )
+        }
+        .with_revocation_registry(self.websocket_revocations.clone())
+        .with_affinity_secret_provider(&self.secret_store)
+        .with_affinity_owner_recorder(self.affinity_owner_recorder.as_ref());
+        let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
+        tunnel
+            .handle_upgraded_connection(
+                local_websocket,
+                handshake,
+                upstream_url.as_str(),
+                self.max_websocket_upstream_messages,
+            )
+            .await
+            .map_err(LoopbackRouterRuntimeError::WebSocket)
+    }
+
+    async fn handle_hyper_http_request(
+        self: Arc<Self>,
+        request: HttpRequest<Incoming>,
+    ) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+        let request = match hyper_request_to_proxy_request(request).await {
+            Ok(request) => request,
+            Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
+        };
+        let response =
+            tokio::task::spawn_blocking(move || self.handle_blocking_http_request(request)).await;
+        match response {
+            Ok(Ok(response)) => http_proxy_response_to_hyper(response),
+            Ok(Err(HttpProxyError::LocalAuth { .. })) => empty_response(StatusCode::UNAUTHORIZED),
+            Ok(Err(HttpProxyError::Selection { .. })) => {
+                empty_response(StatusCode::SERVICE_UNAVAILABLE)
+            }
+            Ok(Err(HttpProxyError::ProviderCredential { .. })) => {
+                empty_response(StatusCode::BAD_GATEWAY)
+            }
+            Ok(Err(_error)) => empty_response(StatusCode::BAD_GATEWAY),
+            Err(_error) => empty_response(StatusCode::BAD_GATEWAY),
+        }
+    }
+
+    fn handle_blocking_http_request(
+        &self,
+        request: HttpProxyRequest,
+    ) -> Result<HttpProxyResponse, HttpProxyError> {
+        let state_store = SqliteStateStore::open(&self.state_database_path).map_err(|_error| {
+            HttpProxyError::Selection {
+                reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
+            }
+        })?;
+        let credential_resolver = self.open_credential_resolver().map_err(|_error| {
+            HttpProxyError::ProviderCredential {
+                reason: CredentialResolverError::SecretUnavailable,
+            }
+        })?;
+        let selector = self.repository_backed_account_selector(&state_store);
+        let service = AuthenticatedHttpProxyService::new(
+            &self.auth_gate,
+            &selector,
+            &credential_resolver,
+            &self.upstream,
+        )
+        .with_affinity_secret_provider(&self.secret_store)
+        .with_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
+        let service = if let Some(audit_sink) = &self.audit_sink {
+            service.with_audit_sink(audit_sink)
+        } else {
+            service
+        };
+        service.handle_streaming_request(request)?.into_buffered()
+    }
+
+    fn preflight_hyper_websocket_request(
+        &self,
+        request: &HttpRequest<Incoming>,
+        path: &str,
+    ) -> Option<HttpResponse<BoxBody<Bytes, Infallible>>> {
+        let subprotocol = header_value(request.headers(), "sec-websocket-protocol");
+        let router_token = header_value(request.headers(), "x-codex-router-token");
+        let authorization = header_value(request.headers(), "authorization");
+        let cookie = header_value(request.headers(), "cookie");
+        let presented_token = if subprotocol
+            .as_deref()
+            .is_some_and(has_forbidden_websocket_subprotocol_auth_carrier)
+        {
+            Err(LocalAuthError::Wrong)
+        } else {
+            extract_presented_local_token_from_request(
+                router_token.as_deref(),
+                authorization.as_deref(),
+                cookie.as_deref(),
+                path,
+                &[],
+                false,
+            )
+        };
+        let presented_token = match presented_token {
+            Ok(presented_token) => presented_token,
+            Err(reason) => {
+                self.emit_websocket_local_auth_rejection(reason);
+                return Some(empty_response(StatusCode::UNAUTHORIZED));
+            }
+        };
+        if let Err(reason) = self.auth_gate.authorize(presented_token) {
+            self.emit_websocket_local_auth_rejection(reason);
+            return Some(empty_response(StatusCode::UNAUTHORIZED));
+        }
+        match classify_route(Method::Post, path_without_query(path), true) {
+            RouteClass::Supported(_) => None,
+            RouteClass::Rejected { .. } => Some(empty_response(StatusCode::NOT_FOUND)),
+        }
+    }
+
+    fn emit_websocket_local_auth_rejection(&self, reason: LocalAuthError) {
+        if let Some(audit_sink) = &self.audit_sink {
+            let event = local_auth_rejection_audit_event(
+                TransportKind::WebSocket,
+                AuditRouteKind::ResponsesWebSocket,
+                reason,
+            );
+            append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
+        }
+    }
+
+    fn runtime_clock(&self) -> Arc<dyn Fn() -> u64 + Send + Sync> {
+        let fixed_now_unix_seconds = self.fixed_now_unix_seconds;
+        Arc::new(move || {
+            fixed_now_unix_seconds.unwrap_or_else(|| match current_unix_seconds() {
+                Ok(now_unix_seconds) => now_unix_seconds,
+                Err(error) => {
+                    panic!("system clock must remain after Unix epoch for routing: {error}")
+                }
+            })
+        })
+    }
+
     fn handle_protocol_connection(
         &self,
         stream: TcpStream,
@@ -925,8 +1273,138 @@ fn has_forbidden_websocket_subprotocol_auth_carrier(value: &str) -> bool {
     value.contains("token") || value.contains("bearer") || value.contains("authorization")
 }
 
+fn websocket_handshake_from_hyper_headers(headers: &HeaderMap) -> WebSocketHandshakeRequest {
+    let mut handshake = WebSocketHandshakeRequest::new();
+    for (name, value) in headers {
+        if let Ok(value) = value.to_str() {
+            handshake = handshake.with_header(Header::new(name.as_str(), value));
+        }
+    }
+
+    handshake
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(header_name, _value)| header_name.as_str().eq_ignore_ascii_case(name))
+        .and_then(|(_header_name, value)| value.to_str().ok())
+        .map(str::to_owned)
+}
+
 fn path_without_query(path: &str) -> &str {
     path.split_once('?').map_or(path, |(path, _query)| path)
+}
+
+async fn hyper_request_to_proxy_request(
+    request: HttpRequest<Incoming>,
+) -> Result<HttpProxyRequest, LoopbackRouterRuntimeError> {
+    let (parts, body) = request.into_parts();
+    let path = parts
+        .uri
+        .path_and_query()
+        .map_or("/", http::uri::PathAndQuery::as_str)
+        .to_owned();
+    let body = body
+        .collect()
+        .await
+        .map_err(LoopbackRouterRuntimeError::HyperBody)?
+        .to_bytes()
+        .to_vec();
+    let mut proxy_request = HttpProxyRequest::new(method_from_hyper(&parts.method), path);
+    for (name, value) in &parts.headers {
+        if let Ok(value) = value.to_str() {
+            proxy_request = proxy_request.with_header(Header::new(name.as_str(), value));
+        }
+    }
+
+    Ok(proxy_request.with_body(body))
+}
+
+fn method_from_hyper(method: &HttpMethod) -> Method {
+    match *method {
+        HttpMethod::GET => Method::Get,
+        HttpMethod::POST => Method::Post,
+        _ => Method::Other,
+    }
+}
+
+fn http_proxy_response_to_hyper(
+    response: HttpProxyResponse,
+) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+    let mut builder = HttpResponse::builder().status(response.status());
+    for header in response.headers().as_slice() {
+        builder = builder.header(header.name(), header.value());
+    }
+    builder
+        .body(full_body(response.body().to_vec()))
+        .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
+}
+
+fn empty_response(status: StatusCode) -> HttpResponse<BoxBody<Bytes, Infallible>> {
+    HttpResponse::builder()
+        .status(status)
+        .body(empty_body())
+        .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
+}
+
+fn empty_body() -> BoxBody<Bytes, Infallible> {
+    Empty::<Bytes>::new().boxed()
+}
+
+fn full_body(body: Vec<u8>) -> BoxBody<Bytes, Infallible> {
+    Full::new(Bytes::from(body)).boxed()
+}
+
+#[derive(Clone, Debug)]
+struct AsyncProxyCredentialResolver {
+    state_database_path: PathBuf,
+    secret_store_root: PathBuf,
+    fixed_now_unix_seconds: Option<u64>,
+}
+
+impl AsyncProxyCredentialResolver {
+    fn new(
+        state_database_path: PathBuf,
+        secret_store_root: PathBuf,
+        fixed_now_unix_seconds: Option<u64>,
+    ) -> Self {
+        Self {
+            state_database_path,
+            secret_store_root,
+            fixed_now_unix_seconds,
+        }
+    }
+}
+
+impl AsyncProviderCredentialResolver for AsyncProxyCredentialResolver {
+    fn resolve_provider_credentials<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
+        Box::pin(async move {
+            let state_database_path = self.state_database_path.clone();
+            let secret_store_root = self.secret_store_root.clone();
+            let fixed_now_unix_seconds = self.fixed_now_unix_seconds;
+            let account_id = account_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let now_unix_seconds = match fixed_now_unix_seconds {
+                    Some(now_unix_seconds) => now_unix_seconds,
+                    None => current_unix_seconds()
+                        .map_err(|_error| CredentialResolverError::RefreshUnavailable)?,
+                };
+                let resolver = ProxyCredentialResolver::open(
+                    &state_database_path,
+                    &secret_store_root,
+                    now_unix_seconds,
+                )
+                .map_err(|_error| CredentialResolverError::SecretUnavailable)?;
+                resolver.resolve_provider_credentials(&account_id)
+            })
+            .await
+            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?
+        })
+    }
 }
 
 impl HttpAffinitySecretProvider for ProxyRuntimeSecretStore {
@@ -1018,6 +1496,21 @@ pub enum LoopbackRouterRuntimeError {
     /// Listener cloning failed before the bounded serve loop.
     #[error("failed to clone loopback listener")]
     ListenerClone(#[source] std::io::Error),
+    /// Listener could not be handed to Tokio.
+    #[error("failed to configure loopback listener for nonblocking Tokio runtime")]
+    ListenerNonBlocking(#[source] std::io::Error),
+    /// Tokio runtime creation failed.
+    #[error("failed to create Tokio runtime")]
+    TokioRuntime(#[source] std::io::Error),
+    /// Hyper connection serving failed.
+    #[error("failed serving Hyper loopback connection")]
+    HyperConnection(#[source] hyper::Error),
+    /// Hyper request body collection failed.
+    #[error("failed reading Hyper request body")]
+    HyperBody(#[source] hyper::Error),
+    /// Hyper connection task failed.
+    #[error("Hyper connection task failed")]
+    ConnectionJoin(#[source] tokio::task::JoinError),
     /// A loopback connection handler panicked.
     #[error("loopback router connection handler panicked")]
     ConnectionPanic,

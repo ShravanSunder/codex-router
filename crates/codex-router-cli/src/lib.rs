@@ -4650,7 +4650,9 @@ exit 42
 
         let (old_close_sender, old_close_receiver) = mpsc::channel();
         let old_client_thread = thread::spawn(move || {
-            let read_result = client.read().map(|message| message.to_string());
+            let read_result = client
+                .read()
+                .map(|message| matches!(message, Message::Close(_)));
             if let Err(error) = old_close_sender.send(read_result) {
                 panic!("old websocket close result should send: {error}");
             }
@@ -4662,8 +4664,8 @@ exit 42
                 panic!("old-token websocket should close after token rotation: {error}");
             }
         };
-        if let Ok(message) = old_close_result {
-            panic!("old-token websocket should close, got message: {message}");
+        if let Ok(false) = old_close_result {
+            panic!("old-token websocket should close, got data message");
         }
         if let Err(error) = release_sender.send(()) {
             panic!("upstream release should send: {error}");

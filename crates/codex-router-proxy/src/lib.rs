@@ -3503,6 +3503,7 @@ mod tests {
             )],
         );
         match client.read() {
+            Ok(Message::Close(_)) => {}
             Ok(message) => panic!("old-token websocket should close, got message: {message}"),
             Err(_error) => {}
         }

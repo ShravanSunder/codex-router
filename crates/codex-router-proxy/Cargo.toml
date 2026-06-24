@@ -15,8 +15,10 @@ codex-router-quota.workspace = true
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.0" }
 codex-router-selection = { path = "../codex-router-selection", version = "0.1.0" }
 codex-router-state = { path = "../codex-router-state", version = "0.1.0" }
+bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true
+http-body-util.workspace = true
 httparse.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

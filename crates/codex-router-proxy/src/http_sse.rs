@@ -361,7 +361,7 @@ pub trait StreamingHttpRequestHandler {
 }
 
 /// Provides router-owned affinity secret material to HTTP/SSE selection.
-pub trait HttpAffinitySecretProvider {
+pub trait HttpAffinitySecretProvider: Send + Sync {
     /// Loads or creates the router affinity secret.
     fn load_or_create_affinity_secret(&self) -> Result<RouterAffinityHashSecret, HttpProxyError>;
 }

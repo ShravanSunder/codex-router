@@ -40,6 +40,7 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
+use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
 use tungstenite::WebSocket;
 use tungstenite::accept_hdr;
@@ -677,6 +678,7 @@ fn websocket_credential_rejection_audit_event(account_hash: String) -> AuditEven
 #[derive(Clone, Debug, Default)]
 pub struct WebSocketRevocationRegistry {
     connections: Arc<Mutex<HashMap<TokenGeneration, Vec<TcpStream>>>>,
+    cancellations: Arc<Mutex<HashMap<TokenGeneration, Vec<CancellationToken>>>>,
 }
 
 impl WebSocketRevocationRegistry {
@@ -701,6 +703,18 @@ impl WebSocketRevocationRegistry {
         Ok(())
     }
 
+    fn register_cancellation(&self, generation: TokenGeneration) -> CancellationToken {
+        let cancellation = CancellationToken::new();
+        if let Ok(mut cancellations) = self.cancellations.lock() {
+            cancellations
+                .entry(generation)
+                .or_default()
+                .push(cancellation.clone());
+        }
+
+        cancellation
+    }
+
     /// Closes connections that authenticated with generations other than the active one.
     pub fn close_all_except(&self, active_generation: TokenGeneration) {
         let Ok(mut connections) = self.connections.lock() else {
@@ -715,6 +729,22 @@ impl WebSocketRevocationRegistry {
             if let Some(streams) = connections.remove(&stale_generation) {
                 for stream in streams {
                     let _result = stream.shutdown(Shutdown::Both);
+                }
+            }
+        }
+        drop(connections);
+        let Ok(mut cancellations) = self.cancellations.lock() else {
+            return;
+        };
+        let stale_generations = cancellations
+            .keys()
+            .copied()
+            .filter(|generation| *generation != active_generation)
+            .collect::<Vec<_>>();
+        for stale_generation in stale_generations {
+            if let Some(tokens) = cancellations.remove(&stale_generation) {
+                for token in tokens {
+                    token.cancel();
                 }
             }
         }
@@ -741,6 +771,7 @@ where
     C: AsyncProviderCredentialResolver,
 {
     router: AsyncAuthenticatedWebSocketRouter<'a, S, C>,
+    revocations: WebSocketRevocationRegistry,
     affinity_owner_recorder: Option<&'a dyn HttpAffinityOwnerRecorder>,
 }
 
@@ -950,6 +981,7 @@ where
                 credential_resolver,
                 protocol_router,
             ),
+            revocations: WebSocketRevocationRegistry::new(),
             affinity_owner_recorder: None,
         }
     }
@@ -971,8 +1003,16 @@ where
                 protocol_router,
             )
             .with_audit_sink(audit_sink),
+            revocations: WebSocketRevocationRegistry::new(),
             affinity_owner_recorder: None,
         }
+    }
+
+    /// Adds shared revocation tracking for token rotation.
+    #[must_use]
+    pub fn with_revocation_registry(mut self, revocations: WebSocketRevocationRegistry) -> Self {
+        self.revocations = revocations;
+        self
     }
 
     /// Adds the router-owned affinity secret provider.
@@ -1032,11 +1072,12 @@ where
             .await
             .map_err(WebSocketTunnelError::CloseReason)?;
         let WebSocketFirstFrameDecision::OpenUpstream {
-            token_generation: _,
+            token_generation,
             headers,
             first_frame,
             affinity_owner_context,
         } = decision;
+        let revocation = self.revocations.register_cancellation(token_generation);
 
         let mut upstream_request = upstream_url.into_client_request()?;
         apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
@@ -1051,6 +1092,7 @@ where
             max_upstream_messages,
             self.affinity_owner_recorder,
             affinity_owner_context.as_ref(),
+            &revocation,
         )
         .await
     }
@@ -1062,6 +1104,7 @@ async fn forward_duplex_until_complete<LocalStream, UpstreamStream>(
     max_upstream_messages: usize,
     affinity_owner_recorder: Option<&dyn HttpAffinityOwnerRecorder>,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
+    revocation: &CancellationToken,
 ) -> Result<(), WebSocketTunnelError>
 where
     LocalStream: AsyncRead + AsyncWrite + Unpin,
@@ -1076,6 +1119,11 @@ where
     let mut upstream_message_count = 0_usize;
     loop {
         tokio::select! {
+            () = revocation.cancelled() => {
+                local_websocket.close(None).await?;
+                upstream_websocket.close(None).await?;
+                return Ok(());
+            }
             local_message = local_websocket.next() => {
                 let Some(local_message) = local_message else {
                     upstream_websocket.close(None).await?;

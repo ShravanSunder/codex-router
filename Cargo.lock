@@ -132,6 +132,7 @@ dependencies = [
 name = "codex-router-proxy"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "codex-router-auth",
  "codex-router-core",
  "codex-router-quota",
@@ -140,6 +141,7 @@ dependencies = [
  "codex-router-state",
  "futures-util",
  "http",
+ "http-body-util",
  "httparse",
  "hyper",
  "hyper-util",
