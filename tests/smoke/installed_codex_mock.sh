@@ -17,7 +17,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --scenario)
       if [[ $# -lt 2 ]]; then
-        echo "--scenario requires one of: serial, concurrent, all" >&2
+        echo "--scenario requires one of: serial, concurrent, soak, all" >&2
         exit 2
       fi
       scenario="$2"
@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       cat <<'USAGE'
-Usage: tests/smoke/installed_codex_mock.sh [--transport http-sse|websocket|all] [--scenario serial|concurrent|all]
+Usage: tests/smoke/installed_codex_mock.sh [--transport http-sse|websocket|all] [--scenario serial|concurrent|soak|all]
 USAGE
       exit 0
       ;;
@@ -53,21 +53,23 @@ case "${transport}" in
 esac
 
 case "${scenario}" in
-  serial|concurrent|all)
+  serial|concurrent|soak|all)
     ;;
   *)
-    echo "--scenario must be one of: serial, concurrent, all" >&2
+    echo "--scenario must be one of: serial, concurrent, soak, all" >&2
     exit 2
     ;;
 esac
 
-if [[ "${scenario}" == "concurrent" && "${transport}" != "websocket" ]]; then
-  echo "--scenario concurrent requires --transport websocket" >&2
+if [[ "${scenario}" =~ ^(concurrent|soak)$ && "${transport}" != "websocket" ]]; then
+  echo "--scenario ${scenario} requires --transport websocket" >&2
   exit 2
 fi
 
 if [[ "${scenario}" == "concurrent" ]]; then
   test_filter="three_codex_websocket_concurrent_e2e_"
+elif [[ "${scenario}" == "soak" ]]; then
+  test_filter="three_codex_websocket_soak_"
 elif [[ "${scenario}" == "all" && "${transport}" == "websocket" ]]; then
   test_filter="installed_codex_websocket_"
 fi

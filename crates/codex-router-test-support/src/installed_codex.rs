@@ -56,6 +56,7 @@ use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
 use tungstenite::Message;
+use tungstenite::WebSocket;
 use tungstenite::accept_hdr;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::connect;
@@ -65,12 +66,77 @@ use tungstenite::handshake::server::Response;
 const SMOKE_EXPECTED_TEXT: &str = "codex-router smoke ok";
 const CODEX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(35);
+const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(300);
+const SOAK_COMMAND_TIMEOUT_SLACK: Duration = Duration::from_secs(90);
+const SOAK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstalledCodexSmokeMode {
     HttpSse,
     WebSocket,
     Combined,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConcurrentWebSocketHarnessConfig {
+    artifact_mode: &'static str,
+    upstream: ConcurrentUpstreamConfig,
+    codex_command_timeout: Duration,
+    router_max_upstream_messages: usize,
+}
+
+impl ConcurrentWebSocketHarnessConfig {
+    const fn quick() -> Self {
+        Self {
+            artifact_mode: "three-websocket",
+            upstream: ConcurrentUpstreamConfig::quick(3),
+            codex_command_timeout: CODEX_COMMAND_TIMEOUT,
+            router_max_upstream_messages: 4,
+        }
+    }
+
+    fn soak() -> Self {
+        let hold_duration = soak_duration_from_env();
+        Self {
+            artifact_mode: "three-websocket-soak",
+            upstream: ConcurrentUpstreamConfig::soak(3, hold_duration),
+            codex_command_timeout: hold_duration.saturating_add(SOAK_COMMAND_TIMEOUT_SLACK),
+            router_max_upstream_messages: 64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConcurrentUpstreamConfig {
+    expected_sessions: usize,
+    hold_duration: Duration,
+    heartbeat_interval: Duration,
+}
+
+impl ConcurrentUpstreamConfig {
+    const fn quick(expected_sessions: usize) -> Self {
+        Self {
+            expected_sessions,
+            hold_duration: Duration::ZERO,
+            heartbeat_interval: SOAK_HEARTBEAT_INTERVAL,
+        }
+    }
+
+    const fn soak(expected_sessions: usize, hold_duration: Duration) -> Self {
+        Self {
+            expected_sessions,
+            hold_duration,
+            heartbeat_interval: SOAK_HEARTBEAT_INTERVAL,
+        }
+    }
+}
+
+fn soak_duration_from_env() -> Duration {
+    std::env::var("CODEX_ROUTER_SOAK_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_SOAK_DURATION)
 }
 
 impl InstalledCodexSmokeMode {
@@ -122,7 +188,13 @@ pub fn run_installed_codex_websocket_mock_smoke() -> Result<InstalledCodexSmokeR
 
 /// Runs three installed Codex WebSocket clients through one router child process.
 pub fn run_installed_codex_three_websocket_mock_e2e() -> Result<InstalledCodexSmokeReport, String> {
-    run_installed_codex_three_websocket_mock_e2e_inner()
+    run_installed_codex_three_websocket_mock_e2e_inner(ConcurrentWebSocketHarnessConfig::quick())
+}
+
+/// Runs three installed Codex WebSocket clients through one router for a sustained soak.
+pub fn run_installed_codex_three_websocket_mock_soak() -> Result<InstalledCodexSmokeReport, String>
+{
+    run_installed_codex_three_websocket_mock_e2e_inner(ConcurrentWebSocketHarnessConfig::soak())
 }
 
 fn run_installed_codex_mock_smoke_with_mode(
@@ -295,8 +367,9 @@ fn run_installed_codex_mock_smoke_with_mode(
     Ok(InstalledCodexSmokeReport { transcript_path })
 }
 
-fn run_installed_codex_three_websocket_mock_e2e_inner() -> Result<InstalledCodexSmokeReport, String>
-{
+fn run_installed_codex_three_websocket_mock_e2e_inner(
+    config: ConcurrentWebSocketHarnessConfig,
+) -> Result<InstalledCodexSmokeReport, String> {
     let smoke_root = SmokeTempRoot::new("installed-codex-three-websocket")?;
     let router_root = smoke_root.path().join("router");
     let state_path = router_root.join("state.sqlite");
@@ -309,17 +382,18 @@ fn run_installed_codex_three_websocket_mock_e2e_inner() -> Result<InstalledCodex
     })?;
 
     let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
-    let upstream = MockConcurrentWebSocketUpstream::start(3)?;
+    let upstream = MockConcurrentWebSocketUpstream::start(config.upstream)?;
     let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
     let audit_path = router_root.join("audit").join("events.jsonl");
-    let router_process = start_router_process(
+    let router_process = start_router_process_with_max_messages(
         router_port,
         state_path,
         secret_root,
         None,
         format!("http://{}/v1", upstream.address()),
         audit_path,
+        config.router_max_upstream_messages,
     )?;
 
     let start_barrier = Arc::new(Barrier::new(3));
@@ -368,13 +442,13 @@ fn run_installed_codex_three_websocket_mock_e2e_inner() -> Result<InstalledCodex
                 .name(format!("codex-router-three-client-{client_index}"))
                 .spawn(move || {
                     barrier.wait();
-                    let output = run_codex_exec(
+                    let output = run_codex_exec_with_timeout(
                         CodexTransportMode::WebSocket,
                         &codex_home,
                         &workdir,
                         &last_message_path,
-                        "",
                         child_environment,
+                        config.codex_command_timeout,
                     )?;
                     assert_codex_visible_output(
                         &format!("WebSocket client {client_index}"),
@@ -396,7 +470,9 @@ fn run_installed_codex_three_websocket_mock_e2e_inner() -> Result<InstalledCodex
     }
     let router_process = router_process.stop("three-client router process")?;
     let upstream_result = upstream.join()?;
+    assert_concurrent_websocket_contract(config, &upstream_result)?;
     let transcript_path = write_redacted_three_websocket_transcript(
+        config.artifact_mode,
         &codex_version,
         &router_process,
         &upstream_result,
@@ -405,6 +481,57 @@ fn run_installed_codex_three_websocket_mock_e2e_inner() -> Result<InstalledCodex
     )?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
+}
+
+fn assert_concurrent_websocket_contract(
+    config: ConcurrentWebSocketHarnessConfig,
+    upstream: &ConcurrentWebSocketTranscript,
+) -> Result<(), String> {
+    if upstream.expected_sessions != config.upstream.expected_sessions {
+        return Err(format!(
+            "concurrent upstream expected_sessions={} did not match config {}",
+            upstream.expected_sessions, config.upstream.expected_sessions
+        ));
+    }
+    if upstream.completed_sessions != config.upstream.expected_sessions {
+        return Err(format!(
+            "concurrent upstream completed {} sessions, expected {}",
+            upstream.completed_sessions, config.upstream.expected_sessions
+        ));
+    }
+    if upstream.final_active_sessions != 0 {
+        return Err(format!(
+            "concurrent upstream final active sessions was {}, expected 0",
+            upstream.final_active_sessions
+        ));
+    }
+    if upstream.active_high_water < config.upstream.expected_sessions {
+        return Err(format!(
+            "concurrent upstream high-water was {}, expected at least {}",
+            upstream.active_high_water, config.upstream.expected_sessions
+        ));
+    }
+    if config.upstream.hold_duration > Duration::ZERO {
+        if upstream.overlap_duration_ms < config.upstream.hold_duration.as_millis() {
+            return Err(format!(
+                "soak overlap duration was {}ms, expected at least {}ms",
+                upstream.overlap_duration_ms,
+                config.upstream.hold_duration.as_millis()
+            ));
+        }
+        if upstream
+            .session_event_counts
+            .iter()
+            .any(|event_count| *event_count < 3)
+        {
+            return Err(format!(
+                "soak session event counts were {:?}, expected at least 3 each",
+                upstream.session_event_counts
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Runs a hostile local no-token smoke and verifies upstream remains untouched.
@@ -722,6 +849,26 @@ fn start_router_process(
     upstream_base_url: String,
     audit_path: PathBuf,
 ) -> Result<RouterProcessGuard, String> {
+    start_router_process_with_max_messages(
+        router_port,
+        state_path,
+        secret_root,
+        local_token,
+        upstream_base_url,
+        audit_path,
+        4,
+    )
+}
+
+fn start_router_process_with_max_messages(
+    router_port: u16,
+    state_path: PathBuf,
+    secret_root: PathBuf,
+    local_token: Option<String>,
+    upstream_base_url: String,
+    audit_path: PathBuf,
+    max_websocket_upstream_messages: usize,
+) -> Result<RouterProcessGuard, String> {
     let binary_path = codex_router_binary_path()?;
     let mut argv = vec![
         "serve".to_owned(),
@@ -741,7 +888,7 @@ fn start_router_process(
         "60".to_owned(),
         "--disable-background-quota-refresh".to_owned(),
         "--max-websocket-upstream-messages".to_owned(),
-        "4".to_owned(),
+        max_websocket_upstream_messages.to_string(),
         "--max-connections".to_owned(),
         "64".to_owned(),
         "--audit-file".to_owned(),
@@ -929,6 +1076,24 @@ fn run_codex_exec(
     _local_token_assignment: &str,
     child_environment: CodexChildEnvironment,
 ) -> Result<Output, String> {
+    run_codex_exec_with_timeout(
+        transport_mode,
+        codex_home,
+        workdir,
+        last_message_path,
+        child_environment,
+        CODEX_COMMAND_TIMEOUT,
+    )
+}
+
+fn run_codex_exec_with_timeout(
+    transport_mode: CodexTransportMode,
+    codex_home: &Path,
+    workdir: &Path,
+    last_message_path: &Path,
+    child_environment: CodexChildEnvironment,
+    timeout: Duration,
+) -> Result<Output, String> {
     let CodexChildEnvironment {
         home,
         xdg_config_home,
@@ -971,7 +1136,7 @@ fn run_codex_exec(
         command.env("PATH", path);
     }
 
-    run_with_timeout(command, CODEX_COMMAND_TIMEOUT)
+    run_with_timeout(command, timeout)
 }
 
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
@@ -1422,6 +1587,7 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
 }
 
 fn write_redacted_three_websocket_transcript(
+    mode: &str,
     codex_version: &str,
     router_process: &RouterProcessObservation,
     upstream: &ConcurrentWebSocketTranscript,
@@ -1451,7 +1617,7 @@ fn write_redacted_three_websocket_transcript(
         })
         .collect::<Vec<_>>();
     let payload = serde_json::json!({
-        "mode": "three-websocket",
+        "mode": mode,
         "codex_version": codex_version.trim(),
         "router_process": {
             "binary_path": router_process.binary_path.display().to_string(),
@@ -1470,10 +1636,16 @@ fn write_redacted_three_websocket_transcript(
         "upstream": {
             "expected_sessions": upstream.expected_sessions,
             "completed_sessions": upstream.completed_sessions,
+            "final_active_sessions": upstream.final_active_sessions,
             "active_high_water": upstream.active_high_water,
             "overlap_proven": upstream.active_high_water >= upstream.expected_sessions,
+            "overlap_started_unix_ms": upstream.overlap_started_unix_ms,
+            "overlap_completed_unix_ms": upstream.overlap_completed_unix_ms,
+            "overlap_duration_ms": upstream.overlap_duration_ms,
+            "hold_duration_ms": upstream.hold_duration.as_millis(),
             "non_prewarm_session_count": upstream.non_prewarm_session_count,
             "session_frame_counts": upstream.session_frame_counts,
+            "session_event_counts": upstream.session_event_counts,
             "http_probe_count": upstream.http_probe_count,
         },
         "shared_router_pid": router_process.pid,
@@ -1666,9 +1838,15 @@ struct MockConcurrentWebSocketUpstream {
 struct ConcurrentWebSocketTranscript {
     expected_sessions: usize,
     completed_sessions: usize,
+    final_active_sessions: usize,
     active_high_water: usize,
+    overlap_started_unix_ms: Option<u128>,
+    overlap_completed_unix_ms: Option<u128>,
+    overlap_duration_ms: u128,
+    hold_duration: Duration,
     http_probe_count: usize,
     session_frame_counts: Vec<usize>,
+    session_event_counts: Vec<usize>,
     non_prewarm_session_count: usize,
 }
 
@@ -1681,11 +1859,17 @@ struct ConcurrentUpstreamSharedState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConcurrentUpstreamState {
     expected_sessions: usize,
+    hold_duration: Duration,
     active_non_prewarm_sessions: usize,
     active_high_water: usize,
     completed_sessions: usize,
+    final_active_sessions: usize,
+    overlap_started_at: Option<Instant>,
+    overlap_started_unix_ms: Option<u128>,
+    overlap_completed_unix_ms: Option<u128>,
     http_probe_count: usize,
     session_frame_counts: Vec<usize>,
+    session_event_counts: Vec<usize>,
     non_prewarm_session_count: usize,
 }
 
@@ -1862,7 +2046,7 @@ impl Drop for MockWebSocketUpstream {
 }
 
 impl MockConcurrentWebSocketUpstream {
-    fn start(expected_sessions: usize) -> Result<Self, String> {
+    fn start(config: ConcurrentUpstreamConfig) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind concurrent mock upstream: {error}"))?;
         listener.set_nonblocking(true).map_err(|error| {
@@ -1874,12 +2058,18 @@ impl MockConcurrentWebSocketUpstream {
             .to_string();
         let state = Arc::new(ConcurrentUpstreamSharedState {
             state: Mutex::new(ConcurrentUpstreamState {
-                expected_sessions,
+                expected_sessions: config.expected_sessions,
+                hold_duration: config.hold_duration,
                 active_non_prewarm_sessions: 0,
                 active_high_water: 0,
                 completed_sessions: 0,
+                final_active_sessions: 0,
+                overlap_started_at: None,
+                overlap_started_unix_ms: None,
+                overlap_completed_unix_ms: None,
                 http_probe_count: 0,
                 session_frame_counts: Vec::new(),
+                session_event_counts: Vec::new(),
                 non_prewarm_session_count: 0,
             }),
             condition: Condvar::new(),
@@ -1890,12 +2080,7 @@ impl MockConcurrentWebSocketUpstream {
         let handle = thread::Builder::new()
             .name("codex-router-three-client-upstream".to_owned())
             .spawn(move || {
-                run_concurrent_mock_upstream(
-                    listener,
-                    thread_state,
-                    thread_shutdown,
-                    expected_sessions,
-                )
+                run_concurrent_mock_upstream(listener, thread_state, thread_shutdown, config)
             })
             .map_err(|error| format!("failed to spawn concurrent mock upstream: {error}"))?;
 
@@ -1941,9 +2126,15 @@ impl MockConcurrentWebSocketUpstream {
         Ok(ConcurrentWebSocketTranscript {
             expected_sessions: state.expected_sessions,
             completed_sessions: state.completed_sessions,
+            final_active_sessions: state.final_active_sessions,
             active_high_water: state.active_high_water,
+            overlap_started_unix_ms: state.overlap_started_unix_ms,
+            overlap_completed_unix_ms: state.overlap_completed_unix_ms,
+            overlap_duration_ms: overlap_duration_ms(&state),
+            hold_duration: state.hold_duration,
             http_probe_count: state.http_probe_count,
             session_frame_counts: state.session_frame_counts,
+            session_event_counts: state.session_event_counts,
             non_prewarm_session_count: state.non_prewarm_session_count,
         })
     }
@@ -2029,9 +2220,12 @@ fn run_concurrent_mock_upstream(
     listener: TcpListener,
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
-    expected_sessions: usize,
+    config: ConcurrentUpstreamConfig,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(45);
+    let deadline = Instant::now()
+        + Duration::from_secs(45)
+            .saturating_add(config.hold_duration)
+            .saturating_add(config.heartbeat_interval);
     let mut handles = Vec::new();
     loop {
         {
@@ -2039,7 +2233,7 @@ fn run_concurrent_mock_upstream(
                 .state
                 .lock()
                 .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
-            if state_guard.completed_sessions >= expected_sessions {
+            if state_guard.completed_sessions >= config.expected_sessions {
                 break;
             }
         }
@@ -2075,6 +2269,7 @@ fn run_concurrent_mock_upstream(
                                 stream,
                                 session_state,
                                 session_shutdown,
+                                config,
                             )
                         })
                         .map_err(|error| {
@@ -2103,9 +2298,14 @@ fn run_concurrent_mock_websocket_session(
     stream: std::net::TcpStream,
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
+    config: ConcurrentUpstreamConfig,
 ) -> Result<(), String> {
     stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(
+            Duration::from_secs(30)
+                .saturating_add(config.hold_duration)
+                .saturating_add(config.heartbeat_interval),
+        ))
         .map_err(|error| {
             format!("concurrent mock upstream failed to set websocket read timeout: {error}")
         })?;
@@ -2141,15 +2341,14 @@ fn run_concurrent_mock_websocket_session(
             continue;
         }
         register_concurrent_non_prewarm_session(&state)?;
-        wait_for_concurrent_session_barrier(&state)?;
-        for event in smoke_response_events(request_index) {
-            websocket
-                .send(Message::Text(event.into()))
-                .map_err(|error| {
-                    format!("concurrent mock upstream failed to send response event: {error}")
-                })?;
-        }
-        finish_concurrent_non_prewarm_session(&state, frame_count)?;
+        let overlap_started_at = wait_for_concurrent_session_barrier(&state)?;
+        let event_count = send_concurrent_response_events(
+            &mut websocket,
+            request_index,
+            overlap_started_at,
+            config,
+        )?;
+        finish_concurrent_non_prewarm_session(&state, frame_count, event_count)?;
         return Ok(());
     }
     Err("concurrent mock upstream did not receive non-prewarm request frame".to_owned())
@@ -2167,21 +2366,27 @@ fn register_concurrent_non_prewarm_session(
     state.active_high_water = state
         .active_high_water
         .max(state.active_non_prewarm_sessions);
+    if state.active_high_water >= state.expected_sessions && state.overlap_started_at.is_none() {
+        state.overlap_started_at = Some(Instant::now());
+        state.overlap_started_unix_ms = Some(timestamp_millis());
+    }
     shared.condition.notify_all();
     Ok(())
 }
 
 fn wait_for_concurrent_session_barrier(
     shared: &ConcurrentUpstreamSharedState,
-) -> Result<(), String> {
+) -> Result<Instant, String> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut state = shared
         .state
         .lock()
         .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
     loop {
-        if state.active_high_water >= state.expected_sessions {
-            return Ok(());
+        if state.active_high_water >= state.expected_sessions
+            && let Some(overlap_started_at) = state.overlap_started_at
+        {
+            return Ok(overlap_started_at);
         }
         let now = Instant::now();
         if now >= deadline {
@@ -2202,6 +2407,7 @@ fn wait_for_concurrent_session_barrier(
 fn finish_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
     frame_count: usize,
+    event_count: usize,
 ) -> Result<(), String> {
     let mut state = shared
         .state
@@ -2209,9 +2415,73 @@ fn finish_concurrent_non_prewarm_session(
         .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
     state.active_non_prewarm_sessions = state.active_non_prewarm_sessions.saturating_sub(1);
     state.completed_sessions = state.completed_sessions.saturating_add(1);
+    state.final_active_sessions = state.active_non_prewarm_sessions;
+    if state.completed_sessions >= state.expected_sessions {
+        state.overlap_completed_unix_ms = Some(timestamp_millis());
+    }
     state.session_frame_counts.push(frame_count);
+    state.session_event_counts.push(event_count);
     shared.condition.notify_all();
     Ok(())
+}
+
+fn send_concurrent_response_events(
+    websocket: &mut WebSocket<std::net::TcpStream>,
+    request_index: usize,
+    overlap_started_at: Instant,
+    config: ConcurrentUpstreamConfig,
+) -> Result<usize, String> {
+    let response_events = smoke_response_events(request_index);
+    let mut event_count = 0_usize;
+    send_concurrent_response_event(websocket, &response_events[0])?;
+    event_count = event_count.saturating_add(1);
+
+    if !config.hold_duration.is_zero() {
+        let hold_deadline = overlap_started_at + config.hold_duration;
+        let mut heartbeat_index = 0_usize;
+        while Instant::now() < hold_deadline {
+            let remaining = hold_deadline.saturating_duration_since(Instant::now());
+            thread::sleep(remaining.min(config.heartbeat_interval));
+            if Instant::now() >= hold_deadline {
+                break;
+            }
+            let heartbeat = serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "",
+                "sequence_number": heartbeat_index,
+            })
+            .to_string();
+            send_concurrent_response_event(websocket, &heartbeat)?;
+            heartbeat_index = heartbeat_index.saturating_add(1);
+            event_count = event_count.saturating_add(1);
+        }
+    }
+
+    for event in response_events.iter().skip(1) {
+        send_concurrent_response_event(websocket, event)?;
+        event_count = event_count.saturating_add(1);
+    }
+
+    Ok(event_count)
+}
+
+fn send_concurrent_response_event(
+    websocket: &mut WebSocket<std::net::TcpStream>,
+    event: &str,
+) -> Result<(), String> {
+    websocket
+        .send(Message::Text(event.to_owned().into()))
+        .map_err(|error| format!("concurrent mock upstream failed to send response event: {error}"))
+}
+
+fn overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
+    match (
+        state.overlap_started_unix_ms,
+        state.overlap_completed_unix_ms,
+    ) {
+        (Some(started), Some(completed)) => completed.saturating_sub(started),
+        _ => 0,
+    }
 }
 
 fn wake_mock_upstream_accept(address: &str) {
@@ -2853,6 +3123,7 @@ mod tests {
     use super::run_installed_codex_http_sse_mock_smoke;
     use super::run_installed_codex_mock_smoke;
     use super::run_installed_codex_three_websocket_mock_e2e;
+    use super::run_installed_codex_three_websocket_mock_soak;
     use super::run_installed_codex_websocket_mock_smoke;
     use super::run_with_timeout;
     use super::upstream_account_token;
@@ -3179,6 +3450,17 @@ mod tests {
         let report = match run_installed_codex_three_websocket_mock_e2e() {
             Ok(report) => report,
             Err(error) => panic!("installed Codex concurrent WebSocket e2e failed: {error}"),
+        };
+
+        assert!(report.transcript_path().exists());
+    }
+
+    #[test]
+    #[ignore = "T8 installed-Codex five-minute WebSocket soak; run through tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak"]
+    fn three_codex_websocket_soak_holds_overlap_and_records_activity() {
+        let report = match run_installed_codex_three_websocket_mock_soak() {
+            Ok(report) => report,
+            Err(error) => panic!("installed Codex concurrent WebSocket soak failed: {error}"),
         };
 
         assert!(report.transcript_path().exists());
