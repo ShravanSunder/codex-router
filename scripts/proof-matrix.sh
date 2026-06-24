@@ -546,8 +546,12 @@ elif row_id == "E-07":
             errors.append(f"runtime correlation {index} router_pid does not match router process")
         if correlation.get("handshake_count") != 1:
             errors.append(f"runtime correlation {index} handshake_count is not 1")
-        if isinstance(correlation.get("frame_count"), int) and correlation["frame_count"] < 3:
-            errors.append(f"runtime correlation {index} frame_count is below 3")
+        if isinstance(correlation.get("frame_count"), int) and correlation["frame_count"] < 1:
+            errors.append(f"runtime correlation {index} frame_count is below 1")
+        if isinstance(correlation.get("event_count"), int) and correlation["event_count"] < 3:
+            errors.append(f"runtime correlation {index} event_count is below 3")
+        if isinstance(correlation.get("in_overlap_event_count"), int) and correlation["in_overlap_event_count"] < 3:
+            errors.append(f"runtime correlation {index} in_overlap_event_count is below 3")
 elif row_id == "E-08":
     if upstream.get("normal_close_sessions", 0) < 3:
         errors.append("upstream normal_close_sessions is below 3")
