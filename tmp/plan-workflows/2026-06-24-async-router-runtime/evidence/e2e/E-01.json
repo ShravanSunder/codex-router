@@ -1,15 +1,15 @@
 {
   "artifact_paths": [
-    "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/smoke/installed-codex-three-websocket-65063-1782334327602.json"
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/e2e/three-websocket-soak-transcript.json"
   ],
   "artifact_source": "tmp/smoke/installed-codex-three-websocket-soak-artifact.txt",
   "command": "scripts/proof-matrix.sh E-01",
-  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "cwd": ".",
   "exit_code": 0,
   "expected_observation": "three installed Codex WebSocket children share one router PID and complete without fallback/retry/downgrade",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "e349592bb1b951fb8b7c8d47ac073d52f1716ff6",
+  "git_head": "071adf1a4fb1dc4206a4898b4eaa6dab8e74b6e3",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -23,18 +23,21 @@
       "count": 3,
       "statuses": [
         {
+          "pid": 12006,
           "status": "exit status: 0",
           "stderr_line_count": 28,
           "stdout_contains_smoke_text": true
         },
         {
+          "pid": 12007,
+          "status": "exit status: 0",
+          "stderr_line_count": 28,
+          "stdout_contains_smoke_text": true
+        },
+        {
+          "pid": 12005,
           "status": "exit status: 0",
           "stderr_line_count": 32,
-          "stdout_contains_smoke_text": true
-        },
-        {
-          "status": "exit status: 0",
-          "stderr_line_count": 28,
           "stdout_contains_smoke_text": true
         }
       ]
@@ -50,13 +53,13 @@
         2,
         5,
         15,
-        15,
-        18
+        18,
+        15
       ],
       "final_session_forwarded_upstream_message_counts": [
         16,
-        16,
-        19
+        19,
+        16
       ],
       "forwarded_upstream_messages": 51,
       "handled_connections": 3,
@@ -81,21 +84,21 @@
       "in_overlap_session_event_counts": [
         13,
         13,
-        15
+        11
       ],
       "multi_step_completed_before_overlap_end": true,
       "multi_step_followup_active_session_count": 3,
       "multi_step_followup_frame_count": 1,
-      "multi_step_followup_unix_ms": 1782334026472,
+      "multi_step_followup_unix_ms": 1782337855069,
       "multi_step_interleave_completed": true,
       "non_prewarm_session_count": 3,
       "normal_close_sessions": 3,
-      "overlap_completed_unix_ms": 1782334327432,
-      "overlap_duration_ms": 300983,
+      "overlap_completed_unix_ms": 1782338156141,
+      "overlap_duration_ms": 301094,
       "overlap_proven": true,
-      "overlap_started_unix_ms": 1782334026449,
-      "real_overlap_completed_unix_ms": 1782334327432,
-      "real_overlap_duration_ms": 300983,
+      "overlap_started_unix_ms": 1782337855047,
+      "real_overlap_completed_unix_ms": 1782338156133,
+      "real_overlap_duration_ms": 301086,
       "session_close_outcomes": [
         "normal",
         "normal",
@@ -103,19 +106,19 @@
       ],
       "session_event_counts": [
         13,
-        13,
-        16
+        16,
+        13
       ],
       "session_frame_counts": [
         2,
-        2,
-        3
+        3,
+        2
       ]
     }
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T20:52:15Z",
+  "timestamp_utc": "2026-06-24T21:56:03Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",
