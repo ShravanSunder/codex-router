@@ -10,6 +10,8 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -551,9 +553,58 @@ struct WebSocketHandshakePreflight {
 fn websocket_handshake_preflight(
     stream: &TcpStream,
 ) -> Result<Option<WebSocketHandshakePreflight>, LoopbackRouterRuntimeError> {
-    let mut buffer = [0_u8; 2048];
-    let read = stream
-        .peek(&mut buffer)
+    let previous_timeout = stream
+        .read_timeout()
+        .map_err(LoopbackRouterRuntimeError::Peek)?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .map_err(LoopbackRouterRuntimeError::Peek)?;
+    let started = Instant::now();
+    let mut buffer = vec![0_u8; MAX_HTTP_HEADER_BYTES];
+    let read = loop {
+        let read = match stream.peek(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                stream
+                    .set_read_timeout(previous_timeout)
+                    .map_err(LoopbackRouterRuntimeError::Peek)?;
+                return Ok(None);
+            }
+            Err(error) => {
+                stream
+                    .set_read_timeout(previous_timeout)
+                    .map_err(LoopbackRouterRuntimeError::Peek)?;
+                return Err(LoopbackRouterRuntimeError::Peek(error));
+            }
+        };
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut parsed_request = httparse::Request::new(&mut headers);
+        match parsed_request.parse(&buffer[..read]) {
+            Ok(httparse::Status::Complete(_header_length)) => break read,
+            Ok(httparse::Status::Partial) if started.elapsed() < Duration::from_millis(250) => {
+                std::thread::yield_now();
+            }
+            Ok(httparse::Status::Partial) => {
+                stream
+                    .set_read_timeout(previous_timeout)
+                    .map_err(LoopbackRouterRuntimeError::Peek)?;
+                return Ok(None);
+            }
+            Err(source) => {
+                stream
+                    .set_read_timeout(previous_timeout)
+                    .map_err(LoopbackRouterRuntimeError::Peek)?;
+                return Err(LoopbackRouterRuntimeError::PreflightParse(source));
+            }
+        }
+    };
+    stream
+        .set_read_timeout(previous_timeout)
         .map_err(LoopbackRouterRuntimeError::Peek)?;
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut parsed_request = httparse::Request::new(&mut headers);
