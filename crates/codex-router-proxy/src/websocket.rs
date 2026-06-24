@@ -678,7 +678,44 @@ fn websocket_credential_rejection_audit_event(account_hash: String) -> AuditEven
 #[derive(Clone, Debug, Default)]
 pub struct WebSocketRevocationRegistry {
     connections: Arc<Mutex<HashMap<TokenGeneration, Vec<TcpStream>>>>,
-    cancellations: Arc<Mutex<HashMap<TokenGeneration, Vec<CancellationToken>>>>,
+    cancellations: Arc<Mutex<HashMap<TokenGeneration, Vec<WebSocketCancellationEntry>>>>,
+    stats: Arc<Mutex<WebSocketRegistryStats>>,
+}
+
+#[derive(Clone, Debug)]
+struct WebSocketCancellationEntry {
+    session_id: u64,
+    token: CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct WebSocketRegistryStats {
+    next_session_id: u64,
+    active_sessions: usize,
+    high_water_sessions: usize,
+    registered_sessions: usize,
+    closed_sessions: usize,
+}
+
+/// Redacted snapshot of WebSocket session registry counters.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebSocketRegistrySnapshot {
+    /// Currently active async WebSocket sessions.
+    pub active_sessions: usize,
+    /// Highest active async WebSocket session count observed.
+    pub high_water_sessions: usize,
+    /// Total async WebSocket sessions registered since router start.
+    pub registered_sessions: usize,
+    /// Total async WebSocket sessions that have dropped their registry handle.
+    pub closed_sessions: usize,
+}
+
+#[derive(Debug)]
+struct WebSocketSessionRegistration {
+    registry: WebSocketRevocationRegistry,
+    generation: TokenGeneration,
+    session_id: u64,
+    cancellation: CancellationToken,
 }
 
 impl WebSocketRevocationRegistry {
@@ -703,16 +740,65 @@ impl WebSocketRevocationRegistry {
         Ok(())
     }
 
-    fn register_cancellation(&self, generation: TokenGeneration) -> CancellationToken {
+    fn register_cancellation(&self, generation: TokenGeneration) -> WebSocketSessionRegistration {
         let cancellation = CancellationToken::new();
+        let session_id = self.note_session_opened();
         if let Ok(mut cancellations) = self.cancellations.lock() {
             cancellations
                 .entry(generation)
                 .or_default()
-                .push(cancellation.clone());
+                .push(WebSocketCancellationEntry {
+                    session_id,
+                    token: cancellation.clone(),
+                });
         }
 
-        cancellation
+        WebSocketSessionRegistration {
+            registry: self.clone(),
+            generation,
+            session_id,
+            cancellation,
+        }
+    }
+
+    /// Returns redacted active-session registry counters.
+    #[must_use]
+    pub fn snapshot(&self) -> WebSocketRegistrySnapshot {
+        self.stats.lock().map_or_else(
+            |_| WebSocketRegistrySnapshot::default(),
+            |stats| WebSocketRegistrySnapshot {
+                active_sessions: stats.active_sessions,
+                high_water_sessions: stats.high_water_sessions,
+                registered_sessions: stats.registered_sessions,
+                closed_sessions: stats.closed_sessions,
+            },
+        )
+    }
+
+    fn note_session_opened(&self) -> u64 {
+        let Ok(mut stats) = self.stats.lock() else {
+            return 0;
+        };
+        stats.next_session_id = stats.next_session_id.saturating_add(1);
+        stats.active_sessions = stats.active_sessions.saturating_add(1);
+        stats.registered_sessions = stats.registered_sessions.saturating_add(1);
+        stats.high_water_sessions = stats.high_water_sessions.max(stats.active_sessions);
+        stats.next_session_id
+    }
+
+    fn note_session_closed(&self, generation: TokenGeneration, session_id: u64) {
+        if let Ok(mut cancellations) = self.cancellations.lock()
+            && let Some(entries) = cancellations.get_mut(&generation)
+        {
+            entries.retain(|entry| entry.session_id != session_id);
+            if entries.is_empty() {
+                cancellations.remove(&generation);
+            }
+        }
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.active_sessions = stats.active_sessions.saturating_sub(1);
+            stats.closed_sessions = stats.closed_sessions.saturating_add(1);
+        }
     }
 
     /// Closes connections that authenticated with generations other than the active one.
@@ -742,12 +828,66 @@ impl WebSocketRevocationRegistry {
             .filter(|generation| *generation != active_generation)
             .collect::<Vec<_>>();
         for stale_generation in stale_generations {
-            if let Some(tokens) = cancellations.remove(&stale_generation) {
-                for token in tokens {
-                    token.cancel();
+            if let Some(entries) = cancellations.remove(&stale_generation) {
+                for entry in entries {
+                    entry.token.cancel();
                 }
             }
         }
+    }
+}
+
+impl WebSocketSessionRegistration {
+    fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+}
+
+impl Drop for WebSocketSessionRegistration {
+    fn drop(&mut self) {
+        self.registry
+            .note_session_closed(self.generation, self.session_id);
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::TokenGeneration;
+    use super::WebSocketRevocationRegistry;
+
+    #[test]
+    fn registry_snapshot_tracks_active_high_water_and_cleanup() {
+        let registry = WebSocketRevocationRegistry::new();
+
+        let first_session = registry.register_cancellation(TokenGeneration::new(1));
+        let second_session = registry.register_cancellation(TokenGeneration::new(1));
+        assert_eq!(registry.snapshot().active_sessions, 2);
+        assert_eq!(registry.snapshot().high_water_sessions, 2);
+        assert_eq!(registry.snapshot().registered_sessions, 2);
+        assert_eq!(registry.snapshot().closed_sessions, 0);
+
+        drop(first_session);
+        assert_eq!(registry.snapshot().active_sessions, 1);
+        assert_eq!(registry.snapshot().high_water_sessions, 2);
+        assert_eq!(registry.snapshot().closed_sessions, 1);
+
+        drop(second_session);
+        assert_eq!(registry.snapshot().active_sessions, 0);
+        assert_eq!(registry.snapshot().high_water_sessions, 2);
+        assert_eq!(registry.snapshot().registered_sessions, 2);
+        assert_eq!(registry.snapshot().closed_sessions, 2);
+    }
+
+    #[test]
+    fn registry_revokes_only_stale_generation_cancellations() {
+        let registry = WebSocketRevocationRegistry::new();
+        let stale_session = registry.register_cancellation(TokenGeneration::new(1));
+        let active_session = registry.register_cancellation(TokenGeneration::new(2));
+
+        registry.close_all_except(TokenGeneration::new(2));
+
+        assert!(stale_session.cancellation().is_cancelled());
+        assert!(!active_session.cancellation().is_cancelled());
     }
 }
 
@@ -1077,7 +1217,8 @@ where
             first_frame,
             affinity_owner_context,
         } = decision;
-        let revocation = self.revocations.register_cancellation(token_generation);
+        let session_registration = self.revocations.register_cancellation(token_generation);
+        let revocation = session_registration.cancellation().clone();
 
         let mut upstream_request = upstream_url.into_client_request()?;
         apply_upstream_headers(upstream_request.headers_mut(), &headers)?;

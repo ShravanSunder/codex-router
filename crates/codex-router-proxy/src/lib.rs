@@ -79,6 +79,7 @@ mod tests {
     use crate::websocket::WebSocketFrame;
     use crate::websocket::WebSocketHandshakeRequest;
     use crate::websocket::WebSocketProtocolRouter;
+    use crate::websocket::WebSocketRevocationRegistry;
     use codex_router_auth::resolver::CredentialRefreshClient;
     use codex_router_auth::resolver::CredentialResolverError;
     use codex_router_auth::resolver::NoopCredentialRefreshClient;
@@ -6229,8 +6230,11 @@ mod tests {
         let selector = RecordingAsyncSelector::default();
         let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let revocations = WebSocketRevocationRegistry::new();
+        let client_revocations = revocations.clone();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
-            .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+            .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
+            .with_revocation_registry(revocations.clone());
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
         let server_future = async {
             let (stream, _peer_address) = match local_listener.accept().await {
@@ -6269,6 +6273,8 @@ mod tests {
                 non_terminal,
                 Message::text(r#"{"type":"response.output_text.delta"}"#),
             );
+            assert_eq!(client_revocations.snapshot().active_sessions, 1);
+            assert_eq!(client_revocations.snapshot().high_water_sessions, 1);
             if let Err(error) = client_websocket
                 .send(Message::text(r#"{"type":"response.create","turn":2}"#))
                 .await
@@ -6301,6 +6307,10 @@ mod tests {
             vec![("/v1/responses".to_owned(), TokenGeneration::new(1))],
         );
         assert_eq!(resolver.take_recorded(), vec!["acct_selected".to_owned()],);
+        assert_eq!(revocations.snapshot().active_sessions, 0);
+        assert_eq!(revocations.snapshot().high_water_sessions, 1);
+        assert_eq!(revocations.snapshot().registered_sessions, 1);
+        assert_eq!(revocations.snapshot().closed_sessions, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
