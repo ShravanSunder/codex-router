@@ -1,6 +1,6 @@
 {
   "artifact_paths": [
-    "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/smoke/installed-codex-three-websocket-48900-1782325868001.json"
+    "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/smoke/installed-codex-three-websocket-33611-1782328113622.json"
   ],
   "artifact_source": "tmp/smoke/installed-codex-three-websocket-soak-artifact.txt",
   "command": "scripts/proof-matrix.sh E-05",
@@ -8,8 +8,8 @@
   "exit_code": 0,
   "expected_observation": "one installed Codex runtime completes function-call-style multi-step WebSocket interleave during overlap",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
-  "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/*",
-  "git_head": "9e024582824dba3d7de9b30236eee47240650a2b",
+  "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
+  "git_head": "ee32a2d7585c66a2036e7c4e9c6736abb8003574",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -24,17 +24,17 @@
       "statuses": [
         {
           "status": "exit status: 0",
-          "stderr_line_count": 27,
+          "stderr_line_count": 28,
           "stdout_contains_smoke_text": true
         },
         {
           "status": "exit status: 0",
-          "stderr_line_count": 27,
+          "stderr_line_count": 32,
           "stdout_contains_smoke_text": true
         },
         {
           "status": "exit status: 0",
-          "stderr_line_count": 31,
+          "stderr_line_count": 28,
           "stdout_contains_smoke_text": true
         }
       ]
@@ -49,16 +49,16 @@
         2,
         2,
         5,
-        14,
-        14,
-        17
+        15,
+        15,
+        18
       ],
       "final_session_forwarded_upstream_message_counts": [
-        14,
-        14,
-        17
+        16,
+        16,
+        19
       ],
-      "forwarded_upstream_messages": 45,
+      "forwarded_upstream_messages": 51,
       "handled_connections": 3,
       "high_water_sessions": 3,
       "registered_sessions": 3
@@ -71,44 +71,57 @@
       "tcp_line_count": 0
     },
     "upstream": {
+      "abnormal_close_sessions": 0,
       "active_high_water": 3,
       "completed_sessions": 3,
       "expected_sessions": 3,
       "final_active_sessions": 0,
       "hold_duration_ms": 300000,
       "http_probe_count": 0,
+      "in_overlap_session_event_counts": [
+        13,
+        16,
+        13
+      ],
       "multi_step_completed_before_overlap_end": true,
       "multi_step_followup_active_session_count": 3,
       "multi_step_followup_frame_count": 1,
-      "multi_step_followup_unix_ms": 1782325567856,
+      "multi_step_followup_unix_ms": 1782327812481,
       "multi_step_interleave_completed": true,
       "non_prewarm_session_count": 3,
-      "overlap_completed_unix_ms": 1782325867851,
-      "overlap_duration_ms": 300016,
+      "normal_close_sessions": 3,
+      "overlap_completed_unix_ms": 1782328113432,
+      "overlap_duration_ms": 300972,
       "overlap_proven": true,
-      "overlap_started_unix_ms": 1782325567835,
-      "real_overlap_completed_unix_ms": 1782325867851,
-      "real_overlap_duration_ms": 300016,
+      "overlap_started_unix_ms": 1782327812460,
+      "real_overlap_completed_unix_ms": 1782328113432,
+      "real_overlap_duration_ms": 300972,
+      "session_close_outcomes": [
+        "normal",
+        "normal",
+        "normal"
+      ],
       "session_event_counts": [
-        12,
-        12,
-        15
+        13,
+        16,
+        13
       ],
       "session_frame_counts": [
         2,
-        2,
-        3
+        3,
+        2
       ]
     }
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T18:31:22Z",
+  "timestamp_utc": "2026-06-24T19:08:47Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",
     "crates/codex-router-proxy/src/websocket.rs",
     "crates/codex-router-proxy/src/server.rs",
-    "crates/codex-router-cli/src/lib.rs"
+    "crates/codex-router-cli/src/lib.rs",
+    "scripts/proof-matrix.sh"
   ]
 }

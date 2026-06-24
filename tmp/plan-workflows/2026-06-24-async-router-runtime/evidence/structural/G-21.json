@@ -14,7 +14,7 @@
   "expected_observation": "release runtime structural guardrails run through proof-matrix",
   "freshness_check": "not_evaluated",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "9e024582824dba3d7de9b30236eee47240650a2b",
+  "git_head": "ee32a2d7585c66a2036e7c4e9c6736abb8003574",
   "layer": "structural",
   "notes": "T6 aggregate guardrail row passed through proof-matrix.",
   "owner": "T6",
@@ -24,6 +24,6 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T18:33:02Z",
+  "timestamp_utc": "2026-06-24T19:10:42Z",
   "touched_targets": []
 }

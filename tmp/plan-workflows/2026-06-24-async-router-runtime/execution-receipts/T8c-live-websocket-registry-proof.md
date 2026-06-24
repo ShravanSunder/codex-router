@@ -1,7 +1,7 @@
 # Execution Receipt: T8c Live WebSocket Registry Proof
 
-Timestamp: 2026-06-24T20:00:40Z
-Proof HEAD: 9e024582824dba3d7de9b30236eee47240650a2b
+Timestamp: 2026-06-24T20:47:40Z
+Proof HEAD: ee32a2d7585c66a2036e7c4e9c6736abb8003574
 
 ## Scope
 
@@ -52,7 +52,7 @@ result: 1 passed, 0 failed, finished in 6.17s after live registry report asserti
 ```text
 tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak
 exit: 0
-result: 1 passed, 0 failed, finished in 302.16s.
+result: 1 passed, 0 failed, finished in 303.44s.
 ```
 
 ```text
@@ -64,8 +64,8 @@ result: all six E rows passed and wrote row-local artifacts.
 Five-minute artifact summary:
 
 ```text
-artifact=tmp/smoke/installed-codex-three-websocket-48900-1782325868001.json
-git_head=9e024582824dba3d7de9b30236eee47240650a2b
+artifact=tmp/smoke/installed-codex-three-websocket-33611-1782328113622.json
+git_head=ee32a2d7585c66a2036e7c4e9c6736abb8003574
 mode=three-websocket-soak
 clients.all_success=true
 shared_router_pid=<recorded in artifact>
@@ -73,10 +73,11 @@ upstream.active_high_water=3
 upstream.completed_sessions=3
 upstream.final_active_sessions=0
 upstream.hold_duration_ms=300000
-upstream.overlap_duration_ms=300016
-upstream.real_overlap_duration_ms=300016
-upstream.session_frame_counts=[2, 2, 3]
-upstream.session_event_counts=[12, 12, 15]
+upstream.real_overlap_duration_ms=300972
+upstream.in_overlap_session_event_counts=[13, 16, 13]
+upstream.normal_close_sessions=3
+upstream.abnormal_close_sessions=0
+upstream.session_close_outcomes=[normal, normal, normal]
 upstream.multi_step_interleave_completed=true
 upstream.multi_step_followup_frame_count=1
 upstream.multi_step_followup_active_session_count=3
@@ -88,8 +89,8 @@ router_websocket_registry.closed_sessions=3
 router_websocket_registry.completed_response_sessions=7
 router_websocket_registry.forwarded_upstream_messages=45
 router_websocket_registry.handled_connections=3
-router_websocket_registry.completed_session_forwarded_upstream_message_counts=[2, 2, 2, 5, 14, 17, 14]
-router_websocket_registry.final_session_forwarded_upstream_message_counts=[14, 14, 17]
+router_websocket_registry.completed_session_forwarded_upstream_message_counts=[2, 2, 2, 5, 15, 15, 18]
+router_websocket_registry.final_session_forwarded_upstream_message_counts=[16, 16, 19]
 socket_cleanup.established_count=0
 socket_cleanup.close_wait_count=0
 socket_cleanup.raw_state_counts=[]

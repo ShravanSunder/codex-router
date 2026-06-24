@@ -36,7 +36,7 @@ Known remaining gaps:
 
 ## Git Scope
 
-Review commits from `7749909` through `9e02458`, especially:
+Review commits from `7749909` through `ee32a2d`, especially:
 - `7749909 feat: use hyper tungstenite serve runtime`
 - `9ac7e96 feat: stream http upstream with hyper`
 - `6140ab5 test: add release runtime guardrails`
@@ -48,6 +48,9 @@ Review commits from `7749909` through `9e02458`, especially:
 - `3e9ef44 fix: harden websocket proof gates`
 - `46da5b6 test: record hardened websocket proof evidence`
 - `9e02458 test: allow evidence-only proof commits`
+- `fb4fb13 test: add non-mutating proof verification`
+- `f8d3ec5 fix: close websocket review proof gaps`
+- `ee32a2d test: stabilize websocket overlap proof timing`
 
 Changed implementation surfaces:
 - `crates/codex-router-proxy/src/server.rs`
@@ -74,7 +77,7 @@ Proof artifacts:
 - `tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent`
   exit 0, 1 passed.
 - `tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak`
-  exit 0, 1 passed, 302.16s.
+  exit 0, 1 passed, 303.44s.
 - `cargo test --workspace -- --nocapture`
   exit 0, 266 passed, 0 failed, 10 ignored.
 - `scripts/proof-matrix.sh` rows E-02/E-03/E-04/E-05/E-06/E-08
@@ -83,13 +86,14 @@ Proof artifacts:
   exit 0.
 
 Five-minute soak artifact:
-- `tmp/smoke/installed-codex-three-websocket-48900-1782325868001.json`
-- git_head=9e024582824dba3d7de9b30236eee47240650a2b.
+- `tmp/smoke/installed-codex-three-websocket-33611-1782328113622.json`
+- git_head=ee32a2d7585c66a2036e7c4e9c6736abb8003574.
 - clients.all_success=true, count=3.
 - upstream.active_high_water=3, completed_sessions=3,
-  final_active_sessions=0, overlap_duration_ms=300016,
-  real_overlap_duration_ms=300016,
-  session_frame_counts=[2,2,3], session_event_counts=[12,12,15].
+  final_active_sessions=0, real_overlap_duration_ms=300972,
+  in_overlap_session_event_counts=[13,16,13],
+  normal_close_sessions=3, abnormal_close_sessions=0,
+  session_close_outcomes=[normal,normal,normal].
 - upstream.multi_step_interleave_completed=true,
   multi_step_followup_frame_count=1,
   multi_step_followup_active_session_count=3,
@@ -98,8 +102,8 @@ Five-minute soak artifact:
   registered_sessions=3, closed_sessions=3,
   completed_response_sessions=7,
   forwarded_upstream_messages=45,
-  completed_session_forwarded_upstream_message_counts=[2,2,2,5,14,17,14],
-  final_session_forwarded_upstream_message_counts=[14,14,17],
+  completed_session_forwarded_upstream_message_counts=[2,2,2,5,15,15,18],
+  final_session_forwarded_upstream_message_counts=[16,16,19],
   handled_connections=3.
 - socket_cleanup.established_count=0, close_wait_count=0,
   raw_state_counts=[].
