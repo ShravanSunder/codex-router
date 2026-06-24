@@ -258,6 +258,7 @@ fn write_websocket_registry_report_file(
             "completed_response_sessions": snapshot.completed_response_sessions,
             "forwarded_upstream_messages": snapshot.forwarded_upstream_messages,
             "completed_session_forwarded_upstream_message_counts": snapshot.completed_session_forwarded_upstream_message_counts,
+            "final_session_forwarded_upstream_message_counts": snapshot.final_session_forwarded_upstream_message_counts,
         },
     });
     let rendered =

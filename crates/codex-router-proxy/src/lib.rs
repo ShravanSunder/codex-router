@@ -4341,11 +4341,10 @@ mod tests {
         let router_address = runtime.local_addr();
         let (done_sender, done_receiver) = mpsc::channel();
         let server_thread = thread::spawn(move || {
-            let handled = match runtime.serve_protocol_connections(1) {
-                Ok(handled) => handled,
-                Err(error) => panic!("router runtime should serve bounded websocket: {error}"),
-            };
-            if let Err(error) = done_sender.send(handled) {
+            let result = runtime
+                .serve_protocol_connections(1)
+                .map_err(|error| error.to_string());
+            if let Err(error) = done_sender.send(result) {
                 panic!("server completion should send: {error}");
             }
         });
@@ -4371,7 +4370,13 @@ mod tests {
             Err(error) => panic!("server thread panicked: {error:?}"),
         }
         match bounded_result {
-            Ok(handled) => assert_eq!(handled, 1),
+            Ok(Err(error)) => assert!(
+                error.contains("FirstFrameTimeout"),
+                "bounded upgraded websocket failure should propagate FirstFrameTimeout, got {error}"
+            ),
+            Ok(Ok(handled)) => {
+                panic!("bounded upgraded websocket failure returned success: handled={handled}");
+            }
             Err(error) => {
                 panic!("server should stop waiting for first websocket frame promptly: {error}");
             }

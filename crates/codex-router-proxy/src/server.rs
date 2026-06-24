@@ -448,11 +448,7 @@ impl LoopbackRouterRuntime {
         let upstream = HyperHttpUpstreamTransport::new(upstream_endpoint.clone());
         let server = runtime.block_on(AsyncLoopbackServerRuntime::bind(config.bind_address))?;
         let audit_sink = config.audit_file_path.map(AuditFileSink::new);
-        let websocket_revocations = config
-            .websocket_registry_report_file
-            .map_or_else(WebSocketRevocationRegistry::new, |report_file| {
-                WebSocketRevocationRegistry::new().with_report_file(report_file)
-            });
+        let websocket_revocations = WebSocketRevocationRegistry::new();
 
         Ok(Self {
             runtime,
@@ -550,7 +546,7 @@ impl LoopbackRouterRuntime {
         for handler in handlers {
             match handler.await {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => eprintln!("loopback connection failed: {error}"),
+                Ok(Err(error)) => return Err(error),
                 Err(source) => return Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
             }
         }
@@ -594,6 +590,10 @@ struct LoopbackProtocolConnectionHandler {
     fixed_now_unix_seconds: Option<u64>,
 }
 
+type UpgradeTaskResult = Result<(), LoopbackRouterRuntimeError>;
+type UpgradeTaskHandle = tokio::task::JoinHandle<UpgradeTaskResult>;
+type SharedUpgradeTasks = Arc<tokio::sync::Mutex<Vec<UpgradeTaskHandle>>>;
+
 impl LoopbackProtocolConnectionHandler {
     async fn handle_hyper_connection(
         self: Arc<Self>,
@@ -626,9 +626,11 @@ impl LoopbackProtocolConnectionHandler {
         let drained_upgrade_tasks = std::mem::take(&mut *upgrade_task_guard);
         drop(upgrade_task_guard);
         for upgrade_task in drained_upgrade_tasks {
-            upgrade_task
-                .await
-                .map_err(LoopbackRouterRuntimeError::ConnectionJoin)?;
+            match upgrade_task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(source) => return Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
+            }
         }
 
         Ok(())
@@ -637,7 +639,7 @@ impl LoopbackProtocolConnectionHandler {
     async fn handle_hyper_request(
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
-        upgrade_tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+        upgrade_tasks: SharedUpgradeTasks,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         match HyperProtocolSwitchpoint::classify(request.method(), request.uri(), request.headers())
         {
@@ -652,7 +654,7 @@ impl LoopbackProtocolConnectionHandler {
     async fn handle_hyper_websocket_request(
         self: Arc<Self>,
         mut request: HttpRequest<Incoming>,
-        upgrade_tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+        upgrade_tasks: SharedUpgradeTasks,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         let path = request
             .uri()
@@ -671,14 +673,13 @@ impl LoopbackProtocolConnectionHandler {
         let upgrade_task = tokio::spawn(async move {
             match websocket.await {
                 Ok(local_websocket) => {
-                    if let Err(error) = task_context
+                    task_context
                         .handle_hyper_websocket_upgraded(local_websocket, handshake, path)
                         .await
-                    {
-                        eprintln!("websocket session failed: {error}");
-                    }
                 }
-                Err(error) => eprintln!("websocket upgrade failed: {error}"),
+                Err(error) => Err(LoopbackRouterRuntimeError::WebSocket(
+                    crate::websocket::WebSocketTunnelError::Transport(error),
+                )),
             }
         });
         upgrade_tasks.lock().await.push(upgrade_task);

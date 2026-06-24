@@ -1,14 +1,12 @@
 //! WebSocket first-frame routing protocol.
 
 use std::collections::HashMap;
-use std::fs;
 #[cfg(test)]
 use std::io::ErrorKind;
 #[cfg(test)]
 use std::net::Shutdown;
 #[cfg(test)]
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -54,6 +52,7 @@ use tungstenite::accept_hdr;
 use tungstenite::client::IntoClientRequest;
 #[cfg(test)]
 use tungstenite::connect;
+use tungstenite::error::ProtocolError;
 #[cfg(test)]
 use tungstenite::handshake::server::Request;
 #[cfg(test)]
@@ -685,6 +684,9 @@ fn websocket_credential_rejection_audit_event(account_hash: String) -> AuditEven
 }
 
 /// Tracks active local WebSocket streams by local token generation.
+const MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS: usize = 1024;
+
+/// Tracks active local WebSocket streams by local token generation.
 #[derive(Clone, Debug, Default)]
 pub struct WebSocketRevocationRegistry {
     #[cfg(test)]
@@ -693,7 +695,7 @@ pub struct WebSocketRevocationRegistry {
     stats: Arc<Mutex<WebSocketRegistryStats>>,
     forwarded_upstream_messages_by_session: Arc<Mutex<HashMap<u64, usize>>>,
     completed_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
-    report_file: Arc<Mutex<Option<PathBuf>>>,
+    final_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -730,6 +732,8 @@ pub struct WebSocketRegistrySnapshot {
     pub forwarded_upstream_messages: usize,
     /// Upstream-to-local write counts captured when each response.completed event is observed.
     pub completed_session_forwarded_upstream_message_counts: Vec<usize>,
+    /// Final upstream-to-local write counts captured once per closed async WebSocket session.
+    pub final_session_forwarded_upstream_message_counts: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -745,16 +749,6 @@ impl WebSocketRevocationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Sets an internal proof report file updated from registry mutations.
-    #[must_use]
-    pub fn with_report_file(self, report_file: PathBuf) -> Self {
-        if let Ok(mut current_report_file) = self.report_file.lock() {
-            *current_report_file = Some(report_file);
-        }
-        self.write_report_file();
-        self
     }
 
     #[cfg(test)]
@@ -810,6 +804,10 @@ impl WebSocketRevocationRegistry {
                     .completed_session_forwarded_upstream_message_counts
                     .lock()
                     .map_or_else(|_| Vec::new(), |counts| counts.clone()),
+                final_session_forwarded_upstream_message_counts: self
+                    .final_session_forwarded_upstream_message_counts
+                    .lock()
+                    .map_or_else(|_| Vec::new(), |counts| counts.clone()),
             },
         )
     }
@@ -822,10 +820,7 @@ impl WebSocketRevocationRegistry {
         stats.active_sessions = stats.active_sessions.saturating_add(1);
         stats.registered_sessions = stats.registered_sessions.saturating_add(1);
         stats.high_water_sessions = stats.high_water_sessions.max(stats.active_sessions);
-        let session_id = stats.next_session_id;
-        drop(stats);
-        self.write_report_file();
-        session_id
+        stats.next_session_id
     }
 
     fn note_session_closed(&self, generation: TokenGeneration, session_id: u64) {
@@ -841,10 +836,18 @@ impl WebSocketRevocationRegistry {
             stats.active_sessions = stats.active_sessions.saturating_sub(1);
             stats.closed_sessions = stats.closed_sessions.saturating_add(1);
         }
+        let forwarded_count = self
+            .forwarded_upstream_messages_by_session
+            .lock()
+            .ok()
+            .and_then(|forwarded_by_session| forwarded_by_session.get(&session_id).copied())
+            .unwrap_or_default();
+        if let Ok(mut counts) = self.final_session_forwarded_upstream_message_counts.lock() {
+            push_bounded_count(&mut counts, forwarded_count);
+        }
         if let Ok(mut forwarded_by_session) = self.forwarded_upstream_messages_by_session.lock() {
             forwarded_by_session.remove(&session_id);
         }
-        self.write_report_file();
     }
 
     fn note_upstream_message_forwarded(&self, session_id: u64) {
@@ -871,39 +874,7 @@ impl WebSocketRevocationRegistry {
             .completed_session_forwarded_upstream_message_counts
             .lock()
         {
-            counts.push(forwarded_count);
-        }
-        self.write_report_file();
-    }
-
-    fn write_report_file(&self) {
-        let report_file = self
-            .report_file
-            .lock()
-            .ok()
-            .and_then(|report_file| report_file.clone());
-        let Some(report_file) = report_file else {
-            return;
-        };
-        if let Some(parent) = report_file.parent() {
-            let _result = fs::create_dir_all(parent);
-        }
-        let snapshot = self.snapshot();
-        let report = serde_json::json!({
-            "schema_version": 1,
-            "handled_connections": null,
-            "websocket_registry": {
-                "active_sessions": snapshot.active_sessions,
-                "high_water_sessions": snapshot.high_water_sessions,
-                "registered_sessions": snapshot.registered_sessions,
-                "closed_sessions": snapshot.closed_sessions,
-                "completed_response_sessions": snapshot.completed_response_sessions,
-                "forwarded_upstream_messages": snapshot.forwarded_upstream_messages,
-                "completed_session_forwarded_upstream_message_counts": snapshot.completed_session_forwarded_upstream_message_counts,
-            },
-        });
-        if let Ok(rendered) = serde_json::to_vec_pretty(&report) {
-            let _result = fs::write(report_file, rendered);
+            push_bounded_count(&mut counts, forwarded_count);
         }
     }
 
@@ -943,6 +914,21 @@ impl WebSocketRevocationRegistry {
             }
         }
     }
+}
+
+fn push_bounded_count(counts: &mut Vec<usize>, count: usize) {
+    counts.push(count);
+    if counts.len() > MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS {
+        let excess = counts.len() - MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS;
+        counts.drain(0..excess);
+    }
+}
+
+fn is_reset_without_closing_handshake(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+    )
 }
 
 impl WebSocketSessionRegistration {
@@ -1383,6 +1369,7 @@ where
     }
 
     let mut upstream_message_count = 0_usize;
+    let mut forwarded_response_completed = false;
     loop {
         tokio::select! {
             () = revocation.cancelled() => {
@@ -1395,7 +1382,17 @@ where
                     upstream_websocket.close(None).await?;
                     return Ok(());
                 };
-                let local_message = local_message?;
+                let local_message = match local_message {
+                    Ok(message) => message,
+                    Err(error)
+                        if forwarded_response_completed
+                            && is_reset_without_closing_handshake(&error) =>
+                    {
+                        upstream_websocket.close(None).await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(WebSocketTunnelError::Transport(error)),
+                };
                 let is_close = matches!(local_message, Message::Close(_));
                 upstream_websocket.send(local_message).await?;
                 if is_close {
@@ -1407,7 +1404,17 @@ where
                     local_websocket.close(None).await?;
                     return Ok(());
                 };
-                let upstream_message = upstream_message?;
+                let upstream_message = match upstream_message {
+                    Ok(message) => message,
+                    Err(error)
+                        if forwarded_response_completed
+                            && is_reset_without_closing_handshake(&error) =>
+                    {
+                        local_websocket.close(None).await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(WebSocketTunnelError::Transport(error)),
+                };
                 let is_close = matches!(upstream_message, Message::Close(_));
                 let is_completed = is_response_completed(&upstream_message);
                 let affinity_owner = websocket_affinity_owner_record(
@@ -1425,6 +1432,7 @@ where
                 }
                 upstream_message_count = upstream_message_count.saturating_add(1);
                 if is_completed {
+                    forwarded_response_completed = true;
                     session_registration.note_response_completed();
                 }
                 if is_close || upstream_message_count >= max_upstream_messages {

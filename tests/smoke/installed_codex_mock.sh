@@ -69,6 +69,7 @@ fi
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 cd "${repo_root}"
+three_websocket_soak_artifact_pointer="${repo_root}/tmp/smoke/installed-codex-three-websocket-soak-artifact.txt"
 
 if command -v cargo >/dev/null 2>&1 && cargo --version >/dev/null 2>&1; then
   cargo_command=(cargo)
@@ -94,14 +95,40 @@ run_test_filter() {
     --test-threads=1
 }
 
+run_three_websocket_soak_filter() {
+  local filter="$1"
+  mkdir -p "$(dirname "${three_websocket_soak_artifact_pointer}")"
+  rm -f "${three_websocket_soak_artifact_pointer}"
+
+  local output_file
+  output_file="$(mktemp "${TMPDIR:-/tmp}/codex-router-three-websocket-soak.XXXXXX")"
+  if run_test_filter "${filter}" | tee "${output_file}"; then
+    local artifact_path
+    artifact_path="$(
+      awk '/codex_router_three_websocket_artifact=/{sub(/^.*codex_router_three_websocket_artifact=/, ""); value=$0} END{print value}' "${output_file}"
+    )"
+    rm -f "${output_file}"
+    if [[ -z "${artifact_path}" ]]; then
+      echo "three-WebSocket soak did not print an artifact path" >&2
+      return 1
+    fi
+    printf '%s\n' "${artifact_path}" > "${three_websocket_soak_artifact_pointer}"
+    return 0
+  fi
+
+  local status=$?
+  rm -f "${output_file}"
+  return "${status}"
+}
+
 if [[ "${scenario}" == "concurrent" ]]; then
   run_test_filter "three_codex_websocket_concurrent_e2e_"
 elif [[ "${scenario}" == "soak" ]]; then
-  run_test_filter "three_codex_websocket_soak_"
+  run_three_websocket_soak_filter "three_codex_websocket_soak_"
 elif [[ "${scenario}" == "all" && "${transport}" == "websocket" ]]; then
   run_test_filter "installed_codex_websocket_"
   run_test_filter "three_codex_websocket_concurrent_e2e_"
-  run_test_filter "three_codex_websocket_soak_"
+  run_three_websocket_soak_filter "three_codex_websocket_soak_"
 else
   run_test_filter "${test_filter}"
 fi

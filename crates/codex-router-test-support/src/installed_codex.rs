@@ -96,7 +96,7 @@ impl ConcurrentWebSocketHarnessConfig {
             upstream: ConcurrentUpstreamConfig::quick(3),
             codex_command_timeout: CODEX_COMMAND_TIMEOUT,
             router_max_upstream_messages: 4,
-            router_max_connections: 64,
+            router_max_connections: 3,
             capture_registry_report: false,
         }
     }
@@ -108,7 +108,7 @@ impl ConcurrentWebSocketHarnessConfig {
             upstream: ConcurrentUpstreamConfig::soak(3, hold_duration),
             codex_command_timeout: hold_duration.saturating_add(SOAK_COMMAND_TIMEOUT_SLACK),
             router_max_upstream_messages: 64,
-            router_max_connections: 64,
+            router_max_connections: 3,
             capture_registry_report: true,
         }
     }
@@ -482,18 +482,13 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
         outputs.push(output);
     }
     let upstream_result = upstream.join()?;
+    let socket_cleanup = observe_router_socket_cleanup(router_process.observation.pid)?;
+    let router_process =
+        router_process.wait("three-client router process", ROUTER_REGISTRY_DRAIN_TIMEOUT)?;
     let registry_report = registry_report_path
         .as_deref()
-        .map(|path| {
-            wait_for_router_registry_report(
-                path,
-                config.upstream.expected_sessions,
-                ROUTER_REGISTRY_DRAIN_TIMEOUT,
-            )
-        })
+        .map(RouterWebSocketRegistryReport::from_file)
         .transpose()?;
-    let socket_cleanup = observe_router_socket_cleanup(router_process.observation.pid)?;
-    let router_process = router_process.stop("three-client router process")?;
     assert_concurrent_websocket_contract(config, &upstream_result, registry_report.as_ref())?;
     socket_cleanup.assert_no_leaked_sessions()?;
     let transcript_path =
@@ -541,10 +536,10 @@ fn assert_concurrent_websocket_contract(
         ));
     }
     if config.upstream.hold_duration > Duration::ZERO {
-        if upstream.overlap_duration_ms < config.upstream.hold_duration.as_millis() {
+        if upstream.real_overlap_duration_ms < config.upstream.hold_duration.as_millis() {
             return Err(format!(
-                "soak overlap duration was {}ms, expected at least {}ms",
-                upstream.overlap_duration_ms,
+                "soak real overlap duration was {}ms, expected at least {}ms",
+                upstream.real_overlap_duration_ms,
                 config.upstream.hold_duration.as_millis()
             ));
         }
@@ -566,21 +561,27 @@ fn assert_concurrent_websocket_contract(
                 "soak did not observe a follow-up local frame before completion".to_owned(),
             );
         }
+        if upstream.multi_step_followup_active_session_count < config.upstream.expected_sessions {
+            return Err(format!(
+                "multi-step follow-up saw {} active sessions, expected at least {}",
+                upstream.multi_step_followup_active_session_count,
+                config.upstream.expected_sessions
+            ));
+        }
         if !upstream.multi_step_completed_before_overlap_end {
             return Err(
-                "multi-step WebSocket interleave did not complete before overlap ended".to_owned(),
+                "multi-step WebSocket interleave did not complete before true 3-way overlap ended"
+                    .to_owned(),
             );
         }
     }
     if config.capture_registry_report {
         let registry_report =
             registry_report.ok_or_else(|| "router registry report was not captured".to_owned())?;
-        if let Some(handled_connections) = registry_report.handled_connections
-            && handled_connections > config.router_max_connections
-        {
+        if registry_report.handled_connections != Some(config.router_max_connections) {
             return Err(format!(
-                "router handled_connections={} exceeded configured max_connections={}",
-                handled_connections, config.router_max_connections
+                "router registry handled_connections={:?}, expected final CLI report with {}",
+                registry_report.handled_connections, config.router_max_connections
             ));
         }
         if registry_report.active_sessions != 0 {
@@ -614,18 +615,18 @@ fn assert_concurrent_websocket_contract(
             ));
         }
         if registry_report
-            .completed_session_forwarded_upstream_message_counts
+            .final_session_forwarded_upstream_message_counts
             .len()
             < config.upstream.expected_sessions
         {
             return Err(format!(
-                "router registry completed-session forwarded counts {:?} had fewer entries than expected sessions {}",
-                registry_report.completed_session_forwarded_upstream_message_counts,
+                "router registry final-session forwarded counts {:?} had fewer entries than expected sessions {}",
+                registry_report.final_session_forwarded_upstream_message_counts,
                 config.upstream.expected_sessions
             ));
         }
         let mut sorted_forwarded_counts = registry_report
-            .completed_session_forwarded_upstream_message_counts
+            .final_session_forwarded_upstream_message_counts
             .clone();
         sorted_forwarded_counts.sort_unstable_by(|left, right| right.cmp(left));
         if sorted_forwarded_counts
@@ -634,8 +635,8 @@ fn assert_concurrent_websocket_contract(
             .any(|count| *count < 3)
         {
             return Err(format!(
-                "router registry completed-session forwarded counts {:?} did not prove three sessions with at least three local writes",
-                registry_report.completed_session_forwarded_upstream_message_counts
+                "router registry final-session forwarded counts {:?} did not prove three unique sessions with at least three local writes",
+                registry_report.final_session_forwarded_upstream_message_counts
             ));
         }
         if registry_report.forwarded_upstream_messages
@@ -1595,6 +1596,7 @@ struct RouterWebSocketRegistryReport {
     completed_response_sessions: usize,
     forwarded_upstream_messages: usize,
     completed_session_forwarded_upstream_message_counts: Vec<usize>,
+    final_session_forwarded_upstream_message_counts: Vec<usize>,
 }
 
 impl RouterWebSocketRegistryReport {
@@ -1638,39 +1640,11 @@ impl RouterWebSocketRegistryReport {
                 registry,
                 "completed_session_forwarded_upstream_message_counts",
             )?,
+            final_session_forwarded_upstream_message_counts: required_usize_array_field(
+                registry,
+                "final_session_forwarded_upstream_message_counts",
+            )?,
         })
-    }
-}
-
-fn wait_for_router_registry_report(
-    path: &Path,
-    expected_completed_sessions: usize,
-    timeout: Duration,
-) -> Result<RouterWebSocketRegistryReport, String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let current_state = match RouterWebSocketRegistryReport::from_file(path) {
-            Ok(report)
-                if report.active_sessions == 0
-                    && report.completed_response_sessions >= expected_completed_sessions =>
-            {
-                return Ok(report);
-            }
-            Ok(report) => format!(
-                "active_sessions={}, completed_response_sessions={}, registered_sessions={}, closed_sessions={}",
-                report.active_sessions,
-                report.completed_response_sessions,
-                report.registered_sessions,
-                report.closed_sessions
-            ),
-            Err(error) => error,
-        };
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "router websocket registry did not drain before timeout; last_state={current_state}"
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -1942,6 +1916,7 @@ fn write_redacted_three_websocket_transcript(
             "completed_response_sessions": report.completed_response_sessions,
             "forwarded_upstream_messages": report.forwarded_upstream_messages,
             "completed_session_forwarded_upstream_message_counts": report.completed_session_forwarded_upstream_message_counts,
+            "final_session_forwarded_upstream_message_counts": report.final_session_forwarded_upstream_message_counts,
         })),
         "clients": {
             "count": input.outputs.len(),
@@ -1956,7 +1931,9 @@ fn write_redacted_three_websocket_transcript(
             "overlap_proven": input.upstream.active_high_water >= input.upstream.expected_sessions,
             "overlap_started_unix_ms": input.upstream.overlap_started_unix_ms,
             "overlap_completed_unix_ms": input.upstream.overlap_completed_unix_ms,
+            "real_overlap_completed_unix_ms": input.upstream.real_overlap_completed_unix_ms,
             "overlap_duration_ms": input.upstream.overlap_duration_ms,
+            "real_overlap_duration_ms": input.upstream.real_overlap_duration_ms,
             "hold_duration_ms": input.upstream.hold_duration.as_millis(),
             "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
             "session_frame_counts": input.upstream.session_frame_counts,
@@ -1964,6 +1941,8 @@ fn write_redacted_three_websocket_transcript(
             "http_probe_count": input.upstream.http_probe_count,
             "multi_step_interleave_completed": input.upstream.multi_step_interleave_completed,
             "multi_step_followup_frame_count": input.upstream.multi_step_followup_frame_count,
+            "multi_step_followup_active_session_count": input.upstream.multi_step_followup_active_session_count,
+            "multi_step_followup_unix_ms": input.upstream.multi_step_followup_unix_ms,
             "multi_step_completed_before_overlap_end": input.upstream.multi_step_completed_before_overlap_end,
         },
         "socket_cleanup": {
@@ -2223,7 +2202,9 @@ struct ConcurrentWebSocketTranscript {
     active_high_water: usize,
     overlap_started_unix_ms: Option<u128>,
     overlap_completed_unix_ms: Option<u128>,
+    real_overlap_completed_unix_ms: Option<u128>,
     overlap_duration_ms: u128,
+    real_overlap_duration_ms: u128,
     hold_duration: Duration,
     http_probe_count: usize,
     session_frame_counts: Vec<usize>,
@@ -2231,6 +2212,8 @@ struct ConcurrentWebSocketTranscript {
     non_prewarm_session_count: usize,
     multi_step_interleave_completed: bool,
     multi_step_followup_frame_count: usize,
+    multi_step_followup_active_session_count: usize,
+    multi_step_followup_unix_ms: Option<u128>,
     multi_step_completed_before_overlap_end: bool,
 }
 
@@ -2251,6 +2234,7 @@ struct ConcurrentUpstreamState {
     overlap_started_at: Option<Instant>,
     overlap_started_unix_ms: Option<u128>,
     overlap_completed_unix_ms: Option<u128>,
+    real_overlap_completed_unix_ms: Option<u128>,
     http_probe_count: usize,
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
@@ -2258,6 +2242,8 @@ struct ConcurrentUpstreamState {
     multi_step_interleave_claimed: bool,
     multi_step_interleave_completed: bool,
     multi_step_followup_frame_count: usize,
+    multi_step_followup_active_session_count: usize,
+    multi_step_followup_unix_ms: Option<u128>,
     multi_step_completed_unix_ms: Option<u128>,
 }
 
@@ -2287,6 +2273,52 @@ impl RouterProcessGuard {
         self.terminate_child(label, Duration::ZERO)?;
         self.join_output_readers(label)?;
         Ok(self.observation.clone())
+    }
+
+    fn wait(mut self, label: &str, timeout: Duration) -> Result<RouterProcessObservation, String> {
+        let Some(mut child) = self.child.take() else {
+            self.join_output_readers(label)?;
+            return Ok(self.observation.clone());
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let stdout_lines = self.join_output_reader(label, "stdout")?;
+                    let stderr_lines = self.join_output_reader(label, "stderr")?;
+                    if !status.success() {
+                        self.observation.cleanup_result = format!("exited:{status}");
+                        return Err(format!(
+                            "{label} exited with status {status}\nstdout:\n{}\nstderr:\n{}",
+                            stdout_lines.join("\n"),
+                            stderr_lines.join("\n")
+                        ));
+                    }
+                    self.observation.cleanup_result = format!("exited:{status}");
+                    return Ok(self.observation.clone());
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let status = child
+                        .wait()
+                        .map_err(|error| format!("failed to wait for {label}: {error}"))?;
+                    self.observation.cleanup_result = format!("wait-timeout-terminated:{status}");
+                    let stdout_lines = self.join_output_reader(label, "stdout")?;
+                    let stderr_lines = self.join_output_reader(label, "stderr")?;
+                    return Err(format!(
+                        "{label} did not exit before timeout\nstdout:\n{}\nstderr:\n{}",
+                        stdout_lines.join("\n"),
+                        stderr_lines.join("\n")
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!("failed to inspect {label}: {error}"));
+                }
+            }
+        }
     }
 
     fn terminate_child(&mut self, label: &str, grace: Duration) -> Result<(), String> {
@@ -2319,13 +2351,25 @@ impl RouterProcessGuard {
     }
 
     fn join_output_readers(&mut self, label: &str) -> Result<(), String> {
-        if let Some(handle) = self.stdout_handle.take() {
-            join_router_output_reader(handle, label, "stdout")?;
-        }
-        if let Some(handle) = self.stderr_handle.take() {
-            join_router_output_reader(handle, label, "stderr")?;
-        }
+        let _stdout_lines = self.join_output_reader(label, "stdout")?;
+        let _stderr_lines = self.join_output_reader(label, "stderr")?;
         Ok(())
+    }
+
+    fn join_output_reader(
+        &mut self,
+        label: &str,
+        stream_name: &str,
+    ) -> Result<Vec<String>, String> {
+        let handle = match stream_name {
+            "stdout" => self.stdout_handle.take(),
+            "stderr" => self.stderr_handle.take(),
+            _ => None,
+        };
+        let Some(handle) = handle else {
+            return Ok(Vec::new());
+        };
+        join_router_output_reader(handle, label, stream_name)
     }
 }
 
@@ -2471,6 +2515,7 @@ impl MockConcurrentWebSocketUpstream {
                 overlap_started_at: None,
                 overlap_started_unix_ms: None,
                 overlap_completed_unix_ms: None,
+                real_overlap_completed_unix_ms: None,
                 http_probe_count: 0,
                 session_frame_counts: Vec::new(),
                 session_event_counts: Vec::new(),
@@ -2478,6 +2523,8 @@ impl MockConcurrentWebSocketUpstream {
                 multi_step_interleave_claimed: false,
                 multi_step_interleave_completed: false,
                 multi_step_followup_frame_count: 0,
+                multi_step_followup_active_session_count: 0,
+                multi_step_followup_unix_ms: None,
                 multi_step_completed_unix_ms: None,
             }),
             condition: Condvar::new(),
@@ -2538,7 +2585,9 @@ impl MockConcurrentWebSocketUpstream {
             active_high_water: state.active_high_water,
             overlap_started_unix_ms: state.overlap_started_unix_ms,
             overlap_completed_unix_ms: state.overlap_completed_unix_ms,
+            real_overlap_completed_unix_ms: state.real_overlap_completed_unix_ms,
             overlap_duration_ms: overlap_duration_ms(&state),
+            real_overlap_duration_ms: real_overlap_duration_ms(&state),
             hold_duration: state.hold_duration,
             http_probe_count: state.http_probe_count,
             session_frame_counts: state.session_frame_counts,
@@ -2546,9 +2595,12 @@ impl MockConcurrentWebSocketUpstream {
             non_prewarm_session_count: state.non_prewarm_session_count,
             multi_step_interleave_completed: state.multi_step_interleave_completed,
             multi_step_followup_frame_count: state.multi_step_followup_frame_count,
+            multi_step_followup_active_session_count: state
+                .multi_step_followup_active_session_count,
+            multi_step_followup_unix_ms: state.multi_step_followup_unix_ms,
             multi_step_completed_before_overlap_end: state
                 .multi_step_completed_unix_ms
-                .zip(state.overlap_completed_unix_ms)
+                .zip(state.real_overlap_completed_unix_ms)
                 .is_some_and(|(multi_step_completed, overlap_completed)| {
                     multi_step_completed <= overlap_completed
                 }),
@@ -2806,7 +2858,10 @@ fn complete_multi_step_interleave(
     state.multi_step_followup_frame_count = state
         .multi_step_followup_frame_count
         .saturating_add(followup_frame_count);
-    state.multi_step_completed_unix_ms = Some(timestamp_millis());
+    let completed_unix_ms = timestamp_millis();
+    state.multi_step_followup_active_session_count = state.active_non_prewarm_sessions;
+    state.multi_step_followup_unix_ms = Some(completed_unix_ms);
+    state.multi_step_completed_unix_ms = Some(completed_unix_ms);
     shared.condition.notify_all();
     Ok(())
 }
@@ -2871,6 +2926,12 @@ fn finish_concurrent_non_prewarm_session(
         .lock()
         .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
     state.active_non_prewarm_sessions = state.active_non_prewarm_sessions.saturating_sub(1);
+    if state.overlap_started_unix_ms.is_some()
+        && state.real_overlap_completed_unix_ms.is_none()
+        && state.active_non_prewarm_sessions < state.expected_sessions
+    {
+        state.real_overlap_completed_unix_ms = Some(timestamp_millis());
+    }
     state.completed_sessions = state.completed_sessions.saturating_add(1);
     state.final_active_sessions = state.active_non_prewarm_sessions;
     if state.completed_sessions >= state.expected_sessions {
@@ -2943,27 +3004,6 @@ fn send_concurrent_multi_step_response_events(
     )?;
     event_count = event_count.saturating_add(1);
 
-    if !config.hold_duration.is_zero() {
-        let hold_deadline = overlap_started_at + config.hold_duration;
-        let mut heartbeat_index = 0_usize;
-        while Instant::now() < hold_deadline {
-            let remaining = hold_deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(config.heartbeat_interval));
-            if Instant::now() >= hold_deadline {
-                break;
-            }
-            let heartbeat = serde_json::json!({
-                "type": "response.output_text.delta",
-                "delta": "",
-                "sequence_number": heartbeat_index,
-            })
-            .to_string();
-            send_concurrent_response_event(websocket, &heartbeat)?;
-            heartbeat_index = heartbeat_index.saturating_add(1);
-            event_count = event_count.saturating_add(1);
-        }
-    }
-
     let tool_arguments = serde_json::json!({
         "command": "printf codex-router-tool-ok",
         "timeout_ms": 1000,
@@ -3007,12 +3047,33 @@ fn send_concurrent_multi_step_response_events(
     if !frame_contains_function_call_output(&followup_frame, &call_id) {
         return Err("multi-step follow-up frame did not contain function_call_output".to_owned());
     }
+    complete_multi_step_interleave(state, 1)?;
+
+    if !config.hold_duration.is_zero() {
+        let hold_deadline = overlap_started_at + config.hold_duration;
+        let mut heartbeat_index = 0_usize;
+        while Instant::now() < hold_deadline {
+            let remaining = hold_deadline.saturating_duration_since(Instant::now());
+            thread::sleep(remaining.min(config.heartbeat_interval));
+            if Instant::now() >= hold_deadline {
+                break;
+            }
+            let heartbeat = serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "",
+                "sequence_number": heartbeat_index,
+            })
+            .to_string();
+            send_concurrent_response_event(websocket, &heartbeat)?;
+            heartbeat_index = heartbeat_index.saturating_add(1);
+            event_count = event_count.saturating_add(1);
+        }
+    }
 
     for event in smoke_response_events(request_index.saturating_add(10)) {
         send_concurrent_response_event(websocket, &event)?;
         event_count = event_count.saturating_add(1);
     }
-    complete_multi_step_interleave(state, 1)?;
     Ok(event_count)
 }
 
@@ -3065,6 +3126,16 @@ fn overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
     match (
         state.overlap_started_unix_ms,
         state.overlap_completed_unix_ms,
+    ) {
+        (Some(started), Some(completed)) => completed.saturating_sub(started),
+        _ => 0,
+    }
+}
+
+fn real_overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
+    match (
+        state.overlap_started_unix_ms,
+        state.real_overlap_completed_unix_ms,
     ) {
         (Some(started), Some(completed)) => completed.saturating_sub(started),
         _ => 0,
@@ -4058,6 +4129,10 @@ mod tests {
         };
 
         assert!(report.transcript_path().exists());
+        println!(
+            "codex_router_three_websocket_artifact={}",
+            report.transcript_path().display()
+        );
     }
 
     #[test]
@@ -4069,6 +4144,10 @@ mod tests {
         };
 
         assert!(report.transcript_path().exists());
+        println!(
+            "codex_router_three_websocket_artifact={}",
+            report.transcript_path().display()
+        );
     }
 
     #[test]
