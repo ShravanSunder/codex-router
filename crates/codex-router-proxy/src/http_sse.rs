@@ -820,16 +820,16 @@ impl AffinityOwnerRecordingBody {
         }
     }
 
-    fn record_if_needed(&mut self) -> io::Result<()> {
+    fn record_if_ready(&mut self) -> io::Result<()> {
         if self.recorded {
             return Ok(());
         }
-        self.recorded = true;
         let Some(response_id) = extract_response_id_from_body(&self.buffered)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
         else {
             return Ok(());
         };
+        self.recorded = true;
         let affinity_key_hash = hash_previous_response_id(&self.affinity_secret, &response_id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         let owner = PreviousResponseAffinityOwnerRecord::new(
@@ -850,10 +850,11 @@ impl Read for AffinityOwnerRecordingBody {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let read = self.inner.read(buffer)?;
         if read == 0 {
-            self.record_if_needed()?;
+            self.record_if_ready()?;
             return Ok(0);
         }
         self.buffered.extend_from_slice(&buffer[..read]);
+        self.record_if_ready()?;
         Ok(read)
     }
 }

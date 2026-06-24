@@ -56,8 +56,6 @@ mod tests {
     use crate::server::AsyncLoopbackServerRuntime;
     use crate::server::HyperProtocolDispatch;
     use crate::server::HyperProtocolSwitchpoint;
-    use crate::server::HyperWebSocketUpgrade;
-    use crate::server::HyperWebSocketUpgradeError;
     use crate::server::LoopbackBindAddress;
     use crate::server::LoopbackHttpAdapter;
     use crate::server::LoopbackHttpServer;
@@ -2270,15 +2268,22 @@ mod tests {
     }
 
     #[test]
-    fn hyper_websocket_upgrade_builds_accept_response_without_second_handshake() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            http::header::SEC_WEBSOCKET_KEY,
-            http::HeaderValue::from_static("dGhlIHNhbXBsZSBub25jZQ=="),
-        );
+    fn hyper_websocket_upgrade_uses_hyper_tungstenite_response_builder() {
+        let mut request = match http::Request::builder()
+            .method(http::Method::GET)
+            .uri("/v1/responses")
+            .header(http::header::CONNECTION, "Upgrade")
+            .header(http::header::UPGRADE, "websocket")
+            .header(http::header::SEC_WEBSOCKET_VERSION, "13")
+            .header(http::header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
+        {
+            Ok(request) => request,
+            Err(error) => panic!("test request should build: {error}"),
+        };
 
-        let response = match HyperWebSocketUpgrade::switching_protocols_response(&headers) {
-            Ok(response) => response,
+        let (response, _websocket) = match hyper_tungstenite::upgrade(&mut request, None) {
+            Ok(upgrade) => upgrade,
             Err(error) => panic!("hyper upgrade response should build: {error}"),
         };
 
@@ -2291,7 +2296,7 @@ mod tests {
         );
         assert_eq!(
             response.headers().get(http::header::CONNECTION),
-            Some(&http::HeaderValue::from_static("Upgrade")),
+            Some(&http::HeaderValue::from_static("upgrade")),
         );
         assert_eq!(
             response.headers().get(http::header::UPGRADE),
@@ -2301,9 +2306,24 @@ mod tests {
 
     #[test]
     fn hyper_websocket_upgrade_rejects_missing_key() {
-        match HyperWebSocketUpgrade::switching_protocols_response(&http::HeaderMap::new()) {
+        let mut request = match http::Request::builder()
+            .method(http::Method::GET)
+            .uri("/v1/responses")
+            .header(http::header::CONNECTION, "Upgrade")
+            .header(http::header::UPGRADE, "websocket")
+            .header(http::header::SEC_WEBSOCKET_VERSION, "13")
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
+        {
+            Ok(request) => request,
+            Err(error) => panic!("test request should build: {error}"),
+        };
+
+        match hyper_tungstenite::upgrade(&mut request, None) {
             Ok(response) => panic!("missing key should fail, got response {response:?}"),
-            Err(error) => assert_eq!(error, HyperWebSocketUpgradeError::MissingWebSocketKey),
+            Err(error) => assert!(matches!(
+                error,
+                hyper_tungstenite::tungstenite::error::ProtocolError::MissingSecWebSocketKey
+            )),
         }
     }
 
