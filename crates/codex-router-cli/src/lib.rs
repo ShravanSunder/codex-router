@@ -86,6 +86,9 @@ where
                 command.secret_root,
             )
             .with_max_websocket_upstream_messages(command.max_websocket_upstream_messages);
+            if let Some(audit_file) = command.audit_file {
+                runtime_config = runtime_config.with_audit_file(audit_file);
+            }
             let token_reload_watcher = if command.require_local_token {
                 let secret_store =
                     FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
@@ -429,6 +432,7 @@ struct ServeCommand {
     require_local_token: bool,
     max_websocket_upstream_messages: usize,
     max_connections: usize,
+    audit_file: Option<PathBuf>,
 }
 
 impl ServeCommand {
@@ -464,6 +468,7 @@ impl ServeCommand {
                 .max_websocket_upstream_messages
                 .unwrap_or(usize::MAX),
             max_connections: options.max_connections.unwrap_or(usize::MAX),
+            audit_file: options.audit_file,
         })
     }
 }
@@ -482,6 +487,7 @@ struct ServeCommandOptions {
     require_local_token: bool,
     max_websocket_upstream_messages: Option<usize>,
     max_connections: Option<usize>,
+    audit_file: Option<PathBuf>,
 }
 
 impl ServeCommandOptions {
@@ -499,6 +505,7 @@ impl ServeCommandOptions {
             require_local_token: false,
             max_websocket_upstream_messages: None,
             max_connections: None,
+            audit_file: None,
         };
 
         while let Some(argument) = parser.next_string()? {
@@ -556,6 +563,10 @@ impl ServeCommandOptions {
                         "--max-websocket-upstream-messages",
                         &value,
                     )?);
+                }
+                "--audit-file" => {
+                    let value = parser.next_required_value("--audit-file")?;
+                    options.audit_file = Some(PathBuf::from(value));
                 }
                 unknown => {
                     return Err(CliError::UnknownOption {

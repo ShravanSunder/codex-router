@@ -21,11 +21,12 @@ Completion requires:
 ## Current Workflow
 
 - Current workflow: `shravan-dev-workflow:orchestrator-goal`
-- Latest completed workflow: `shravan-dev-workflow:spec-review-swarm`
+- Latest completed workflow: `shravan-dev-workflow:plan-review-swarm`
 - Phase result: `complete`
-- Next workflow: `shravan-dev-workflow:plan-creation-swarm`
-- First planning target: create a traced implementation plan whose mandatory
-  proof/guardrail matrix carries every hard gate from the accepted spec.
+- Next workflow: `shravan-dev-workflow:implementation-execute-plan`
+- First implementation target: continue executing the reviewed implementation
+  plan from the first unproven proof slice, with the current focus on the real
+  child-process `codex-router serve` installed-Codex WebSocket proof path.
 
 ## Required Reading
 
@@ -40,6 +41,13 @@ Resolve these paths in the current checkout:
 Historical lane files under
 `tmp/spec-workflows/2026-06-24-async-router-runtime/lanes/` are supporting
 evidence only. The primary spec and review ledger are authoritative for planning.
+
+Implementation artifacts:
+
+- `tmp/plan-workflows/2026-06-24-async-router-runtime/implementation-plan.md`
+- `tmp/plan-workflows/2026-06-24-async-router-runtime/plan-ledger.md`
+- `tmp/plan-workflows/2026-06-24-async-router-runtime/reviews/plan-review-report.md`
+- `tmp/plan-workflows/2026-06-24-async-router-runtime/execution-receipts/`
 
 ## Scope
 

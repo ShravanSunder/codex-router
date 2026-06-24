@@ -3,6 +3,8 @@
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fs;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
@@ -10,6 +12,7 @@ use std::net::Shutdown;
 use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Output;
@@ -32,10 +35,6 @@ use codex_router_cli::token::Shell;
 use codex_router_cli::token::export_token_assignment;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
-use codex_router_proxy::server::LoopbackBindAddress;
-use codex_router_proxy::server::LoopbackRouterRuntime;
-use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
-use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::account_credential_bundle_key;
@@ -177,17 +176,14 @@ fn run_installed_codex_mock_smoke_with_mode(
     let profile_path = profile_writer
         .write(&profile, true, Some(profile_preview.preview_token()))
         .map_err(|error| format!("failed to write generated Codex profile: {error}"))?;
-    let router_thread = RouterThreadGuard::new(
+    let router_process = start_router_process(
         router_port,
-        start_router_once(
-            router_port,
-            state_path,
-            secret_root,
-            None,
-            format!("http://{}/v1", upstream.address()),
-            audit_path.clone(),
-        )?,
-    );
+        state_path,
+        secret_root,
+        None,
+        format!("http://{}/v1", upstream.address()),
+        audit_path.clone(),
+    )?;
 
     let http_sse_last_message_path = smoke_root.path().join("http-sse-last-message.txt");
     let http_sse_codex_output = if mode.requires_http_sse() {
@@ -229,7 +225,7 @@ fn run_installed_codex_mock_smoke_with_mode(
     } else {
         None
     };
-    router_thread.join("router runtime")?;
+    let router_process = router_process.stop("router process")?;
     let router_audit = RouterAuditObservation::from_file(&audit_path)?;
     router_audit.require_mode(mode)?;
     let upstream_result = upstream.join().map_err(|error| {
@@ -285,6 +281,7 @@ fn run_installed_codex_mock_smoke_with_mode(
         upstream: &upstream_result,
         quota_status: &seed.quota_status,
         expected_account_label: &seed.expected_account_label,
+        router_process: &router_process,
         router_audit: &router_audit,
     })?;
 
@@ -308,20 +305,17 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
     let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
     let audit_path = router_root.join("audit").join("events.jsonl");
-    let router_thread = RouterThreadGuard::new(
+    let router_process = start_router_process(
         router_port,
-        start_router_once(
-            router_port,
-            state_path,
-            secret_root,
-            Some(seed.local_token),
-            format!("http://{}/v1", upstream.address()),
-            audit_path,
-        )?,
-    );
+        state_path,
+        secret_root,
+        Some(seed.local_token),
+        format!("http://{}/v1", upstream.address()),
+        audit_path,
+    )?;
 
     send_hostile_no_token_websocket(router_port)?;
-    router_thread.join("hostile no-token router runtime")?;
+    let _router_process = router_process.stop("hostile no-token router process")?;
     let upstream_connection_count = upstream.join()?;
     if upstream_connection_count != 0 {
         return Err(format!(
@@ -601,54 +595,179 @@ fn smoke_account_label_from_upstream_token(token: &str) -> Option<&'static str> 
         .map(|fixture| fixture.label)
 }
 
-fn start_router_once(
+fn start_router_process(
     router_port: u16,
     state_path: PathBuf,
     secret_root: PathBuf,
     local_token: Option<String>,
     upstream_base_url: String,
     audit_path: PathBuf,
-) -> Result<thread::JoinHandle<Result<(), String>>, String> {
-    let (ready_sender, ready_receiver) = mpsc::channel();
-    let handle = thread::Builder::new()
-        .name("codex-router-installed-smoke-router".to_owned())
-        .spawn(move || {
-            let bind_address = LoopbackBindAddress::new("127.0.0.1", router_port)
-                .map_err(|error| format!("failed to build router bind address: {error}"))?;
-            let upstream_endpoint = UpstreamEndpoint::new(upstream_base_url)
-                .map_err(|error| format!("failed to build upstream endpoint: {error}"))?;
-            let mut runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
-                bind_address,
-                upstream_endpoint,
-                state_path,
-                secret_root,
-            )
-            .with_quota_clock(1_030, 60)
-            .with_max_websocket_upstream_messages(4)
-            .with_audit_file(audit_path);
-            if let Some(local_token) = local_token {
-                let local_token = codex_router_core::local_auth::LocalRouterTokenRecord::new(
-                    SecretString::new(local_token),
-                    codex_router_core::ids::TokenGeneration::new(1),
-                );
-                runtime_config = runtime_config.with_required_local_token(local_token);
-            }
-            let runtime = LoopbackRouterRuntime::start(runtime_config)
-                .map_err(|error| format!("failed to start router runtime: {error}"))?;
-            if let Err(error) = ready_sender.send(()) {
-                return Err(format!("failed to signal router readiness: {error}"));
-            }
-            runtime
-                .serve_protocol_connections(16)
-                .map(|_| ())
-                .map_err(|error| format!("router runtime failed: {error}"))
-        })
-        .map_err(|error| format!("failed to spawn router runtime thread: {error}"))?;
+) -> Result<RouterProcessGuard, String> {
+    let binary_path = codex_router_binary_path()?;
+    let mut argv = vec![
+        "serve".to_owned(),
+        "--port".to_owned(),
+        router_port.to_string(),
+        "--listen-host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--state-db".to_owned(),
+        state_path.display().to_string(),
+        "--secret-root".to_owned(),
+        secret_root.display().to_string(),
+        "--upstream-base-url".to_owned(),
+        upstream_base_url,
+        "--now-unix-seconds".to_owned(),
+        "1030".to_owned(),
+        "--max-snapshot-age-seconds".to_owned(),
+        "60".to_owned(),
+        "--disable-background-quota-refresh".to_owned(),
+        "--max-websocket-upstream-messages".to_owned(),
+        "4".to_owned(),
+        "--max-connections".to_owned(),
+        "64".to_owned(),
+        "--audit-file".to_owned(),
+        audit_path.display().to_string(),
+    ];
+    if local_token.is_some() {
+        argv.push("--require-local-token".to_owned());
+    }
+    let mut command = Command::new(&binary_path);
+    command.args(&argv);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "failed to spawn codex-router serve child {}: {error}",
+            binary_path.display()
+        )
+    })?;
+    let pid = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "router child stdout was not piped".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "router child stderr was not piped".to_owned())?;
+    let (line_sender, line_receiver) = mpsc::channel();
+    let stdout_handle = spawn_router_output_reader("router stdout", stdout, Some(line_sender))?;
+    let stderr_handle = spawn_router_output_reader("router stderr", stderr, None)?;
+    let readiness_line = wait_for_router_readiness(&mut child, &line_receiver, router_port)?;
+    let listener = readiness_line
+        .trim()
+        .strip_prefix("listening: ")
+        .unwrap_or_else(|| readiness_line.trim())
+        .to_owned();
 
-    ready_receiver
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|error| format!("router did not become ready on port {router_port}: {error}"))?;
-    Ok(handle)
+    Ok(RouterProcessGuard {
+        child: Some(child),
+        stdout_handle: Some(stdout_handle),
+        stderr_handle: Some(stderr_handle),
+        observation: RouterProcessObservation {
+            binary_path,
+            pid,
+            argv,
+            listener,
+            readiness_line,
+            cleanup_result: "not-cleaned".to_owned(),
+        },
+    })
+}
+
+fn codex_router_binary_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_codex-router") {
+        return Ok(PathBuf::from(path));
+    }
+    let workspace_root = workspace_root()?;
+    let binary_name = if cfg!(windows) {
+        "codex-router.exe"
+    } else {
+        "codex-router"
+    };
+    Ok(workspace_root
+        .join("target")
+        .join("debug")
+        .join(binary_name))
+}
+
+fn workspace_root() -> Result<PathBuf, String> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "failed to resolve workspace root".to_owned())
+}
+
+fn spawn_router_output_reader<R>(
+    name: &'static str,
+    stream: R,
+    line_sender: Option<mpsc::Sender<String>>,
+) -> Result<thread::JoinHandle<Vec<String>>, String>
+where
+    R: Read + Send + 'static,
+{
+    thread::Builder::new()
+        .name(format!("codex-router-installed-smoke-{name}"))
+        .spawn(move || {
+            let mut reader = BufReader::new(stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => return lines,
+                    Ok(_) => {
+                        let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                        if let Some(sender) = &line_sender {
+                            let _ = sender.send(line.clone());
+                        }
+                        lines.push(line);
+                    }
+                    Err(error) => {
+                        lines.push(format!("<{name} read error: {error}>"));
+                        return lines;
+                    }
+                }
+            }
+        })
+        .map_err(|error| format!("failed to spawn {name} reader: {error}"))
+}
+
+fn wait_for_router_readiness(
+    child: &mut Child,
+    line_receiver: &mpsc::Receiver<String>,
+    router_port: u16,
+) -> Result<String, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "router child exited before readiness on port {router_port}: {status}"
+            ));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "router child did not print readiness for port {router_port} before timeout"
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let wait = remaining.min(Duration::from_millis(50));
+        match line_receiver.recv_timeout(wait) {
+            Ok(line) if line.starts_with("listening: ") => return Ok(line),
+            Ok(_line) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "router child stdout closed before readiness on port {router_port}"
+                ));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1005,6 +1124,16 @@ struct RouterAuditObservation {
     websocket_local_auth_validated: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouterProcessObservation {
+    binary_path: PathBuf,
+    pid: u32,
+    argv: Vec<String>,
+    listener: String,
+    readiness_line: String,
+    cleanup_result: String,
+}
+
 impl RouterAuditObservation {
     fn from_file(path: &Path) -> Result<Self, String> {
         let audit_contents = fs::read_to_string(path).map_err(|error| {
@@ -1067,6 +1196,7 @@ struct RedactedTranscriptInput<'a> {
     quota_status: &'a SmokeQuotaStatus,
     expected_account_label: &'a str,
     expected_upstream_token: &'a str,
+    router_process: &'a RouterProcessObservation,
     router_audit: &'a RouterAuditObservation,
 }
 
@@ -1099,6 +1229,15 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         "profile_written": input.profile_path.exists(),
         "profile_env_key": null,
         "profile_uses_codex_router_token": false,
+        "router_process": {
+            "binary_path": input.router_process.binary_path.display().to_string(),
+            "pid": input.router_process.pid,
+            "argv": input.router_process.argv,
+            "listener": input.router_process.listener,
+            "readiness_line": input.router_process.readiness_line,
+            "cleanup_result": input.router_process.cleanup_result,
+            "spawned_real_serve_child": true,
+        },
         "http_sse_codex_status": input.http_sse_codex_status.map(ToString::to_string),
         "http_sse_codex_stdout_contains_smoke_text": input.http_sse_codex_stdout.as_deref().map(|stdout| stdout.contains("codex-router smoke ok")),
         "http_sse_codex_stderr_line_count": input.http_sse_codex_stderr.as_deref().map(str::lines).map(Iterator::count),
@@ -1297,36 +1436,68 @@ struct MockNoConnectionUpstream {
     handle: Option<thread::JoinHandle<Result<usize, String>>>,
 }
 
-struct RouterThreadGuard {
-    router_port: u16,
-    handle: Option<thread::JoinHandle<Result<(), String>>>,
+struct RouterProcessGuard {
+    child: Option<Child>,
+    stdout_handle: Option<thread::JoinHandle<Vec<String>>>,
+    stderr_handle: Option<thread::JoinHandle<Vec<String>>>,
+    observation: RouterProcessObservation,
 }
 
-impl RouterThreadGuard {
-    fn new(router_port: u16, handle: thread::JoinHandle<Result<(), String>>) -> Self {
-        Self {
-            router_port,
-            handle: Some(handle),
+impl RouterProcessGuard {
+    fn stop(mut self, label: &str) -> Result<RouterProcessObservation, String> {
+        self.terminate_child(label)?;
+        self.join_output_readers(label)?;
+        Ok(self.observation.clone())
+    }
+
+    fn terminate_child(&mut self, label: &str) -> Result<(), String> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                self.observation.cleanup_result = format!("already-exited:{status}");
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let status = child
+                    .wait()
+                    .map_err(|error| format!("failed to wait for {label}: {error}"))?;
+                self.observation.cleanup_result = format!("terminated:{status}");
+            }
+            Err(error) => {
+                return Err(format!("failed to inspect {label}: {error}"));
+            }
         }
+        Ok(())
     }
 
-    fn join(mut self, label: &str) -> Result<(), String> {
-        drain_optional_router_connections(self.router_port, 16);
-        let handle = self
-            .handle
-            .take()
-            .ok_or_else(|| format!("{label} was already joined"))?;
-        join_result(handle, label)
+    fn join_output_readers(&mut self, label: &str) -> Result<(), String> {
+        if let Some(handle) = self.stdout_handle.take() {
+            join_router_output_reader(handle, label, "stdout")?;
+        }
+        if let Some(handle) = self.stderr_handle.take() {
+            join_router_output_reader(handle, label, "stderr")?;
+        }
+        Ok(())
     }
 }
 
-impl Drop for RouterThreadGuard {
+impl Drop for RouterProcessGuard {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            drain_optional_router_connections(self.router_port, 16);
-            let _ = join_result(handle, "router runtime cleanup");
-        }
+        let _ = self.terminate_child("router child cleanup");
+        let _ = self.join_output_readers("router child cleanup");
     }
+}
+
+fn join_router_output_reader(
+    handle: thread::JoinHandle<Vec<String>>,
+    label: &str,
+    stream_name: &str,
+) -> Result<Vec<String>, String> {
+    handle
+        .join()
+        .map_err(|_| format!("{label} {stream_name} reader panicked"))
 }
 
 impl MockNoConnectionUpstream {
@@ -1405,6 +1576,8 @@ impl MockWebSocketUpstream {
     }
 
     fn join(mut self) -> Result<MockWebSocketTranscript, String> {
+        self.shutdown.store(true, Ordering::SeqCst);
+        wake_mock_upstream_accept(&self.address);
         let handle = self
             .handle
             .take()
@@ -1439,15 +1612,28 @@ fn run_mock_upstream(
     let mut http_probe_count = 0_usize;
     let mut http_sse_count = 0_usize;
     let mut http_sse = None;
+    let mut websocket_count = 0_usize;
     loop {
+        if shutdown.load(Ordering::SeqCst) && (!mode.requires_websocket() || websocket_count > 0) {
+            return Ok(());
+        }
         let deadline = Instant::now() + UPSTREAM_ACCEPT_TIMEOUT;
-        let stream = accept_with_deadline(
+        let stream = match accept_with_deadline(
             &listener,
             &shutdown,
             deadline,
             http_probe_count,
             http_sse_count,
-        )?;
+        ) {
+            Ok(stream) => stream,
+            Err(_error)
+                if shutdown.load(Ordering::SeqCst)
+                    && (!mode.requires_websocket() || websocket_count > 0) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if !looks_like_websocket_upgrade(&stream)? {
             match respond_to_http_request(stream)? {
                 MockHttpRequestResult::Probe => http_probe_count += 1,
@@ -1469,8 +1655,16 @@ fn run_mock_upstream(
         if !mode.requires_websocket() {
             return Err("mock upstream received unexpected websocket in HTTP/SSE mode".to_owned());
         }
-        run_mock_websocket(stream, transcript, http_probe_count, http_sse.take())?;
-        return Ok(());
+        run_mock_websocket(
+            stream,
+            Arc::clone(&transcript),
+            http_probe_count,
+            http_sse.take(),
+        )?;
+        websocket_count = websocket_count.saturating_add(1);
+        if websocket_count >= 8 {
+            return Ok(());
+        }
     }
 }
 
@@ -1843,19 +2037,42 @@ fn run_mock_websocket(
         .lock()
         .map_err(|_| "mock upstream header mutex poisoned".to_owned())?
         .clone();
-    let mut transcript = transcript
-        .lock()
-        .map_err(|_| "mock upstream transcript mutex poisoned".to_owned())?;
-    *transcript = Some(MockWebSocketTranscript {
+    let mut candidate = MockWebSocketTranscript {
         headers,
         first_frame,
         request_frames,
         websocket_request_frame_count,
         http_probe_count,
         http_sse,
-    });
+    };
+    let candidate_has_non_prewarm = transcript_has_non_prewarm_request(&candidate);
+    let mut transcript = transcript
+        .lock()
+        .map_err(|_| "mock upstream transcript mutex poisoned".to_owned())?;
+    let should_replace = match transcript.as_ref() {
+        None => true,
+        Some(existing) => {
+            candidate_has_non_prewarm || !transcript_has_non_prewarm_request(existing)
+        }
+    };
+    if should_replace {
+        if candidate.http_sse.is_none()
+            && let Some(existing) = transcript.as_ref()
+        {
+            candidate.http_sse = existing.http_sse.clone();
+        }
+        *transcript = Some(candidate);
+    }
 
     Ok(())
+}
+
+fn transcript_has_non_prewarm_request(transcript: &MockWebSocketTranscript) -> bool {
+    transcript
+        .request_frames
+        .iter()
+        .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
+        .any(|value| is_non_prewarm_response_create_frame(&value))
 }
 
 fn is_prewarm_request_frame(frame: &str) -> bool {
@@ -1989,20 +2206,6 @@ fn reserve_loopback_port() -> Result<u16, String> {
     Ok(port)
 }
 
-fn drain_optional_router_connections(router_port: u16, attempts: usize) {
-    for _ in 0..attempts {
-        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", router_port)) {
-            let _ = stream.write_all(
-                b"POST /v1/responses HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 2\r\n\r\n{}",
-            );
-            let _ = stream.shutdown(Shutdown::Write);
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-            let mut buffer = [0_u8; 256];
-            let _ = stream.read(&mut buffer);
-        }
-    }
-}
-
 fn send_hostile_no_token_websocket(router_port: u16) -> Result<(), String> {
     let request = format!("ws://127.0.0.1:{router_port}/v1/responses")
         .into_client_request()
@@ -2092,6 +2295,7 @@ mod tests {
     use super::MockWebSocketTranscript;
     use super::RedactedTranscriptInput;
     use super::RouterAuditObservation;
+    use super::RouterProcessObservation;
     use super::SMOKE_EXPECTED_TEXT;
     use super::SmokeContractAssertion;
     use super::SmokeQuotaStatus;
@@ -2159,6 +2363,17 @@ mod tests {
         RouterAuditObservation {
             http_sse_local_auth_validated: true,
             websocket_local_auth_validated: true,
+        }
+    }
+
+    fn valid_router_process_observation(test_root: &SmokeTempRoot) -> RouterProcessObservation {
+        RouterProcessObservation {
+            binary_path: test_root.path().join("target/debug/codex-router"),
+            pid: 42,
+            argv: vec!["serve".to_owned(), "--port".to_owned(), "8787".to_owned()],
+            listener: "127.0.0.1:8787".to_owned(),
+            readiness_line: "listening: 127.0.0.1:8787".to_owned(),
+            cleanup_result: "terminated:signal: 9 (SIGKILL)".to_owned(),
         }
     }
 
@@ -2292,6 +2507,7 @@ mod tests {
             quota_status: &valid_quota_status(),
             expected_account_label: "matches",
             expected_upstream_token: upstream_account_token(),
+            router_process: &valid_router_process_observation(&test_root),
             router_audit: &valid_router_audit_observation(),
         }) {
             Ok(path) => path,

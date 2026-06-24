@@ -58,6 +58,8 @@ else
   exit 127
 fi
 
+"${cargo_command[@]}" build -p codex-router-cli --bin codex-router
+
 "${cargo_command[@]}" test \
   -p codex-router-test-support \
   "${test_filter}" \
