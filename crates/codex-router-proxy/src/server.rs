@@ -17,9 +17,12 @@ use std::time::UNIX_EPOCH;
 
 use http::HeaderMap;
 use http::Method as HttpMethod;
+use http::Response as HttpResponse;
+use http::StatusCode;
 use http::Uri;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio_util::sync::CancellationToken;
+use tungstenite::handshake::derive_accept_key;
 
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditFileSink;
@@ -242,6 +245,45 @@ impl HyperProtocolSwitchpoint {
             HyperProtocolDispatch::Http
         }
     }
+}
+
+/// Builds the Hyper-owned WebSocket upgrade response.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HyperWebSocketUpgrade;
+
+impl HyperWebSocketUpgrade {
+    /// Builds a `101 Switching Protocols` response for an already-classified
+    /// WebSocket upgrade request.
+    pub fn switching_protocols_response(
+        headers: &HeaderMap,
+    ) -> Result<HttpResponse<()>, HyperWebSocketUpgradeError> {
+        let websocket_key = headers
+            .get(http::header::SEC_WEBSOCKET_KEY)
+            .ok_or(HyperWebSocketUpgradeError::MissingWebSocketKey)?
+            .to_str()
+            .map_err(|_error| HyperWebSocketUpgradeError::InvalidWebSocketKey)?;
+        HttpResponse::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .header(http::header::CONNECTION, "Upgrade")
+            .header(http::header::UPGRADE, "websocket")
+            .header(
+                http::header::SEC_WEBSOCKET_ACCEPT,
+                derive_accept_key(websocket_key.as_bytes()),
+            )
+            .body(())
+            .map_err(|_error| HyperWebSocketUpgradeError::InvalidWebSocketKey)
+    }
+}
+
+/// Hyper WebSocket upgrade response failure.
+#[derive(Clone, Copy, Debug, thiserror::Error, Eq, PartialEq)]
+pub enum HyperWebSocketUpgradeError {
+    /// The client did not include `Sec-WebSocket-Key`.
+    #[error("websocket upgrade request is missing Sec-WebSocket-Key")]
+    MissingWebSocketKey,
+    /// The provided WebSocket key could not be used for the upgrade response.
+    #[error("websocket upgrade request has an invalid Sec-WebSocket-Key")]
+    InvalidWebSocketKey,
 }
 
 fn is_websocket_upgrade(headers: &HeaderMap) -> bool {

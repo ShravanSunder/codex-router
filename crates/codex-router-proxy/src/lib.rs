@@ -56,6 +56,8 @@ mod tests {
     use crate::server::AsyncLoopbackServerRuntime;
     use crate::server::HyperProtocolDispatch;
     use crate::server::HyperProtocolSwitchpoint;
+    use crate::server::HyperWebSocketUpgrade;
+    use crate::server::HyperWebSocketUpgradeError;
     use crate::server::LoopbackBindAddress;
     use crate::server::LoopbackHttpAdapter;
     use crate::server::LoopbackHttpServer;
@@ -2261,6 +2263,44 @@ mod tests {
         );
 
         assert_eq!(dispatch, HyperProtocolDispatch::Http);
+    }
+
+    #[test]
+    fn hyper_websocket_upgrade_builds_accept_response_without_second_handshake() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::SEC_WEBSOCKET_KEY,
+            http::HeaderValue::from_static("dGhlIHNhbXBsZSBub25jZQ=="),
+        );
+
+        let response = match HyperWebSocketUpgrade::switching_protocols_response(&headers) {
+            Ok(response) => response,
+            Err(error) => panic!("hyper upgrade response should build: {error}"),
+        };
+
+        assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(
+            response.headers().get(http::header::SEC_WEBSOCKET_ACCEPT),
+            Some(&http::HeaderValue::from_static(
+                "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+            )),
+        );
+        assert_eq!(
+            response.headers().get(http::header::CONNECTION),
+            Some(&http::HeaderValue::from_static("Upgrade")),
+        );
+        assert_eq!(
+            response.headers().get(http::header::UPGRADE),
+            Some(&http::HeaderValue::from_static("websocket")),
+        );
+    }
+
+    #[test]
+    fn hyper_websocket_upgrade_rejects_missing_key() {
+        match HyperWebSocketUpgrade::switching_protocols_response(&http::HeaderMap::new()) {
+            Ok(response) => panic!("missing key should fail, got response {response:?}"),
+            Err(error) => assert_eq!(error, HyperWebSocketUpgradeError::MissingWebSocketKey),
+        }
     }
 
     #[test]
