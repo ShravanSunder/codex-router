@@ -6,7 +6,7 @@
   "expected_observation": "installed Codex hardening smoke rejects missing/wrong/smuggled/stale local auth before upstream selection",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
+  "git_head": "3515851b3635c87d0dcdf76d8a5d23101bd6cd32",
   "layer": "smoke",
   "notes": "Hardening smoke/tests passed: missing local token does not reach upstream, forbidden carriers reject before selection, stale WebSocket generation closes on rotation, and WebSocket token smuggling is rejected.",
   "owner": "T7",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T22:25:19Z",
+  "timestamp_utc": "2026-06-24T22:34:56Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "crates/codex-router-proxy/src/lib.rs",

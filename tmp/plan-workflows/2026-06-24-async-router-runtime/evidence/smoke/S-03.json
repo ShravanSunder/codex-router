@@ -8,7 +8,7 @@
   "expected_observation": "installed Codex smoke uses spawned built codex-router serve binary and records process metadata",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
+  "git_head": "3515851b3635c87d0dcdf76d8a5d23101bd6cd32",
   "layer": "smoke",
   "notes": "Installed Codex WebSocket smoke passed through spawned built codex-router serve child.",
   "owner": "T7",
@@ -18,7 +18,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T22:25:21Z",
+  "timestamp_utc": "2026-06-24T22:34:57Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",

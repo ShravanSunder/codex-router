@@ -9,7 +9,7 @@
   "expected_observation": "router-owned WebSocket registry records high-water 3 and zero active after completion",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
+  "git_head": "3515851b3635c87d0dcdf76d8a5d23101bd6cd32",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -23,23 +23,23 @@
       "count": 3,
       "statuses": [
         {
-          "pid": 92204,
+          "pid": 15703,
           "status": "exit status: 0",
           "stderr_line_count": 28,
           "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         },
         {
-          "pid": 92203,
+          "pid": 15704,
+          "status": "exit status: 0",
+          "stderr_line_count": 28,
+          "stderr_transport_error_markers": [],
+          "stdout_contains_smoke_text": true
+        },
+        {
+          "pid": 15705,
           "status": "exit status: 0",
           "stderr_line_count": 32,
-          "stderr_transport_error_markers": [],
-          "stdout_contains_smoke_text": true
-        },
-        {
-          "pid": 92202,
-          "status": "exit status: 0",
-          "stderr_line_count": 28,
           "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         }
@@ -49,8 +49,8 @@
     "router_websocket_registry": {
       "active_sessions": 0,
       "closed_session_ids": [
-        2,
         3,
+        2,
         1
       ],
       "closed_sessions": 3,
@@ -65,12 +65,12 @@
         15
       ],
       "completed_session_ids": [
-        2,
         1,
-        3,
-        2,
         2,
         3,
+        3,
+        3,
+        2,
         1
       ],
       "final_session_forwarded_upstream_message_counts": [
@@ -105,22 +105,22 @@
       "http_probe_count": 0,
       "in_overlap_session_event_counts": [
         16,
-        11,
+        13,
         11
       ],
       "multi_step_completed_before_overlap_end": true,
       "multi_step_followup_active_session_count": 3,
       "multi_step_followup_frame_count": 1,
-      "multi_step_followup_unix_ms": 1782339928682,
+      "multi_step_followup_unix_ms": 1782340504629,
       "multi_step_interleave_completed": true,
       "non_prewarm_session_count": 3,
       "normal_close_sessions": 3,
-      "overlap_completed_unix_ms": 1782340229696,
-      "overlap_duration_ms": 301035,
+      "overlap_completed_unix_ms": 1782340805617,
+      "overlap_duration_ms": 301009,
       "overlap_proven": true,
-      "overlap_started_unix_ms": 1782339928661,
-      "real_overlap_completed_unix_ms": 1782340229695,
-      "real_overlap_duration_ms": 301034,
+      "overlap_started_unix_ms": 1782340504608,
+      "real_overlap_completed_unix_ms": 1782340805614,
+      "real_overlap_duration_ms": 301006,
       "session_close_outcomes": [
         "normal",
         "normal",
@@ -145,7 +145,7 @@
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T22:30:37Z",
+  "timestamp_utc": "2026-06-24T22:40:13Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",

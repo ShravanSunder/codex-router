@@ -4,36 +4,36 @@
     "count": 3,
     "statuses": [
       {
-        "pid": 92204,
+        "pid": 15703,
         "status": "exit status: 0",
         "stderr_line_count": 28,
         "stderr_transport_error_markers": [],
         "stdout_contains_smoke_text": true
       },
       {
-        "pid": 92203,
+        "pid": 15704,
+        "status": "exit status: 0",
+        "stderr_line_count": 28,
+        "stderr_transport_error_markers": [],
+        "stdout_contains_smoke_text": true
+      },
+      {
+        "pid": 15705,
         "status": "exit status: 0",
         "stderr_line_count": 32,
-        "stderr_transport_error_markers": [],
-        "stdout_contains_smoke_text": true
-      },
-      {
-        "pid": 92202,
-        "status": "exit status: 0",
-        "stderr_line_count": 28,
         "stderr_transport_error_markers": [],
         "stdout_contains_smoke_text": true
       }
     ]
   },
   "codex_version": "codex-cli 0.142.0",
-  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
+  "git_head": "3515851b3635c87d0dcdf76d8a5d23101bd6cd32",
   "mode": "three-websocket-soak",
   "router_process": {
     "argv": [
       "serve",
       "--port",
-      "50572",
+      "56179",
       "--listen-host",
       "127.0.0.1",
       "--state-db",
@@ -41,7 +41,7 @@
       "--secret-root",
       "<secret-root-path>",
       "--upstream-base-url",
-      "http://127.0.0.1:50571/v1",
+      "http://127.0.0.1:56177/v1",
       "--now-unix-seconds",
       "1030",
       "--max-snapshot-age-seconds",
@@ -58,16 +58,16 @@
     ],
     "binary_path": "<repo>/target/debug/codex-router",
     "cleanup_result": "exited:exit status: 0",
-    "listener": "127.0.0.1:50572",
-    "pid": 92200,
-    "readiness_line": "listening: 127.0.0.1:50572",
+    "listener": "127.0.0.1:56179",
+    "pid": 15700,
+    "readiness_line": "listening: 127.0.0.1:56179",
     "spawned_real_serve_child": true
   },
   "router_websocket_registry": {
     "active_sessions": 0,
     "closed_session_ids": [
-      2,
       3,
+      2,
       1
     ],
     "closed_sessions": 3,
@@ -82,12 +82,12 @@
       15
     ],
     "completed_session_ids": [
-      2,
       1,
-      3,
-      2,
       2,
       3,
+      3,
+      3,
+      2,
       1
     ],
     "final_session_forwarded_upstream_message_counts": [
@@ -108,17 +108,17 @@
   "runtime_correlations": [
     {
       "client_index": 0,
-      "client_pid": 92204,
+      "client_pid": 15703,
       "close_reason": "normal",
       "event_count": 16,
       "frame_count": 3,
       "handshake_count": 1,
       "handshake_count_observed": true,
       "in_overlap_event_count": 16,
-      "overlap_completed_unix_ms": 1782340229695,
-      "overlap_started_unix_ms": 1782339928661,
-      "router_pid": 92200,
-      "router_session_id": 2,
+      "overlap_completed_unix_ms": 1782340805614,
+      "overlap_started_unix_ms": 1782340504608,
+      "router_pid": 15700,
+      "router_session_id": 1,
       "router_session_id_observed": true,
       "transport": "websocket",
       "transport_observed_from_client_stderr": true,
@@ -127,17 +127,17 @@
     },
     {
       "client_index": 1,
-      "client_pid": 92203,
+      "client_pid": 15704,
       "close_reason": "normal",
       "event_count": 13,
       "frame_count": 2,
       "handshake_count": 1,
       "handshake_count_observed": true,
-      "in_overlap_event_count": 11,
-      "overlap_completed_unix_ms": 1782340229695,
-      "overlap_started_unix_ms": 1782339928661,
-      "router_pid": 92200,
-      "router_session_id": 1,
+      "in_overlap_event_count": 13,
+      "overlap_completed_unix_ms": 1782340805614,
+      "overlap_started_unix_ms": 1782340504608,
+      "router_pid": 15700,
+      "router_session_id": 2,
       "router_session_id_observed": true,
       "transport": "websocket",
       "transport_observed_from_client_stderr": true,
@@ -146,16 +146,16 @@
     },
     {
       "client_index": 2,
-      "client_pid": 92202,
+      "client_pid": 15705,
       "close_reason": "normal",
       "event_count": 13,
       "frame_count": 2,
       "handshake_count": 1,
       "handshake_count_observed": true,
       "in_overlap_event_count": 11,
-      "overlap_completed_unix_ms": 1782340229695,
-      "overlap_started_unix_ms": 1782339928661,
-      "router_pid": 92200,
+      "overlap_completed_unix_ms": 1782340805614,
+      "overlap_started_unix_ms": 1782340504608,
+      "router_pid": 15700,
       "router_session_id": 3,
       "router_session_id_observed": true,
       "transport": "websocket",
@@ -164,7 +164,7 @@
       "upstream_session_id_observed": true
     }
   ],
-  "shared_router_pid": 92200,
+  "shared_router_pid": 15700,
   "socket_cleanup": {
     "close_wait_count": 0,
     "established_count": 0,
@@ -182,22 +182,22 @@
     "http_probe_count": 0,
     "in_overlap_session_event_counts": [
       16,
-      11,
+      13,
       11
     ],
     "multi_step_completed_before_overlap_end": true,
     "multi_step_followup_active_session_count": 3,
     "multi_step_followup_frame_count": 1,
-    "multi_step_followup_unix_ms": 1782339928682,
+    "multi_step_followup_unix_ms": 1782340504629,
     "multi_step_interleave_completed": true,
     "non_prewarm_session_count": 3,
     "normal_close_sessions": 3,
-    "overlap_completed_unix_ms": 1782340229696,
-    "overlap_duration_ms": 301035,
+    "overlap_completed_unix_ms": 1782340805617,
+    "overlap_duration_ms": 301009,
     "overlap_proven": true,
-    "overlap_started_unix_ms": 1782339928661,
-    "real_overlap_completed_unix_ms": 1782340229695,
-    "real_overlap_duration_ms": 301034,
+    "overlap_started_unix_ms": 1782340504608,
+    "real_overlap_completed_unix_ms": 1782340805614,
+    "real_overlap_duration_ms": 301006,
     "session_close_outcomes": [
       "normal",
       "normal",

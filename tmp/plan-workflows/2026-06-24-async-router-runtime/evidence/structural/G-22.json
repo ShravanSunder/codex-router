@@ -6,7 +6,7 @@
   "expected_observation": "no unbounded production pump channels and no detached production reader tasks in release serve path",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "89728744ed7f613243253b64154878356e1fd2ad",
+  "git_head": "3515851b3635c87d0dcdf76d8a5d23101bd6cd32",
   "layer": "structural",
   "notes": "Structural/inventory guard passed.",
   "owner": "T6",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T22:25:02Z",
+  "timestamp_utc": "2026-06-24T22:34:46Z",
   "touched_targets": [
     "scripts/proof-matrix.sh",
     "scripts/check-release-runtime-guardrails.py",

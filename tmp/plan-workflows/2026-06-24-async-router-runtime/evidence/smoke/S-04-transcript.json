@@ -34,7 +34,7 @@
     "argv": [
       "serve",
       "--port",
-      "50502",
+      "56113",
       "--listen-host",
       "127.0.0.1",
       "--state-db",
@@ -42,7 +42,7 @@
       "--secret-root",
       "<secret-root-path>",
       "--upstream-base-url",
-      "http://127.0.0.1:50501/v1",
+      "http://127.0.0.1:56112/v1",
       "--now-unix-seconds",
       "1030",
       "--max-snapshot-age-seconds",
@@ -57,9 +57,9 @@
     ],
     "binary_path": "<repo>/target/debug/codex-router",
     "cleanup_result": "terminated:signal: 9 (SIGKILL)",
-    "listener": "127.0.0.1:50502",
-    "pid": 91796,
-    "readiness_line": "listening: 127.0.0.1:50502",
+    "listener": "127.0.0.1:56113",
+    "pid": 15404,
+    "readiness_line": "listening: 127.0.0.1:56113",
     "spawned_real_serve_child": true
   },
   "selected_account": {
