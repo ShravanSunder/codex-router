@@ -1446,13 +1446,14 @@ fn forward_upstream_response(
     for _ in 0..max_upstream_messages {
         let upstream_message = upstream_websocket.read()?;
         let is_close = matches!(upstream_message, Message::Close(_));
+        let is_completed = is_response_completed(&upstream_message);
         record_websocket_affinity_owner(
             &upstream_message,
             affinity_owner_recorder,
             affinity_owner_context,
         );
         local_websocket.send(upstream_message)?;
-        if is_close {
+        if is_close || is_completed {
             return Ok(());
         }
     }

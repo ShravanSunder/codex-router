@@ -6305,6 +6305,12 @@ mod tests {
             {
                 panic!("mock upstream should send completion: {error}");
             }
+            match websocket.next().await {
+                Some(Ok(Message::Close(_))) => {}
+                Some(Ok(message)) => panic!("mock upstream should receive close, got {message:?}"),
+                Some(Err(error)) => panic!("mock upstream should read close: {error}"),
+                None => panic!("mock upstream should receive close"),
+            }
         });
 
         let local_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -6379,6 +6385,9 @@ mod tests {
                 completed,
                 Message::text(r#"{"type":"response.completed","response":{"id":"resp_async"}}"#),
             );
+            if let Err(error) = client_websocket.close(None).await {
+                panic!("local client should close after second turn: {error}");
+            }
         };
 
         let (server_result, ()) = tokio::join!(server_future, client_future);
