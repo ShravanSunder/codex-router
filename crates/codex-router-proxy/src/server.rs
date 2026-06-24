@@ -15,6 +15,7 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -99,6 +100,7 @@ use crate::websocket::AsyncWebSocketTunnel;
 use crate::websocket::FirstFramePolicy;
 use crate::websocket::WebSocketHandshakeRequest;
 use crate::websocket::WebSocketProtocolRouter;
+use crate::websocket::WebSocketRegistrySnapshot;
 use crate::websocket::WebSocketRevocationRegistry;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
@@ -313,6 +315,7 @@ pub struct LoopbackRouterRuntimeConfig {
     max_snapshot_age_seconds: u64,
     max_websocket_upstream_messages: usize,
     audit_file_path: Option<PathBuf>,
+    websocket_registry_report_file: Option<PathBuf>,
 }
 
 impl LoopbackRouterRuntimeConfig {
@@ -335,6 +338,7 @@ impl LoopbackRouterRuntimeConfig {
             max_snapshot_age_seconds: 300,
             max_websocket_upstream_messages: usize::MAX,
             audit_file_path: None,
+            websocket_registry_report_file: None,
         }
     }
 
@@ -356,6 +360,7 @@ impl LoopbackRouterRuntimeConfig {
             max_snapshot_age_seconds: 300,
             max_websocket_upstream_messages: usize::MAX,
             audit_file_path: None,
+            websocket_registry_report_file: None,
         }
     }
 
@@ -392,6 +397,13 @@ impl LoopbackRouterRuntimeConfig {
     #[must_use]
     pub fn with_audit_file(mut self, audit_file_path: PathBuf) -> Self {
         self.audit_file_path = Some(audit_file_path);
+        self
+    }
+
+    /// Sets the internal WebSocket registry JSON report path.
+    #[must_use]
+    pub fn with_websocket_registry_report_file(mut self, report_file: PathBuf) -> Self {
+        self.websocket_registry_report_file = Some(report_file);
         self
     }
 }
@@ -437,6 +449,11 @@ impl LoopbackRouterRuntime {
         let upstream = HyperHttpUpstreamTransport::new(upstream_endpoint.clone());
         let server = runtime.block_on(AsyncLoopbackServerRuntime::bind(config.bind_address))?;
         let audit_sink = config.audit_file_path.map(AuditFileSink::new);
+        let websocket_revocations = config
+            .websocket_registry_report_file
+            .map_or_else(WebSocketRevocationRegistry::new, |report_file| {
+                WebSocketRevocationRegistry::new().with_report_file(report_file)
+            });
 
         Ok(Self {
             runtime,
@@ -449,7 +466,7 @@ impl LoopbackRouterRuntime {
             upstream,
             upstream_endpoint,
             max_websocket_upstream_messages: config.max_websocket_upstream_messages,
-            websocket_revocations: WebSocketRevocationRegistry::new(),
+            websocket_revocations,
             audit_sink,
             weighted_selectors: Default::default(),
             account_holds: Default::default(),
@@ -470,6 +487,12 @@ impl LoopbackRouterRuntime {
             auth_gate: self.auth_gate.clone(),
             websocket_revocations: self.websocket_revocations.clone(),
         }
+    }
+
+    /// Returns redacted WebSocket registry counters for runtime proof.
+    #[must_use]
+    pub fn websocket_registry_snapshot(&self) -> WebSocketRegistrySnapshot {
+        self.websocket_revocations.snapshot()
     }
 
     /// Replaces local auth and closes WebSocket connections authenticated with old generations.
@@ -496,24 +519,43 @@ impl LoopbackRouterRuntime {
         &self,
         max_connections: usize,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
-        self.runtime
-            .block_on(self.serve_protocol_connections_async(max_connections))
+        self.serve_protocol_connections_until_websocket_idle(max_connections, None)
+    }
+
+    /// Serves HTTP/SSE or WebSocket connections until a connection cap or registry idle target.
+    pub fn serve_protocol_connections_until_websocket_idle(
+        &self,
+        max_connections: usize,
+        websocket_completed_sessions: Option<usize>,
+    ) -> Result<usize, LoopbackRouterRuntimeError> {
+        self.runtime.block_on(
+            self.serve_protocol_connections_async(max_connections, websocket_completed_sessions),
+        )
     }
 
     async fn serve_protocol_connections_async(
         &self,
         max_connections: usize,
+        websocket_completed_sessions: Option<usize>,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         let mut handled_connections = 0_usize;
         let mut handlers = Vec::new();
         let connection_handler = Arc::new(self.protocol_connection_handler());
         while handled_connections < max_connections {
-            let (stream, _peer_addr) = self
-                .server
-                .listener
-                .accept()
-                .await
-                .map_err(LoopbackRouterRuntimeError::Accept)?;
+            if self.websocket_idle_target_reached(websocket_completed_sessions) {
+                break;
+            }
+            let accept_result = if websocket_completed_sessions.is_some() {
+                match tokio::time::timeout(Duration::from_millis(50), self.server.listener.accept())
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_elapsed) => continue,
+                }
+            } else {
+                self.server.listener.accept().await
+            };
+            let (stream, _peer_addr) = accept_result.map_err(LoopbackRouterRuntimeError::Accept)?;
             let handler_context = Arc::clone(&connection_handler);
             let handler =
                 tokio::spawn(async move { handler_context.handle_hyper_connection(stream).await });
@@ -534,6 +576,15 @@ impl LoopbackRouterRuntime {
         }
 
         Ok(handled_connections)
+    }
+
+    fn websocket_idle_target_reached(&self, websocket_completed_sessions: Option<usize>) -> bool {
+        let Some(target_completed_sessions) = websocket_completed_sessions else {
+            return false;
+        };
+        let snapshot = self.websocket_revocations.snapshot();
+        snapshot.completed_response_sessions >= target_completed_sessions
+            && snapshot.active_sessions == 0
     }
 
     fn protocol_connection_handler(&self) -> LoopbackProtocolConnectionHandler {

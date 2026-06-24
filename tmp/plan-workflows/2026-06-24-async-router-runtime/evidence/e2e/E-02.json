@@ -1,6 +1,6 @@
 {
   "artifact_paths": [
-    "tmp/smoke/installed-codex-three-websocket-42353-1782317879159.json"
+    "tmp/smoke/installed-codex-three-websocket-18227-1782319827822.json"
   ],
   "clients": {
     "all_success": true,
@@ -12,18 +12,25 @@
   "expected_observation": "five-minute three-runtime WebSocket soak holds three installed Codex clients concurrently through one real router process",
   "freshness_check": "current_git_head_recorded_before_commit",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/*",
-  "git_head": "44ef5ed844a492050d5b2c2d0aa156538f3c8e19",
+  "git_head": "97a5c8ca57e65860d4244264806af76e76de5f5c",
   "layer": "e2e",
   "mode": "three-websocket-soak",
   "owner": "T8",
   "redaction_check": "pass",
+  "router_websocket_registry": {
+    "active_sessions": 0,
+    "closed_sessions": 6,
+    "completed_response_sessions": 6,
+    "high_water_sessions": 3,
+    "registered_sessions": 6
+  },
   "result": "pass",
   "row_id": "E-02",
   "schema_version": 1,
-  "shared_router_pid": 42375,
+  "shared_router_pid": 18252,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T16:18:59Z",
+  "timestamp_utc": "2026-06-24T16:50:51Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh"
@@ -34,7 +41,7 @@
     "expected_sessions": 3,
     "final_active_sessions": 0,
     "hold_duration_ms": 300000,
-    "overlap_duration_ms": 300042,
+    "overlap_duration_ms": 300017,
     "overlap_proven": true,
     "session_event_counts": [
       12,

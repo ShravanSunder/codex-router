@@ -1,12 +1,14 @@
 //! WebSocket first-frame routing protocol.
 
 use std::collections::HashMap;
+use std::fs;
 #[cfg(test)]
 use std::io::ErrorKind;
 #[cfg(test)]
 use std::net::Shutdown;
 #[cfg(test)]
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -689,6 +691,7 @@ pub struct WebSocketRevocationRegistry {
     connections: Arc<Mutex<HashMap<TokenGeneration, Vec<TcpStream>>>>,
     cancellations: Arc<Mutex<HashMap<TokenGeneration, Vec<WebSocketCancellationEntry>>>>,
     stats: Arc<Mutex<WebSocketRegistryStats>>,
+    report_file: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -704,6 +707,7 @@ struct WebSocketRegistryStats {
     high_water_sessions: usize,
     registered_sessions: usize,
     closed_sessions: usize,
+    completed_response_sessions: usize,
 }
 
 /// Redacted snapshot of WebSocket session registry counters.
@@ -717,6 +721,8 @@ pub struct WebSocketRegistrySnapshot {
     pub registered_sessions: usize,
     /// Total async WebSocket sessions that have dropped their registry handle.
     pub closed_sessions: usize,
+    /// Total async WebSocket sessions that forwarded a response.completed event.
+    pub completed_response_sessions: usize,
 }
 
 #[derive(Debug)]
@@ -732,6 +738,16 @@ impl WebSocketRevocationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets an internal proof report file updated from registry mutations.
+    #[must_use]
+    pub fn with_report_file(self, report_file: PathBuf) -> Self {
+        if let Ok(mut current_report_file) = self.report_file.lock() {
+            *current_report_file = Some(report_file);
+        }
+        self.write_report_file();
+        self
     }
 
     #[cfg(test)]
@@ -781,6 +797,7 @@ impl WebSocketRevocationRegistry {
                 high_water_sessions: stats.high_water_sessions,
                 registered_sessions: stats.registered_sessions,
                 closed_sessions: stats.closed_sessions,
+                completed_response_sessions: stats.completed_response_sessions,
             },
         )
     }
@@ -793,7 +810,10 @@ impl WebSocketRevocationRegistry {
         stats.active_sessions = stats.active_sessions.saturating_add(1);
         stats.registered_sessions = stats.registered_sessions.saturating_add(1);
         stats.high_water_sessions = stats.high_water_sessions.max(stats.active_sessions);
-        stats.next_session_id
+        let session_id = stats.next_session_id;
+        drop(stats);
+        self.write_report_file();
+        session_id
     }
 
     fn note_session_closed(&self, generation: TokenGeneration, session_id: u64) {
@@ -808,6 +828,41 @@ impl WebSocketRevocationRegistry {
         if let Ok(mut stats) = self.stats.lock() {
             stats.active_sessions = stats.active_sessions.saturating_sub(1);
             stats.closed_sessions = stats.closed_sessions.saturating_add(1);
+        }
+        self.write_report_file();
+    }
+
+    fn note_response_completed(&self) {
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.completed_response_sessions = stats.completed_response_sessions.saturating_add(1);
+        }
+        self.write_report_file();
+    }
+
+    fn write_report_file(&self) {
+        let report_file = self
+            .report_file
+            .lock()
+            .ok()
+            .and_then(|report_file| report_file.clone());
+        let Some(report_file) = report_file else {
+            return;
+        };
+        if let Some(parent) = report_file.parent() {
+            let _result = fs::create_dir_all(parent);
+        }
+        let snapshot = self.snapshot();
+        let report = serde_json::json!({
+            "websocket_registry": {
+                "active_sessions": snapshot.active_sessions,
+                "high_water_sessions": snapshot.high_water_sessions,
+                "registered_sessions": snapshot.registered_sessions,
+                "closed_sessions": snapshot.closed_sessions,
+                "completed_response_sessions": snapshot.completed_response_sessions,
+            },
+        });
+        if let Ok(rendered) = serde_json::to_vec_pretty(&report) {
+            let _result = fs::write(report_file, rendered);
         }
     }
 
@@ -853,6 +908,10 @@ impl WebSocketSessionRegistration {
     fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
+
+    fn note_response_completed(&self) {
+        self.registry.note_response_completed();
+    }
 }
 
 impl Drop for WebSocketSessionRegistration {
@@ -877,6 +936,10 @@ mod registry_tests {
         assert_eq!(registry.snapshot().high_water_sessions, 2);
         assert_eq!(registry.snapshot().registered_sessions, 2);
         assert_eq!(registry.snapshot().closed_sessions, 0);
+        assert_eq!(registry.snapshot().completed_response_sessions, 0);
+
+        second_session.note_response_completed();
+        assert_eq!(registry.snapshot().completed_response_sessions, 1);
 
         drop(first_session);
         assert_eq!(registry.snapshot().active_sessions, 1);
@@ -1244,6 +1307,7 @@ where
         forward_duplex_until_complete(
             &mut local_websocket,
             &mut upstream_websocket,
+            &session_registration,
             max_upstream_messages,
             self.affinity_owner_recorder.clone(),
             affinity_owner_context.as_ref(),
@@ -1256,6 +1320,7 @@ where
 async fn forward_duplex_until_complete<LocalStream, UpstreamStream>(
     local_websocket: &mut WebSocketStream<LocalStream>,
     upstream_websocket: &mut WebSocketStream<UpstreamStream>,
+    session_registration: &WebSocketSessionRegistration,
     max_upstream_messages: usize,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
@@ -1313,6 +1378,9 @@ where
                 }
                 upstream_message_count = upstream_message_count.saturating_add(1);
                 if is_close || is_completed || upstream_message_count >= max_upstream_messages {
+                    if is_completed {
+                        session_registration.note_response_completed();
+                    }
                     return Ok(());
                 }
             }

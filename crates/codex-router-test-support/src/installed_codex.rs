@@ -69,6 +69,7 @@ const UPSTREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(300);
 const SOAK_COMMAND_TIMEOUT_SLACK: Duration = Duration::from_secs(90);
 const SOAK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const ROUTER_REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstalledCodexSmokeMode {
@@ -83,6 +84,8 @@ struct ConcurrentWebSocketHarnessConfig {
     upstream: ConcurrentUpstreamConfig,
     codex_command_timeout: Duration,
     router_max_upstream_messages: usize,
+    router_max_connections: usize,
+    capture_registry_report: bool,
 }
 
 impl ConcurrentWebSocketHarnessConfig {
@@ -92,6 +95,8 @@ impl ConcurrentWebSocketHarnessConfig {
             upstream: ConcurrentUpstreamConfig::quick(3),
             codex_command_timeout: CODEX_COMMAND_TIMEOUT,
             router_max_upstream_messages: 4,
+            router_max_connections: 64,
+            capture_registry_report: false,
         }
     }
 
@@ -102,6 +107,8 @@ impl ConcurrentWebSocketHarnessConfig {
             upstream: ConcurrentUpstreamConfig::soak(3, hold_duration),
             codex_command_timeout: hold_duration.saturating_add(SOAK_COMMAND_TIMEOUT_SLACK),
             router_max_upstream_messages: 64,
+            router_max_connections: 64,
+            capture_registry_report: true,
         }
     }
 }
@@ -386,15 +393,21 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
     let seed = seed_router_state(&state_path, &secret_root)?;
     let router_port = reserve_loopback_port()?;
     let audit_path = router_root.join("audit").join("events.jsonl");
-    let router_process = start_router_process_with_max_messages(
+    let registry_report_path = config
+        .capture_registry_report
+        .then(|| router_root.join("websocket-registry-report.json"));
+    let router_process = start_router_process_with_options(RouterProcessStartOptions {
         router_port,
         state_path,
         secret_root,
-        None,
-        format!("http://{}/v1", upstream.address()),
+        local_token: None,
+        upstream_base_url: format!("http://{}/v1", upstream.address()),
         audit_path,
-        config.router_max_upstream_messages,
-    )?;
+        max_websocket_upstream_messages: config.router_max_upstream_messages,
+        max_connections: config.router_max_connections,
+        exit_after_websocket_completed_sessions: None,
+        websocket_registry_report_file: registry_report_path.clone(),
+    })?;
 
     let start_barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
@@ -468,13 +481,24 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
         let output = join_result(handle, &format!("installed Codex client {client_index}"))?;
         outputs.push(output);
     }
+    let registry_report = registry_report_path
+        .as_deref()
+        .map(|path| {
+            wait_for_router_registry_report(
+                path,
+                config.upstream.expected_sessions,
+                ROUTER_REGISTRY_DRAIN_TIMEOUT,
+            )
+        })
+        .transpose()?;
     let router_process = router_process.stop("three-client router process")?;
     let upstream_result = upstream.join()?;
-    assert_concurrent_websocket_contract(config, &upstream_result)?;
+    assert_concurrent_websocket_contract(config, &upstream_result, registry_report.as_ref())?;
     let transcript_path = write_redacted_three_websocket_transcript(
         config.artifact_mode,
         &codex_version,
         &router_process,
+        registry_report.as_ref(),
         &upstream_result,
         &outputs,
         &seed,
@@ -486,6 +510,7 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
 fn assert_concurrent_websocket_contract(
     config: ConcurrentWebSocketHarnessConfig,
     upstream: &ConcurrentWebSocketTranscript,
+    registry_report: Option<&RouterWebSocketRegistryReport>,
 ) -> Result<(), String> {
     if upstream.expected_sessions != config.upstream.expected_sessions {
         return Err(format!(
@@ -527,6 +552,48 @@ fn assert_concurrent_websocket_contract(
             return Err(format!(
                 "soak session event counts were {:?}, expected at least 3 each",
                 upstream.session_event_counts
+            ));
+        }
+    }
+    if config.capture_registry_report {
+        let registry_report =
+            registry_report.ok_or_else(|| "router registry report was not captured".to_owned())?;
+        if let Some(handled_connections) = registry_report.handled_connections
+            && handled_connections > config.router_max_connections
+        {
+            return Err(format!(
+                "router handled_connections={} exceeded configured max_connections={}",
+                handled_connections, config.router_max_connections
+            ));
+        }
+        if registry_report.active_sessions != 0 {
+            return Err(format!(
+                "router registry active_sessions={} after soak; expected 0",
+                registry_report.active_sessions
+            ));
+        }
+        if registry_report.high_water_sessions < config.upstream.expected_sessions {
+            return Err(format!(
+                "router registry high_water_sessions={} did not prove all {} sessions overlapped",
+                registry_report.high_water_sessions, config.upstream.expected_sessions
+            ));
+        }
+        if registry_report.registered_sessions < config.upstream.expected_sessions {
+            return Err(format!(
+                "router registry registered_sessions={} was less than expected sessions {}",
+                registry_report.registered_sessions, config.upstream.expected_sessions
+            ));
+        }
+        if registry_report.closed_sessions < config.upstream.expected_sessions {
+            return Err(format!(
+                "router registry closed_sessions={} was less than expected sessions {}",
+                registry_report.closed_sessions, config.upstream.expected_sessions
+            ));
+        }
+        if registry_report.completed_response_sessions < config.upstream.expected_sessions {
+            return Err(format!(
+                "router registry completed_response_sessions={} was less than expected sessions {}",
+                registry_report.completed_response_sessions, config.upstream.expected_sessions
             ));
         }
     }
@@ -849,18 +916,21 @@ fn start_router_process(
     upstream_base_url: String,
     audit_path: PathBuf,
 ) -> Result<RouterProcessGuard, String> {
-    start_router_process_with_max_messages(
+    start_router_process_with_options(RouterProcessStartOptions {
         router_port,
         state_path,
         secret_root,
         local_token,
         upstream_base_url,
         audit_path,
-        4,
-    )
+        max_websocket_upstream_messages: 4,
+        max_connections: 64,
+        exit_after_websocket_completed_sessions: None,
+        websocket_registry_report_file: None,
+    })
 }
 
-fn start_router_process_with_max_messages(
+struct RouterProcessStartOptions {
     router_port: u16,
     state_path: PathBuf,
     secret_root: PathBuf,
@@ -868,33 +938,54 @@ fn start_router_process_with_max_messages(
     upstream_base_url: String,
     audit_path: PathBuf,
     max_websocket_upstream_messages: usize,
+    max_connections: usize,
+    exit_after_websocket_completed_sessions: Option<usize>,
+    websocket_registry_report_file: Option<PathBuf>,
+}
+
+fn start_router_process_with_options(
+    options: RouterProcessStartOptions,
 ) -> Result<RouterProcessGuard, String> {
     let binary_path = codex_router_binary_path()?;
     let mut argv = vec![
         "serve".to_owned(),
         "--port".to_owned(),
-        router_port.to_string(),
+        options.router_port.to_string(),
         "--listen-host".to_owned(),
         "127.0.0.1".to_owned(),
         "--state-db".to_owned(),
-        state_path.display().to_string(),
+        options.state_path.display().to_string(),
         "--secret-root".to_owned(),
-        secret_root.display().to_string(),
+        options.secret_root.display().to_string(),
         "--upstream-base-url".to_owned(),
-        upstream_base_url,
+        options.upstream_base_url,
         "--now-unix-seconds".to_owned(),
         "1030".to_owned(),
         "--max-snapshot-age-seconds".to_owned(),
         "60".to_owned(),
         "--disable-background-quota-refresh".to_owned(),
         "--max-websocket-upstream-messages".to_owned(),
-        max_websocket_upstream_messages.to_string(),
+        options.max_websocket_upstream_messages.to_string(),
         "--max-connections".to_owned(),
-        "64".to_owned(),
+        options.max_connections.to_string(),
         "--audit-file".to_owned(),
-        audit_path.display().to_string(),
+        options.audit_path.display().to_string(),
     ];
-    if local_token.is_some() {
+    if let Some(exit_after_websocket_completed_sessions) =
+        options.exit_after_websocket_completed_sessions
+    {
+        argv.extend([
+            "--exit-after-websocket-completed-sessions".to_owned(),
+            exit_after_websocket_completed_sessions.to_string(),
+        ]);
+    }
+    if let Some(report_file) = options.websocket_registry_report_file {
+        argv.extend([
+            "--websocket-registry-report-file".to_owned(),
+            report_file.display().to_string(),
+        ]);
+    }
+    if options.local_token.is_some() {
         argv.push("--require-local-token".to_owned());
     }
     let mut command = Command::new(&binary_path);
@@ -921,7 +1012,8 @@ fn start_router_process_with_max_messages(
     let (line_sender, line_receiver) = mpsc::channel();
     let stdout_handle = spawn_router_output_reader("router stdout", stdout, Some(line_sender))?;
     let stderr_handle = spawn_router_output_reader("router stderr", stderr, None)?;
-    let readiness_line = wait_for_router_readiness(&mut child, &line_receiver, router_port)?;
+    let readiness_line =
+        wait_for_router_readiness(&mut child, &line_receiver, options.router_port)?;
     let listener = readiness_line
         .trim()
         .strip_prefix("listening: ")
@@ -1178,8 +1270,12 @@ fn assert_codex_visible_output(
 ) -> Result<(), String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.contains(SMOKE_EXPECTED_TEXT) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "{label} smoke stdout did not contain expected response text"
+            "{label} smoke stdout did not contain expected response text; status={}; stdout_preview={}; stderr_preview={}",
+            output.status,
+            redacted_process_output_preview(&stdout),
+            redacted_process_output_preview(&stderr),
         ));
     }
     let last_message = fs::read_to_string(last_message_path).map_err(|error| {
@@ -1194,6 +1290,36 @@ fn assert_codex_visible_output(
         ));
     }
     Ok(())
+}
+
+fn redacted_process_output_preview(output: &str) -> String {
+    const MAX_CHARS: usize = 1200;
+    let mut redacted = String::new();
+    let mut words = output.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        if !redacted.is_empty() {
+            redacted.push(' ');
+        }
+        if word == "Bearer" {
+            redacted.push_str("Bearer <redacted>");
+            let _ = words.next();
+        } else if let Some(token) = word.strip_prefix("Bearer ") {
+            let _ = token;
+            redacted.push_str("Bearer <redacted>");
+        } else {
+            redacted.push_str(word);
+        }
+        if redacted.chars().count() >= MAX_CHARS {
+            redacted.truncate(MAX_CHARS);
+            redacted.push_str("<truncated>");
+            break;
+        }
+    }
+    if redacted.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        redacted
+    }
 }
 
 struct SmokeContractAssertion<'a> {
@@ -1418,6 +1544,100 @@ struct RouterProcessObservation {
     cleanup_result: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouterWebSocketRegistryReport {
+    handled_connections: Option<usize>,
+    active_sessions: usize,
+    high_water_sessions: usize,
+    registered_sessions: usize,
+    closed_sessions: usize,
+    completed_response_sessions: usize,
+}
+
+impl RouterWebSocketRegistryReport {
+    fn from_file(path: &Path) -> Result<Self, String> {
+        let contents = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read router websocket registry report {}: {error}",
+                path.display()
+            )
+        })?;
+        let value = serde_json::from_str::<Value>(&contents).map_err(|error| {
+            format!(
+                "router websocket registry report {} was invalid JSON: {error}",
+                path.display()
+            )
+        })?;
+        let registry = value
+            .get("websocket_registry")
+            .ok_or_else(|| "router websocket registry report was missing registry".to_owned())?;
+        Ok(Self {
+            handled_connections: optional_usize_field(&value, "handled_connections")?,
+            active_sessions: required_usize_field(registry, "active_sessions")?,
+            high_water_sessions: required_usize_field(registry, "high_water_sessions")?,
+            registered_sessions: required_usize_field(registry, "registered_sessions")?,
+            closed_sessions: required_usize_field(registry, "closed_sessions")?,
+            completed_response_sessions: required_usize_field(
+                registry,
+                "completed_response_sessions",
+            )?,
+        })
+    }
+}
+
+fn wait_for_router_registry_report(
+    path: &Path,
+    expected_completed_sessions: usize,
+    timeout: Duration,
+) -> Result<RouterWebSocketRegistryReport, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let current_state = match RouterWebSocketRegistryReport::from_file(path) {
+            Ok(report)
+                if report.active_sessions == 0
+                    && report.completed_response_sessions >= expected_completed_sessions =>
+            {
+                return Ok(report);
+            }
+            Ok(report) => format!(
+                "active_sessions={}, completed_response_sessions={}, registered_sessions={}, closed_sessions={}",
+                report.active_sessions,
+                report.completed_response_sessions,
+                report.registered_sessions,
+                report.closed_sessions
+            ),
+            Err(error) => error,
+        };
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "router websocket registry did not drain before timeout; last_state={current_state}"
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn required_usize_field(value: &Value, field: &'static str) -> Result<usize, String> {
+    let raw = value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("router websocket registry report missing numeric {field}"))?;
+    usize::try_from(raw)
+        .map_err(|_| format!("router websocket registry report field {field} overflowed usize"))
+}
+
+fn optional_usize_field(value: &Value, field: &'static str) -> Result<Option<usize>, String> {
+    let Some(raw) = value.get(field) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .as_u64()
+        .ok_or_else(|| format!("router websocket registry report field {field} was not numeric"))?;
+    usize::try_from(raw)
+        .map(Some)
+        .map_err(|_| format!("router websocket registry report field {field} overflowed usize"))
+}
+
 impl RouterAuditObservation {
     fn from_file(path: &Path) -> Result<Self, String> {
         let audit_contents = fs::read_to_string(path).map_err(|error| {
@@ -1590,6 +1810,7 @@ fn write_redacted_three_websocket_transcript(
     mode: &str,
     codex_version: &str,
     router_process: &RouterProcessObservation,
+    registry_report: Option<&RouterWebSocketRegistryReport>,
     upstream: &ConcurrentWebSocketTranscript,
     outputs: &[Output],
     seed: &SmokeSeed,
@@ -1628,6 +1849,14 @@ fn write_redacted_three_websocket_transcript(
             "cleanup_result": router_process.cleanup_result,
             "spawned_real_serve_child": true,
         },
+        "router_websocket_registry": registry_report.map(|report| serde_json::json!({
+            "handled_connections": report.handled_connections,
+            "active_sessions": report.active_sessions,
+            "high_water_sessions": report.high_water_sessions,
+            "registered_sessions": report.registered_sessions,
+            "closed_sessions": report.closed_sessions,
+            "completed_response_sessions": report.completed_response_sessions,
+        })),
         "clients": {
             "count": outputs.len(),
             "all_success": outputs.iter().all(|output| output.status.success()),
@@ -1887,31 +2116,38 @@ struct RouterProcessGuard {
 
 impl RouterProcessGuard {
     fn stop(mut self, label: &str) -> Result<RouterProcessObservation, String> {
-        self.terminate_child(label)?;
+        self.terminate_child(label, Duration::ZERO)?;
         self.join_output_readers(label)?;
         Ok(self.observation.clone())
     }
 
-    fn terminate_child(&mut self, label: &str) -> Result<(), String> {
+    fn terminate_child(&mut self, label: &str, grace: Duration) -> Result<(), String> {
         let Some(mut child) = self.child.take() else {
             return Ok(());
         };
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                self.observation.cleanup_result = format!("already-exited:{status}");
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let status = child
-                    .wait()
-                    .map_err(|error| format!("failed to wait for {label}: {error}"))?;
-                self.observation.cleanup_result = format!("terminated:{status}");
-            }
-            Err(error) => {
-                return Err(format!("failed to inspect {label}: {error}"));
+        let deadline = Instant::now() + grace;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.observation.cleanup_result = format!("already-exited:{status}");
+                    return Ok(());
+                }
+                Ok(None) if !grace.is_zero() && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let status = child
+                        .wait()
+                        .map_err(|error| format!("failed to wait for {label}: {error}"))?;
+                    self.observation.cleanup_result = format!("terminated:{status}");
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(format!("failed to inspect {label}: {error}"));
+                }
             }
         }
-        Ok(())
     }
 
     fn join_output_readers(&mut self, label: &str) -> Result<(), String> {
@@ -1927,7 +2163,7 @@ impl RouterProcessGuard {
 
 impl Drop for RouterProcessGuard {
     fn drop(&mut self) {
-        let _ = self.terminate_child("router child cleanup");
+        let _ = self.terminate_child("router child cleanup", Duration::ZERO);
         let _ = self.join_output_readers("router child cleanup");
     }
 }

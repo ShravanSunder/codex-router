@@ -3,6 +3,9 @@
 Timestamp: 2026-06-24T16:18:59Z
 Base HEAD before commit: 44ef5ed844a492050d5b2c2d0aa156538f3c8e19
 
+Supersession note: T8c adds live router-owned WebSocket registry proof and
+supersedes the E-06 partial gap recorded in this receipt.
+
 ## Scope
 
 This checkpoint adds and proves the long-running installed-Codex WebSocket soak
@@ -94,8 +97,8 @@ result: 266 passed, 0 failed, 10 ignored.
 
 ## Explicit Open Gaps
 
-- E-06 is still partial for router-internal registry export from the child
-  process; the soak proves upstream high-water/final-active evidence.
+- E-06 partial in this receipt is superseded by T8c live router-registry
+  evidence.
 - E-08 socket cleanup by OS socket inspection is still not separately captured;
   the soak artifact proves upstream final active 0 and successful child
   completion.

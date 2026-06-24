@@ -1,6 +1,7 @@
 //! Command-line entry points for codex-router.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,6 +90,9 @@ where
             if let Some(audit_file) = command.audit_file {
                 runtime_config = runtime_config.with_audit_file(audit_file);
             }
+            if let Some(report_file) = command.websocket_registry_report_file.clone() {
+                runtime_config = runtime_config.with_websocket_registry_report_file(report_file);
+            }
             let token_reload_watcher = if command.require_local_token {
                 let secret_store =
                     FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
@@ -125,7 +129,13 @@ where
             } else {
                 None
             };
-            runtime.serve_protocol_connections(command.max_connections)?;
+            let handled_connections = runtime.serve_protocol_connections_until_websocket_idle(
+                command.max_connections,
+                command.exit_after_websocket_completed_sessions,
+            )?;
+            if let Some(report_file) = command.websocket_registry_report_file {
+                write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
+            }
         }
         CliCommand::Token(TokenCommand::Init { router_root }) => {
             let store =
@@ -224,6 +234,36 @@ fn default_router_root() -> Result<PathBuf, CliError> {
         .map(PathBuf::from)
         .ok_or(CliError::HomeDirectoryUnavailable)?;
     Ok(home.join(DEFAULT_ROUTER_ROOT_DIR))
+}
+
+fn write_websocket_registry_report_file(
+    report_file: &PathBuf,
+    handled_connections: usize,
+    runtime: &LoopbackRouterRuntime,
+) -> Result<(), CliError> {
+    if let Some(parent) = report_file.parent() {
+        fs::create_dir_all(parent).map_err(|source| CliError::WebSocketRegistryReportWrite {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    let snapshot = runtime.websocket_registry_snapshot();
+    let report = serde_json::json!({
+        "handled_connections": handled_connections,
+        "websocket_registry": {
+            "active_sessions": snapshot.active_sessions,
+            "high_water_sessions": snapshot.high_water_sessions,
+            "registered_sessions": snapshot.registered_sessions,
+            "closed_sessions": snapshot.closed_sessions,
+            "completed_response_sessions": snapshot.completed_response_sessions,
+        },
+    });
+    let rendered =
+        serde_json::to_vec_pretty(&report).map_err(CliError::WebSocketRegistryReportRender)?;
+    fs::write(report_file, rendered).map_err(|source| CliError::WebSocketRegistryReportWrite {
+        path: report_file.display().to_string(),
+        source,
+    })
 }
 
 fn write_profile_preview(
@@ -433,6 +473,8 @@ struct ServeCommand {
     max_websocket_upstream_messages: usize,
     max_connections: usize,
     audit_file: Option<PathBuf>,
+    websocket_registry_report_file: Option<PathBuf>,
+    exit_after_websocket_completed_sessions: Option<usize>,
 }
 
 impl ServeCommand {
@@ -469,6 +511,9 @@ impl ServeCommand {
                 .unwrap_or(usize::MAX),
             max_connections: options.max_connections.unwrap_or(usize::MAX),
             audit_file: options.audit_file,
+            websocket_registry_report_file: options.websocket_registry_report_file,
+            exit_after_websocket_completed_sessions: options
+                .exit_after_websocket_completed_sessions,
         })
     }
 }
@@ -488,6 +533,8 @@ struct ServeCommandOptions {
     max_websocket_upstream_messages: Option<usize>,
     max_connections: Option<usize>,
     audit_file: Option<PathBuf>,
+    websocket_registry_report_file: Option<PathBuf>,
+    exit_after_websocket_completed_sessions: Option<usize>,
 }
 
 impl ServeCommandOptions {
@@ -506,6 +553,8 @@ impl ServeCommandOptions {
             max_websocket_upstream_messages: None,
             max_connections: None,
             audit_file: None,
+            websocket_registry_report_file: None,
+            exit_after_websocket_completed_sessions: None,
         };
 
         while let Some(argument) = parser.next_string()? {
@@ -567,6 +616,18 @@ impl ServeCommandOptions {
                 "--audit-file" => {
                     let value = parser.next_required_value("--audit-file")?;
                     options.audit_file = Some(PathBuf::from(value));
+                }
+                "--websocket-registry-report-file" => {
+                    let value = parser.next_required_value("--websocket-registry-report-file")?;
+                    options.websocket_registry_report_file = Some(PathBuf::from(value));
+                }
+                "--exit-after-websocket-completed-sessions" => {
+                    let value =
+                        parser.next_required_value("--exit-after-websocket-completed-sessions")?;
+                    options.exit_after_websocket_completed_sessions = Some(parse_usize_option(
+                        "--exit-after-websocket-completed-sessions",
+                        &value,
+                    )?);
                 }
                 unknown => {
                     return Err(CliError::UnknownOption {
@@ -990,6 +1051,19 @@ pub enum CliError {
     /// Router runtime failed.
     #[error(transparent)]
     Runtime(#[from] LoopbackRouterRuntimeError),
+
+    /// WebSocket registry report failed to render.
+    #[error("failed to render websocket registry report: {0}")]
+    WebSocketRegistryReportRender(serde_json::Error),
+
+    /// WebSocket registry report failed to write.
+    #[error("failed to write websocket registry report {path}: {source}")]
+    WebSocketRegistryReportWrite {
+        /// Destination path.
+        path: String,
+        /// Source error.
+        source: std::io::Error,
+    },
 
     /// Stdout write failed.
     #[error("failed to write stdout: {0}")]

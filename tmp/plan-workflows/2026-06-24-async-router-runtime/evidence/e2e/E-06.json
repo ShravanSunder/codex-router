@@ -1,0 +1,35 @@
+{
+  "artifact_paths": [
+    "tmp/smoke/installed-codex-three-websocket-18227-1782319827822.json"
+  ],
+  "command": "tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak",
+  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "exit_code": 0,
+  "expected_observation": "router-owned WebSocket registry records high-water concurrency and drains active sessions after installed Codex completion",
+  "freshness_guard": "crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs crates/codex-router-cli/src/lib.rs crates/codex-router-test-support/src/installed_codex.rs",
+  "git_head": "97a5c8ca57e65860d4244264806af76e76de5f5c",
+  "layer": "e2e",
+  "owner": "T8",
+  "result": "pass",
+  "row_id": "E-06",
+  "schema_version": 1,
+  "shared_router_pid": 18252,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-24T16:50:51Z",
+  "router_websocket_registry": {
+    "active_sessions": 0,
+    "closed_sessions": 6,
+    "completed_response_sessions": 6,
+    "high_water_sessions": 3,
+    "registered_sessions": 6
+  },
+  "upstream_cross_check": {
+    "active_high_water": 3,
+    "completed_sessions": 3,
+    "expected_sessions": 3,
+    "final_active_sessions": 0,
+    "non_prewarm_session_count": 3,
+    "overlap_duration_ms": 300017
+  }
+}
