@@ -45,28 +45,30 @@ use tokio::io::AsyncWrite;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::tungstenite::Message;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::WebSocket;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::accept_hdr;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::connect;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::handshake::server::Request;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::handshake::server::Response;
+use tokio_tungstenite::tungstenite::http::HeaderName;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_util::sync::CancellationToken;
-use tungstenite::Message;
-#[cfg(test)]
-use tungstenite::WebSocket;
-#[cfg(test)]
-use tungstenite::accept_hdr;
-use tungstenite::client::IntoClientRequest;
-#[cfg(test)]
-use tungstenite::connect;
-use tungstenite::error::ProtocolError;
-#[cfg(test)]
-use tungstenite::handshake::server::Request;
-#[cfg(test)]
-use tungstenite::handshake::server::Response;
-use tungstenite::http::HeaderName;
-use tungstenite::http::HeaderValue;
 
 use crate::account_selection::AccountDecisionSelector;
 use crate::account_selection::AsyncAccountDecisionSelector;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
+use crate::http_sse::AsyncHttpAffinityOwnerRecorder;
 use crate::http_sse::AsyncProviderCredentialResolver;
 use crate::http_sse::HttpAffinityOwnerRecorder;
 use crate::http_sse::HttpAffinitySecretProvider;
@@ -1015,9 +1017,9 @@ mod async_forwarding_tests {
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
     use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::Role;
     use tokio_util::sync::CancellationToken;
-    use tungstenite::Message;
-    use tungstenite::protocol::Role;
 
     use crate::account_selection::AsyncAccountDecisionSelector;
     use crate::account_selection::SelectedAccountDecision;
@@ -1482,6 +1484,7 @@ where
     router: AsyncAuthenticatedWebSocketRouter<'a, S, C>,
     revocations: WebSocketRevocationRegistry,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
+    async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     session_shutdown: CancellationToken,
 }
 
@@ -1694,6 +1697,7 @@ where
             ),
             revocations: WebSocketRevocationRegistry::new(),
             affinity_owner_recorder: None,
+            async_affinity_owner_recorder: None,
             session_shutdown: CancellationToken::new(),
         }
     }
@@ -1717,6 +1721,7 @@ where
             .with_audit_sink(audit_sink),
             revocations: WebSocketRevocationRegistry::new(),
             affinity_owner_recorder: None,
+            async_affinity_owner_recorder: None,
             session_shutdown: CancellationToken::new(),
         }
     }
@@ -1754,6 +1759,16 @@ where
         affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
     ) -> Self {
         self.affinity_owner_recorder = Some(affinity_owner_recorder);
+        self
+    }
+
+    /// Adds the async previous-response owner recorder for production Tokio runtime callers.
+    #[must_use]
+    pub fn with_async_affinity_owner_recorder(
+        mut self,
+        affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    ) -> Self {
+        self.async_affinity_owner_recorder = Some(affinity_owner_recorder);
         self
     }
 
@@ -1848,6 +1863,7 @@ where
                 session_registration,
                 max_upstream_messages,
                 affinity_owner_recorder: self.affinity_owner_recorder.clone(),
+                async_affinity_owner_recorder: self.async_affinity_owner_recorder.clone(),
                 affinity_owner_context: affinity_owner_context.as_ref(),
                 revocation: &revocation,
                 session_shutdown: &self.session_shutdown,
@@ -1861,6 +1877,7 @@ struct WebSocketForwardingContext<'a> {
     session_registration: WebSocketSessionRegistration,
     max_upstream_messages: usize,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
+    async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_owner_context: Option<&'a WebSocketAffinityOwnerContext>,
     revocation: &'a CancellationToken,
     session_shutdown: &'a CancellationToken,
@@ -1915,6 +1932,7 @@ where
                 session_id,
                 max_upstream_messages: context.max_upstream_messages,
                 affinity_owner_recorder: context.affinity_owner_recorder,
+                async_affinity_owner_recorder: context.async_affinity_owner_recorder,
                 affinity_owner_context,
             },
         )
@@ -2006,6 +2024,7 @@ struct UpstreamToLocalPumpContext {
     session_id: u64,
     max_upstream_messages: usize,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
+    async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_owner_context: Option<WebSocketAffinityOwnerContext>,
 }
 
@@ -2053,12 +2072,16 @@ where
                 );
                 local_write.send(upstream_message).await?;
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
-                if let (Some(recorder), Some(owner)) =
-                    (context.affinity_owner_recorder.clone(), affinity_owner)
-                {
-                    tokio::task::spawn_blocking(move || {
-                        let _result = recorder.record_affinity_owner(&owner);
-                    });
+                if let Some(owner) = affinity_owner {
+                    if let Some(recorder) = context.async_affinity_owner_recorder.clone() {
+                        tokio::spawn(async move {
+                            let _result = recorder.record_affinity_owner(owner).await;
+                        });
+                    } else if let Some(recorder) = context.affinity_owner_recorder.clone() {
+                        tokio::task::spawn_blocking(move || {
+                            let _result = recorder.record_affinity_owner(&owner);
+                        });
+                    }
                 }
                 upstream_message_count = upstream_message_count.saturating_add(1);
                 if is_completed {

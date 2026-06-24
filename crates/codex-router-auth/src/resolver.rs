@@ -429,6 +429,7 @@ where
     fn refresh_expired_bundle(
         &self,
         account_id: &AccountId,
+        current_generation: u64,
         bundle: &AccountCredentialBundle,
     ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
         let refresh_token = bundle
@@ -442,10 +443,9 @@ where
         {
             refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
         }
-        let refreshed_generation = self
-            .state_repository
-            .next_credential_generation(account_id)
-            .map_err(map_state_error)?;
+        let refreshed_generation = current_generation
+            .checked_add(1)
+            .ok_or(CredentialResolverError::RefreshUnavailable)?;
         let refreshed_key = account_credential_bundle_key(account_id, refreshed_generation)
             .map_err(map_secret_error)?;
         self.secret_store
@@ -459,8 +459,9 @@ where
             return Err(CredentialResolverError::RefreshUnavailable);
         }
         self.state_repository
-            .activate_account_credential_generation_and_invalidate_quota(
+            .activate_account_credential_generation_if_current_and_invalidate_quota(
                 account_id,
+                current_generation,
                 refreshed_generation,
                 AccountStatus::Enabled,
             )
@@ -491,7 +492,7 @@ where
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (current_generation, current_bundle) = self.read_active_bundle(account_id)?;
             let (resolved_generation, refreshed) = if self.bundle_is_expired(&current_bundle) {
-                self.refresh_expired_bundle(account_id, &current_bundle)?
+                self.refresh_expired_bundle(account_id, current_generation, &current_bundle)?
             } else {
                 (current_generation, current_bundle)
             };

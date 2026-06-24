@@ -56,9 +56,7 @@ use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
-use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
-use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
 use crate::account_selection::AsyncRepositoryBackedAccountSelector;
@@ -67,12 +65,12 @@ use crate::account_selection::RouteBandAccountHolds;
 use crate::account_selection::RouteBandWeightedSelectors;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
+use crate::http_sse::AsyncHttpAffinityOwnerRecorder;
 use crate::http_sse::AsyncHttpBodyError;
 use crate::http_sse::AsyncProviderCredentialResolver;
 use crate::http_sse::AsyncStreamingHttpProxyResponse;
 use crate::http_sse::AsyncStreamingUpstreamHttpTransport;
 use crate::http_sse::AuthenticatedHttpProxyService;
-use crate::http_sse::HttpAffinityOwnerRecorder;
 use crate::http_sse::HttpAffinitySecretProvider;
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
@@ -432,7 +430,8 @@ pub struct LoopbackRouterRuntime {
     server: AsyncLoopbackServerRuntime,
     state_database_path: PathBuf,
     secret_store: ProxyRuntimeSecretStore,
-    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+    affinity_secret_provider: RuntimeAffinitySecretProvider,
+    affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -454,9 +453,13 @@ impl LoopbackRouterRuntime {
             .build()
             .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
         let secret_store = open_proxy_secret_store(&config.secret_store_root)?;
-        let affinity_owner_recorder = Arc::new(SqliteAffinityOwnerRecorder::new(
-            config.state_database_path.clone(),
-        ));
+        let affinity_secret = load_or_create_router_affinity_hash_secret(&secret_store)
+            .map(|loaded| loaded.secret().clone())?;
+        let affinity_secret_provider = RuntimeAffinitySecretProvider::new(affinity_secret);
+        let affinity_state_store =
+            runtime.block_on(AsyncSqliteStateStore::open(&config.state_database_path))?;
+        let affinity_owner_recorder =
+            Arc::new(AsyncSqliteAffinityOwnerRecorder::new(affinity_state_store));
         let auth_gate = match config.local_token {
             Some(local_token) => crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
                 local_token,
@@ -475,6 +478,7 @@ impl LoopbackRouterRuntime {
             server,
             state_database_path: config.state_database_path,
             secret_store,
+            affinity_secret_provider,
             affinity_owner_recorder,
             auth_gate,
             upstream,
@@ -622,6 +626,7 @@ impl LoopbackRouterRuntime {
         LoopbackProtocolConnectionHandler {
             state_database_path: self.state_database_path.clone(),
             secret_store: self.secret_store.clone(),
+            affinity_secret_provider: self.affinity_secret_provider.clone(),
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
             auth_gate: self.auth_gate.clone(),
             upstream: self.upstream.clone(),
@@ -659,7 +664,8 @@ fn supervise_detached_connection_handler(
 struct LoopbackProtocolConnectionHandler {
     state_database_path: PathBuf,
     secret_store: ProxyRuntimeSecretStore,
-    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+    affinity_secret_provider: RuntimeAffinitySecretProvider,
+    affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -812,8 +818,8 @@ impl LoopbackProtocolConnectionHandler {
         }
         .with_revocation_registry(self.websocket_revocations.clone())
         .with_session_shutdown(self.session_shutdown.clone())
-        .with_affinity_secret_provider(&self.secret_store)
-        .with_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
+        .with_affinity_secret_provider(&self.affinity_secret_provider)
+        .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
         tunnel
             .handle_upgraded_connection(
@@ -875,8 +881,7 @@ impl LoopbackProtocolConnectionHandler {
             &credential_resolver,
             &self.upstream,
         )
-        .with_affinity_secret_provider(&self.secret_store)
-        .with_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
+        .with_affinity_secret_provider(&self.affinity_secret_provider);
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -1070,7 +1075,7 @@ fn async_streaming_http_response_to_hyper(
     headers: HeaderCollection,
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     completion: StreamingHttpProxyCompletion,
-    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+    affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
 ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     let body = record_affinity_owner_from_async_body(body, completion, affinity_owner_recorder);
     let mut builder = HttpResponse::builder().status(status);
@@ -1085,7 +1090,7 @@ fn async_streaming_http_response_to_hyper(
 fn record_affinity_owner_from_async_body(
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     completion: StreamingHttpProxyCompletion,
-    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+    affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
 ) -> BoxBody<Bytes, AsyncHttpBodyError> {
     let Some(affinity_secret) = completion.affinity_secret().cloned() else {
         return body;
@@ -1103,7 +1108,7 @@ fn record_affinity_owner_from_async_body(
                 let recorder = Arc::clone(&affinity_owner_recorder);
                 let account_id = account_id.clone();
                 let affinity_secret = affinity_secret.clone();
-                tokio::task::spawn_blocking(move || {
+                tokio::spawn(async move {
                     let Ok(affinity_key_hash) =
                         hash_previous_response_id(&affinity_secret, &response_id)
                     else {
@@ -1117,7 +1122,7 @@ fn record_affinity_owner_from_async_body(
                         AffinitySourceTransport::HttpSse,
                         current_unix_seconds().map_or(0, |seconds| seconds),
                     );
-                    let _record_result = recorder.record_affinity_owner(&owner);
+                    let _record_result = recorder.record_affinity_owner(owner).await;
                 });
             }
         }
@@ -1211,7 +1216,7 @@ impl AsyncProxyCredentialResolver {
             let (current_generation, current_bundle) = self.read_active_bundle(account_id).await?;
             let (resolved_generation, refreshed) =
                 if self.bundle_is_expired(&current_bundle, now_unix_seconds) {
-                    self.refresh_expired_bundle(account_id, &current_bundle)
+                    self.refresh_expired_bundle(account_id, current_generation, &current_bundle)
                         .await?
                 } else {
                     (current_generation, current_bundle)
@@ -1272,6 +1277,7 @@ impl AsyncProxyCredentialResolver {
     async fn refresh_expired_bundle(
         &self,
         account_id: &AccountId,
+        current_generation: u64,
         bundle: &AccountCredentialBundle,
     ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
         let refresh_token = bundle
@@ -1290,11 +1296,9 @@ impl AsyncProxyCredentialResolver {
         {
             refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
         }
-        let refreshed_generation = self
-            .state_store
-            .next_credential_generation(account_id)
-            .await
-            .map_err(map_state_error)?;
+        let refreshed_generation = current_generation
+            .checked_add(1)
+            .ok_or(CredentialResolverError::RefreshUnavailable)?;
         let refreshed_key = account_credential_bundle_key(account_id, refreshed_generation)
             .map_err(map_secret_error)?;
         let refreshed_secret = refreshed.to_secret_string().map_err(map_secret_error)?;
@@ -1307,8 +1311,9 @@ impl AsyncProxyCredentialResolver {
         .await
         .map_err(|_error| CredentialResolverError::SecretUnavailable)??;
         self.state_store
-            .activate_account_credential_generation_and_invalidate_quota(
+            .activate_account_credential_generation_if_current_and_invalidate_quota(
                 account_id,
+                current_generation,
                 refreshed_generation,
                 AccountStatus::Enabled,
             )
@@ -1347,32 +1352,46 @@ impl HttpAffinitySecretProvider for ProxyRuntimeSecretStore {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct SqliteAffinityOwnerRecorder {
-    state_database_path: PathBuf,
+struct RuntimeAffinitySecretProvider {
+    secret: RouterAffinityHashSecret,
 }
 
-impl SqliteAffinityOwnerRecorder {
-    fn new(state_database_path: PathBuf) -> Self {
-        Self {
-            state_database_path,
-        }
+impl RuntimeAffinitySecretProvider {
+    const fn new(secret: RouterAffinityHashSecret) -> Self {
+        Self { secret }
     }
 }
 
-impl HttpAffinityOwnerRecorder for SqliteAffinityOwnerRecorder {
-    fn record_affinity_owner(
-        &self,
-        owner: &PreviousResponseAffinityOwnerRecord,
-    ) -> Result<(), HttpProxyError> {
-        let state_store = SqliteStateStore::open(&self.state_database_path).map_err(|_error| {
-            HttpProxyError::Selection {
-                reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
-            }
-        })?;
-        AffinityRepository::write_previous_response_owner(&state_store, owner).map_err(|_error| {
-            HttpProxyError::Selection {
-                reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
-            }
+impl HttpAffinitySecretProvider for RuntimeAffinitySecretProvider {
+    fn load_or_create_affinity_secret(&self) -> Result<RouterAffinityHashSecret, HttpProxyError> {
+        Ok(self.secret.clone())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AsyncSqliteAffinityOwnerRecorder {
+    state_store: AsyncSqliteStateStore,
+}
+
+impl AsyncSqliteAffinityOwnerRecorder {
+    const fn new(state_store: AsyncSqliteStateStore) -> Self {
+        Self { state_store }
+    }
+}
+
+impl AsyncHttpAffinityOwnerRecorder for AsyncSqliteAffinityOwnerRecorder {
+    fn record_affinity_owner<'a>(
+        &'a self,
+        owner: PreviousResponseAffinityOwnerRecord,
+    ) -> BoxFuture<'a, Result<(), HttpProxyError>> {
+        Box::pin(async move {
+            self.state_store
+                .write_previous_response_owner(&owner)
+                .await
+                .map_err(|_error| HttpProxyError::Selection {
+                    reason:
+                        crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
+                })
         })
     }
 }

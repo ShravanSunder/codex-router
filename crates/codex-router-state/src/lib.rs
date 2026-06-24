@@ -749,6 +749,60 @@ mod tests {
         assert!(code_review_inputs[0].windows().is_empty());
     }
 
+    #[tokio::test]
+    async fn async_credential_generation_activation_fails_when_account_was_disabled() {
+        let temp_dir = TestTempDir::new("async_credential_activation_disabled_race");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_async_activation_disabled_race");
+        let enabled_account =
+            AccountRecord::new(account_id.clone(), "race", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &enabled_account) {
+            panic!("enabled account should persist: {error}");
+        }
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let disabled_account =
+            AccountRecord::new(account_id.clone(), "race", AccountStatus::Disabled)
+                .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &disabled_account) {
+            panic!("disabled account should persist: {error}");
+        }
+
+        let activation_error = match async_store
+            .activate_account_credential_generation_if_current_and_invalidate_quota(
+                &account_id,
+                1,
+                2,
+                AccountStatus::Enabled,
+            )
+            .await
+        {
+            Ok(()) => panic!("disabled account must not be re-enabled by stale refresh commit"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            activation_error,
+            StateStoreError::AccountConcurrentModification {
+                account_id: account_id.as_str().to_owned()
+            }
+        );
+        let loaded_account = match AccountStateRepository::load_account(&sync_store, &account_id) {
+            Ok(Some(account)) => account,
+            Ok(None) => panic!("account should still exist"),
+            Err(error) => panic!("account should load after failed activation: {error}"),
+        };
+        assert_eq!(loaded_account.status(), AccountStatus::Disabled);
+        assert_eq!(loaded_account.active_credential_generation(), Some(1));
+    }
+
     #[test]
     fn credential_mutation_invalidates_selector_windows_atomically() {
         let temp_dir = TestTempDir::new("credential_mutation_invalidates_selector_windows");
@@ -1105,6 +1159,48 @@ mod tests {
 
         assert_eq!(async_lookup, sync_lookup);
         assert_eq!(async_missing, PreviousResponseAffinityOwnerLookup::Missing);
+    }
+
+    #[tokio::test]
+    async fn async_previous_response_affinity_owner_write_matches_sync_projection() {
+        let temp_dir = TestTempDir::new("async_affinity_owner_write");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let hash = affinity_hash('e');
+        let responses_owner = PreviousResponseAffinityOwnerRecord::new(
+            hash.clone(),
+            account_id("acct_async_owner_write"),
+            12,
+            RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            1_300,
+        );
+        if let Err(error) =
+            AsyncAffinityRepository::write_previous_response_owner(&async_store, &responses_owner)
+                .await
+        {
+            panic!("async affinity owner should persist: {error}");
+        }
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open after async write: {error}"),
+        };
+        let sync_lookup = match AffinityRepository::load_previous_response_owner(
+            &sync_store,
+            &hash,
+            RouteBand::Responses.as_str(),
+        ) {
+            Ok(lookup) => lookup,
+            Err(error) => panic!("sync affinity owner should load after async write: {error}"),
+        };
+
+        assert_eq!(
+            sync_lookup,
+            PreviousResponseAffinityOwnerLookup::Found(responses_owner)
+        );
     }
 
     #[test]

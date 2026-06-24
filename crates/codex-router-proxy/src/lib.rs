@@ -149,15 +149,15 @@ mod tests {
     use std::time::Instant;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
-    use tungstenite::Message;
-    use tungstenite::WebSocket;
-    use tungstenite::accept_hdr;
-    use tungstenite::client::IntoClientRequest;
-    use tungstenite::connect;
-    use tungstenite::handshake::server::Request;
-    use tungstenite::handshake::server::Response;
-    use tungstenite::http::HeaderValue;
-    use tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::WebSocket;
+    use tokio_tungstenite::tungstenite::accept_hdr;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::connect;
+    use tokio_tungstenite::tungstenite::handshake::server::Request;
+    use tokio_tungstenite::tungstenite::handshake::server::Response;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::protocol::Role;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
     static TEST_AFFINITY_SECRET_PROVIDER: TestAffinitySecretProvider = TestAffinitySecretProvider;

@@ -491,6 +491,15 @@ pub trait HttpAffinityOwnerRecorder: Send + Sync {
     ) -> Result<(), HttpProxyError>;
 }
 
+/// Async previous-response owner recorder for Tokio runtime callers.
+pub trait AsyncHttpAffinityOwnerRecorder: Send + Sync {
+    /// Persists one owner row without blocking the Tokio worker.
+    fn record_affinity_owner<'a>(
+        &'a self,
+        owner: PreviousResponseAffinityOwnerRecord,
+    ) -> BoxFuture<'a, Result<(), HttpProxyError>>;
+}
+
 /// HTTP/SSE proxy service.
 #[derive(Clone, Copy, Debug)]
 pub struct HttpProxyService<'a, T> {

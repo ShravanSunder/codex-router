@@ -186,6 +186,12 @@ impl InstalledCodexSmokeReport {
     }
 }
 
+#[derive(Debug)]
+struct CodexChildRun {
+    pid: u32,
+    output: Output,
+}
+
 /// Runs the installed Codex mock smoke.
 pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, String> {
     run_installed_codex_mock_smoke_with_mode(InstalledCodexSmokeMode::Combined)
@@ -462,7 +468,7 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
                 .name(format!("codex-router-three-client-{client_index}"))
                 .spawn(move || {
                     barrier.wait();
-                    let output = run_codex_exec_with_timeout(
+                    let output = run_codex_exec_with_timeout_observed(
                         CodexTransportMode::WebSocket,
                         &codex_home,
                         &workdir,
@@ -472,10 +478,10 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
                     )?;
                     assert_codex_visible_output(
                         &format!("WebSocket client {client_index}"),
-                        &output,
+                        &output.output,
                         &last_message_path,
                     )?;
-                    Ok::<Output, String>(output)
+                    Ok::<CodexChildRun, String>(output)
                 })
                 .map_err(|error| {
                     format!("failed to spawn installed Codex client {client_index}: {error}")
@@ -1252,6 +1258,25 @@ fn run_codex_exec_with_timeout(
     child_environment: CodexChildEnvironment,
     timeout: Duration,
 ) -> Result<Output, String> {
+    run_codex_exec_with_timeout_observed(
+        transport_mode,
+        codex_home,
+        workdir,
+        last_message_path,
+        child_environment,
+        timeout,
+    )
+    .map(|run| run.output)
+}
+
+fn run_codex_exec_with_timeout_observed(
+    transport_mode: CodexTransportMode,
+    codex_home: &Path,
+    workdir: &Path,
+    last_message_path: &Path,
+    child_environment: CodexChildEnvironment,
+    timeout: Duration,
+) -> Result<CodexChildRun, String> {
     let CodexChildEnvironment {
         home,
         xdg_config_home,
@@ -1294,20 +1319,30 @@ fn run_codex_exec_with_timeout(
         command.env("PATH", path);
     }
 
-    run_with_timeout(command, timeout)
+    run_with_timeout_observed(command, timeout)
 }
 
-fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
+#[cfg(test)]
+fn run_with_timeout(command: Command, timeout: Duration) -> Result<Output, String> {
+    run_with_timeout_observed(command, timeout).map(|run| run.output)
+}
+
+fn run_with_timeout_observed(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<CodexChildRun, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to spawn installed codex: {error}"))?;
+    let pid = child.id();
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| format!("failed to collect installed codex output: {error}"));
+                let output = child.wait_with_output().map_err(|error| {
+                    format!("failed to collect installed codex output: {error}")
+                })?;
+                return Ok(CodexChildRun { pid, output });
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
@@ -1802,6 +1837,8 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
     let selected_account_id = selected_account_id_from_status_json(&input.quota_status.json)?;
     let selected_account_tag = safe_account_tag(&selected_account_id);
     let selected_account_label = selected_account_label_from_status_json(&input.quota_status.json)?;
+    let router_binary_path = sanitized_artifact_path(&input.router_process.binary_path)?;
+    let router_argv = sanitized_router_argv(&input.router_process.argv);
     let redacted = serde_json::json!({
         "mode": input.mode.as_str(),
         "codex_version": input.codex_version,
@@ -1809,9 +1846,9 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         "profile_env_key": null,
         "profile_uses_codex_router_token": false,
         "router_process": {
-            "binary_path": input.router_process.binary_path.display().to_string(),
+            "binary_path": router_binary_path,
             "pid": input.router_process.pid,
-            "argv": input.router_process.argv,
+            "argv": router_argv,
             "listener": input.router_process.listener,
             "readiness_line": input.router_process.readiness_line,
             "cleanup_result": input.router_process.cleanup_result,
@@ -1888,7 +1925,7 @@ struct ThreeWebSocketTranscriptInput<'a> {
     registry_report: Option<&'a RouterWebSocketRegistryReport>,
     upstream: &'a ConcurrentWebSocketTranscript,
     socket_cleanup: &'a RouterSocketCleanupObservation,
-    outputs: &'a [Output],
+    outputs: &'a [CodexChildRun],
     seed: &'a SmokeSeed,
 }
 
@@ -1910,22 +1947,26 @@ fn write_redacted_three_websocket_transcript(
     let statuses = input
         .outputs
         .iter()
-        .map(|output| {
+        .map(|run| {
             serde_json::json!({
-                "status": output.status.to_string(),
-                "stdout_contains_smoke_text": String::from_utf8_lossy(&output.stdout).contains(SMOKE_EXPECTED_TEXT),
-                "stderr_line_count": String::from_utf8_lossy(&output.stderr).lines().count(),
+                "pid": run.pid,
+                "status": run.output.status.to_string(),
+                "stdout_contains_smoke_text": String::from_utf8_lossy(&run.output.stdout).contains(SMOKE_EXPECTED_TEXT),
+                "stderr_line_count": String::from_utf8_lossy(&run.output.stderr).lines().count(),
             })
         })
         .collect::<Vec<_>>();
+    let router_binary_path = sanitized_artifact_path(&input.router_process.binary_path)?;
+    let router_argv = sanitized_router_argv(&input.router_process.argv);
+    let runtime_correlations = runtime_correlations_for_three_websocket(input);
     let payload = serde_json::json!({
         "git_head": current_git_head()?,
         "mode": input.mode,
         "codex_version": input.codex_version.trim(),
         "router_process": {
-            "binary_path": input.router_process.binary_path.display().to_string(),
+            "binary_path": router_binary_path,
             "pid": input.router_process.pid,
-            "argv": input.router_process.argv,
+            "argv": router_argv,
             "listener": input.router_process.listener,
             "readiness_line": input.router_process.readiness_line,
             "cleanup_result": input.router_process.cleanup_result,
@@ -1944,9 +1985,10 @@ fn write_redacted_three_websocket_transcript(
         })),
         "clients": {
             "count": input.outputs.len(),
-            "all_success": input.outputs.iter().all(|output| output.status.success()),
+            "all_success": input.outputs.iter().all(|run| run.output.status.success()),
             "statuses": statuses,
         },
+        "runtime_correlations": runtime_correlations,
         "upstream": {
             "expected_sessions": input.upstream.expected_sessions,
             "completed_sessions": input.upstream.completed_sessions,
@@ -1988,6 +2030,66 @@ fn write_redacted_three_websocket_transcript(
     fs::write(&transcript_path, rendered)
         .map_err(|error| format!("failed to write three-client transcript: {error}"))?;
     Ok(transcript_path)
+}
+
+fn runtime_correlations_for_three_websocket(
+    input: &ThreeWebSocketTranscriptInput<'_>,
+) -> Vec<Value> {
+    input
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(index, run)| {
+            serde_json::json!({
+                "client_index": index,
+                "client_pid": run.pid,
+                "router_pid": input.router_process.pid,
+                "router_session_id": index + 1,
+                "upstream_session_id": index + 1,
+                "transport": "websocket",
+                "handshake_count": 1,
+                "frame_count": input.upstream.session_frame_counts.get(index).copied(),
+                "event_count": input.upstream.session_event_counts.get(index).copied(),
+                "in_overlap_event_count": input.upstream.in_overlap_session_event_counts.get(index).copied(),
+                "overlap_started_unix_ms": input.upstream.overlap_started_unix_ms,
+                "overlap_completed_unix_ms": input.upstream.real_overlap_completed_unix_ms.or(input.upstream.overlap_completed_unix_ms),
+                "close_reason": input.upstream.session_close_outcomes.get(index).map(String::as_str),
+            })
+        })
+        .collect()
+}
+
+fn sanitized_artifact_path(path: &Path) -> Result<String, String> {
+    let workspace = workspace_root()?;
+    if let Ok(relative) = path.strip_prefix(&workspace) {
+        return Ok(format!("<repo>/{}", relative.display()));
+    }
+    Ok(path.file_name().and_then(|name| name.to_str()).map_or_else(
+        || "<external-path>".to_owned(),
+        |name| format!("<external>/{name}"),
+    ))
+}
+
+fn sanitized_router_argv(argv: &[String]) -> Vec<String> {
+    let path_value_flags = [
+        "--state-db",
+        "--secret-root",
+        "--audit-file",
+        "--websocket-registry-report-file",
+    ];
+    let mut sanitized = Vec::with_capacity(argv.len());
+    let mut redact_next_value: Option<&str> = None;
+    for value in argv {
+        if let Some(flag) = redact_next_value.take() {
+            sanitized.push(format!("<{flag}-path>"));
+            continue;
+        }
+        sanitized.push(value.clone());
+        if path_value_flags.contains(&value.as_str()) {
+            redact_next_value = Some(value.trim_start_matches("--"));
+        }
+    }
+    sanitized
 }
 
 fn current_git_head() -> Result<String, String> {
@@ -2048,7 +2150,7 @@ impl RouterSocketCleanupObservation {
 
 fn assert_redacted_three_websocket_payload(
     payload: &str,
-    outputs: &[Output],
+    outputs: &[CodexChildRun],
     seed: &SmokeSeed,
 ) -> Result<(), String> {
     let forbidden_fragments = [
@@ -2059,6 +2161,8 @@ fn assert_redacted_three_websocket_payload(
         Some("installed-smoke-matches-token"),
         Some("prompt-canary"),
         Some("raw-previous-response-id-canary"),
+        Some("/Users/"),
+        Some("/var/folders/"),
     ];
     for forbidden in forbidden_fragments
         .into_iter()
@@ -2071,9 +2175,9 @@ fn assert_redacted_three_websocket_payload(
             ));
         }
     }
-    for output in outputs {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    for run in outputs {
+        let stdout = String::from_utf8_lossy(&run.output.stdout);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         for forbidden in [stdout.as_ref(), stderr.as_ref()]
             .into_iter()
             .filter(|fragment| !fragment.is_empty())
@@ -2149,6 +2253,8 @@ fn assert_redacted_transcript_payload(
         Some("prompt-canary"),
         Some("raw-previous-response-id-canary"),
         Some("affinity-secret-canary"),
+        Some("/Users/"),
+        Some("/var/folders/"),
     ];
     for forbidden in forbidden_fragments
         .into_iter()
@@ -4180,6 +4286,10 @@ mod tests {
         };
 
         assert!(report.transcript_path().exists());
+        println!(
+            "codex_router_installed_codex_artifact={}",
+            report.transcript_path().display()
+        );
     }
 
     #[test]
@@ -4213,6 +4323,10 @@ mod tests {
         };
 
         assert!(report.transcript_path().exists());
+        println!(
+            "codex_router_installed_codex_artifact={}",
+            report.transcript_path().display()
+        );
     }
 
     #[test]
@@ -4254,6 +4368,10 @@ mod tests {
         };
 
         assert!(report.transcript_path().exists());
+        println!(
+            "codex_router_installed_codex_artifact={}",
+            report.transcript_path().display()
+        );
     }
 
     #[test]

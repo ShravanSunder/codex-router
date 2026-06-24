@@ -134,6 +134,12 @@ pub enum StateStoreError {
         /// Corrupt field name.
         field: &'static str,
     },
+    /// Account state changed while a credential refresh was being committed.
+    #[error("account state changed during credential commit for {account_id}")]
+    AccountConcurrentModification {
+        /// Affected account id.
+        account_id: String,
+    },
 }
 
 /// SQLite-backed metadata repository.
@@ -366,6 +372,74 @@ impl AsyncSqliteStateStore {
         Ok(())
     }
 
+    /// Activates one credential generation only if account state still matches the caller's read.
+    pub async fn activate_account_credential_generation_if_current_and_invalidate_quota(
+        &self,
+        account_id: &AccountId,
+        expected_active_credential_generation: u64,
+        active_credential_generation: u64,
+        status: AccountStatus,
+    ) -> Result<(), StateStoreError> {
+        let expected_generation = u64_to_i64(expected_active_credential_generation)?;
+        let active_generation = u64_to_i64(active_credential_generation)?;
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        let update = sqlx::query(
+            "UPDATE accounts
+                SET status = ?2,
+                    active_credential_generation = ?3
+              WHERE account_id = ?1
+                AND status = ?4
+                AND active_credential_generation = ?5",
+        )
+        .bind(account_id.as_str())
+        .bind(status.as_str())
+        .bind(active_generation)
+        .bind(AccountStatus::Enabled.as_str())
+        .bind(expected_generation)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        if update.rows_affected() != 1 {
+            transaction.rollback().await.map_err(sqlx_error)?;
+            return Err(StateStoreError::AccountConcurrentModification {
+                account_id: account_id.as_str().to_owned(),
+            });
+        }
+        invalidate_credential_mutation_quota_async(&mut transaction, account_id).await?;
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Writes a previous-response owner record through the async state pool.
+    pub async fn write_previous_response_owner(
+        &self,
+        owner: &PreviousResponseAffinityOwnerRecord,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "INSERT INTO previous_response_affinity_owners (
+               affinity_key_hash, route_band, account_id, credential_generation,
+               source_transport, created_unix_seconds
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(affinity_key_hash, route_band, account_id) DO UPDATE SET
+               credential_generation = excluded.credential_generation,
+               source_transport = excluded.source_transport,
+               created_unix_seconds = excluded.created_unix_seconds",
+        )
+        .bind(owner.affinity_key_hash().as_str())
+        .bind(owner.route_band().as_str())
+        .bind(owner.account_id().as_str())
+        .bind(u64_to_i64(owner.credential_generation())?)
+        .bind(owner.source_transport().as_str())
+        .bind(u64_to_i64(owner.created_unix_seconds())?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
     async fn load_quota_refresh_status(
         &self,
         account_id: &AccountId,
@@ -569,6 +643,12 @@ impl AsyncSelectorQuotaRepository for AsyncSqliteStateStore {
 
 /// Async affinity repository contract for Tokio runtime callers.
 pub trait AsyncAffinityRepository {
+    /// Writes a hashed previous-response owner record.
+    fn write_previous_response_owner<'a>(
+        &'a self,
+        owner: &'a PreviousResponseAffinityOwnerRecord,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>>;
+
     /// Loads a hashed previous-response owner record for one route band.
     fn load_previous_response_owner<'a>(
         &'a self,
@@ -578,6 +658,13 @@ pub trait AsyncAffinityRepository {
 }
 
 impl AsyncAffinityRepository for AsyncSqliteStateStore {
+    fn write_previous_response_owner<'a>(
+        &'a self,
+        owner: &'a PreviousResponseAffinityOwnerRecord,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+        Box::pin(async move { self.write_previous_response_owner(owner).await })
+    }
+
     fn load_previous_response_owner<'a>(
         &'a self,
         affinity_key_hash: &'a AffinityKeyHash,
@@ -795,6 +882,49 @@ impl SqliteStateStore {
                     .map_err(sqlite_error)?;
             }
         }
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    /// Activates one credential generation only if account state still matches the caller's read.
+    pub fn activate_account_credential_generation_if_current_and_invalidate_quota(
+        &self,
+        account_id: &AccountId,
+        expected_active_credential_generation: u64,
+        active_credential_generation: u64,
+        status: AccountStatus,
+    ) -> Result<(), StateStoreError> {
+        let expected_generation = u64_to_i64(expected_active_credential_generation)?;
+        let active_generation = u64_to_i64(active_credential_generation)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error)?;
+        let updated = transaction
+            .execute(
+                "UPDATE accounts
+                    SET status = ?2,
+                        active_credential_generation = ?3
+                  WHERE account_id = ?1
+                    AND status = ?4
+                    AND active_credential_generation = ?5",
+                params![
+                    account_id.as_str(),
+                    status.as_str(),
+                    active_generation,
+                    AccountStatus::Enabled.as_str(),
+                    expected_generation,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        if updated != 1 {
+            transaction.rollback().map_err(sqlite_error)?;
+            return Err(StateStoreError::AccountConcurrentModification {
+                account_id: account_id.as_str().to_owned(),
+            });
+        }
+        invalidate_credential_mutation_quota_sync(&transaction, account_id)?;
         transaction.commit().map_err(sqlite_error)?;
 
         Ok(())
@@ -2119,6 +2249,116 @@ fn selector_window_from_snapshot(
     }
 
     window
+}
+
+async fn invalidate_credential_mutation_quota_async(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &AccountId,
+) -> Result<(), StateStoreError> {
+    for route_band in CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS {
+        sqlx::query(
+            "INSERT INTO quota_snapshots (
+               account_id, source, observed_unix_seconds, route_band,
+               remaining_headroom, reset_unix_seconds, stale_penalty
+             )
+             VALUES (?1, ?2, 0, ?3, 0, NULL, 1)
+             ON CONFLICT(account_id, route_band) DO UPDATE SET
+               source = excluded.source,
+               observed_unix_seconds = excluded.observed_unix_seconds,
+               remaining_headroom = excluded.remaining_headroom,
+               reset_unix_seconds = excluded.reset_unix_seconds,
+               stale_penalty = excluded.stale_penalty",
+        )
+        .bind(account_id.as_str())
+        .bind(QuotaSnapshotSource::CredentialMutation.as_str())
+        .bind(*route_band)
+        .execute(&mut **transaction)
+        .await
+        .map_err(sqlx_error)?;
+        sqlx::query(
+            "DELETE FROM selector_quota_windows
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(*route_band)
+        .execute(&mut **transaction)
+        .await
+        .map_err(sqlx_error)?;
+        if selector_route_band(route_band) {
+            sqlx::query(
+                "INSERT INTO selector_quota_windows (
+                   account_id, route_band, limit_window_seconds, status,
+                   remaining_headroom, reset_unix_seconds, effective,
+                   observed_unix_seconds
+                 )
+                 VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, 0)",
+            )
+            .bind(account_id.as_str())
+            .bind(*route_band)
+            .bind(u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?)
+            .bind(SelectorQuotaWindowStatus::Ineligible.as_str())
+            .execute(&mut **transaction)
+            .await
+            .map_err(sqlx_error)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn invalidate_credential_mutation_quota_sync(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &AccountId,
+) -> Result<(), StateStoreError> {
+    for route_band in CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS {
+        transaction
+            .execute(
+                "INSERT INTO quota_snapshots (
+                   account_id, source, observed_unix_seconds, route_band,
+                   remaining_headroom, reset_unix_seconds, stale_penalty
+                 )
+                 VALUES (?1, ?2, 0, ?3, 0, NULL, 1)
+                 ON CONFLICT(account_id, route_band) DO UPDATE SET
+                   source = excluded.source,
+                   observed_unix_seconds = excluded.observed_unix_seconds,
+                   remaining_headroom = excluded.remaining_headroom,
+                   reset_unix_seconds = excluded.reset_unix_seconds,
+                   stale_penalty = excluded.stale_penalty",
+                params![
+                    account_id.as_str(),
+                    QuotaSnapshotSource::CredentialMutation.as_str(),
+                    route_band,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "DELETE FROM selector_quota_windows
+                  WHERE account_id = ?1 AND route_band = ?2",
+                params![account_id.as_str(), route_band],
+            )
+            .map_err(sqlite_error)?;
+        if selector_route_band(route_band) {
+            transaction
+                .execute(
+                    "INSERT INTO selector_quota_windows (
+                       account_id, route_band, limit_window_seconds, status,
+                       remaining_headroom, reset_unix_seconds, effective,
+                       observed_unix_seconds
+                     )
+                     VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, 0)",
+                    params![
+                        account_id.as_str(),
+                        route_band,
+                        u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?,
+                        SelectorQuotaWindowStatus::Ineligible.as_str(),
+                    ],
+                )
+                .map_err(sqlite_error)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn selector_route_band(route_band: &str) -> bool {
