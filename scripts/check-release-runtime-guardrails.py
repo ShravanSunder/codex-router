@@ -244,7 +244,7 @@ def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
             "CODEX_ROUTER_PROOF_COMMAND",
             f"scripts/check-release-runtime-guardrails.py {check.row_id}",
         ),
-        "cwd": str(REPO_ROOT),
+        "cwd": ".",
         "git_head": git_head(),
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status_before": "[ ] pending",
