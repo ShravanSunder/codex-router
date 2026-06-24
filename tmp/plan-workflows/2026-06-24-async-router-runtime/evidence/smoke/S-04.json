@@ -1,0 +1,27 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh S-04",
+  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "exit_code": 0,
+  "expected_observation": "installed Codex mock upstream proves deterministic WebSocket behavior without fallback/reconnect/retry",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
+  "git_head": "2f030786d6a7917220b1a5fcbd5eb13e3c8dd641",
+  "layer": "smoke",
+  "notes": "Installed Codex WebSocket mock upstream smoke passed deterministic runtime/no-fallback contract.",
+  "owner": "T7",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "S-04",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-24T20:46:45Z",
+  "touched_targets": [
+    "crates/codex-router-test-support/src/installed_codex.rs",
+    "tests/smoke/installed_codex_mock.sh",
+    "crates/codex-router-cli/src/lib.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/websocket.rs"
+  ]
+}

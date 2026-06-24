@@ -12,9 +12,9 @@
   "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
   "exit_code": 0,
   "expected_observation": "release runtime structural guardrails run through proof-matrix",
-  "freshness_check": "not_evaluated",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "cbe736a787f4024d6efd938a5ea6e9c9c0629c8e",
+  "git_head": "2f030786d6a7917220b1a5fcbd5eb13e3c8dd641",
   "layer": "structural",
   "notes": "T6 aggregate guardrail row passed through proof-matrix.",
   "owner": "T6",
@@ -24,6 +24,6 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T20:09:12Z",
+  "timestamp_utc": "2026-06-24T20:46:46Z",
   "touched_targets": []
 }
