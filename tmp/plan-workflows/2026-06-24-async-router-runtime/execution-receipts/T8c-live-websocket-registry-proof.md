@@ -1,7 +1,7 @@
 # Execution Receipt: T8c Live WebSocket Registry Proof
 
-Timestamp: 2026-06-24T20:47:40Z
-Proof HEAD: ee32a2d7585c66a2036e7c4e9c6736abb8003574
+Timestamp: 2026-06-24T19:34:49Z
+Proof HEAD: 8478fa8791597d8e1115e54c52e6a57f7c105ecf
 
 ## Scope
 
@@ -52,7 +52,7 @@ result: 1 passed, 0 failed, finished in 6.17s after live registry report asserti
 ```text
 tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak
 exit: 0
-result: 1 passed, 0 failed, finished in 303.44s.
+result: 1 passed, 0 failed, finished in 303.68s.
 ```
 
 ```text
@@ -64,8 +64,8 @@ result: all six E rows passed and wrote row-local artifacts.
 Five-minute artifact summary:
 
 ```text
-artifact=tmp/smoke/installed-codex-three-websocket-33611-1782328113622.json
-git_head=ee32a2d7585c66a2036e7c4e9c6736abb8003574
+artifact=tmp/smoke/installed-codex-three-websocket-90038-1782329647884.json
+git_head=8478fa8791597d8e1115e54c52e6a57f7c105ecf
 mode=three-websocket-soak
 clients.all_success=true
 shared_router_pid=<recorded in artifact>
@@ -73,8 +73,8 @@ upstream.active_high_water=3
 upstream.completed_sessions=3
 upstream.final_active_sessions=0
 upstream.hold_duration_ms=300000
-upstream.real_overlap_duration_ms=300972
-upstream.in_overlap_session_event_counts=[13, 16, 13]
+upstream.real_overlap_duration_ms=301006
+upstream.in_overlap_session_event_counts=[13, 11, 13]
 upstream.normal_close_sessions=3
 upstream.abnormal_close_sessions=0
 upstream.session_close_outcomes=[normal, normal, normal]
@@ -98,8 +98,7 @@ socket_cleanup.raw_state_counts=[]
 
 ## Open Gaps
 
-- Final full-suite validation, implementation review swarm, and PR wrapup remain
-  required before PR-ready.
+- Final implementation re-review and PR wrapup remain required before PR-ready.
 
 phase_result: complete
 evidence:

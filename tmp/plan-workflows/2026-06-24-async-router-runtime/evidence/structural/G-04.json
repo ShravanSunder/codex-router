@@ -7,7 +7,7 @@
   "failures": [],
   "freshness_check": "current_git_head_recorded",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/*",
-  "git_head": "ee32a2d7585c66a2036e7c4e9c6736abb8003574",
+  "git_head": "8478fa8791597d8e1115e54c52e6a57f7c105ecf",
   "layer": "structural",
   "owner": "T6",
   "redaction_check": "pass",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T19:10:41Z",
+  "timestamp_utc": "2026-06-24T19:36:10Z",
   "touched_targets": [
     "crates/codex-router-proxy/src/server.rs",
     "crates/codex-router-proxy/src/upstream.rs"

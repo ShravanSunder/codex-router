@@ -1,6 +1,6 @@
 {
   "artifact_paths": [
-    "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/smoke/installed-codex-three-websocket-33611-1782328113622.json"
+    "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/smoke/installed-codex-three-websocket-90038-1782329647884.json"
   ],
   "artifact_source": "tmp/smoke/installed-codex-three-websocket-soak-artifact.txt",
   "command": "scripts/proof-matrix.sh E-05",
@@ -9,7 +9,7 @@
   "expected_observation": "one installed Codex runtime completes function-call-style multi-step WebSocket interleave during overlap",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "ee32a2d7585c66a2036e7c4e9c6736abb8003574",
+  "git_head": "8478fa8791597d8e1115e54c52e6a57f7c105ecf",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -24,12 +24,12 @@
       "statuses": [
         {
           "status": "exit status: 0",
-          "stderr_line_count": 28,
+          "stderr_line_count": 32,
           "stdout_contains_smoke_text": true
         },
         {
           "status": "exit status: 0",
-          "stderr_line_count": 32,
+          "stderr_line_count": 28,
           "stdout_contains_smoke_text": true
         },
         {
@@ -80,22 +80,22 @@
       "http_probe_count": 0,
       "in_overlap_session_event_counts": [
         13,
-        16,
+        11,
         13
       ],
       "multi_step_completed_before_overlap_end": true,
       "multi_step_followup_active_session_count": 3,
       "multi_step_followup_frame_count": 1,
-      "multi_step_followup_unix_ms": 1782327812481,
+      "multi_step_followup_unix_ms": 1782329346741,
       "multi_step_interleave_completed": true,
       "non_prewarm_session_count": 3,
       "normal_close_sessions": 3,
-      "overlap_completed_unix_ms": 1782328113432,
-      "overlap_duration_ms": 300972,
+      "overlap_completed_unix_ms": 1782329647726,
+      "overlap_duration_ms": 301007,
       "overlap_proven": true,
-      "overlap_started_unix_ms": 1782327812460,
-      "real_overlap_completed_unix_ms": 1782328113432,
-      "real_overlap_duration_ms": 300972,
+      "overlap_started_unix_ms": 1782329346719,
+      "real_overlap_completed_unix_ms": 1782329647725,
+      "real_overlap_duration_ms": 301006,
       "session_close_outcomes": [
         "normal",
         "normal",
@@ -103,19 +103,19 @@
       ],
       "session_event_counts": [
         13,
-        16,
-        13
+        13,
+        16
       ],
       "session_frame_counts": [
         2,
-        3,
-        2
+        2,
+        3
       ]
     }
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T19:08:47Z",
+  "timestamp_utc": "2026-06-24T19:34:13Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",

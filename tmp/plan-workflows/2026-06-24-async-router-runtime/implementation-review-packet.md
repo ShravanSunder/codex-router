@@ -32,11 +32,11 @@ Material plan rows:
 - G-01/G-02/G-03/G-04/G-05/G-07/G-21/G-23: structural guardrails.
 
 Known remaining gaps:
-- Final implementation review and PR wrapup are not complete.
+- Final implementation re-review and PR wrapup are not complete.
 
 ## Git Scope
 
-Review commits from `7749909` through `ee32a2d`, especially:
+Review commits from `7749909` through `8478fa8`, especially:
 - `7749909 feat: use hyper tungstenite serve runtime`
 - `9ac7e96 feat: stream http upstream with hyper`
 - `6140ab5 test: add release runtime guardrails`
@@ -48,9 +48,11 @@ Review commits from `7749909` through `ee32a2d`, especially:
 - `3e9ef44 fix: harden websocket proof gates`
 - `46da5b6 test: record hardened websocket proof evidence`
 - `9e02458 test: allow evidence-only proof commits`
+- `16c8a1f test: refresh async runtime proof evidence`
 - `fb4fb13 test: add non-mutating proof verification`
 - `f8d3ec5 fix: close websocket review proof gaps`
 - `ee32a2d test: stabilize websocket overlap proof timing`
+- `8478fa8 fix: guard websocket proof against dirty sources`
 
 Changed implementation surfaces:
 - `crates/codex-router-proxy/src/server.rs`
@@ -70,28 +72,32 @@ Proof artifacts:
 
 ## Current Proof Claims
 
-- `cargo fmt --all -- --check && cargo check --workspace && cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo fmt --all -- --check`
+  exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`
   exit 0.
 - `tests/smoke/installed_codex_mock.sh --transport all`
   exit 0, 6 passed.
 - `tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent`
   exit 0, 1 passed.
 - `tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak`
-  exit 0, 1 passed, 303.44s.
+  exit 0, 1 passed, 303.68s.
 - `cargo test --workspace -- --nocapture`
-  exit 0, 266 passed, 0 failed, 10 ignored.
+  exit 0 after `8478fa8`; 270 passed, 0 failed, 10 ignored.
+- `cargo test -p codex-router-proxy -- --nocapture`
+  exit 0 after `8478fa8`; 111 passed, 0 failed.
 - `scripts/proof-matrix.sh` rows E-02/E-03/E-04/E-05/E-06/E-08
   exit 0.
 - `scripts/proof-matrix.sh` rows G-01/G-02/G-03/G-04/G-05/G-07/G-21/G-23/I-17b
   exit 0.
 
 Five-minute soak artifact:
-- `tmp/smoke/installed-codex-three-websocket-33611-1782328113622.json`
-- git_head=ee32a2d7585c66a2036e7c4e9c6736abb8003574.
+- `tmp/smoke/installed-codex-three-websocket-90038-1782329647884.json`
+- git_head=8478fa8791597d8e1115e54c52e6a57f7c105ecf.
 - clients.all_success=true, count=3.
 - upstream.active_high_water=3, completed_sessions=3,
-  final_active_sessions=0, real_overlap_duration_ms=300972,
-  in_overlap_session_event_counts=[13,16,13],
+  final_active_sessions=0, real_overlap_duration_ms=301006,
+  in_overlap_session_event_counts=[13,11,13],
   normal_close_sessions=3, abnormal_close_sessions=0,
   session_close_outcomes=[normal,normal,normal].
 - upstream.multi_step_interleave_completed=true,
@@ -120,6 +126,12 @@ Accepted review findings addressed:
   so one busy session cannot satisfy the three-session proof.
 - Proof rows consume an explicit soak artifact pointer written by the successful
   producing run; they no longer glob the latest artifact.
+- WebSocket response lifecycle now marks a response outstanding only for local
+  Text/Binary request frames; idle Ping/Pong/Close control frames after
+  completion cannot turn a later clean reset into an error.
+- Proof rows reject dirty guarded source paths before accepting a fresh artifact,
+  so a local implementation/proof change cannot be hidden behind an artifact
+  whose git_head already equals HEAD.
 
 ## Security Context
 
@@ -139,3 +151,6 @@ flags do not weaken normal serve behavior.
    misleading?
 4. Are there blocker/important correctness, security, cleanup, or proof gaps
    that must route back to implementation before PR wrapup?
+5. Are the two latest re-review fixes sufficient: Ping/Pong post-completion
+   lifecycle handling and dirty guarded source-path rejection in
+   `scripts/proof-matrix.sh`?

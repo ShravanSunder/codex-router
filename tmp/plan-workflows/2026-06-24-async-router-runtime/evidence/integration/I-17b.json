@@ -6,7 +6,7 @@
   "expected_observation": "slow affinity recorder cannot delay WebSocket frame forwarding or close progress",
   "freshness_check": "current_git_head_recorded",
   "freshness_guard": "crates/codex-router-proxy/src/* crates/codex-router-cli/src/* crates/codex-router-state/src/* crates/codex-router-auth/src/*",
-  "git_head": "ee32a2d7585c66a2036e7c4e9c6736abb8003574",
+  "git_head": "8478fa8791597d8e1115e54c52e6a57f7c105ecf",
   "layer": "integration",
   "notes": "Focused async WebSocket slow-recorder integration test passed; side-effect persistence is spawned after local frame forwarding.",
   "owner": "T5/T6",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T19:10:46Z",
+  "timestamp_utc": "2026-06-24T19:36:11Z",
   "touched_targets": [
     "crates/codex-router-proxy/src/websocket.rs",
     "crates/codex-router-proxy/src/lib.rs"
