@@ -905,6 +905,7 @@ Default columns:
 - `status`
 - `5h`
 - `weekly`
+- `resets available`
 - `routing`
 - `next use`
 
@@ -915,6 +916,9 @@ Column semantics:
   usefulness must appear in `5h`, `weekly`, `routing`, and `next use`
 - `5h`: short-window bar, percent left, reset timing, and short-window note
 - `weekly`: long-window bar, percent left, reset timing, and long-window note
+- `resets available`: provider-reported reset credits from the last successful
+  quota refresh for this account/route band, or `-` when unknown; reset credits
+  are status-only in v1 and do not change routing eligibility or score
 - `routing`: stable reason phrase from the route-band assessment
 - `next use`: one of `preferred`, `available`, `held`, `blocked`, or
   `fallback`
@@ -1079,6 +1083,7 @@ JSON output schema:
       "routing_reason": "preferred_weekly_healthier | preferred_weekly_reset_soon | preferred_short_reset_soon | preferred_highest_weight | available_same_pool | held_reserve | held_unknown | unknown_fallback_preferred | unknown_fallback_available | excluded_disabled | excluded_missing_credential | blocked_window_exhausted | blocked_window_ineligible",
       "routing_weight": 1..100 | null,
       "preferred_next": true | false,
+      "reset_credits_available": 0 | null,
       "window_slots": {
         "5h": { "slot": "5h", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 18000 | null, "display_note": "string" },
         "weekly": { "slot": "weekly", "evidence_state": "known | unknown | no_data", "remaining_headroom": 0..100 | null, "reset_unix_seconds": 0 | null, "reset_duration_seconds": 604800 | null, "display_note": "string" }

@@ -2385,10 +2385,13 @@ exit 42
         );
 
         let lines = output.stdout.lines().collect::<Vec<_>>();
-        assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
+        assert_eq!(
+            lines[0],
+            "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use"
+        );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
         );
         assert_eq!(
             lines[2],
@@ -2444,6 +2447,18 @@ exit 42
                 20_000,
             ),
         );
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_primary"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(10_000)
+            .with_route_band("responses", 25)
+            .with_reset_unix_seconds(20_000)
+            .with_reset_credits_available(1)
+            .with_stale_penalty(false),
+        ));
 
         let output = run_cli(
             [
@@ -2462,10 +2477,13 @@ exit 42
         );
 
         let lines = output.stdout.lines().collect::<Vec<_>>();
-        assert_eq!(lines[0], "account\tstatus\t5h\tweekly\trouting\tnext use");
+        assert_eq!(
+            lines[0],
+            "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use"
+        );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
         );
         assert_eq!(
             lines[2],
@@ -2524,6 +2542,18 @@ exit 42
                 20_000,
             ),
         );
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_primary"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(10_000)
+            .with_route_band("responses", 25)
+            .with_reset_unix_seconds(20_000)
+            .with_reset_credits_available(1)
+            .with_stale_penalty(false),
+        ));
 
         let output = run_cli(
             [
@@ -2560,6 +2590,7 @@ exit 42
             "preferred_highest_weight"
         );
         assert_eq!(parsed["accounts"][0]["preferred_next"], true);
+        assert_eq!(parsed["accounts"][0]["reset_credits_available"], 1);
         assert_eq!(parsed["accounts"][0]["next_use"], "preferred");
         assert_eq!(parsed["accounts"][0]["short_pressure"], 25);
         assert_eq!(parsed["accounts"][0]["long_pressure"], 20);
@@ -3519,7 +3550,7 @@ exit 42
                 let request = String::from_utf8_lossy(&buffer[..bytes_read]);
                 assert!(request.starts_with("GET /api/codex/usage HTTP/1.1\r\n"));
                 assert!(request.contains("authorization: Bearer quota-http-access-token\r\n"));
-                let body = r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}}}"#;
+                let body = r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}},"reset_credits":{"available":1}}"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
@@ -3552,6 +3583,7 @@ exit 42
             .unwrap_or_else(|| panic!("{route_band} quota snapshot should be persisted"));
             assert_eq!(snapshot.remaining_headroom(), 75);
             assert_eq!(snapshot.reset_unix_seconds(), Some(2_000));
+            assert_eq!(snapshot.reset_credits_available(), Some(1));
             assert_eq!(snapshot.source(), QuotaSnapshotSource::OpenAiEndpoint);
         }
         let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
@@ -4754,6 +4786,7 @@ exit 42
             ));
             Ok(QuotaRefreshProviderResponse {
                 windows: verified_quota_windows(self.remaining_headroom),
+                reset_credits_available: None,
             })
         }
     }
@@ -4775,6 +4808,7 @@ exit 42
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
             Ok(QuotaRefreshProviderResponse {
                 windows: self.windows.clone(),
+                reset_credits_available: None,
             })
         }
     }
@@ -4801,6 +4835,7 @@ exit 42
             thread::sleep(self.delay);
             Ok(QuotaRefreshProviderResponse {
                 windows: verified_quota_windows(self.remaining_headroom),
+                reset_credits_available: None,
             })
         }
     }
@@ -4851,6 +4886,7 @@ exit 42
             }
             Ok(QuotaRefreshProviderResponse {
                 windows: verified_quota_windows(self.remaining_headroom),
+                reset_credits_available: None,
             })
         }
     }
@@ -4879,6 +4915,7 @@ exit 42
             }
             Ok(QuotaRefreshProviderResponse {
                 windows: verified_quota_windows(self.remaining_headroom),
+                reset_credits_available: None,
             })
         }
     }
@@ -4908,6 +4945,7 @@ exit 42
 
             Ok(QuotaRefreshProviderResponse {
                 windows: verified_quota_windows(self.remaining_headroom),
+                reset_credits_available: None,
             })
         }
     }

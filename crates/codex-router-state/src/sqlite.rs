@@ -30,7 +30,7 @@ use crate::repositories::AffinityRepository;
 use crate::repositories::QuotaSnapshotRepository;
 use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
@@ -312,6 +312,7 @@ impl SqliteStateStore {
         let observed_unix_seconds = u64_to_i64(snapshot.observed_unix_seconds())?;
         let remaining_headroom = u32_to_i64(snapshot.remaining_headroom());
         let reset_unix_seconds = snapshot.reset_unix_seconds().map(u64_to_i64).transpose()?;
+        let reset_credits_available = snapshot.reset_credits_available().map(u32_to_i64);
         let stale_penalty = if snapshot.stale_penalty() {
             1_i64
         } else {
@@ -326,14 +327,16 @@ impl SqliteStateStore {
             .execute(
                 "INSERT INTO quota_snapshots (
                    account_id, source, observed_unix_seconds, route_band,
-                   remaining_headroom, reset_unix_seconds, stale_penalty
+                   remaining_headroom, reset_unix_seconds,
+                   reset_credits_available, stale_penalty
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(account_id, route_band) DO UPDATE SET
                    source = excluded.source,
                    observed_unix_seconds = excluded.observed_unix_seconds,
                    remaining_headroom = excluded.remaining_headroom,
                    reset_unix_seconds = excluded.reset_unix_seconds,
+                   reset_credits_available = excluded.reset_credits_available,
                    stale_penalty = excluded.stale_penalty",
                 params![
                     snapshot.account_id().as_str(),
@@ -342,6 +345,7 @@ impl SqliteStateStore {
                     snapshot.route_band(),
                     remaining_headroom,
                     reset_unix_seconds,
+                    reset_credits_available,
                     stale_penalty,
                 ],
             )
@@ -423,7 +427,8 @@ impl SqliteStateStore {
             .connection
             .query_row(
                 "SELECT account_id, source, observed_unix_seconds, route_band,
-                        remaining_headroom, reset_unix_seconds, stale_penalty
+                        remaining_headroom, reset_unix_seconds,
+                        reset_credits_available, stale_penalty
                    FROM quota_snapshots
                   WHERE account_id = ?1 AND route_band = ?2",
                 params![account_id.as_str(), route_band],
@@ -435,7 +440,8 @@ impl SqliteStateStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?,
                         row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 },
             )
@@ -449,6 +455,7 @@ impl SqliteStateStore {
             route_band,
             remaining_headroom,
             reset_unix_seconds,
+            reset_credits_available,
             stale_penalty,
         )) = row
         else {
@@ -472,6 +479,9 @@ impl SqliteStateStore {
         let reset = reset_unix_seconds
             .map(|value| i64_to_u64(value, &account_id_value, "reset_unix_seconds"))
             .transpose()?;
+        let reset_credits = reset_credits_available
+            .map(|value| i64_to_u32(value, &account_id_value, "reset_credits_available"))
+            .transpose()?;
         let stale = match stale_penalty {
             0 => false,
             1 => true,
@@ -489,6 +499,9 @@ impl SqliteStateStore {
             .with_stale_penalty(stale);
         if let Some(reset) = reset {
             snapshot = snapshot.with_reset_unix_seconds(reset);
+        }
+        if let Some(reset_credits) = reset_credits {
+            snapshot = snapshot.with_reset_credits_available(reset_credits);
         }
 
         Ok(Some(snapshot))
@@ -922,24 +935,32 @@ impl SqliteStateStore {
                 self.apply_v3()?;
                 self.apply_v4()?;
                 self.apply_v5()?;
-                self.apply_v6()
+                self.apply_v6()?;
+                self.apply_v7()
             }
             2 => {
                 self.apply_v3()?;
                 self.apply_v4()?;
                 self.apply_v5()?;
-                self.apply_v6()
+                self.apply_v6()?;
+                self.apply_v7()
             }
             3 => {
                 self.apply_v4()?;
                 self.apply_v5()?;
-                self.apply_v6()
+                self.apply_v6()?;
+                self.apply_v7()
             }
             4 => {
                 self.apply_v5()?;
-                self.apply_v6()
+                self.apply_v6()?;
+                self.apply_v7()
             }
-            5 => self.apply_v6(),
+            5 => {
+                self.apply_v6()?;
+                self.apply_v7()
+            }
+            6 => self.apply_v7(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -963,6 +984,7 @@ impl SqliteStateStore {
                     route_band TEXT NOT NULL,
                     remaining_headroom INTEGER NOT NULL,
                     reset_unix_seconds INTEGER,
+                    reset_credits_available INTEGER,
                     stale_penalty INTEGER NOT NULL,
                     PRIMARY KEY (account_id, route_band)
                 );
@@ -1004,7 +1026,7 @@ impl SqliteStateStore {
                     PRIMARY KEY (affinity_key_hash, route_band, account_id)
                 );
 
-                PRAGMA user_version = 6;
+                PRAGMA user_version = 7;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -1157,6 +1179,19 @@ impl SqliteStateStore {
                 );
 
                 PRAGMA user_version = 6;
+                ",
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn apply_v7(&self) -> Result<(), StateStoreError> {
+        self.connection
+            .execute_batch(
+                "
+                ALTER TABLE quota_snapshots ADD COLUMN reset_credits_available INTEGER;
+                PRAGMA user_version = 7;
                 ",
             )
             .map_err(sqlite_error)?;

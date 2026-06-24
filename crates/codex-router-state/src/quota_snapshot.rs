@@ -47,6 +47,7 @@ pub struct PersistedQuotaSnapshot {
     route_band: String,
     remaining_headroom: u32,
     reset_unix_seconds: Option<u64>,
+    reset_credits_available: Option<u32>,
     stale_penalty: bool,
 }
 
@@ -424,6 +425,7 @@ impl PersistedQuotaSnapshot {
             route_band: String::new(),
             remaining_headroom: 0,
             reset_unix_seconds: None,
+            reset_credits_available: None,
             stale_penalty: true,
         }
     }
@@ -451,6 +453,13 @@ impl PersistedQuotaSnapshot {
     #[must_use]
     pub const fn with_reset_unix_seconds(mut self, reset_unix_seconds: u64) -> Self {
         self.reset_unix_seconds = Some(reset_unix_seconds);
+        self
+    }
+
+    /// Sets provider reset credits available.
+    #[must_use]
+    pub const fn with_reset_credits_available(mut self, reset_credits_available: u32) -> Self {
+        self.reset_credits_available = Some(reset_credits_available);
         self
     }
 
@@ -495,6 +504,12 @@ impl PersistedQuotaSnapshot {
     #[must_use]
     pub const fn reset_unix_seconds(&self) -> Option<u64> {
         self.reset_unix_seconds
+    }
+
+    /// Returns provider reset credits available.
+    #[must_use]
+    pub const fn reset_credits_available(&self) -> Option<u32> {
+        self.reset_credits_available
     }
 
     /// Returns stale penalty status.

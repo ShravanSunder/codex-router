@@ -62,7 +62,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 6);
+        assert_eq!(store.schema_version(), 7);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -78,6 +78,7 @@ mod tests {
                 .with_observed_unix_seconds(100)
                 .with_route_band("responses", 42)
                 .with_reset_unix_seconds(160)
+                .with_reset_credits_available(1)
                 .with_stale_penalty(false);
         if let Err(error) = store.upsert_quota_snapshot(&snapshot) {
             panic!("quota snapshot should persist: {error}");
@@ -445,7 +446,7 @@ mod tests {
             Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 6);
+        assert_eq!(store.schema_version(), 7);
         let selector_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -504,7 +505,7 @@ mod tests {
             Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 6);
+        assert_eq!(store.schema_version(), 7);
         let responses_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",

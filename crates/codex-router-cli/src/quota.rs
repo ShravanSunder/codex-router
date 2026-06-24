@@ -52,6 +52,7 @@ use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
 use serde::Serialize;
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::ArgumentParser;
@@ -291,6 +292,7 @@ impl QuotaRefreshProviderRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaRefreshProviderResponse {
     pub(crate) windows: Vec<QuotaRefreshProviderWindow>,
+    pub(crate) reset_credits_available: Option<u32>,
 }
 
 impl QuotaRefreshProviderResponse {
@@ -370,12 +372,21 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
             .map_err(|error| QuotaCommandError::ProviderRequest {
                 message: error.to_string(),
             })?;
-        let usage = serde_json::from_str::<UsageResponse>(&body).map_err(|error| {
+        let usage_value = serde_json::from_str::<Value>(&body).map_err(|error| {
             QuotaCommandError::ProviderResponse {
                 message: error.to_string(),
             }
         })?;
-        quota_response_for_route_band(&usage, request.route_band())
+        let reset_credits_available = reset_credits_available_from_json(&usage_value);
+        let usage = serde_json::from_value::<UsageResponse>(usage_value).map_err(|error| {
+            QuotaCommandError::ProviderResponse {
+                message: error.to_string(),
+            }
+        })?;
+        quota_response_for_route_band(&usage, request.route_band()).map(|mut response| {
+            response.reset_credits_available = reset_credits_available;
+            response
+        })
     }
 }
 
@@ -505,6 +516,11 @@ where
             .with_stale_penalty(false);
             let snapshot = if let Some(reset_unix_seconds) = effective_window.reset_unix_seconds {
                 snapshot.with_reset_unix_seconds(reset_unix_seconds)
+            } else {
+                snapshot
+            };
+            let snapshot = if let Some(reset_credits_available) = response.reset_credits_available {
+                snapshot.with_reset_credits_available(reset_credits_available)
             } else {
                 snapshot
             };
@@ -793,7 +809,70 @@ fn quota_response_from_window_pair(
         });
     }
 
-    Ok(QuotaRefreshProviderResponse { windows })
+    Ok(QuotaRefreshProviderResponse {
+        windows,
+        reset_credits_available: None,
+    })
+}
+
+fn reset_credits_available_from_json(value: &Value) -> Option<u32> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let normalized_key = normalize_json_key(key);
+                if matches!(
+                    normalized_key.as_str(),
+                    "resetcreditsavailable" | "availableresetcredits"
+                ) {
+                    if let Some(value) = json_u32(child) {
+                        return Some(value);
+                    }
+                }
+                if normalized_key == "resetcredits" {
+                    if let Some(value) = reset_credits_available_from_reset_credits_value(child) {
+                        return Some(value);
+                    }
+                }
+            }
+            object.values().find_map(reset_credits_available_from_json)
+        }
+        Value::Array(values) => values.iter().find_map(reset_credits_available_from_json),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+fn reset_credits_available_from_reset_credits_value(value: &Value) -> Option<u32> {
+    match value {
+        Value::Number(_) | Value::String(_) => json_u32(value),
+        Value::Object(object) => object.iter().find_map(|(key, child)| {
+            let normalized_key = normalize_json_key(key);
+            if matches!(normalized_key.as_str(), "available" | "remaining" | "count") {
+                json_u32(child)
+            } else {
+                reset_credits_available_from_reset_credits_value(child)
+            }
+        }),
+        Value::Array(values) => values
+            .iter()
+            .find_map(reset_credits_available_from_reset_credits_value),
+        Value::Null | Value::Bool(_) => None,
+    }
+}
+
+fn normalize_json_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn json_u32(value: &Value) -> Option<u32> {
+    match value {
+        Value::Number(number) => number.as_u64().and_then(|value| u32::try_from(value).ok()),
+        Value::String(value) => value.trim().parse::<u32>().ok(),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 fn quota_provider_window_from_usage_window(
@@ -878,16 +957,19 @@ fn quota_status_report(
         let selector_input = selector_inputs
             .iter()
             .find(|input| input.account_id() == account.account_id());
+        let snapshot = QuotaSnapshotRepository::load_snapshot_for_route_band(
+            state,
+            account.account_id(),
+            USER_QUOTA_ROUTE_BAND,
+        )?;
+        let reset_credits_available = snapshot
+            .as_ref()
+            .and_then(PersistedQuotaSnapshot::reset_credits_available);
         let display_windows = if let Some(selector_input) = selector_input {
             display_windows_from_selector_input(selector_input)
         } else {
-            QuotaSnapshotRepository::load_snapshot_for_route_band(
-                state,
-                account.account_id(),
-                USER_QUOTA_ROUTE_BAND,
-            )?
-            .map_or_else(Vec::new, |snapshot| {
-                vec![DisplayQuotaWindow::from_snapshot(&snapshot)]
+            snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
+                vec![DisplayQuotaWindow::from_snapshot(snapshot)]
             })
         };
         burn_down_inputs.push(burn_down_input_from_display_windows(
@@ -898,6 +980,7 @@ fn quota_status_report(
             account_label: account.label().to_owned(),
             account_status: account.status().as_str().to_owned(),
             account_id: account.account_id().clone(),
+            reset_credits_available,
             windows: display_windows,
         });
     }
@@ -943,13 +1026,22 @@ fn write_quota_table(
 ) -> Result<(), QuotaCommandError> {
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(["account", "status", "5h", "weekly", "routing", "next use"]);
+    table.set_header([
+        "account",
+        "status",
+        "5h",
+        "weekly",
+        "resets available",
+        "routing",
+        "next use",
+    ]);
     for row in rows {
         table.add_row([
             row.account_label.as_str(),
             row.account_status.as_str(),
             row.short_window.as_str(),
             row.weekly_window.as_str(),
+            row.reset_credits_available.as_str(),
             row.routing.as_str(),
             row.next_use.as_str(),
         ]);
@@ -963,16 +1055,20 @@ fn write_quota_plain(
     stdout: &mut impl Write,
     rows: &[QuotaStatusRow],
 ) -> Result<(), QuotaCommandError> {
-    writeln!(stdout, "account\tstatus\t5h\tweekly\trouting\tnext use")
-        .map_err(QuotaCommandError::Stdout)?;
+    writeln!(
+        stdout,
+        "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use"
+    )
+    .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
             row.account_status,
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
+            row.reset_credits_available,
             row.routing.replace('\n', " "),
             row.next_use,
         )
@@ -1057,6 +1153,7 @@ struct QuotaStatusAccountInput {
     account_label: String,
     account_status: String,
     account_id: AccountId,
+    reset_credits_available: Option<u32>,
     windows: Vec<DisplayQuotaWindow>,
 }
 
@@ -1067,6 +1164,8 @@ struct QuotaStatusRow {
     account_status: String,
     short_window: String,
     weekly_window: String,
+    reset_credits_available: String,
+    reset_credits_available_value: Option<u32>,
     routing: String,
     next_use: String,
     windows: Vec<DisplayQuotaWindow>,
@@ -1107,6 +1206,8 @@ impl QuotaStatusRow {
                 now_unix_seconds,
                 unicode_bars,
             ),
+            reset_credits_available: format_reset_credits(input.reset_credits_available),
+            reset_credits_available_value: input.reset_credits_available,
             routing: format_routing_cell(assessment),
             next_use: format_next_use(assessment).to_owned(),
             windows: input.windows.clone(),
@@ -1225,6 +1326,19 @@ fn quota_bar(percent: u32, unicode: bool) -> String {
     }
 }
 
+fn format_reset_credits(reset_credits_available: Option<u32>) -> String {
+    reset_credits_available.map_or_else(
+        || "-".to_owned(),
+        |credits| {
+            if credits == 1 {
+                "1 available".to_owned()
+            } else {
+                format!("{credits} available")
+            }
+        },
+    )
+}
+
 fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
     let first_line = assessment.routing_reason().human_phrase();
     if let Some(limiting_window) = assessment.limiting_window() {
@@ -1323,6 +1437,7 @@ struct JsonQuotaStatusAccount {
     routing_reason: &'static str,
     routing_weight: Option<u32>,
     preferred_next: bool,
+    reset_credits_available: Option<u32>,
     window_slots: JsonWindowSlots,
     windows: Vec<JsonQuotaWindow>,
 }
@@ -1348,6 +1463,7 @@ impl JsonQuotaStatusAccount {
             routing_reason: routing_reason_json(row.routing_reason),
             routing_weight: row.routing_weight,
             preferred_next: row.preferred_next,
+            reset_credits_available: row.reset_credits_available_value,
             window_slots: JsonWindowSlots::from_windows(&row.windows, now_unix_seconds),
             windows: row
                 .windows

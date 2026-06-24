@@ -358,6 +358,9 @@ Implemented:
 - Quota status table now shows `<percent>% left`, `no data`, `unknown`, `reset
   unknown`, `needs refresh`, `limiting window`, and spec `next use` values:
   `preferred`, `available`, `held`, `blocked`, or `fallback`.
+- Follow-up T4 display slice persists provider reset-credit availability from
+  successful quota refreshes and shows it as `resets available` in table/plain
+  output and `reset_credits_available` in JSON without changing routing.
 - Plain mode now uses ASCII bars (`#`/`-`) instead of Unicode.
 - Human status rows now display the assessment's safe account label rather than
   raw account metadata.

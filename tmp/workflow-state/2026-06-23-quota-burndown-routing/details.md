@@ -1291,6 +1291,50 @@ Remaining before terminal completion:
 - installed-Codex WebSocket e2e
 - implementation review and PR-ready wrapup
 
+## Implementation Checkpoint: T4 Reset Credits Status Display
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan checkpoint.
+
+Checkpoint result:
+complete for reset-credit quota status display.
+
+Evidence:
+
+- Provider quota JSON with `reset_credits.available` is parsed into
+  `QuotaRefreshProviderResponse.reset_credits_available`.
+- Successful quota refresh persists reset credits through
+  `quota_snapshots.reset_credits_available` in SQLite schema v7.
+- `quota status --format table` and `--format plain` render a
+  `resets available` column with `1 available` or `-`.
+- `quota status --format json` emits account-level
+  `reset_credits_available`.
+- Reset credits are display-only in this slice and do not change selector
+  routing, window eligibility, or burn-down scoring.
+- `cargo test -p codex-router-state -- --nocapture`: 18 passed.
+- `cargo test -p codex-router-cli quota_status -- --nocapture`: 5 passed.
+- `cargo test -p codex-router-cli quota_refresh -- --nocapture`: 14 passed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed; auth 13, CLI 62, core 15, proxy 87,
+  quota 4, secret-store 11, selection 21, state 18, test-support 6 passed;
+  2 installed-Codex smoke tests remain ignored by design and require the smoke
+  script gate.
+- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by an
+  existing untouched `clippy::collapsible_if` warning in
+  `crates/codex-router-selection/src/burn_down.rs:610`.
+- `tests/smoke/quota_status_fixture.sh`: exited 0.
+
+Remaining before terminal completion:
+
+- route-native black-box proof for all routed APIs
+- installed-Codex HTTP/SSE e2e
+- installed-Codex WebSocket e2e
+- implementation review and PR-ready wrapup
+
 ## Implementation Checkpoint: T7 Non-Blocking Refresh
 
 Date: 2026-06-23

@@ -340,6 +340,9 @@ Implement:
   labels, no raw account ids, no raw scores, no `pp`, no `bottleneck`, one
   logical row per account, and at most one blank continuation line inside a
   cell.
+- Status persists provider-reported reset credits from quota refresh and renders
+  them as a `resets available` column plus JSON `reset_credits_available`; this
+  is display-only and does not affect route scoring in v1.
 - Plain output uses ASCII bars and the same phrases.
 - JSON output uses the normative flat route-level and account-level schema.
 - Status joins refresh status metadata for stale/needs-refresh notes without
