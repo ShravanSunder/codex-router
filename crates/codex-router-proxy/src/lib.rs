@@ -21,6 +21,8 @@ pub const fn package_name() -> &'static str {
 mod tests {
     use super::package_name;
     use crate::account_selection::AccountDecisionSelector;
+    use crate::account_selection::AsyncAccountDecisionSelector;
+    use crate::account_selection::AsyncRepositoryBackedAccountSelector;
     use crate::account_selection::QuotaAwareAccountSelector;
     use crate::account_selection::QuotaAwareAccountSelectorError;
     use crate::account_selection::QuotaAwareAccountState;
@@ -115,6 +117,7 @@ mod tests {
     use codex_router_state::repositories::AffinityRepository;
     use codex_router_state::repositories::QuotaSnapshotRepository;
     use codex_router_state::repositories::SelectorQuotaRepository;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
     use codex_router_state::sqlite::SqliteStateStore;
     use std::cell::RefCell;
     use std::env;
@@ -1303,6 +1306,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn async_repository_backed_selector_uses_route_specific_quota_snapshots() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_route_band");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_route_specific"),
+            "route-specific",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_status_specs(
+            &state,
+            &account,
+            "responses",
+            &[
+                (18_000, 0, true, SelectorQuotaWindowStatus::Ineligible),
+                (604_800, 0, false, SelectorQuotaWindowStatus::Ineligible),
+            ],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &account,
+            "models",
+            &[(18_000, 10, true), (604_800, 10, false)],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+
+        let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
+        let selected = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Get, "/v1/models"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("models request should select from models quota: {error}"),
+        };
+        assert_eq!(selected.account_id(), account.account_id());
+
+        assert_eq!(
+            selector
+                .select_upstream_account(
+                    &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                    TokenGeneration::new(1),
+                    None,
+                )
+                .await,
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+            })
+        );
+    }
+
     #[test]
     fn repository_backed_selector_weights_weekly_pressure_over_short_window_headroom() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_weekly_pressure");
@@ -1470,6 +1534,60 @@ mod tests {
             TokenGeneration::new(1),
             Some(&affinity_secret),
         ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("affinity owner should select: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), beta.account_id());
+        assert_eq!(selected.selection_reason(), "previous_response_affinity");
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_affinity_owner_bypasses_hold_and_weighted_choice() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_affinity_owner_hit");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
+            &state,
+            "resp_beta",
+            &affinity_secret,
+            beta.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+
+        let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
+        let selected = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_body(br#"{"previous_response_id":"resp_beta"}"#.to_vec()),
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+        {
             Ok(selected) => selected,
             Err(error) => panic!("affinity owner should select: {error}"),
         };
@@ -1835,6 +1953,71 @@ mod tests {
             TokenGeneration::new(1),
             None,
         ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("second request should reuse held account: {error}"),
+        };
+
+        assert_eq!(first.account_id(), alpha.account_id());
+        assert_eq!(first.selection_reason(), "preferred_highest_weight");
+        assert_eq!(second.account_id(), alpha.account_id());
+        assert_eq!(second.selection_reason(), "account_hold_cooldown");
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_reuses_held_account_inside_cooldown() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_hold_cooldown");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let now = Arc::new(Mutex::new(test_unix_seconds()));
+        let clock_now = Arc::clone(&now);
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            120,
+            Arc::new(move || *lock_test_mutex(&clock_now, "test clock")),
+        );
+
+        let first = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("first request should select account: {error}"),
+        };
+        let second = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
             Ok(selected) => selected,
             Err(error) => panic!("second request should reuse held account: {error}"),
         };

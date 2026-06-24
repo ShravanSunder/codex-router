@@ -31,6 +31,9 @@ use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
+use codex_router_state::sqlite::AsyncAffinityRepository;
+use codex_router_state::sqlite::AsyncSelectorQuotaRepository;
+use futures_util::future::BoxFuture;
 use thiserror::Error;
 
 use crate::http_sse::HttpProxyError;
@@ -103,6 +106,17 @@ pub trait AccountDecisionSelector {
         token_generation: TokenGeneration,
         affinity_secret: Option<&RouterAffinityHashSecret>,
     ) -> Result<SelectedAccountDecision, HttpProxyError>;
+}
+
+/// Async account selector boundary for Tokio proxy runtime callers.
+pub trait AsyncAccountDecisionSelector {
+    /// Selects account material for one request without blocking the async runtime.
+    fn select_upstream_account<'a>(
+        &'a self,
+        request: &'a HttpProxyRequest,
+        token_generation: TokenGeneration,
+        affinity_secret: Option<&'a RouterAffinityHashSecret>,
+    ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>>;
 }
 
 /// Account state consumed by the quota-aware proxy selector adapter.
@@ -196,6 +210,18 @@ where
     clock: UnixClock,
 }
 
+/// Async selector that hydrates account state from repositories at request time.
+pub struct AsyncRepositoryBackedAccountSelector<'a, R>
+where
+    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + Sync,
+{
+    state_repository: &'a R,
+    weighted_selectors: RouteBandWeightedSelectors,
+    account_holds: RouteBandAccountHolds,
+    minimum_account_hold_cooldown_seconds: u64,
+    clock: UnixClock,
+}
+
 impl<'a, R> RepositoryBackedAccountSelector<'a, R>
 where
     R: AffinityRepository + SelectorQuotaRepository,
@@ -229,6 +255,57 @@ where
     }
 
     /// Creates a repository-backed selector with process-lifetime runtime state.
+    #[must_use]
+    pub fn new_with_runtime(
+        state_repository: &'a R,
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        minimum_account_hold_cooldown_seconds: u64,
+        clock: UnixClock,
+    ) -> Self {
+        Self {
+            state_repository,
+            weighted_selectors,
+            account_holds,
+            minimum_account_hold_cooldown_seconds,
+            clock,
+        }
+    }
+}
+
+impl<'a, R> AsyncRepositoryBackedAccountSelector<'a, R>
+where
+    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + Sync,
+{
+    /// Creates an async repository-backed selector.
+    #[must_use]
+    pub fn new(state_repository: &'a R) -> Self {
+        Self {
+            state_repository,
+            weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
+            account_holds: Arc::new(Mutex::new(HashMap::new())),
+            minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            clock: Arc::new(current_unix_seconds),
+        }
+    }
+
+    /// Creates an async repository-backed selector with process-lifetime weighted state.
+    #[must_use]
+    pub fn new_with_weighted_selector(
+        state_repository: &'a R,
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+    ) -> Self {
+        Self {
+            state_repository,
+            weighted_selectors,
+            account_holds,
+            minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            clock: Arc::new(current_unix_seconds),
+        }
+    }
+
+    /// Creates an async repository-backed selector with process-lifetime runtime state.
     #[must_use]
     pub fn new_with_runtime(
         state_repository: &'a R,
@@ -342,6 +419,125 @@ where
             self.minimum_account_hold_cooldown_seconds,
             now_unix_seconds,
         )
+    }
+}
+
+impl<R> AsyncAccountDecisionSelector for AsyncRepositoryBackedAccountSelector<'_, R>
+where
+    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + Sync,
+{
+    fn select_upstream_account<'a>(
+        &'a self,
+        request: &'a HttpProxyRequest,
+        _token_generation: TokenGeneration,
+        affinity_secret: Option<&'a RouterAffinityHashSecret>,
+    ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
+        Box::pin(async move {
+            let route_kind = route_kind_for_request(request)?;
+            let route_band = route_kind.route_band();
+            let now_unix_seconds = (self.clock)();
+            let selector_inputs = AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+                self.state_repository,
+                route_band.as_str(),
+                now_unix_seconds,
+            )
+            .await
+            .map_err(|_error| HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::StateUnavailable,
+            })?;
+            let selector_accounts = selector_inputs
+                .iter()
+                .map(account_input_from_selector_input)
+                .collect::<Vec<_>>();
+            let assessment_input = BurnDownRouteBandAssessmentInput::new(
+                route_band,
+                now_unix_seconds,
+                selector_accounts,
+            );
+            let assessment = assess_route_band(assessment_input);
+            if assessment.selected_pool() == SelectedPool::None {
+                return Err(HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+                });
+            }
+
+            let affinity_owner_account_id = if route_kind.previous_response_affinity_capable() {
+                match previous_response_id(request)? {
+                    Some(previous_response_id) => {
+                        let affinity_secret = affinity_secret.ok_or(HttpProxyError::Selection {
+                            reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+                        })?;
+                        let affinity_key_hash =
+                            hash_previous_response_id(affinity_secret, &previous_response_id)
+                                .map_err(|_error| HttpProxyError::Selection {
+                                    reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+                                })?;
+                        let owner_lookup = AsyncAffinityRepository::load_previous_response_owner(
+                            self.state_repository,
+                            &affinity_key_hash,
+                            route_band.as_str(),
+                        )
+                        .await
+                        .map_err(|_error| HttpProxyError::Selection {
+                            reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                        })?;
+                        Some(account_id_from_affinity_owner_lookup(owner_lookup)?)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            let mut weighted_selectors =
+                self.weighted_selectors
+                    .lock()
+                    .map_err(|_error| HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+                    })?;
+            let weighted_selector = weighted_selectors
+                .entry(route_band.as_str().to_owned())
+                .or_insert_with(WeightedDeficitSelector::default);
+            let mut account_holds =
+                self.account_holds
+                    .lock()
+                    .map_err(|_error| HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+                    })?;
+
+            if let Some(owner_account_id) = affinity_owner_account_id {
+                return select_affinity_owner(
+                    route_band,
+                    &owner_account_id,
+                    &assessment,
+                    &mut account_holds,
+                    now_unix_seconds,
+                );
+            }
+
+            select_from_burn_down_assessment(
+                route_band.as_str(),
+                &assessment,
+                weighted_selector,
+                &mut account_holds,
+                self.minimum_account_hold_cooldown_seconds,
+                now_unix_seconds,
+            )
+        })
+    }
+}
+
+fn account_id_from_affinity_owner_lookup(
+    owner_lookup: PreviousResponseAffinityOwnerLookup,
+) -> Result<AccountId, HttpProxyError> {
+    match owner_lookup {
+        PreviousResponseAffinityOwnerLookup::Found(owner) => Ok(owner.account_id().clone()),
+        PreviousResponseAffinityOwnerLookup::Missing => Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing,
+        }),
+        PreviousResponseAffinityOwnerLookup::Ambiguous => Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+        }),
     }
 }
 

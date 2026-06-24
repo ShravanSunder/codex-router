@@ -138,6 +138,7 @@ dependencies = [
  "codex-router-secret-store",
  "codex-router-selection",
  "codex-router-state",
+ "futures-util",
  "http",
  "httparse",
  "hyper",
