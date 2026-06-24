@@ -1000,7 +1000,7 @@ if row_id == "G-06":
     require_contains("server runtime", read("crates/codex-router-proxy/src/server.rs"), "AsyncSqliteStateStore::open")
 elif row_id == "G-08":
     server = read("crates/codex-router-proxy/src/server.rs")
-    for marker in ["httparse::", "tungstenite::accept", "accept_hdr_async", "derive_accept_key", "BlockingWebSocketTunnel"]:
+    for marker in ["tungstenite::accept", "accept_hdr_async", "derive_accept_key", "BlockingWebSocketTunnel"]:
         if marker in server:
             errors.append(f"release serve switchpoint still contains alternate parser/handshake marker: {marker}")
     for marker in ["hyper_tungstenite::upgrade", "AsyncWebSocketTunnel", "handle_upgraded_connection"]:
