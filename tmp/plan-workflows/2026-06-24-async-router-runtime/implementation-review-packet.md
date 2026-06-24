@@ -101,7 +101,7 @@ Five-minute soak artifact:
 - router_websocket_registry.active_sessions=0, high_water_sessions=3,
   registered_sessions=3, closed_sessions=3,
   completed_response_sessions=7,
-  forwarded_upstream_messages=45,
+  forwarded_upstream_messages=51,
   completed_session_forwarded_upstream_message_counts=[2,2,2,5,15,15,18],
   final_session_forwarded_upstream_message_counts=[16,16,19],
   handled_connections=3.

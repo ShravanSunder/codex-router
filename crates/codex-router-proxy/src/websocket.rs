@@ -1004,6 +1004,7 @@ mod async_forwarding_tests {
     use super::WebSocketRevocationRegistry;
     use super::WebSocketTunnelError;
     use super::forward_duplex_until_complete;
+    use bytes::Bytes;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
     use tokio::io::duplex;
@@ -1089,6 +1090,74 @@ mod async_forwarding_tests {
         assert!(
             matches!(router_result, Err(WebSocketTunnelError::Transport(_))),
             "reset before the second turn completes must be reported, got {router_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_after_idle_control_frame_remains_clean_after_completion() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let mut router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let mut router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                &mut router_local_websocket,
+                &mut router_upstream_websocket,
+                &session,
+                10,
+                None,
+                None,
+                &revocation,
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(r#"{"type":"response.completed","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("completion should send: {error}"));
+            match client_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("client should receive completion: {error}"),
+                None => panic!("client should receive completion"),
+            }
+
+            client_websocket
+                .send(Message::Ping(Bytes::from_static(b"idle")))
+                .await
+                .unwrap_or_else(|error| panic!("idle ping should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(Message::Ping(_))) => {}
+                Some(Ok(message)) => panic!("upstream should receive ping, got {message:?}"),
+                Some(Err(error)) => panic!("upstream ping should be valid: {error}"),
+                None => panic!("upstream should receive idle ping"),
+            }
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "idle control frame after completion must not make reset look like a failed turn, got {router_result:?}"
         );
     }
 }
@@ -1488,11 +1557,15 @@ where
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
                 };
                 let is_close = matches!(local_message, Message::Close(_));
+                let is_application_frame =
+                    matches!(local_message, Message::Text(_) | Message::Binary(_));
                 upstream_websocket.send(local_message).await?;
                 if is_close {
                     return Ok(());
                 }
-                response_outstanding = true;
+                if is_application_frame {
+                    response_outstanding = true;
+                }
             }
             upstream_message = upstream_websocket.next() => {
                 let Some(upstream_message) = upstream_message else {

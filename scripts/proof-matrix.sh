@@ -265,17 +265,28 @@ artifact = json.loads(artifact_path.read_text())
 receipt = json.loads(receipt_path.read_text())
 
 errors: list[str] = []
-if artifact.get("git_head") != receipt.get("git_head"):
-    import subprocess
+import subprocess
 
-    source_paths = [
-        "crates/codex-router-test-support/src/installed_codex.rs",
-        "tests/smoke/installed_codex_mock.sh",
-        "crates/codex-router-proxy/src/websocket.rs",
-        "crates/codex-router-proxy/src/server.rs",
-        "crates/codex-router-cli/src/lib.rs",
-        "scripts/proof-matrix.sh",
-    ]
+source_paths = [
+    "crates/codex-router-test-support/src/installed_codex.rs",
+    "tests/smoke/installed_codex_mock.sh",
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-cli/src/lib.rs",
+    "scripts/proof-matrix.sh",
+]
+
+dirty_worktree = subprocess.run(
+    ["git", "diff", "--quiet", "HEAD", "--", *source_paths],
+    check=False,
+)
+dirty_index = subprocess.run(
+    ["git", "diff", "--cached", "--quiet", "--", *source_paths],
+    check=False,
+)
+if dirty_worktree.returncode != 0 or dirty_index.returncode != 0:
+    errors.append("guarded proof source paths are dirty; commit or revert them before accepting E-row proof")
+if artifact.get("git_head") != receipt.get("git_head"):
     diff_result = subprocess.run(
         ["git", "diff", "--quiet", f"{artifact.get('git_head')}..{receipt.get('git_head')}", "--", *source_paths],
         check=False,
