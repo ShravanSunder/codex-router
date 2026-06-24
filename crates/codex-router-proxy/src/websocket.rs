@@ -691,6 +691,8 @@ pub struct WebSocketRevocationRegistry {
     connections: Arc<Mutex<HashMap<TokenGeneration, Vec<TcpStream>>>>,
     cancellations: Arc<Mutex<HashMap<TokenGeneration, Vec<WebSocketCancellationEntry>>>>,
     stats: Arc<Mutex<WebSocketRegistryStats>>,
+    forwarded_upstream_messages_by_session: Arc<Mutex<HashMap<u64, usize>>>,
+    completed_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
     report_file: Arc<Mutex<Option<PathBuf>>>,
 }
 
@@ -708,10 +710,11 @@ struct WebSocketRegistryStats {
     registered_sessions: usize,
     closed_sessions: usize,
     completed_response_sessions: usize,
+    forwarded_upstream_messages: usize,
 }
 
 /// Redacted snapshot of WebSocket session registry counters.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WebSocketRegistrySnapshot {
     /// Currently active async WebSocket sessions.
     pub active_sessions: usize,
@@ -721,8 +724,12 @@ pub struct WebSocketRegistrySnapshot {
     pub registered_sessions: usize,
     /// Total async WebSocket sessions that have dropped their registry handle.
     pub closed_sessions: usize,
-    /// Total async WebSocket sessions that forwarded a response.completed event.
+    /// Total response.completed events forwarded by async WebSocket sessions.
     pub completed_response_sessions: usize,
+    /// Total upstream-to-local WebSocket messages written to local clients.
+    pub forwarded_upstream_messages: usize,
+    /// Upstream-to-local write counts captured when each response.completed event is observed.
+    pub completed_session_forwarded_upstream_message_counts: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -798,6 +805,11 @@ impl WebSocketRevocationRegistry {
                 registered_sessions: stats.registered_sessions,
                 closed_sessions: stats.closed_sessions,
                 completed_response_sessions: stats.completed_response_sessions,
+                forwarded_upstream_messages: stats.forwarded_upstream_messages,
+                completed_session_forwarded_upstream_message_counts: self
+                    .completed_session_forwarded_upstream_message_counts
+                    .lock()
+                    .map_or_else(|_| Vec::new(), |counts| counts.clone()),
             },
         )
     }
@@ -829,12 +841,37 @@ impl WebSocketRevocationRegistry {
             stats.active_sessions = stats.active_sessions.saturating_sub(1);
             stats.closed_sessions = stats.closed_sessions.saturating_add(1);
         }
+        if let Ok(mut forwarded_by_session) = self.forwarded_upstream_messages_by_session.lock() {
+            forwarded_by_session.remove(&session_id);
+        }
         self.write_report_file();
     }
 
-    fn note_response_completed(&self) {
+    fn note_upstream_message_forwarded(&self, session_id: u64) {
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.forwarded_upstream_messages = stats.forwarded_upstream_messages.saturating_add(1);
+        }
+        if let Ok(mut forwarded_by_session) = self.forwarded_upstream_messages_by_session.lock() {
+            let count = forwarded_by_session.entry(session_id).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+
+    fn note_response_completed(&self, session_id: u64) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.completed_response_sessions = stats.completed_response_sessions.saturating_add(1);
+        }
+        let forwarded_count = self
+            .forwarded_upstream_messages_by_session
+            .lock()
+            .ok()
+            .and_then(|forwarded_by_session| forwarded_by_session.get(&session_id).copied())
+            .unwrap_or_default();
+        if let Ok(mut counts) = self
+            .completed_session_forwarded_upstream_message_counts
+            .lock()
+        {
+            counts.push(forwarded_count);
         }
         self.write_report_file();
     }
@@ -853,12 +890,16 @@ impl WebSocketRevocationRegistry {
         }
         let snapshot = self.snapshot();
         let report = serde_json::json!({
+            "schema_version": 1,
+            "handled_connections": null,
             "websocket_registry": {
                 "active_sessions": snapshot.active_sessions,
                 "high_water_sessions": snapshot.high_water_sessions,
                 "registered_sessions": snapshot.registered_sessions,
                 "closed_sessions": snapshot.closed_sessions,
                 "completed_response_sessions": snapshot.completed_response_sessions,
+                "forwarded_upstream_messages": snapshot.forwarded_upstream_messages,
+                "completed_session_forwarded_upstream_message_counts": snapshot.completed_session_forwarded_upstream_message_counts,
             },
         });
         if let Ok(rendered) = serde_json::to_vec_pretty(&report) {
@@ -910,7 +951,12 @@ impl WebSocketSessionRegistration {
     }
 
     fn note_response_completed(&self) {
-        self.registry.note_response_completed();
+        self.registry.note_response_completed(self.session_id);
+    }
+
+    fn note_upstream_message_forwarded(&self) {
+        self.registry
+            .note_upstream_message_forwarded(self.session_id);
     }
 }
 
@@ -1369,6 +1415,7 @@ where
                     affinity_owner_context,
                 );
                 local_websocket.send(upstream_message).await?;
+                session_registration.note_upstream_message_forwarded();
                 if let (Some(recorder), Some(owner)) =
                     (affinity_owner_recorder.clone(), affinity_owner)
                 {
@@ -1377,10 +1424,10 @@ where
                     });
                 }
                 upstream_message_count = upstream_message_count.saturating_add(1);
-                if is_close || is_completed || upstream_message_count >= max_upstream_messages {
-                    if is_completed {
-                        session_registration.note_response_completed();
-                    }
+                if is_completed {
+                    session_registration.note_response_completed();
+                }
+                if is_close || upstream_message_count >= max_upstream_messages {
                     return Ok(());
                 }
             }
@@ -1399,14 +1446,13 @@ fn forward_upstream_response(
     for _ in 0..max_upstream_messages {
         let upstream_message = upstream_websocket.read()?;
         let is_close = matches!(upstream_message, Message::Close(_));
-        let is_completed = is_response_completed(&upstream_message);
         record_websocket_affinity_owner(
             &upstream_message,
             affinity_owner_recorder,
             affinity_owner_context,
         );
         local_websocket.send(upstream_message)?;
-        if is_close || is_completed {
+        if is_close {
             return Ok(());
         }
     }

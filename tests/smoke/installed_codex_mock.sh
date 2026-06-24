@@ -66,14 +66,6 @@ if [[ "${scenario}" =~ ^(concurrent|soak)$ && "${transport}" != "websocket" ]]; 
   exit 2
 fi
 
-if [[ "${scenario}" == "concurrent" ]]; then
-  test_filter="three_codex_websocket_concurrent_e2e_"
-elif [[ "${scenario}" == "soak" ]]; then
-  test_filter="three_codex_websocket_soak_"
-elif [[ "${scenario}" == "all" && "${transport}" == "websocket" ]]; then
-  test_filter="installed_codex_websocket_"
-fi
-
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 cd "${repo_root}"
@@ -91,10 +83,25 @@ fi
 
 "${cargo_command[@]}" build -p codex-router-cli --bin codex-router
 
-"${cargo_command[@]}" test \
-  -p codex-router-test-support \
-  "${test_filter}" \
-  -- \
-  --ignored \
-  --nocapture \
-  --test-threads=1
+run_test_filter() {
+  local filter="$1"
+  "${cargo_command[@]}" test \
+    -p codex-router-test-support \
+    "${filter}" \
+    -- \
+    --ignored \
+    --nocapture \
+    --test-threads=1
+}
+
+if [[ "${scenario}" == "concurrent" ]]; then
+  run_test_filter "three_codex_websocket_concurrent_e2e_"
+elif [[ "${scenario}" == "soak" ]]; then
+  run_test_filter "three_codex_websocket_soak_"
+elif [[ "${scenario}" == "all" && "${transport}" == "websocket" ]]; then
+  run_test_filter "installed_codex_websocket_"
+  run_test_filter "three_codex_websocket_concurrent_e2e_"
+  run_test_filter "three_codex_websocket_soak_"
+else
+  run_test_filter "${test_filter}"
+fi

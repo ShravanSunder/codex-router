@@ -1,6 +1,7 @@
 //! Installed Codex smoke harness.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::BufRead;
@@ -405,7 +406,6 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
         audit_path,
         max_websocket_upstream_messages: config.router_max_upstream_messages,
         max_connections: config.router_max_connections,
-        exit_after_websocket_completed_sessions: None,
         websocket_registry_report_file: registry_report_path.clone(),
     })?;
 
@@ -481,6 +481,7 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
         let output = join_result(handle, &format!("installed Codex client {client_index}"))?;
         outputs.push(output);
     }
+    let upstream_result = upstream.join()?;
     let registry_report = registry_report_path
         .as_deref()
         .map(|path| {
@@ -491,18 +492,21 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
             )
         })
         .transpose()?;
+    let socket_cleanup = observe_router_socket_cleanup(router_process.observation.pid)?;
     let router_process = router_process.stop("three-client router process")?;
-    let upstream_result = upstream.join()?;
     assert_concurrent_websocket_contract(config, &upstream_result, registry_report.as_ref())?;
-    let transcript_path = write_redacted_three_websocket_transcript(
-        config.artifact_mode,
-        &codex_version,
-        &router_process,
-        registry_report.as_ref(),
-        &upstream_result,
-        &outputs,
-        &seed,
-    )?;
+    socket_cleanup.assert_no_leaked_sessions()?;
+    let transcript_path =
+        write_redacted_three_websocket_transcript(&ThreeWebSocketTranscriptInput {
+            mode: config.artifact_mode,
+            codex_version: &codex_version,
+            router_process: &router_process,
+            registry_report: registry_report.as_ref(),
+            upstream: &upstream_result,
+            socket_cleanup: &socket_cleanup,
+            outputs: &outputs,
+            seed: &seed,
+        })?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
 }
@@ -554,6 +558,19 @@ fn assert_concurrent_websocket_contract(
                 upstream.session_event_counts
             ));
         }
+        if !upstream.multi_step_interleave_completed {
+            return Err("soak did not complete a multi-step WebSocket interleave".to_owned());
+        }
+        if upstream.multi_step_followup_frame_count == 0 {
+            return Err(
+                "soak did not observe a follow-up local frame before completion".to_owned(),
+            );
+        }
+        if !upstream.multi_step_completed_before_overlap_end {
+            return Err(
+                "multi-step WebSocket interleave did not complete before overlap ended".to_owned(),
+            );
+        }
     }
     if config.capture_registry_report {
         let registry_report =
@@ -594,6 +611,40 @@ fn assert_concurrent_websocket_contract(
             return Err(format!(
                 "router registry completed_response_sessions={} was less than expected sessions {}",
                 registry_report.completed_response_sessions, config.upstream.expected_sessions
+            ));
+        }
+        if registry_report
+            .completed_session_forwarded_upstream_message_counts
+            .len()
+            < config.upstream.expected_sessions
+        {
+            return Err(format!(
+                "router registry completed-session forwarded counts {:?} had fewer entries than expected sessions {}",
+                registry_report.completed_session_forwarded_upstream_message_counts,
+                config.upstream.expected_sessions
+            ));
+        }
+        let mut sorted_forwarded_counts = registry_report
+            .completed_session_forwarded_upstream_message_counts
+            .clone();
+        sorted_forwarded_counts.sort_unstable_by(|left, right| right.cmp(left));
+        if sorted_forwarded_counts
+            .iter()
+            .take(config.upstream.expected_sessions)
+            .any(|count| *count < 3)
+        {
+            return Err(format!(
+                "router registry completed-session forwarded counts {:?} did not prove three sessions with at least three local writes",
+                registry_report.completed_session_forwarded_upstream_message_counts
+            ));
+        }
+        if registry_report.forwarded_upstream_messages
+            < config.upstream.expected_sessions.saturating_mul(3)
+        {
+            return Err(format!(
+                "router registry forwarded_upstream_messages={} was less than expected minimum {}",
+                registry_report.forwarded_upstream_messages,
+                config.upstream.expected_sessions.saturating_mul(3)
             ));
         }
     }
@@ -925,7 +976,6 @@ fn start_router_process(
         audit_path,
         max_websocket_upstream_messages: 4,
         max_connections: 64,
-        exit_after_websocket_completed_sessions: None,
         websocket_registry_report_file: None,
     })
 }
@@ -939,7 +989,6 @@ struct RouterProcessStartOptions {
     audit_path: PathBuf,
     max_websocket_upstream_messages: usize,
     max_connections: usize,
-    exit_after_websocket_completed_sessions: Option<usize>,
     websocket_registry_report_file: Option<PathBuf>,
 }
 
@@ -971,14 +1020,6 @@ fn start_router_process_with_options(
         "--audit-file".to_owned(),
         options.audit_path.display().to_string(),
     ];
-    if let Some(exit_after_websocket_completed_sessions) =
-        options.exit_after_websocket_completed_sessions
-    {
-        argv.extend([
-            "--exit-after-websocket-completed-sessions".to_owned(),
-            exit_after_websocket_completed_sessions.to_string(),
-        ]);
-    }
     if let Some(report_file) = options.websocket_registry_report_file {
         argv.extend([
             "--websocket-registry-report-file".to_owned(),
@@ -1552,6 +1593,8 @@ struct RouterWebSocketRegistryReport {
     registered_sessions: usize,
     closed_sessions: usize,
     completed_response_sessions: usize,
+    forwarded_upstream_messages: usize,
+    completed_session_forwarded_upstream_message_counts: Vec<usize>,
 }
 
 impl RouterWebSocketRegistryReport {
@@ -1571,6 +1614,12 @@ impl RouterWebSocketRegistryReport {
         let registry = value
             .get("websocket_registry")
             .ok_or_else(|| "router websocket registry report was missing registry".to_owned())?;
+        let schema_version = required_usize_field(&value, "schema_version")?;
+        if schema_version != 1 {
+            return Err(format!(
+                "router websocket registry report schema_version={schema_version}, expected 1"
+            ));
+        }
         Ok(Self {
             handled_connections: optional_usize_field(&value, "handled_connections")?,
             active_sessions: required_usize_field(registry, "active_sessions")?,
@@ -1580,6 +1629,14 @@ impl RouterWebSocketRegistryReport {
             completed_response_sessions: required_usize_field(
                 registry,
                 "completed_response_sessions",
+            )?,
+            forwarded_upstream_messages: required_usize_field(
+                registry,
+                "forwarded_upstream_messages",
+            )?,
+            completed_session_forwarded_upstream_message_counts: required_usize_array_field(
+                registry,
+                "completed_session_forwarded_upstream_message_counts",
             )?,
         })
     }
@@ -1630,12 +1687,32 @@ fn optional_usize_field(value: &Value, field: &'static str) -> Result<Option<usi
     let Some(raw) = value.get(field) else {
         return Ok(None);
     };
+    if raw.is_null() {
+        return Ok(None);
+    }
     let raw = raw
         .as_u64()
         .ok_or_else(|| format!("router websocket registry report field {field} was not numeric"))?;
     usize::try_from(raw)
         .map(Some)
         .map_err(|_| format!("router websocket registry report field {field} overflowed usize"))
+}
+
+fn required_usize_array_field(value: &Value, field: &'static str) -> Result<Vec<usize>, String> {
+    let raw = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("router websocket registry report missing numeric array {field}"))?;
+    raw.iter()
+        .map(|item| {
+            let raw = item.as_u64().ok_or_else(|| {
+                format!("router websocket registry report field {field} contained non-number")
+            })?;
+            usize::try_from(raw).map_err(|_| {
+                format!("router websocket registry report field {field} overflowed usize")
+            })
+        })
+        .collect()
 }
 
 impl RouterAuditObservation {
@@ -1806,14 +1883,19 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
     Ok(transcript_path)
 }
 
+struct ThreeWebSocketTranscriptInput<'a> {
+    mode: &'a str,
+    codex_version: &'a str,
+    router_process: &'a RouterProcessObservation,
+    registry_report: Option<&'a RouterWebSocketRegistryReport>,
+    upstream: &'a ConcurrentWebSocketTranscript,
+    socket_cleanup: &'a RouterSocketCleanupObservation,
+    outputs: &'a [Output],
+    seed: &'a SmokeSeed,
+}
+
 fn write_redacted_three_websocket_transcript(
-    mode: &str,
-    codex_version: &str,
-    router_process: &RouterProcessObservation,
-    registry_report: Option<&RouterWebSocketRegistryReport>,
-    upstream: &ConcurrentWebSocketTranscript,
-    outputs: &[Output],
-    seed: &SmokeSeed,
+    input: &ThreeWebSocketTranscriptInput<'_>,
 ) -> Result<PathBuf, String> {
     let artifact_dir = workspace_root()?.join("tmp").join("smoke");
     fs::create_dir_all(&artifact_dir).map_err(|error| {
@@ -1827,7 +1909,8 @@ fn write_redacted_three_websocket_transcript(
         std::process::id(),
         timestamp_millis()
     ));
-    let statuses = outputs
+    let statuses = input
+        .outputs
         .iter()
         .map(|output| {
             serde_json::json!({
@@ -1838,54 +1921,123 @@ fn write_redacted_three_websocket_transcript(
         })
         .collect::<Vec<_>>();
     let payload = serde_json::json!({
-        "mode": mode,
-        "codex_version": codex_version.trim(),
+        "git_head": current_git_head()?,
+        "mode": input.mode,
+        "codex_version": input.codex_version.trim(),
         "router_process": {
-            "binary_path": router_process.binary_path.display().to_string(),
-            "pid": router_process.pid,
-            "argv": router_process.argv,
-            "listener": router_process.listener,
-            "readiness_line": router_process.readiness_line,
-            "cleanup_result": router_process.cleanup_result,
+            "binary_path": input.router_process.binary_path.display().to_string(),
+            "pid": input.router_process.pid,
+            "argv": input.router_process.argv,
+            "listener": input.router_process.listener,
+            "readiness_line": input.router_process.readiness_line,
+            "cleanup_result": input.router_process.cleanup_result,
             "spawned_real_serve_child": true,
         },
-        "router_websocket_registry": registry_report.map(|report| serde_json::json!({
+        "router_websocket_registry": input.registry_report.map(|report| serde_json::json!({
             "handled_connections": report.handled_connections,
             "active_sessions": report.active_sessions,
             "high_water_sessions": report.high_water_sessions,
             "registered_sessions": report.registered_sessions,
             "closed_sessions": report.closed_sessions,
             "completed_response_sessions": report.completed_response_sessions,
+            "forwarded_upstream_messages": report.forwarded_upstream_messages,
+            "completed_session_forwarded_upstream_message_counts": report.completed_session_forwarded_upstream_message_counts,
         })),
         "clients": {
-            "count": outputs.len(),
-            "all_success": outputs.iter().all(|output| output.status.success()),
+            "count": input.outputs.len(),
+            "all_success": input.outputs.iter().all(|output| output.status.success()),
             "statuses": statuses,
         },
         "upstream": {
-            "expected_sessions": upstream.expected_sessions,
-            "completed_sessions": upstream.completed_sessions,
-            "final_active_sessions": upstream.final_active_sessions,
-            "active_high_water": upstream.active_high_water,
-            "overlap_proven": upstream.active_high_water >= upstream.expected_sessions,
-            "overlap_started_unix_ms": upstream.overlap_started_unix_ms,
-            "overlap_completed_unix_ms": upstream.overlap_completed_unix_ms,
-            "overlap_duration_ms": upstream.overlap_duration_ms,
-            "hold_duration_ms": upstream.hold_duration.as_millis(),
-            "non_prewarm_session_count": upstream.non_prewarm_session_count,
-            "session_frame_counts": upstream.session_frame_counts,
-            "session_event_counts": upstream.session_event_counts,
-            "http_probe_count": upstream.http_probe_count,
+            "expected_sessions": input.upstream.expected_sessions,
+            "completed_sessions": input.upstream.completed_sessions,
+            "final_active_sessions": input.upstream.final_active_sessions,
+            "active_high_water": input.upstream.active_high_water,
+            "overlap_proven": input.upstream.active_high_water >= input.upstream.expected_sessions,
+            "overlap_started_unix_ms": input.upstream.overlap_started_unix_ms,
+            "overlap_completed_unix_ms": input.upstream.overlap_completed_unix_ms,
+            "overlap_duration_ms": input.upstream.overlap_duration_ms,
+            "hold_duration_ms": input.upstream.hold_duration.as_millis(),
+            "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
+            "session_frame_counts": input.upstream.session_frame_counts,
+            "session_event_counts": input.upstream.session_event_counts,
+            "http_probe_count": input.upstream.http_probe_count,
+            "multi_step_interleave_completed": input.upstream.multi_step_interleave_completed,
+            "multi_step_followup_frame_count": input.upstream.multi_step_followup_frame_count,
+            "multi_step_completed_before_overlap_end": input.upstream.multi_step_completed_before_overlap_end,
         },
-        "shared_router_pid": router_process.pid,
-        "quota_selected_account_safe_label": seed.expected_account_label,
+        "socket_cleanup": {
+            "lsof_exit_status": input.socket_cleanup.lsof_exit_status,
+            "tcp_line_count": input.socket_cleanup.tcp_line_count,
+            "established_count": input.socket_cleanup.established_count,
+            "close_wait_count": input.socket_cleanup.close_wait_count,
+            "raw_state_counts": input.socket_cleanup.raw_state_counts,
+        },
+        "shared_router_pid": input.router_process.pid,
+        "quota_selected_account_safe_label": input.seed.expected_account_label,
     });
     let rendered = serde_json::to_string_pretty(&payload)
         .map_err(|error| format!("failed to render three-client transcript: {error}"))?;
-    assert_redacted_three_websocket_payload(&rendered, outputs, seed)?;
+    assert_redacted_three_websocket_payload(&rendered, input.outputs, input.seed)?;
     fs::write(&transcript_path, rendered)
         .map_err(|error| format!("failed to write three-client transcript: {error}"))?;
     Ok(transcript_path)
+}
+
+fn current_git_head() -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace_root()?)
+        .output()
+        .map_err(|error| format!("failed to run git rev-parse HEAD: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn observe_router_socket_cleanup(pid: u32) -> Result<RouterSocketCleanupObservation, String> {
+    let output = Command::new("lsof")
+        .args(["-nP", "-a", "-p", &pid.to_string(), "-iTCP"])
+        .output()
+        .map_err(|error| format!("failed to run lsof for router socket cleanup: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut state_counts = BTreeMap::<String, usize>::new();
+    let mut tcp_line_count = 0_usize;
+    for line in stdout.lines().skip(1) {
+        if !line.contains("TCP") {
+            continue;
+        }
+        tcp_line_count = tcp_line_count.saturating_add(1);
+        let state = line
+            .rsplit_once('(')
+            .and_then(|(_prefix, suffix)| suffix.strip_suffix(')'))
+            .unwrap_or("UNKNOWN")
+            .to_owned();
+        *state_counts.entry(state).or_default() += 1;
+    }
+    Ok(RouterSocketCleanupObservation {
+        lsof_exit_status: output.status.to_string(),
+        tcp_line_count,
+        established_count: state_counts.get("ESTABLISHED").copied().unwrap_or_default(),
+        close_wait_count: state_counts.get("CLOSE_WAIT").copied().unwrap_or_default(),
+        raw_state_counts: state_counts.into_iter().collect(),
+    })
+}
+
+impl RouterSocketCleanupObservation {
+    fn assert_no_leaked_sessions(&self) -> Result<(), String> {
+        if self.established_count != 0 || self.close_wait_count != 0 {
+            return Err(format!(
+                "router socket cleanup found established_count={} close_wait_count={} state_counts={:?}",
+                self.established_count, self.close_wait_count, self.raw_state_counts
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn assert_redacted_three_websocket_payload(
@@ -2077,6 +2229,9 @@ struct ConcurrentWebSocketTranscript {
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
     non_prewarm_session_count: usize,
+    multi_step_interleave_completed: bool,
+    multi_step_followup_frame_count: usize,
+    multi_step_completed_before_overlap_end: bool,
 }
 
 #[derive(Debug)]
@@ -2100,6 +2255,19 @@ struct ConcurrentUpstreamState {
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
     non_prewarm_session_count: usize,
+    multi_step_interleave_claimed: bool,
+    multi_step_interleave_completed: bool,
+    multi_step_followup_frame_count: usize,
+    multi_step_completed_unix_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouterSocketCleanupObservation {
+    lsof_exit_status: String,
+    tcp_line_count: usize,
+    established_count: usize,
+    close_wait_count: usize,
+    raw_state_counts: Vec<(String, usize)>,
 }
 
 struct MockNoConnectionUpstream {
@@ -2307,6 +2475,10 @@ impl MockConcurrentWebSocketUpstream {
                 session_frame_counts: Vec::new(),
                 session_event_counts: Vec::new(),
                 non_prewarm_session_count: 0,
+                multi_step_interleave_claimed: false,
+                multi_step_interleave_completed: false,
+                multi_step_followup_frame_count: 0,
+                multi_step_completed_unix_ms: None,
             }),
             condition: Condvar::new(),
         });
@@ -2372,6 +2544,14 @@ impl MockConcurrentWebSocketUpstream {
             session_frame_counts: state.session_frame_counts,
             session_event_counts: state.session_event_counts,
             non_prewarm_session_count: state.non_prewarm_session_count,
+            multi_step_interleave_completed: state.multi_step_interleave_completed,
+            multi_step_followup_frame_count: state.multi_step_followup_frame_count,
+            multi_step_completed_before_overlap_end: state
+                .multi_step_completed_unix_ms
+                .zip(state.overlap_completed_unix_ms)
+                .is_some_and(|(multi_step_completed, overlap_completed)| {
+                    multi_step_completed <= overlap_completed
+                }),
         })
     }
 }
@@ -2578,16 +2758,57 @@ fn run_concurrent_mock_websocket_session(
         }
         register_concurrent_non_prewarm_session(&state)?;
         let overlap_started_at = wait_for_concurrent_session_barrier(&state)?;
-        let event_count = send_concurrent_response_events(
-            &mut websocket,
-            request_index,
-            overlap_started_at,
-            config,
-        )?;
+        let run_multi_step_interleave = claim_multi_step_interleave(&state)?;
+        let event_count = if run_multi_step_interleave {
+            send_concurrent_multi_step_response_events(
+                &mut websocket,
+                request_index,
+                overlap_started_at,
+                config,
+                &state,
+                &mut frame_count,
+            )?
+        } else {
+            send_concurrent_response_events(
+                &mut websocket,
+                request_index,
+                overlap_started_at,
+                config,
+            )?
+        };
         finish_concurrent_non_prewarm_session(&state, frame_count, event_count)?;
         return Ok(());
     }
     Err("concurrent mock upstream did not receive non-prewarm request frame".to_owned())
+}
+
+fn claim_multi_step_interleave(shared: &ConcurrentUpstreamSharedState) -> Result<bool, String> {
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    if state.multi_step_interleave_claimed {
+        return Ok(false);
+    }
+    state.multi_step_interleave_claimed = true;
+    Ok(true)
+}
+
+fn complete_multi_step_interleave(
+    shared: &ConcurrentUpstreamSharedState,
+    followup_frame_count: usize,
+) -> Result<(), String> {
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    state.multi_step_interleave_completed = true;
+    state.multi_step_followup_frame_count = state
+        .multi_step_followup_frame_count
+        .saturating_add(followup_frame_count);
+    state.multi_step_completed_unix_ms = Some(timestamp_millis());
+    shared.condition.notify_all();
+    Ok(())
 }
 
 fn register_concurrent_non_prewarm_session(
@@ -2699,6 +2920,136 @@ fn send_concurrent_response_events(
     }
 
     Ok(event_count)
+}
+
+fn send_concurrent_multi_step_response_events(
+    websocket: &mut WebSocket<std::net::TcpStream>,
+    request_index: usize,
+    overlap_started_at: Instant,
+    config: ConcurrentUpstreamConfig,
+    state: &ConcurrentUpstreamSharedState,
+    frame_count: &mut usize,
+) -> Result<usize, String> {
+    let call_id = format!("codex-router-tool-call-{request_index}");
+    let mut event_count = 0_usize;
+    let response_id = format!("resp-smoke-tool-{request_index}");
+    send_concurrent_response_event(
+        websocket,
+        &serde_json::json!({
+            "type": "response.created",
+            "response": {"id": response_id}
+        })
+        .to_string(),
+    )?;
+    event_count = event_count.saturating_add(1);
+
+    if !config.hold_duration.is_zero() {
+        let hold_deadline = overlap_started_at + config.hold_duration;
+        let mut heartbeat_index = 0_usize;
+        while Instant::now() < hold_deadline {
+            let remaining = hold_deadline.saturating_duration_since(Instant::now());
+            thread::sleep(remaining.min(config.heartbeat_interval));
+            if Instant::now() >= hold_deadline {
+                break;
+            }
+            let heartbeat = serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "",
+                "sequence_number": heartbeat_index,
+            })
+            .to_string();
+            send_concurrent_response_event(websocket, &heartbeat)?;
+            heartbeat_index = heartbeat_index.saturating_add(1);
+            event_count = event_count.saturating_add(1);
+        }
+    }
+
+    let tool_arguments = serde_json::json!({
+        "command": "printf codex-router-tool-ok",
+        "timeout_ms": 1000,
+    })
+    .to_string();
+    send_concurrent_response_event(
+        websocket,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": "shell_command",
+                "arguments": tool_arguments,
+            }
+        })
+        .to_string(),
+    )?;
+    event_count = event_count.saturating_add(1);
+    send_concurrent_response_event(
+        websocket,
+        &serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "usage": {
+                    "input_tokens": 0,
+                    "input_tokens_details": null,
+                    "output_tokens": 0,
+                    "output_tokens_details": null,
+                    "total_tokens": 0
+                }
+            }
+        })
+        .to_string(),
+    )?;
+    event_count = event_count.saturating_add(1);
+
+    let followup_frame = read_concurrent_text_frame(websocket)?;
+    *frame_count = frame_count.saturating_add(1);
+    if !frame_contains_function_call_output(&followup_frame, &call_id) {
+        return Err("multi-step follow-up frame did not contain function_call_output".to_owned());
+    }
+
+    for event in smoke_response_events(request_index.saturating_add(10)) {
+        send_concurrent_response_event(websocket, &event)?;
+        event_count = event_count.saturating_add(1);
+    }
+    complete_multi_step_interleave(state, 1)?;
+    Ok(event_count)
+}
+
+fn read_concurrent_text_frame(
+    websocket: &mut WebSocket<std::net::TcpStream>,
+) -> Result<String, String> {
+    loop {
+        match websocket.read() {
+            Ok(Message::Text(text)) => return Ok(text.to_string()),
+            Ok(Message::Binary(bytes)) => {
+                return String::from_utf8(bytes.to_vec()).map_err(|error| {
+                    format!("concurrent mock upstream follow-up frame was not UTF-8: {error}")
+                });
+            }
+            Ok(Message::Close(_)) => {
+                return Err("concurrent mock upstream closed before follow-up frame".to_owned());
+            }
+            Ok(_other) => {}
+            Err(error) => {
+                return Err(format!(
+                    "concurrent mock upstream failed to read follow-up frame: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn frame_contains_function_call_output(frame: &str, call_id: &str) -> bool {
+    serde_json::from_str::<Value>(frame)
+        .ok()
+        .and_then(|value| value.get("input").and_then(Value::as_array).cloned())
+        .is_some_and(|input| {
+            input.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    && item.get("call_id").and_then(Value::as_str) == Some(call_id)
+            })
+        })
 }
 
 fn send_concurrent_response_event(
@@ -3418,6 +3769,24 @@ mod tests {
             http_sse_local_auth_validated: true,
             websocket_local_auth_validated: true,
         }
+    }
+
+    #[test]
+    fn websocket_scenario_all_runs_serial_concurrent_and_soak_filters() -> Result<(), String> {
+        let script_path = super::workspace_root()?
+            .join("tests")
+            .join("smoke")
+            .join("installed_codex_mock.sh");
+        let script = fs::read_to_string(script_path)
+            .map_err(|error| format!("failed to read smoke script: {error}"))?;
+
+        assert!(script.contains(
+            r#"elif [[ "${scenario}" == "all" && "${transport}" == "websocket" ]]; then"#
+        ));
+        assert!(script.contains(r#"run_test_filter "installed_codex_websocket_""#));
+        assert!(script.contains(r#"run_test_filter "three_codex_websocket_concurrent_e2e_""#));
+        assert!(script.contains(r#"run_test_filter "three_codex_websocket_soak_""#));
+        Ok(())
     }
 
     fn valid_router_process_observation(test_root: &SmokeTempRoot) -> RouterProcessObservation {

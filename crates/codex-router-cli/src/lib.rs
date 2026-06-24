@@ -91,6 +91,7 @@ where
                 runtime_config = runtime_config.with_audit_file(audit_file);
             }
             if let Some(report_file) = command.websocket_registry_report_file.clone() {
+                validate_websocket_registry_report_file(&report_file)?;
                 runtime_config = runtime_config.with_websocket_registry_report_file(report_file);
             }
             let token_reload_watcher = if command.require_local_token {
@@ -129,10 +130,8 @@ where
             } else {
                 None
             };
-            let handled_connections = runtime.serve_protocol_connections_until_websocket_idle(
-                command.max_connections,
-                command.exit_after_websocket_completed_sessions,
-            )?;
+            let handled_connections =
+                runtime.serve_protocol_connections(command.max_connections)?;
             if let Some(report_file) = command.websocket_registry_report_file {
                 write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
             }
@@ -249,6 +248,7 @@ fn write_websocket_registry_report_file(
     }
     let snapshot = runtime.websocket_registry_snapshot();
     let report = serde_json::json!({
+        "schema_version": 1,
         "handled_connections": handled_connections,
         "websocket_registry": {
             "active_sessions": snapshot.active_sessions,
@@ -256,6 +256,8 @@ fn write_websocket_registry_report_file(
             "registered_sessions": snapshot.registered_sessions,
             "closed_sessions": snapshot.closed_sessions,
             "completed_response_sessions": snapshot.completed_response_sessions,
+            "forwarded_upstream_messages": snapshot.forwarded_upstream_messages,
+            "completed_session_forwarded_upstream_message_counts": snapshot.completed_session_forwarded_upstream_message_counts,
         },
     });
     let rendered =
@@ -264,6 +266,25 @@ fn write_websocket_registry_report_file(
         path: report_file.display().to_string(),
         source,
     })
+}
+
+fn validate_websocket_registry_report_file(report_file: &PathBuf) -> Result<(), CliError> {
+    if let Some(parent) = report_file.parent() {
+        fs::create_dir_all(parent).map_err(|source| CliError::WebSocketRegistryReportWrite {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(report_file)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| CliError::WebSocketRegistryReportWrite {
+            path: report_file.display().to_string(),
+            source,
+        })
 }
 
 fn write_profile_preview(
@@ -474,7 +495,6 @@ struct ServeCommand {
     max_connections: usize,
     audit_file: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
-    exit_after_websocket_completed_sessions: Option<usize>,
 }
 
 impl ServeCommand {
@@ -512,8 +532,6 @@ impl ServeCommand {
             max_connections: options.max_connections.unwrap_or(usize::MAX),
             audit_file: options.audit_file,
             websocket_registry_report_file: options.websocket_registry_report_file,
-            exit_after_websocket_completed_sessions: options
-                .exit_after_websocket_completed_sessions,
         })
     }
 }
@@ -534,7 +552,6 @@ struct ServeCommandOptions {
     max_connections: Option<usize>,
     audit_file: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
-    exit_after_websocket_completed_sessions: Option<usize>,
 }
 
 impl ServeCommandOptions {
@@ -554,7 +571,6 @@ impl ServeCommandOptions {
             max_connections: None,
             audit_file: None,
             websocket_registry_report_file: None,
-            exit_after_websocket_completed_sessions: None,
         };
 
         while let Some(argument) = parser.next_string()? {
@@ -620,14 +636,6 @@ impl ServeCommandOptions {
                 "--websocket-registry-report-file" => {
                     let value = parser.next_required_value("--websocket-registry-report-file")?;
                     options.websocket_registry_report_file = Some(PathBuf::from(value));
-                }
-                "--exit-after-websocket-completed-sessions" => {
-                    let value =
-                        parser.next_required_value("--exit-after-websocket-completed-sessions")?;
-                    options.exit_after_websocket_completed_sessions = Some(parse_usize_option(
-                        "--exit-after-websocket-completed-sessions",
-                        &value,
-                    )?);
                 }
                 unknown => {
                     return Err(CliError::UnknownOption {
@@ -1079,6 +1087,7 @@ codex-router
 
 commands:
   serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh] [--require-local-token]
+  serve internal proof flags: [--max-connections <n>] [--max-websocket-upstream-messages <n>] [--audit-file <path>] [--websocket-registry-report-file <path>]
   account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets
   account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets

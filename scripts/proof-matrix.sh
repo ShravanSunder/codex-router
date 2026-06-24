@@ -40,6 +40,7 @@ row_owner() {
     U-06|U-07|I-16) printf 'T2' ;;
     I-21) printf 'T1/T2' ;;
     I-17b) printf 'T5/T6' ;;
+    E-02|E-03|E-04|E-05|E-06|E-08) printf 'T8' ;;
     G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23) printf 'T6' ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-09) printf 'T0/T6' ;;
     P-07|P-08|P-10) printf 'final' ;;
@@ -49,6 +50,24 @@ row_owner() {
 
 expected_observation() {
   case "$1" in
+    E-02)
+      printf 'five-minute soak holds three installed Codex WebSocket sessions through one real router process'
+      ;;
+    E-03)
+      printf 'soak artifact overlap timestamps prove concurrent activity'
+      ;;
+    E-04)
+      printf 'router writes at least three upstream frames to each of three completed sessions during overlap'
+      ;;
+    E-05)
+      printf 'one installed Codex runtime completes function-call-style multi-step WebSocket interleave during overlap'
+      ;;
+    E-06)
+      printf 'router-owned WebSocket registry records high-water 3 and zero active after completion'
+      ;;
+    E-08)
+      printf 'live router socket table has no leaked ESTABLISHED or CLOSE_WAIT TCP sessions after completion'
+      ;;
     I-21)
       printf 'listener binds and first request is accepted while broad quota refresh is slow or stalled'
       ;;
@@ -166,6 +185,122 @@ main() {
   owner=$(row_owner "$row_id")
 
   case "$row_id" in
+    E-02|E-03|E-04|E-05|E-06|E-08)
+      latest_artifact=$(ls -t tmp/smoke/installed-codex-three-websocket-*.json 2>/dev/null | head -n 1 || true)
+      if [[ -z "$latest_artifact" ]]; then
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        printf 'proof row %s failed; no installed-codex three-websocket artifact found; receipt: %s\n' "$row_id" "$receipt" >&2
+        exit 1
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+      if python3 - "$row_id" "$latest_artifact" "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+row_id = sys.argv[1]
+artifact_path = Path(sys.argv[2])
+receipt_path = Path(sys.argv[3])
+artifact = json.loads(artifact_path.read_text())
+receipt = json.loads(receipt_path.read_text())
+
+errors: list[str] = []
+if artifact.get("git_head") != receipt.get("git_head"):
+    errors.append(
+        f"artifact git_head {artifact.get('git_head')} does not match current proof git_head {receipt.get('git_head')}"
+    )
+if artifact.get("mode") != "three-websocket-soak":
+    errors.append("artifact mode is not three-websocket-soak")
+if not artifact.get("clients", {}).get("all_success"):
+    errors.append("clients did not all succeed")
+if artifact.get("clients", {}).get("count") != 3:
+    errors.append("client count is not 3")
+
+upstream = artifact.get("upstream", {})
+registry = artifact.get("router_websocket_registry", {})
+
+if row_id == "E-02":
+    if upstream.get("hold_duration_ms", 0) < 300_000:
+        errors.append("hold_duration_ms is below five minutes")
+    if upstream.get("active_high_water", 0) < 3:
+        errors.append("upstream active_high_water is below 3")
+    if registry.get("high_water_sessions", 0) < 3:
+        errors.append("router registry high_water_sessions is below 3")
+elif row_id == "E-03":
+    if upstream.get("overlap_proven") is not True:
+        errors.append("overlap_proven is not true")
+    if upstream.get("overlap_duration_ms", 0) < 300_000:
+        errors.append("overlap_duration_ms is below five minutes")
+    if not upstream.get("overlap_started_unix_ms") or not upstream.get("overlap_completed_unix_ms"):
+        errors.append("overlap timestamps are missing")
+elif row_id == "E-04":
+    counts = registry.get("completed_session_forwarded_upstream_message_counts", [])
+    if not isinstance(counts, list):
+        errors.append("completed_session_forwarded_upstream_message_counts is not a list")
+        counts = []
+    top_counts = sorted((count for count in counts if isinstance(count, int)), reverse=True)[:3]
+    if len(top_counts) < 3 or any(count < 3 for count in top_counts):
+        errors.append(f"top completed-session forwarded counts do not prove three sessions with >=3 frames: {counts}")
+    if registry.get("forwarded_upstream_messages", 0) < 9:
+        errors.append("forwarded_upstream_messages is below 9")
+elif row_id == "E-05":
+    if upstream.get("multi_step_interleave_completed") is not True:
+        errors.append("multi_step_interleave_completed is not true")
+    if upstream.get("multi_step_followup_frame_count", 0) < 1:
+        errors.append("multi_step_followup_frame_count is below 1")
+    if upstream.get("multi_step_completed_before_overlap_end") is not True:
+        errors.append("multi_step_completed_before_overlap_end is not true")
+elif row_id == "E-06":
+    if registry.get("active_sessions") != 0:
+        errors.append("router registry active_sessions is not 0")
+    if registry.get("high_water_sessions", 0) < 3:
+        errors.append("router registry high_water_sessions is below 3")
+    if registry.get("closed_sessions", 0) < 3:
+        errors.append("router registry closed_sessions is below 3")
+    if registry.get("completed_response_sessions", 0) < 3:
+        errors.append("router registry completed_response_sessions is below 3")
+elif row_id == "E-08":
+    socket_cleanup = artifact.get("socket_cleanup", {})
+    if socket_cleanup.get("established_count") != 0:
+        errors.append("socket cleanup established_count is not 0")
+    if socket_cleanup.get("close_wait_count") != 0:
+        errors.append("socket cleanup close_wait_count is not 0")
+    if not isinstance(socket_cleanup.get("raw_state_counts"), list):
+        errors.append("socket cleanup raw_state_counts is missing")
+
+receipt["status_after"] = "[x] passed" if not errors else "[ ] pending"
+receipt["result"] = "pass" if not errors else "fail"
+receipt["exit_code"] = 0 if not errors else 1
+receipt["artifact_paths"] = [str(artifact_path)]
+receipt["freshness_check"] = "artifact_git_head_matches_current_head"
+receipt["touched_targets"] = [
+    "crates/codex-router-test-support/src/installed_codex.rs",
+    "tests/smoke/installed_codex_mock.sh",
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-cli/src/lib.rs",
+]
+receipt["notes"] = "Validated latest installed-Codex three-WebSocket soak artifact." if not errors else "; ".join(errors)
+receipt["soak_summary"] = {
+    "mode": artifact.get("mode"),
+    "clients": artifact.get("clients"),
+    "upstream": upstream,
+    "router_websocket_registry": registry,
+}
+receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+PY
+      then
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
     I-17b)
       if cargo test -p codex-router-proxy async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder -- --nocapture; then
         receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
