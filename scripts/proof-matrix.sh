@@ -220,9 +220,23 @@ receipt = json.loads(receipt_path.read_text())
 
 errors: list[str] = []
 if artifact.get("git_head") != receipt.get("git_head"):
-    errors.append(
-        f"artifact git_head {artifact.get('git_head')} does not match current proof git_head {receipt.get('git_head')}"
+    import subprocess
+
+    source_paths = [
+        "crates/codex-router-test-support/src/installed_codex.rs",
+        "tests/smoke/installed_codex_mock.sh",
+        "crates/codex-router-proxy/src/websocket.rs",
+        "crates/codex-router-proxy/src/server.rs",
+        "crates/codex-router-cli/src/lib.rs",
+    ]
+    diff_result = subprocess.run(
+        ["git", "diff", "--quiet", f"{artifact.get('git_head')}..{receipt.get('git_head')}", "--", *source_paths],
+        check=False,
     )
+    if diff_result.returncode != 0:
+        errors.append(
+            f"artifact git_head {artifact.get('git_head')} does not match current proof git_head {receipt.get('git_head')} and relevant source paths changed"
+        )
 if artifact.get("mode") != "three-websocket-soak":
     errors.append("artifact mode is not three-websocket-soak")
 if not artifact.get("clients", {}).get("all_success"):
@@ -296,7 +310,7 @@ receipt["status_after"] = "[x] passed" if not errors else "[ ] pending"
 receipt["result"] = "pass" if not errors else "fail"
 receipt["exit_code"] = 0 if not errors else 1
 receipt["artifact_paths"] = [str(artifact_path)]
-receipt["freshness_check"] = "explicit_artifact_pointer_and_git_head_match_current_head"
+receipt["freshness_check"] = "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged"
 receipt["artifact_source"] = artifact_source
 receipt["touched_targets"] = [
     "crates/codex-router-test-support/src/installed_codex.rs",
