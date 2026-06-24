@@ -239,9 +239,10 @@ impl LoopbackRouterRuntime {
         let affinity_owner_recorder = Arc::new(SqliteAffinityOwnerRecorder::new(
             config.state_database_path.clone(),
         ));
-        let runtime_start_unix_seconds = config
-            .fixed_now_unix_seconds
-            .unwrap_or_else(current_unix_seconds);
+        let runtime_start_unix_seconds = match config.fixed_now_unix_seconds {
+            Some(now_unix_seconds) => now_unix_seconds,
+            None => current_unix_seconds().map_err(LoopbackRouterRuntimeError::SystemClock)?,
+        };
         let credential_resolver = ProxyCredentialResolver::open(
             &config.state_database_path,
             &config.secret_store_root,
@@ -466,15 +467,22 @@ impl LoopbackRouterRuntime {
             Arc::clone(&self.weighted_selectors),
             Arc::clone(&self.account_holds),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
-            Arc::new(move || fixed_now_unix_seconds.unwrap_or_else(current_unix_seconds)),
+            Arc::new(move || {
+                fixed_now_unix_seconds.unwrap_or_else(|| match current_unix_seconds() {
+                    Ok(now_unix_seconds) => now_unix_seconds,
+                    Err(error) => {
+                        panic!("system clock must remain after Unix epoch for routing: {error}")
+                    }
+                })
+            }),
         )
     }
 }
 
-fn current_unix_seconds() -> u64 {
+fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
+        .map(|duration| duration.as_secs())
 }
 
 /// Thread-safe handle for replacing local auth without sharing the full runtime.
@@ -670,6 +678,9 @@ pub enum LoopbackRouterRuntimeError {
     /// Opening runtime credential state failed.
     #[error(transparent)]
     CredentialResolver(#[from] ProxyCredentialResolverOpenError),
+    /// Runtime system clock is before Unix epoch.
+    #[error("system clock is before Unix epoch")]
+    SystemClock(#[source] std::time::SystemTimeError),
     /// Listener cloning failed before the bounded serve loop.
     #[error("failed to clone loopback listener")]
     ListenerClone(#[source] std::io::Error),

@@ -128,10 +128,10 @@ fn has_forbidden_cookie_auth_carrier(cookie_header: Option<&str>) -> bool {
 
 pub(crate) fn has_forbidden_top_level_json_auth_carrier(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return body_mentions_forbidden_auth_carrier(body);
+        return body_mentions_forbidden_auth_carrier_key(body);
     };
     let Some(object) = value.as_object() else {
-        return body_mentions_forbidden_auth_carrier(body);
+        return body_mentions_forbidden_auth_carrier_key(body);
     };
 
     object
@@ -140,17 +140,53 @@ pub(crate) fn has_forbidden_top_level_json_auth_carrier(body: &[u8]) -> bool {
         .any(|key| is_forbidden_auth_field_name(&key))
 }
 
-fn body_mentions_forbidden_auth_carrier(body: &[u8]) -> bool {
+fn body_mentions_forbidden_auth_carrier_key(body: &[u8]) -> bool {
     let body = String::from_utf8_lossy(body);
-    body.split(|character: char| {
-        !(character.is_ascii_alphanumeric()
-            || character == '%'
-            || character == '-'
-            || character == '_'
-            || character == '.')
-    })
-    .filter_map(canonical_auth_field_name)
-    .any(|field_name| is_forbidden_auth_field_name(&field_name))
+    let mut cursor = 0_usize;
+    while cursor < body.len() {
+        let Some((token_start, _character)) = body[cursor..]
+            .char_indices()
+            .find(|(_index, character)| is_auth_key_character(*character))
+        else {
+            return false;
+        };
+        let token_start = cursor + token_start;
+        let token_end = body[token_start..]
+            .char_indices()
+            .find(|(_index, character)| !is_auth_key_character(*character))
+            .map_or(body.len(), |(index, _character)| token_start + index);
+        let token = &body[token_start..token_end];
+        if canonical_auth_field_name(token)
+            .as_deref()
+            .is_some_and(is_forbidden_auth_field_name)
+            && raw_body_token_is_key(&body[token_end..])
+        {
+            return true;
+        }
+        cursor = token_end.saturating_add(1);
+    }
+
+    false
+}
+
+fn is_auth_key_character(character: char) -> bool {
+    character.is_ascii_alphanumeric()
+        || character == '%'
+        || character == '-'
+        || character == '_'
+        || character == '.'
+}
+
+fn raw_body_token_is_key(tail: &str) -> bool {
+    let tail = tail.trim_start();
+    if tail.starts_with(':') || tail.starts_with('=') {
+        return true;
+    }
+    let Some(tail) = tail.strip_prefix('"') else {
+        return false;
+    };
+    let tail = tail.trim_start();
+    tail.starts_with(':') || tail.starts_with('=')
 }
 
 fn canonical_auth_field_name(name: &str) -> Option<String> {
@@ -394,6 +430,32 @@ mod tests {
                 None,
                 "/v1/responses",
                 br#"{"prompt":{"x-codex-router-token":"nested-token"}}"#,
+                true,
+            ),
+            Ok(Some("router-token"))
+        );
+    }
+
+    #[test]
+    fn request_local_auth_allows_non_object_json_auth_words_without_key_shape() {
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#""token""#,
+                true,
+            ),
+            Ok(Some("router-token"))
+        );
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                br#"["bearer"]"#,
                 true,
             ),
             Ok(Some("router-token"))

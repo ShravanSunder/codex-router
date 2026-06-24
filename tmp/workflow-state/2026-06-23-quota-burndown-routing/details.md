@@ -115,6 +115,37 @@ Remaining before terminal completion:
 - rerun implementation-review-swarm against the updated diff
 - PR readiness wrapup with fresh checks/review-thread state
 
+## Current Phase Update: Follow-Up Review P2s Folded
+
+The rerun implementation-review pass on `859bdd4..7d966fb` returned two valid
+P2 findings. Both have been folded:
+
+- non-object JSON bodies that merely contain auth words, such as `"token"` or
+  `["bearer"]`, are allowed; malformed/key-shaped auth carriers such as
+  `{"token":...` and `token=...` still fail closed before upstream.
+- live runtime clock startup no longer degrades to Unix epoch `0`; invalid
+  system time returns a runtime `SystemClock` error instead. Fixed clocks remain
+  explicit via `--now-unix-seconds` and test config.
+
+Fresh proof:
+
+- `cargo test -p codex-router-proxy local_auth -- --nocapture`: 13 passed.
+- `cargo test -p codex-router-cli 'serve_command_' -- --nocapture`: 6 passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed.
+- `tests/smoke/installed_codex_mock.sh`: 6 passed.
+- `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture`:
+  2 passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+
+Remaining before terminal completion:
+
+- commit and push this follow-up review-fix checkpoint
+- PR readiness wrapup with fresh GitHub/CI state, subject to API rate-limit
+  availability
+
 ## Current Phase Update: Plan Review Findings Folded Into Plan
 
 The first `plan-review-swarm` pass for the R20 implementation plan returned
