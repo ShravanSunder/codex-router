@@ -705,7 +705,7 @@ impl LoopbackProtocolConnectionHandler {
         }
         .with_revocation_registry(self.websocket_revocations.clone())
         .with_affinity_secret_provider(&self.secret_store)
-        .with_affinity_owner_recorder(self.affinity_owner_recorder.as_ref());
+        .with_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
         tunnel
             .handle_upgraded_connection(

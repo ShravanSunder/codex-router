@@ -925,7 +925,7 @@ where
 {
     router: AsyncAuthenticatedWebSocketRouter<'a, S, C>,
     revocations: WebSocketRevocationRegistry,
-    affinity_owner_recorder: Option<&'a dyn HttpAffinityOwnerRecorder>,
+    affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
 }
 
 #[cfg(test)]
@@ -1185,7 +1185,7 @@ where
     #[must_use]
     pub fn with_affinity_owner_recorder(
         mut self,
-        affinity_owner_recorder: &'a dyn HttpAffinityOwnerRecorder,
+        affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
     ) -> Self {
         self.affinity_owner_recorder = Some(affinity_owner_recorder);
         self
@@ -1245,7 +1245,7 @@ where
             &mut local_websocket,
             &mut upstream_websocket,
             max_upstream_messages,
-            self.affinity_owner_recorder,
+            self.affinity_owner_recorder.clone(),
             affinity_owner_context.as_ref(),
             &revocation,
         )
@@ -1257,7 +1257,7 @@ async fn forward_duplex_until_complete<LocalStream, UpstreamStream>(
     local_websocket: &mut WebSocketStream<LocalStream>,
     upstream_websocket: &mut WebSocketStream<UpstreamStream>,
     max_upstream_messages: usize,
-    affinity_owner_recorder: Option<&dyn HttpAffinityOwnerRecorder>,
+    affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
     revocation: &CancellationToken,
 ) -> Result<(), WebSocketTunnelError>
@@ -1299,12 +1299,18 @@ where
                 let upstream_message = upstream_message?;
                 let is_close = matches!(upstream_message, Message::Close(_));
                 let is_completed = is_response_completed(&upstream_message);
-                record_websocket_affinity_owner(
+                let affinity_owner = websocket_affinity_owner_record(
                     &upstream_message,
-                    affinity_owner_recorder,
                     affinity_owner_context,
                 );
                 local_websocket.send(upstream_message).await?;
+                if let (Some(recorder), Some(owner)) =
+                    (affinity_owner_recorder.clone(), affinity_owner)
+                {
+                    tokio::task::spawn_blocking(move || {
+                        let _result = recorder.record_affinity_owner(&owner);
+                    });
+                }
                 upstream_message_count = upstream_message_count.saturating_add(1);
                 if is_close || is_completed || upstream_message_count >= max_upstream_messages {
                     return Ok(());
@@ -1342,31 +1348,41 @@ fn forward_upstream_response(
     Ok(())
 }
 
+#[cfg(test)]
 fn record_websocket_affinity_owner(
     upstream_message: &Message,
     affinity_owner_recorder: Option<&dyn HttpAffinityOwnerRecorder>,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
 ) {
-    let (Some(recorder), Some(context)) = (affinity_owner_recorder, affinity_owner_context) else {
+    let Some(recorder) = affinity_owner_recorder else {
         return;
     };
-    let Some(previous_response_id) = extract_websocket_response_id(upstream_message) else {
-        return;
-    };
-    let Ok(affinity_key_hash) =
-        hash_previous_response_id(&context.affinity_secret, &previous_response_id)
+    let Some(owner) = websocket_affinity_owner_record(upstream_message, affinity_owner_context)
     else {
         return;
     };
-    let owner = PreviousResponseAffinityOwnerRecord::new(
+    let _result = recorder.record_affinity_owner(&owner);
+}
+
+fn websocket_affinity_owner_record(
+    upstream_message: &Message,
+    affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
+) -> Option<PreviousResponseAffinityOwnerRecord> {
+    let context = affinity_owner_context?;
+    let previous_response_id = extract_websocket_response_id(upstream_message)?;
+    let Ok(affinity_key_hash) =
+        hash_previous_response_id(&context.affinity_secret, &previous_response_id)
+    else {
+        return None;
+    };
+    Some(PreviousResponseAffinityOwnerRecord::new(
         affinity_key_hash,
         context.account_id.clone(),
         context.credential_generation,
         RouteBand::Responses,
         AffinitySourceTransport::WebSocket,
         current_unix_seconds(),
-    );
-    let _result = recorder.record_affinity_owner(&owner);
+    ))
 }
 
 fn extract_websocket_response_id(message: &Message) -> Option<PreviousResponseId> {

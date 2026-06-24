@@ -209,6 +209,10 @@ mod tests {
                 .drain(..)
                 .collect()
         }
+
+        fn records_snapshot(&self) -> Vec<PreviousResponseAffinityOwnerRecord> {
+            lock_test_mutex(&self.records, "test recorder").clone()
+        }
     }
 
     impl HttpAffinityOwnerRecorder for RecordingAffinityOwnerRecorder {
@@ -219,6 +223,60 @@ mod tests {
             lock_test_mutex(&self.records, "test recorder").push(owner.clone());
             Ok(())
         }
+    }
+
+    struct BlockingAffinityOwnerRecorder {
+        records: Arc<Mutex<Vec<PreviousResponseAffinityOwnerRecord>>>,
+        entered: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl BlockingAffinityOwnerRecorder {
+        fn new(entered: mpsc::Sender<()>, release: mpsc::Receiver<()>) -> Self {
+            Self {
+                records: Arc::new(Mutex::new(Vec::new())),
+                entered: Mutex::new(Some(entered)),
+                release: Mutex::new(release),
+            }
+        }
+
+        fn records_snapshot(&self) -> Vec<PreviousResponseAffinityOwnerRecord> {
+            lock_test_mutex(&self.records, "blocking recorder records").clone()
+        }
+    }
+
+    impl HttpAffinityOwnerRecorder for BlockingAffinityOwnerRecorder {
+        fn record_affinity_owner(
+            &self,
+            owner: &PreviousResponseAffinityOwnerRecord,
+        ) -> Result<(), HttpProxyError> {
+            if let Some(entered) =
+                lock_test_mutex(&self.entered, "blocking recorder entered").take()
+            {
+                let _result = entered.send(());
+            }
+            lock_test_mutex(&self.release, "blocking recorder release")
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| HttpProxyError::Upstream {
+                    message: error.to_string(),
+                })?;
+            lock_test_mutex(&self.records, "blocking recorder records").push(owner.clone());
+            Ok(())
+        }
+    }
+
+    async fn wait_for_affinity_records(
+        recorder: &RecordingAffinityOwnerRecorder,
+        expected_count: usize,
+    ) -> Vec<PreviousResponseAffinityOwnerRecord> {
+        for _attempt in 0..50 {
+            let records = recorder.records_snapshot();
+            if records.len() >= expected_count {
+                return records;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("expected {expected_count} affinity records before timeout");
     }
 
     #[test]
@@ -6510,7 +6568,7 @@ mod tests {
         let recorder = RecordingAffinityOwnerRecorder::default();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
             .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
-            .with_affinity_owner_recorder(&recorder);
+            .with_affinity_owner_recorder(Arc::new(recorder.clone()));
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
         let server_future = async {
             let (stream, _peer_address) = match local_listener.accept().await {
@@ -6564,7 +6622,7 @@ mod tests {
             Err(error) => panic!("mock upstream task should join: {error}"),
         }
 
-        let records = recorder.take_records();
+        let records = wait_for_affinity_records(&recorder, 1).await;
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.account_id().as_str(), "acct_selected");
@@ -6582,6 +6640,130 @@ mod tests {
             )),
         );
         assert_ne!(record.affinity_key_hash().as_str(), "resp_ws_owner");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder() {
+        let upstream_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _peer_address) = match upstream_listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket = match tokio_tungstenite::accept_async(stream).await {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("mock websocket upstream handshake should accept: {error}"),
+            };
+            if let Some(Err(error)) = websocket.next().await {
+                panic!("mock upstream should read first frame: {error}");
+            }
+            if let Err(error) = websocket
+                .send(Message::text(
+                    r#"{"type":"response.completed","response":{"id":"resp_slow_recorder"}}"#,
+                ))
+                .await
+            {
+                panic!("mock upstream should send completion: {error}");
+            }
+        });
+
+        let local_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) => panic!("router websocket listener should bind: {error}"),
+        };
+        let local_address = match local_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("router websocket listener address should read: {error}"),
+        };
+        let auth_gate = local_auth_gate();
+        let selector = RecordingAsyncSelector::default();
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let (recorder_entered_sender, recorder_entered_receiver) = mpsc::channel();
+        let (recorder_release_sender, recorder_release_receiver) = mpsc::channel();
+        let recorder = Arc::new(BlockingAffinityOwnerRecorder::new(
+            recorder_entered_sender,
+            recorder_release_receiver,
+        ));
+        let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
+            .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
+            .with_affinity_owner_recorder(recorder.clone());
+        let upstream_url = format!("ws://{upstream_address}/v1/responses");
+        let server_future = async {
+            let (stream, _peer_address) = match local_listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => panic!("router websocket listener should accept: {error}"),
+            };
+            let local_websocket = match tokio_tungstenite::accept_async(stream).await {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("local websocket should accept: {error}"),
+            };
+            let handshake = WebSocketHandshakeRequest::new()
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"));
+            tunnel
+                .handle_upgraded_connection(local_websocket, handshake, &upstream_url, 1)
+                .await
+        };
+        let client_future = async {
+            let local_url = format!("ws://{local_address}/v1/responses");
+            let (mut client_websocket, _response) =
+                match tokio_tungstenite::connect_async(local_url).await {
+                    Ok(connected) => connected,
+                    Err(error) => panic!("local websocket client should connect: {error}"),
+                };
+            if let Err(error) = client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+            {
+                panic!("local client should send first frame: {error}");
+            }
+            let completed =
+                match tokio::time::timeout(Duration::from_millis(250), client_websocket.next())
+                    .await
+                {
+                    Ok(Some(Ok(message))) => message,
+                    Ok(Some(Err(error))) => panic!("local client should read completion: {error}"),
+                    Ok(None) => panic!("local client should read completion"),
+                    Err(_elapsed) => panic!("slow affinity recorder gated websocket forwarding"),
+                };
+            assert_eq!(
+                completed,
+                Message::text(
+                    r#"{"type":"response.completed","response":{"id":"resp_slow_recorder"}}"#
+                ),
+            );
+        };
+
+        let (server_result, ()) = tokio::join!(server_future, client_future);
+        match server_result {
+            Ok(()) => {}
+            Err(error) => panic!("async websocket tunnel should complete: {error}"),
+        }
+        match recorder_entered_receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(()) => {}
+            Err(error) => panic!("blocking recorder should start after forwarding: {error}"),
+        }
+        if let Err(error) = recorder_release_sender.send(()) {
+            panic!("blocking recorder release should send: {error}");
+        }
+        for _attempt in 0..50 {
+            if recorder.records_snapshot().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(recorder.records_snapshot().len(), 1);
+        match upstream_task.await {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream task should join: {error}"),
+        }
     }
 
     #[test]

@@ -39,6 +39,7 @@ row_owner() {
   case "$1" in
     U-06|U-07|I-16) printf 'T2' ;;
     I-21) printf 'T1/T2' ;;
+    I-17b) printf 'T5/T6' ;;
     G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23) printf 'T6' ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-09) printf 'T0/T6' ;;
     P-07|P-08|P-10) printf 'final' ;;
@@ -50,6 +51,9 @@ expected_observation() {
   case "$1" in
     I-21)
       printf 'listener binds and first request is accepted while broad quota refresh is slow or stalled'
+      ;;
+    I-17b)
+      printf 'slow affinity recorder cannot delay WebSocket frame forwarding or close progress'
       ;;
     G-01)
       printf 'no production std::net listener or stream in release serve path'
@@ -162,6 +166,33 @@ main() {
   owner=$(row_owner "$row_id")
 
   case "$row_id" in
+    I-17b)
+      if cargo test -p codex-router-proxy async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder -- --nocapture; then
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/lib.rs",
+]
+payload["freshness_check"] = "current_git_head_recorded"
+payload["notes"] = "Focused async WebSocket slow-recorder integration test passed; side-effect persistence is spawned after local frame forwarding."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
     G-01|G-02|G-03|G-04|G-05|G-07|G-23)
       CODEX_ROUTER_PROOF_COMMAND="scripts/proof-matrix.sh $row_id" \
         scripts/check-release-runtime-guardrails.py "$row_id"
