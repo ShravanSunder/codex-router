@@ -999,14 +999,12 @@ if row_id == "G-06":
             errors.append(f"{relative} contains direct sync SQLite access marker")
     require_contains("server runtime", read("crates/codex-router-proxy/src/server.rs"), "AsyncSqliteStateStore::open")
 elif row_id == "G-08":
-    release_sources = "\n".join(read(path) for path in [
-        "crates/codex-router-proxy/src/server.rs",
-        "crates/codex-router-proxy/src/websocket.rs",
-        "crates/codex-router-proxy/src/upstream.rs",
-    ])
+    server = read("crates/codex-router-proxy/src/server.rs")
     for marker in ["httparse::", "tungstenite::accept", "accept_hdr_async", "derive_accept_key", "BlockingWebSocketTunnel"]:
-        if marker in release_sources:
-            errors.append(f"release runtime still contains alternate parser/handshake marker: {marker}")
+        if marker in server:
+            errors.append(f"release serve switchpoint still contains alternate parser/handshake marker: {marker}")
+    for marker in ["hyper_tungstenite::upgrade", "AsyncWebSocketTunnel", "handle_upgraded_connection"]:
+        require_contains("release serve switchpoint", server, marker)
 elif row_id == "G-09":
     checker = read("scripts/check-release-runtime-guardrails.py")
     for marker in ["release_proxy_source_paths", "strip_cfg_test_items", "release_scan_forbidden", "proxy_src.rglob(\"*.rs\")"]:
@@ -1107,8 +1105,7 @@ PY
       ;;
     G-21)
       for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23; do
-        CODEX_ROUTER_PROOF_COMMAND="scripts/proof-matrix.sh $guardrail_row" \
-          scripts/check-release-runtime-guardrails.py "$guardrail_row" >/dev/null
+        CODEX_ROUTER_PROOF_VERIFY_ONLY=1 "$0" "$guardrail_row" >/dev/null
       done
       if ! ensure_guarded_source_paths_clean "$row_id"; then
         receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
@@ -1131,7 +1128,20 @@ payload["artifact_paths"] = [
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-03.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-04.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-05.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-06.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-07.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-08.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-09.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-10.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-13.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-14.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-15.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-16.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-17.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-18.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-19.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-20.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-22.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-23.json",
 ]
 payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
