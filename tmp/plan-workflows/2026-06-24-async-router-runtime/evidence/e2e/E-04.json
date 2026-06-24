@@ -3,10 +3,10 @@
     "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router/tmp/smoke/installed-codex-three-websocket-24532-1782325226459.json"
   ],
   "artifact_source": "tmp/smoke/installed-codex-three-websocket-soak-artifact.txt",
-  "command": "scripts/proof-matrix.sh E-06",
+  "command": "scripts/proof-matrix.sh E-04",
   "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
   "exit_code": 0,
-  "expected_observation": "router-owned WebSocket registry records high-water 3 and zero active after completion",
+  "expected_observation": "router writes at least three upstream frames to each of three completed sessions during overlap",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/*",
   "git_head": "3e9ef44e5a5ada9462a97559efb1bcd64d85e40e",
@@ -15,7 +15,7 @@
   "owner": "T8",
   "redaction_check": "pass",
   "result": "pass",
-  "row_id": "E-06",
+  "row_id": "E-04",
   "schema_version": 1,
   "soak_summary": {
     "clients": {

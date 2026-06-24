@@ -3856,7 +3856,9 @@ mod tests {
         ));
         assert!(script.contains(r#"run_test_filter "installed_codex_websocket_""#));
         assert!(script.contains(r#"run_test_filter "three_codex_websocket_concurrent_e2e_""#));
-        assert!(script.contains(r#"run_test_filter "three_codex_websocket_soak_""#));
+        assert!(
+            script.contains(r#"run_three_websocket_soak_filter "three_codex_websocket_soak_""#)
+        );
         Ok(())
     }
 
