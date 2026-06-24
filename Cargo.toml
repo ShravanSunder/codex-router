@@ -33,10 +33,11 @@ hyper = { version = "1.8.1", features = ["http1", "http2", "client", "server"] }
 hyper-rustls = { version = "0.27.7", default-features = false, features = ["http1", "http2", "tls12", "webpki-roots"] }
 hyper-util = { version = "0.1.19", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.37.0", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.18"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["rustls-tls-webpki-roots"] }

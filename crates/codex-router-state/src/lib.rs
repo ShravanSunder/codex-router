@@ -43,6 +43,9 @@ mod tests {
     use crate::repositories::AffinityRepository;
     use crate::repositories::QuotaSnapshotRepository;
     use crate::repositories::SelectorQuotaRepository;
+    use crate::sqlite::AsyncAffinityRepository;
+    use crate::sqlite::AsyncSelectorQuotaRepository;
+    use crate::sqlite::AsyncSqliteStateStore;
     use crate::sqlite::SqliteStateStore;
     use crate::sqlite::StateStoreError;
 
@@ -190,6 +193,77 @@ mod tests {
         assert_eq!(effective.status(), SelectorQuotaWindowStatus::Stale);
         assert_eq!(effective.remaining_headroom(), 41);
         assert_eq!(effective.reset_unix_seconds(), Some(700_000));
+    }
+
+    #[tokio::test]
+    async fn async_selector_input_matches_sync_repository_projection() {
+        let temp_dir = TestTempDir::new("async_selector_input_windows");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_async_selector_windows");
+        let account =
+            AccountRecord::new(account_id.clone(), "async-selector", AccountStatus::Enabled)
+                .with_active_credential_generation(9);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("account should persist: {error}");
+        }
+        let short_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(88)
+        .with_reset_unix_seconds(20_000)
+        .with_observed_unix_seconds(1_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(55)
+        .with_reset_unix_seconds(700_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&sync_store, &short_window)
+        {
+            panic!("short window should persist: {error}");
+        }
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&sync_store, &weekly_window)
+        {
+            panic!("weekly window should persist: {error}");
+        }
+
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let sync_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
+            &sync_store,
+            "responses",
+            1_000,
+        ) {
+            Ok(inputs) => inputs,
+            Err(error) => panic!("sync selector input should load: {error}"),
+        };
+        let async_inputs = match AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+            &async_store,
+            "responses",
+            1_000,
+        )
+        .await
+        {
+            Ok(inputs) => inputs,
+            Err(error) => panic!("async selector input should load: {error}"),
+        };
+
+        assert_eq!(async_inputs, sync_inputs);
     }
 
     #[test]
@@ -971,6 +1045,66 @@ mod tests {
             Ok(PreviousResponseAffinityOwnerLookup::Missing)
         );
         assert_no_previous_response_id_in_affinity_owner_rows(&database_path, "resp_raw_canary");
+    }
+
+    #[tokio::test]
+    async fn async_previous_response_affinity_owner_matches_sync_repository_projection() {
+        let temp_dir = TestTempDir::new("async_affinity_owner_hash_only");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let hash = affinity_hash('c');
+        let responses_owner = PreviousResponseAffinityOwnerRecord::new(
+            hash.clone(),
+            account_id("acct_async_owner"),
+            11,
+            RouteBand::Responses,
+            AffinitySourceTransport::WebSocket,
+            1_200,
+        );
+        if let Err(error) =
+            AffinityRepository::write_previous_response_owner(&sync_store, &responses_owner)
+        {
+            panic!("responses affinity owner should persist: {error}");
+        }
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+
+        let sync_lookup = match AffinityRepository::load_previous_response_owner(
+            &sync_store,
+            &hash,
+            RouteBand::Responses.as_str(),
+        ) {
+            Ok(lookup) => lookup,
+            Err(error) => panic!("sync affinity owner should load: {error}"),
+        };
+        let async_lookup = match AsyncAffinityRepository::load_previous_response_owner(
+            &async_store,
+            &hash,
+            RouteBand::Responses.as_str(),
+        )
+        .await
+        {
+            Ok(lookup) => lookup,
+            Err(error) => panic!("async affinity owner should load: {error}"),
+        };
+        let async_missing = match AsyncAffinityRepository::load_previous_response_owner(
+            &async_store,
+            &affinity_hash('d'),
+            RouteBand::Responses.as_str(),
+        )
+        .await
+        {
+            Ok(lookup) => lookup,
+            Err(error) => panic!("async missing affinity owner should load: {error}"),
+        };
+
+        assert_eq!(async_lookup, sync_lookup);
+        assert_eq!(async_missing, PreviousResponseAffinityOwnerLookup::Missing);
     }
 
     #[test]

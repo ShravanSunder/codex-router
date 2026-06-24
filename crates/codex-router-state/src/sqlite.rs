@@ -8,9 +8,13 @@ use codex_router_core::affinity::AffinityKeyHash;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::AffinityKey;
 use codex_router_core::routes::RouteBand;
+use futures_util::future::BoxFuture;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
+use sqlx::Row;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use thiserror::Error;
 
 use crate::account::AccountRecord;
@@ -44,6 +48,59 @@ const SELECTOR_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "models",
     "memories_trace_summarize",
     "responses_compact",
+];
+const ASYNC_V1_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS accounts (
+        account_id TEXT PRIMARY KEY NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        active_credential_generation INTEGER
+    )",
+    "CREATE TABLE IF NOT EXISTS quota_snapshots (
+        account_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        observed_unix_seconds INTEGER NOT NULL,
+        route_band TEXT NOT NULL,
+        remaining_headroom INTEGER NOT NULL,
+        reset_unix_seconds INTEGER,
+        reset_credits_available INTEGER,
+        stale_penalty INTEGER NOT NULL,
+        PRIMARY KEY (account_id, route_band)
+    )",
+    "CREATE TABLE IF NOT EXISTS affinity_pins (
+        affinity_key TEXT PRIMARY KEY NOT NULL,
+        account_id TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS selector_quota_windows (
+        account_id TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        limit_window_seconds INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        remaining_headroom INTEGER NOT NULL,
+        reset_unix_seconds INTEGER,
+        effective INTEGER NOT NULL,
+        observed_unix_seconds INTEGER NOT NULL,
+        PRIMARY KEY (account_id, route_band, limit_window_seconds)
+    )",
+    "CREATE TABLE IF NOT EXISTS quota_refresh_status (
+        account_id TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        last_success_unix_seconds INTEGER,
+        last_attempt_unix_seconds INTEGER,
+        last_error_class TEXT,
+        stale_after_unix_seconds INTEGER,
+        PRIMARY KEY (account_id, route_band)
+    )",
+    "CREATE TABLE IF NOT EXISTS previous_response_affinity_owners (
+        affinity_key_hash TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        credential_generation INTEGER NOT NULL,
+        source_transport TEXT NOT NULL,
+        created_unix_seconds INTEGER NOT NULL,
+        PRIMARY KEY (affinity_key_hash, route_band, account_id)
+    )",
+    "PRAGMA user_version = 7",
 ];
 
 /// SQLite state store failure.
@@ -91,6 +148,326 @@ impl fmt::Debug for SqliteStateStore {
             .debug_struct("SqliteStateStore")
             .field("database_path", &self.database_path)
             .finish_non_exhaustive()
+    }
+}
+
+/// Async SQLite state store backed by SQLx.
+#[derive(Clone, Debug)]
+pub struct AsyncSqliteStateStore {
+    database_path: PathBuf,
+    pool: sqlx::SqlitePool,
+}
+
+impl AsyncSqliteStateStore {
+    /// Opens a SQLite state database through SQLx and applies supported migrations.
+    pub async fn open(database_path: &Path) -> Result<Self, StateStoreError> {
+        let options = SqliteConnectOptions::new()
+            .filename(database_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(options)
+            .await
+            .map_err(sqlx_error)?;
+        let store = Self {
+            database_path: database_path.to_path_buf(),
+            pool,
+        };
+        store.migrate().await?;
+
+        Ok(store)
+    }
+
+    /// Returns the database path used by this async store.
+    #[must_use]
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    /// Returns the active schema version.
+    pub async fn schema_version(&self) -> Result<i64, StateStoreError> {
+        sqlx::query("PRAGMA user_version")
+            .fetch_one(&self.pool)
+            .await
+            .map(|row| row.get::<i64, _>(0))
+            .map_err(sqlx_error)
+    }
+
+    /// Loads selector input rows for one route band.
+    pub async fn selector_inputs_for_route_band(
+        &self,
+        route_band: &str,
+        now_unix_seconds: u64,
+    ) -> Result<Vec<SelectorQuotaInput>, StateStoreError> {
+        let accounts = self.list_accounts().await?;
+        let mut inputs = Vec::new();
+        for account in accounts {
+            let mut windows = self
+                .load_selector_windows(account.account_id(), route_band)
+                .await?;
+            let refresh_status = self
+                .load_quota_refresh_status(account.account_id(), route_band)
+                .await?;
+            if selector_windows_are_stale(&windows, refresh_status.as_ref(), now_unix_seconds) {
+                mark_selector_windows_stale(&mut windows);
+            }
+            inputs.push(SelectorQuotaInput::new(
+                account.account_id().clone(),
+                account.label(),
+                account.status(),
+                account.active_credential_generation(),
+                route_band,
+                windows,
+            ));
+        }
+
+        Ok(inputs)
+    }
+
+    async fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT account_id, label, status, active_credential_generation
+               FROM accounts
+              ORDER BY account_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let mut accounts = Vec::new();
+        for row in rows {
+            accounts.push(parse_account_row(
+                row.get::<String, _>(0),
+                row.get::<String, _>(1),
+                row.get::<String, _>(2),
+                row.get::<Option<i64>, _>(3),
+            )?);
+        }
+
+        Ok(accounts)
+    }
+
+    async fn load_quota_refresh_status(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+    ) -> Result<Option<QuotaRefreshStatusView>, StateStoreError> {
+        let row = sqlx::query(
+            "SELECT last_success_unix_seconds, last_attempt_unix_seconds,
+                    last_error_class, stale_after_unix_seconds
+               FROM quota_refresh_status
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        Ok(Some(QuotaRefreshStatusView::recorded(
+            account_id.clone(),
+            route_band,
+            row.get::<Option<i64>, _>(0)
+                .map(|value| i64_to_u64(value, account_id.as_str(), "last_success_unix_seconds"))
+                .transpose()?,
+            row.get::<Option<i64>, _>(1)
+                .map(|value| i64_to_u64(value, account_id.as_str(), "last_attempt_unix_seconds"))
+                .transpose()?,
+            row.get::<Option<String>, _>(2)
+                .as_deref()
+                .map(parse_refresh_error_class)
+                .transpose()?,
+            row.get::<Option<i64>, _>(3)
+                .map(|value| i64_to_u64(value, account_id.as_str(), "stale_after_unix_seconds"))
+                .transpose()?,
+        )))
+    }
+
+    async fn load_selector_windows(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+    ) -> Result<Vec<PersistedSelectorQuotaWindow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT account_id, route_band, limit_window_seconds, status,
+                    remaining_headroom, reset_unix_seconds, effective,
+                    observed_unix_seconds
+               FROM selector_quota_windows
+              WHERE account_id = ?1 AND route_band = ?2
+              ORDER BY effective DESC, limit_window_seconds",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let mut windows = Vec::new();
+        for row in rows {
+            let account_id_value = row.get::<String, _>(0);
+            let status_value = row.get::<String, _>(3);
+            let parsed_account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
+                StateStoreError::CorruptQuotaSnapshot {
+                    account_id: account_id_value.clone(),
+                    field: "account_id",
+                }
+            })?;
+            let status = SelectorQuotaWindowStatus::parse(&status_value).ok_or_else(|| {
+                StateStoreError::CorruptQuotaSnapshot {
+                    account_id: account_id_value.clone(),
+                    field: "selector_status",
+                }
+            })?;
+            let effective = match row.get::<i64, _>(6) {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(StateStoreError::CorruptQuotaSnapshot {
+                        account_id: account_id_value,
+                        field: "effective",
+                    });
+                }
+            };
+            let mut window = PersistedSelectorQuotaWindow::new(
+                parsed_account_id,
+                row.get::<String, _>(1),
+                i64_to_u64(
+                    row.get::<i64, _>(2),
+                    &account_id_value,
+                    "limit_window_seconds",
+                )?,
+                status,
+            )
+            .with_remaining_headroom(i64_to_u32(
+                row.get::<i64, _>(4),
+                &account_id_value,
+                "remaining_headroom",
+            )?)
+            .with_effective(effective)
+            .with_observed_unix_seconds(i64_to_u64(
+                row.get::<i64, _>(7),
+                &account_id_value,
+                "observed_unix_seconds",
+            )?);
+            if let Some(reset) = row
+                .get::<Option<i64>, _>(5)
+                .map(|value| i64_to_u64(value, &account_id_value, "reset_unix_seconds"))
+                .transpose()?
+            {
+                window = window.with_reset_unix_seconds(reset);
+            }
+            windows.push(window);
+        }
+
+        Ok(windows)
+    }
+
+    /// Loads a hashed previous-response owner record for one route band.
+    pub async fn load_previous_response_owner(
+        &self,
+        affinity_key_hash: &AffinityKeyHash,
+        route_band: &str,
+    ) -> Result<PreviousResponseAffinityOwnerLookup, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT affinity_key_hash, route_band, account_id, credential_generation,
+                    source_transport, created_unix_seconds
+               FROM previous_response_affinity_owners
+              WHERE affinity_key_hash = ?1 AND route_band = ?2
+              ORDER BY account_id
+              LIMIT 2",
+        )
+        .bind(affinity_key_hash.as_str())
+        .bind(route_band)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let mut owners = Vec::new();
+        for row in rows {
+            owners.push(parse_previous_response_owner_row(
+                row.get::<String, _>(0),
+                row.get::<String, _>(1),
+                row.get::<String, _>(2),
+                row.get::<i64, _>(3),
+                row.get::<String, _>(4),
+                row.get::<i64, _>(5),
+            )?);
+        }
+
+        match owners.len() {
+            0 => Ok(PreviousResponseAffinityOwnerLookup::Missing),
+            1 => Ok(PreviousResponseAffinityOwnerLookup::Found(owners.remove(0))),
+            _ => Ok(PreviousResponseAffinityOwnerLookup::Ambiguous),
+        }
+    }
+
+    async fn migrate(&self) -> Result<(), StateStoreError> {
+        match self.schema_version().await? {
+            0 => self.apply_v1().await,
+            CURRENT_SCHEMA_VERSION => Ok(()),
+            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
+        }
+    }
+
+    async fn apply_v1(&self) -> Result<(), StateStoreError> {
+        for statement in ASYNC_V1_SCHEMA_STATEMENTS {
+            sqlx::query(*statement)
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Async selector quota repository contract for Tokio runtime callers.
+pub trait AsyncSelectorQuotaRepository {
+    /// Loads selector input rows for one route band.
+    fn selector_inputs_for_route_band<'a>(
+        &'a self,
+        route_band: &'a str,
+        now_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<SelectorQuotaInput>, StateStoreError>>;
+}
+
+impl AsyncSelectorQuotaRepository for AsyncSqliteStateStore {
+    fn selector_inputs_for_route_band<'a>(
+        &'a self,
+        route_band: &'a str,
+        now_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<SelectorQuotaInput>, StateStoreError>> {
+        Box::pin(async move {
+            self.selector_inputs_for_route_band(route_band, now_unix_seconds)
+                .await
+        })
+    }
+}
+
+/// Async affinity repository contract for Tokio runtime callers.
+pub trait AsyncAffinityRepository {
+    /// Loads a hashed previous-response owner record for one route band.
+    fn load_previous_response_owner<'a>(
+        &'a self,
+        affinity_key_hash: &'a AffinityKeyHash,
+        route_band: &'a str,
+    ) -> BoxFuture<'a, Result<PreviousResponseAffinityOwnerLookup, StateStoreError>>;
+}
+
+impl AsyncAffinityRepository for AsyncSqliteStateStore {
+    fn load_previous_response_owner<'a>(
+        &'a self,
+        affinity_key_hash: &'a AffinityKeyHash,
+        route_band: &'a str,
+    ) -> BoxFuture<'a, Result<PreviousResponseAffinityOwnerLookup, StateStoreError>> {
+        Box::pin(async move {
+            self.load_previous_response_owner(affinity_key_hash, route_band)
+                .await
+        })
     }
 }
 
@@ -1428,6 +1805,12 @@ impl AffinityRepository for SqliteStateStore {
 }
 
 fn sqlite_error(error: rusqlite::Error) -> StateStoreError {
+    StateStoreError::Sqlite {
+        message: error.to_string(),
+    }
+}
+
+fn sqlx_error(error: sqlx::Error) -> StateStoreError {
     StateStoreError::Sqlite {
         message: error.to_string(),
     }
