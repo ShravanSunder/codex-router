@@ -7,7 +7,7 @@
   "failures": [],
   "freshness_check": "current_git_head_recorded",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/*",
-  "git_head": "8478fa8791597d8e1115e54c52e6a57f7c105ecf",
+  "git_head": "cbe736a787f4024d6efd938a5ea6e9c9c0629c8e",
   "layer": "structural",
   "owner": "T6",
   "redaction_check": "pass",
@@ -16,9 +16,18 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T19:36:10Z",
+  "timestamp_utc": "2026-06-24T20:09:12Z",
   "touched_targets": [
+    "crates/codex-router-proxy/src/account_selection.rs",
+    "crates/codex-router-proxy/src/credential_runtime.rs",
+    "crates/codex-router-proxy/src/headers.rs",
+    "crates/codex-router-proxy/src/http_sse.rs",
+    "crates/codex-router-proxy/src/lib.rs",
+    "crates/codex-router-proxy/src/local_auth.rs",
+    "crates/codex-router-proxy/src/routes.rs",
+    "crates/codex-router-proxy/src/secret_store_factory.rs",
     "crates/codex-router-proxy/src/server.rs",
-    "crates/codex-router-proxy/src/upstream.rs"
+    "crates/codex-router-proxy/src/upstream.rs",
+    "crates/codex-router-proxy/src/websocket.rs"
   ]
 }

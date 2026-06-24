@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
+use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::affinity::PreviousResponseId;
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::affinity::hash_previous_response_id;
@@ -37,6 +38,7 @@ use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
 use crate::account_selection::AccountDecisionSelector;
+use crate::account_selection::AsyncAccountDecisionSelector;
 use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
@@ -62,6 +64,15 @@ impl AuditFailureReporter for StderrAuditFailureReporter {
     fn report_audit_failure(&self, diagnostic: &str) {
         eprintln!("{diagnostic}");
     }
+}
+
+/// Resolves provider credentials for async Tokio runtime callers.
+pub trait AsyncProviderCredentialResolver {
+    /// Resolves credentials immediately before provider egress.
+    fn resolve_provider_credentials<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>>;
 }
 
 /// Appends one audit event and reports a redacted local diagnostic on failure.
@@ -694,6 +705,90 @@ where
         let resolved = self
             .credential_resolver
             .resolve_provider_credentials(selected.account_id())
+            .map_err(|reason| {
+                self.emit_audit_event(http_credential_rejection_audit_event(
+                    audit_route_kind,
+                    account_hash.clone(),
+                ));
+                HttpProxyError::ProviderCredential { reason }
+            })?;
+        let upstream_request = self.proxy.build_upstream_request(
+            request,
+            resolved.access_token().clone(),
+            resolved.chatgpt_account_id(),
+        )?;
+        let completion = StreamingHttpProxyCompletion {
+            affinity_secret,
+            account_id: selected.account_id().clone(),
+            credential_generation: resolved.credential_generation(),
+            allowed_audit_event: allowed_audit_event(
+                TransportKind::Http,
+                audit_route_kind,
+                account_hash,
+            ),
+        };
+
+        Ok(PreparedStreamingHttpProxyRequest {
+            upstream_request,
+            completion,
+        })
+    }
+}
+
+impl<T, S, C> AuthenticatedHttpProxyService<'_, T, S, C>
+where
+    S: AsyncAccountDecisionSelector,
+    C: AsyncProviderCredentialResolver,
+{
+    /// Prepares one sanitized upstream HTTP/SSE request without blocking on
+    /// request-time account selection or credential resolution.
+    pub async fn prepare_streaming_request_async(
+        &self,
+        request: HttpProxyRequest,
+    ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
+        let audit_route_kind = audit_route_kind_for_request(&request);
+        let presented_token = match extract_presented_local_token_from_request(
+            request.header_value("x-codex-router-token"),
+            request.header_value("authorization"),
+            request.header_value("cookie"),
+            request.path(),
+            request.body(),
+            true,
+        ) {
+            Ok(presented_token) => presented_token,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::Http,
+                    audit_route_kind,
+                    reason,
+                ));
+                return Err(HttpProxyError::LocalAuth { reason });
+            }
+        };
+        let token_generation = match self.auth_gate.authorize(presented_token) {
+            Ok(generation) => generation,
+            Err(reason) => {
+                self.emit_audit_event(local_auth_rejection_audit_event(
+                    TransportKind::Http,
+                    audit_route_kind,
+                    reason,
+                ));
+                return Err(HttpProxyError::LocalAuth { reason });
+            }
+        };
+        let affinity_secret = self.load_affinity_secret_for_request(&request)?;
+        let selected = self
+            .selector
+            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
+            .await
+            .inspect_err(|_error| {
+                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
+            })?;
+        let account_hash = redacted_account_hash(selected.account_id());
+        let resolved = self
+            .credential_resolver
+            .resolve_provider_credentials(selected.account_id())
+            .await
             .map_err(|reason| {
                 self.emit_audit_event(http_credential_rejection_audit_event(
                     audit_route_kind,

@@ -1,0 +1,25 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh I-19",
+  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "exit_code": 0,
+  "expected_observation": "local/upstream close, runtime shutdown, and active pump cancellation clean up WebSocket sessions",
+  "freshness_check": "current_git_head_recorded",
+  "freshness_guard": "crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/lib.rs scripts/proof-matrix.sh",
+  "git_head": "cbe736a787f4024d6efd938a5ea6e9c9c0629c8e",
+  "layer": "integration",
+  "notes": "Focused pump cleanup family passed: active duplex pumps cancel on shutdown, serve shutdown drains active sessions, and reset/idle-close handling does not leak failed turns.",
+  "owner": "pending-owner",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "I-19",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-24T20:10:20Z",
+  "touched_targets": [
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/lib.rs"
+  ]
+}

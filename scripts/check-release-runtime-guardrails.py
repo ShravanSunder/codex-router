@@ -22,6 +22,7 @@ class Check:
     description: str
     forbidden: tuple[tuple[str, str], ...]
     required: tuple[tuple[str, str], ...] = ()
+    release_scan_forbidden: tuple[str, ...] = ()
 
 
 CHECKS: dict[str, Check] = {
@@ -31,6 +32,10 @@ CHECKS: dict[str, Check] = {
         forbidden=(
             ("crates/codex-router-proxy/src/server.rs", "std::net::TcpListener"),
             ("crates/codex-router-proxy/src/server.rs", "std::net::TcpStream"),
+        ),
+        release_scan_forbidden=(
+            "std::net::TcpListener",
+            "std::net::TcpStream",
         ),
         required=(
             ("crates/codex-router-proxy/src/server.rs", "tokio::net::TcpListener"),
@@ -43,6 +48,7 @@ CHECKS: dict[str, Check] = {
         forbidden=(
             ("crates/codex-router-proxy/src/upstream.rs", "reqwest::blocking"),
         ),
+        release_scan_forbidden=("reqwest::blocking",),
         required=(
             ("crates/codex-router-proxy/src/upstream.rs", "HyperHttpUpstreamTransport"),
             ("crates/codex-router-proxy/src/upstream.rs", "hyper_util::client::legacy::Client"),
@@ -57,6 +63,12 @@ CHECKS: dict[str, Check] = {
             ("crates/codex-router-proxy/src/websocket.rs", "use tungstenite::connect;"),
             ("crates/codex-router-proxy/src/websocket.rs", "connect(upstream_request)"),
         ),
+        release_scan_forbidden=(
+            "BlockingWebSocketTunnel",
+            "tungstenite::accept",
+            "use tungstenite::connect;",
+            "connect(upstream_request)",
+        ),
         required=(
             ("crates/codex-router-proxy/src/server.rs", "AsyncWebSocketTunnel"),
             ("crates/codex-router-proxy/src/websocket.rs", "tokio_tungstenite::connect_async"),
@@ -69,6 +81,7 @@ CHECKS: dict[str, Check] = {
             ("crates/codex-router-proxy/src/server.rs", "httparse::"),
             ("crates/codex-router-proxy/src/upstream.rs", "httparse::"),
         ),
+        release_scan_forbidden=("httparse::",),
     ),
     "G-05": Check(
         row_id="G-05",
@@ -117,6 +130,7 @@ def main() -> int:
     args = parser.parse_args()
     check = CHECKS[args.row_id]
     production_sources: dict[str, str] = {}
+    release_sources = release_proxy_sources()
     failures: list[dict[str, str]] = []
 
     for relative_path, needle in check.forbidden + check.required:
@@ -139,6 +153,17 @@ def main() -> int:
                     "needle": needle,
                 }
             )
+
+    for needle in check.release_scan_forbidden:
+        for relative_path, source in release_sources.items():
+            if needle in source:
+                failures.append(
+                    {
+                        "kind": "release_reachable_forbidden_present",
+                        "path": relative_path,
+                        "needle": needle,
+                    }
+                )
 
     receipt_path = write_receipt(check, failures)
     if failures:
@@ -218,7 +243,11 @@ def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
         "exit_code": 0 if not failures else 1,
         "expected_observation": check.description,
         "touched_targets": sorted(
-            {path for path, _needle in check.forbidden + check.required}
+            {
+                path
+                for path, _needle in check.forbidden + check.required
+            }
+            | set(release_proxy_source_paths())
         ),
         "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/*",
         "freshness_check": "current_git_head_recorded",
@@ -228,6 +257,22 @@ def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
     }
     receipt_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return receipt_path
+
+
+def release_proxy_source_paths() -> list[str]:
+    proxy_src = REPO_ROOT / "crates/codex-router-proxy/src"
+    return sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in proxy_src.rglob("*.rs")
+        if path.is_file()
+    )
+
+
+def release_proxy_sources() -> dict[str, str]:
+    return {
+        relative_path: strip_cfg_test_items(REPO_ROOT / relative_path)
+        for relative_path in release_proxy_source_paths()
+    }
 
 
 def git_head() -> str:

@@ -74,6 +74,12 @@ expected_observation() {
     I-17b)
       printf 'slow affinity recorder cannot delay WebSocket frame forwarding or close progress'
       ;;
+    I-19)
+      printf 'local/upstream close, runtime shutdown, and active pump cancellation clean up WebSocket sessions'
+      ;;
+    I-20)
+      printf 'first client WebSocket frame is forwarded unchanged before upstream response pumping'
+      ;;
     G-01)
       printf 'no production std::net listener or stream in release serve path'
       ;;
@@ -106,6 +112,7 @@ expected_observation() {
 
 freshness_guard() {
   case "$1" in
+    I-19|I-20) printf 'crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/lib.rs scripts/proof-matrix.sh' ;;
     I-21) printf 'crates/codex-router-cli/src/lib.rs crates/codex-router-proxy/src/server.rs crates/codex-router-quota/src/* crates/codex-router-state/src/*' ;;
     U-*) printf 'crates/codex-router-proxy/src/* crates/codex-router-core/src/* crates/codex-router-selection/src/*' ;;
     I-*) printf 'crates/codex-router-proxy/src/* crates/codex-router-cli/src/* crates/codex-router-state/src/* crates/codex-router-auth/src/*' ;;
@@ -431,6 +438,122 @@ path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
         exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
+    I-19)
+      if cargo test -p codex-router-proxy runtime_shutdown_cancels_active_duplex_pumps -- --nocapture \
+        && cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture \
+        && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_during_new_turn_after_prior_completion_is_reported -- --nocapture \
+        && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture; then
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/lib.rs",
+]
+payload["freshness_check"] = "current_git_head_recorded"
+payload["notes"] = "Focused pump cleanup family passed: active duplex pumps cancel on shutdown, serve shutdown drains active sessions, and reset/idle-close handling does not leak failed turns."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
+    I-20)
+      if cargo test -p codex-router-proxy websocket_first_response_create_frame_selects_and_forwards_unchanged -- --nocapture \
+        && cargo test -p codex-router-proxy websocket_first_direct_response_create_payload_selects_and_forwards_unchanged -- --nocapture \
+        && cargo test -p codex-router-proxy async_websocket_tunnel_forwards_first_frame_and_second_local_frame -- --nocapture; then
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/lib.rs",
+]
+payload["freshness_check"] = "current_git_head_recorded"
+payload["notes"] = "Focused exact-forwarding tests passed: first response.create frame and direct response payload route once and reach upstream unchanged, including async tunnel forwarding."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
+    I-21)
+      if python3 - <<'PY'
+from pathlib import Path
+source = Path("crates/codex-router-proxy/src/server.rs").read_text()
+errors = []
+required = [
+    "prepare_streaming_http_request_async",
+    "AsyncSqliteStateStore::open",
+    "AsyncRepositoryBackedAccountSelector::new_with_runtime",
+    "service.prepare_streaming_request_async(request).await",
+]
+for needle in required:
+    if needle not in source:
+        errors.append(f"missing async HTTP/SSE release-path marker: {needle}")
+forbidden = [
+    "prepare_context.prepare_streaming_http_request",
+    "fn prepare_streaming_http_request(",
+    "let prepared = tokio::task::spawn_blocking(move ||",
+]
+for needle in forbidden:
+    if needle in source:
+        errors.append(f"sync HTTP/SSE request-time marker still present: {needle}")
+if errors:
+    for error in errors:
+        print(error)
+    raise SystemExit(1)
+PY
+      then
+        if cargo test -p codex-router-cli served_router_http_uses_persisted_quota_while_background_refresh_is_blocked -- --nocapture; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+          python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/http_sse.rs",
+    "crates/codex-router-cli/src/lib.rs",
+]
+payload["freshness_check"] = "current_git_head_recorded"
+payload["notes"] = "Release HTTP/SSE request prep uses SQLx-backed AsyncSqliteStateStore and async selector; served-router startup/nonblocking HTTP quota regression passed."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+          printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+          exit 0
+        fi
       fi
       receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2

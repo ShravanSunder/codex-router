@@ -57,7 +57,6 @@ use codex_router_state::sqlite::StateStoreError;
 
 use crate::account_selection::AsyncRepositoryBackedAccountSelector;
 use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
-use crate::account_selection::RepositoryBackedAccountSelector;
 use crate::account_selection::RouteBandAccountHolds;
 use crate::account_selection::RouteBandWeightedSelectors;
 use crate::credential_runtime::ProxyCredentialResolver;
@@ -65,6 +64,7 @@ use crate::credential_runtime::ProxyCredentialResolverOpenError;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::http_sse::AsyncHttpBodyError;
+use crate::http_sse::AsyncProviderCredentialResolver;
 use crate::http_sse::AsyncStreamingHttpProxyResponse;
 use crate::http_sse::AsyncStreamingUpstreamHttpTransport;
 use crate::http_sse::AuthenticatedHttpProxyService;
@@ -94,7 +94,6 @@ use crate::secret_store_factory::ProxyRuntimeSecretStore;
 use crate::secret_store_factory::open_proxy_secret_store;
 use crate::upstream::HyperHttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
-use crate::websocket::AsyncProviderCredentialResolver;
 use crate::websocket::AsyncWebSocketTunnel;
 use crate::websocket::FirstFramePolicy;
 use crate::websocket::WebSocketHandshakeRequest;
@@ -562,7 +561,9 @@ impl LoopbackRouterRuntime {
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         let mut handled_connections = 0_usize;
         let mut handlers = Vec::new();
-        let connection_handler = Arc::new(self.protocol_connection_handler());
+        let session_shutdown = shutdown.clone().unwrap_or_default();
+        let connection_handler =
+            Arc::new(self.protocol_connection_handler(session_shutdown.clone()));
         while handled_connections < max_connections {
             let (stream, _peer_addr) = if let Some(shutdown) = shutdown.as_ref() {
                 tokio::select! {
@@ -581,7 +582,7 @@ impl LoopbackRouterRuntime {
             let handler_context = Arc::clone(&connection_handler);
             let handler =
                 tokio::spawn(async move { handler_context.handle_hyper_connection(stream).await });
-            if max_connections == usize::MAX {
+            if max_connections == usize::MAX && shutdown.is_none() {
                 supervise_detached_connection_handler(
                     handler,
                     Arc::clone(&self.connection_error_reporter),
@@ -590,6 +591,12 @@ impl LoopbackRouterRuntime {
                 handlers.push(handler);
             }
             handled_connections += 1;
+        }
+
+        if let Some(shutdown) = shutdown.as_ref()
+            && shutdown.is_cancelled()
+        {
+            session_shutdown.cancel();
         }
 
         for handler in handlers {
@@ -603,7 +610,10 @@ impl LoopbackRouterRuntime {
         Ok(handled_connections)
     }
 
-    fn protocol_connection_handler(&self) -> LoopbackProtocolConnectionHandler {
+    fn protocol_connection_handler(
+        &self,
+        session_shutdown: CancellationToken,
+    ) -> LoopbackProtocolConnectionHandler {
         LoopbackProtocolConnectionHandler {
             state_database_path: self.state_database_path.clone(),
             secret_store_root: self.secret_store_root.clone(),
@@ -618,6 +628,7 @@ impl LoopbackRouterRuntime {
             weighted_selectors: Arc::clone(&self.weighted_selectors),
             account_holds: Arc::clone(&self.account_holds),
             fixed_now_unix_seconds: self.fixed_now_unix_seconds,
+            session_shutdown,
         }
     }
 }
@@ -654,6 +665,7 @@ struct LoopbackProtocolConnectionHandler {
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     fixed_now_unix_seconds: Option<u64>,
+    session_shutdown: CancellationToken,
 }
 
 type UpgradeTaskResult = Result<(), LoopbackRouterRuntimeError>;
@@ -793,6 +805,7 @@ impl LoopbackProtocolConnectionHandler {
             )
         }
         .with_revocation_registry(self.websocket_revocations.clone())
+        .with_session_shutdown(self.session_shutdown.clone())
         .with_affinity_secret_provider(&self.secret_store)
         .with_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
@@ -815,15 +828,9 @@ impl LoopbackProtocolConnectionHandler {
             Ok(request) => request,
             Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
         };
-        let prepare_context = Arc::clone(&self);
-        let prepared = tokio::task::spawn_blocking(move || {
-            prepare_context.prepare_streaming_http_request(request)
-        })
-        .await;
-        let prepared = match prepared {
-            Ok(Ok(prepared)) => prepared,
-            Ok(Err(error)) => return http_error_response(error),
-            Err(_error) => return empty_response(StatusCode::BAD_GATEWAY),
+        let prepared = match self.prepare_streaming_http_request_async(request).await {
+            Ok(prepared) => prepared,
+            Err(error) => return http_error_response(error),
         };
         let (upstream_request, completion) = prepared.into_parts();
         let response = match self.upstream.send_streaming(upstream_request).await {
@@ -834,21 +841,27 @@ impl LoopbackProtocolConnectionHandler {
         self.async_streaming_http_response_to_hyper(response, completion)
     }
 
-    fn prepare_streaming_http_request(
+    async fn prepare_streaming_http_request_async(
         &self,
         request: HttpProxyRequest,
     ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
-        let state_store = SqliteStateStore::open(&self.state_database_path).map_err(|_error| {
-            HttpProxyError::Selection {
+        let state_store = AsyncSqliteStateStore::open(&self.state_database_path)
+            .await
+            .map_err(|_error| HttpProxyError::Selection {
                 reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
-            }
-        })?;
-        let credential_resolver = self.open_credential_resolver().map_err(|_error| {
-            HttpProxyError::ProviderCredential {
-                reason: CredentialResolverError::SecretUnavailable,
-            }
-        })?;
-        let selector = self.repository_backed_account_selector(&state_store);
+            })?;
+        let credential_resolver = AsyncProxyCredentialResolver::new(
+            self.state_database_path.clone(),
+            self.secret_store_root.clone(),
+            self.fixed_now_unix_seconds,
+        );
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &state_store,
+            Arc::clone(&self.weighted_selectors),
+            Arc::clone(&self.account_holds),
+            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            self.runtime_clock(),
+        );
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,
@@ -862,7 +875,7 @@ impl LoopbackProtocolConnectionHandler {
         } else {
             service
         };
-        service.prepare_streaming_request(request)
+        service.prepare_streaming_request_async(request).await
     }
 
     fn async_streaming_http_response_to_hyper(
@@ -949,42 +962,6 @@ impl LoopbackProtocolConnectionHandler {
                 }
             })
         })
-    }
-
-    fn repository_backed_account_selector<'a>(
-        &self,
-        state_store: &'a SqliteStateStore,
-    ) -> RepositoryBackedAccountSelector<'a, SqliteStateStore> {
-        let fixed_now_unix_seconds = self.fixed_now_unix_seconds;
-        RepositoryBackedAccountSelector::new_with_runtime(
-            state_store,
-            Arc::clone(&self.weighted_selectors),
-            Arc::clone(&self.account_holds),
-            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
-            Arc::new(move || {
-                fixed_now_unix_seconds.unwrap_or_else(|| match current_unix_seconds() {
-                    Ok(now_unix_seconds) => now_unix_seconds,
-                    Err(error) => {
-                        panic!("system clock must remain after Unix epoch for routing: {error}")
-                    }
-                })
-            }),
-        )
-    }
-
-    fn open_credential_resolver(
-        &self,
-    ) -> Result<ProxyCredentialResolver, LoopbackRouterRuntimeError> {
-        let now_unix_seconds = match self.fixed_now_unix_seconds {
-            Some(now_unix_seconds) => now_unix_seconds,
-            None => current_unix_seconds().map_err(LoopbackRouterRuntimeError::SystemClock)?,
-        };
-        ProxyCredentialResolver::open(
-            &self.state_database_path,
-            &self.secret_store_root,
-            now_unix_seconds,
-        )
-        .map_err(LoopbackRouterRuntimeError::CredentialResolver)
     }
 }
 

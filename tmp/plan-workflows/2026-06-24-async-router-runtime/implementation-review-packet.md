@@ -91,6 +91,34 @@ Proof artifacts:
 - `scripts/proof-matrix.sh` rows G-01/G-02/G-03/G-04/G-05/G-07/G-21/G-23/I-17b
   exit 0.
 
+Latest implementation-review finding fixes after `cbe736a`:
+- `cargo fmt --all -- --check`
+  exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`
+  exit 0.
+- `cargo test -p codex-router-proxy -- --nocapture`
+  exit 0, 113 passed.
+- `cargo test --workspace -- --nocapture`
+  exit 0, 270 passed, 0 failed, 10 ignored.
+- `tests/smoke/installed_codex_mock.sh --transport all`
+  exit 0, 6 passed.
+- `scripts/proof-matrix.sh I-19`
+  exit 0; pump cleanup/shutdown row now has a permanent harness.
+- `scripts/proof-matrix.sh I-20`
+  exit 0; exact first-frame forwarding row now has a permanent harness.
+- `scripts/proof-matrix.sh I-21`
+  exit 0; release HTTP/SSE request prep uses async state/selector contracts.
+- `scripts/proof-matrix.sh` rows G-01/G-02/G-03/G-04/G-05/G-07/G-21/G-23
+  exit 0 with guardrails scanning the release `codex-router-proxy/src/*.rs`
+  surface after stripping `#[cfg(test)]` items.
+
+Freshness note:
+- The five-minute soak artifact below is still the last completed long-run
+  artifact, but it predates the latest implementation-review fixes. Final
+  PR-ready proof requires a fresh post-commit `tests/smoke/installed_codex_mock.sh
+  --transport websocket --scenario soak` run and fresh E-02/E-03/E-04/E-05/E-06/E-08
+  row validation.
+
 Five-minute soak artifact:
 - `tmp/smoke/installed-codex-three-websocket-90038-1782329647884.json`
 - git_head=8478fa8791597d8e1115e54c52e6a57f7c105ecf.
@@ -132,6 +160,16 @@ Accepted review findings addressed:
 - Proof rows reject dirty guarded source paths before accepting a fresh artifact,
   so a local implementation/proof change cannot be hidden behind an artifact
   whose git_head already equals HEAD.
+- WebSocket duplex forwarding now uses separately supervised local-to-upstream
+  and upstream-to-local pump tasks; revocation, serve shutdown, or either pump
+  completion aborts and awaits the sibling pump.
+- Serve shutdown with a cancellation token now cancels session-level WebSocket
+  work and awaits active handlers before returning.
+- HTTP/SSE release request preparation now uses async SQLx-backed state and
+  async selector/credential contracts instead of sync SQLite inside
+  `spawn_blocking`.
+- Structural guardrails now scan the release proxy source surface rather than
+  only fixed obvious files.
 
 ## Security Context
 

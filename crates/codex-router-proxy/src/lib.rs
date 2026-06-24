@@ -33,6 +33,7 @@ mod tests {
     use crate::credential_runtime::ProxyCredentialResolver;
     use crate::headers::Header;
     use crate::headers::HeaderCollection;
+    use crate::http_sse::AsyncProviderCredentialResolver;
     use crate::http_sse::AuditFailureReporter;
     use crate::http_sse::AuthenticatedHttpProxyService;
     use crate::http_sse::HttpAffinityOwnerRecorder;
@@ -67,7 +68,6 @@ mod tests {
     use crate::upstream::UpstreamEndpoint;
     use crate::upstream::UpstreamRequestBuilder;
     use crate::websocket::AsyncAuthenticatedWebSocketRouter;
-    use crate::websocket::AsyncProviderCredentialResolver;
     use crate::websocket::AsyncWebSocketTunnel;
     use crate::websocket::AuthenticatedWebSocketRouter;
     use crate::websocket::BlockingWebSocketTunnel;
@@ -169,27 +169,6 @@ mod tests {
             &self,
         ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
             Ok(test_affinity_secret())
-        }
-    }
-
-    struct ChannelConnectionErrorReporter {
-        sender: Mutex<mpsc::Sender<String>>,
-    }
-
-    impl ChannelConnectionErrorReporter {
-        fn new(sender: mpsc::Sender<String>) -> Self {
-            Self {
-                sender: Mutex::new(sender),
-            }
-        }
-    }
-
-    impl crate::server::LoopbackConnectionErrorReporter for ChannelConnectionErrorReporter {
-        fn report_connection_error(&self, diagnostic: &str) {
-            let Ok(sender) = self.sender.lock() else {
-                return;
-            };
-            let _send_result = sender.send(diagnostic.to_owned());
         }
     }
 
@@ -4405,7 +4384,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_router_runtime_reports_detached_unbounded_websocket_failures() {
+    fn loopback_router_runtime_reports_unbounded_websocket_failures_on_shutdown() {
         let temp_dir = ProxyTestTempDir::new("runtime_websocket_unbounded_error_report");
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
@@ -4427,11 +4406,8 @@ mod tests {
                 TokenGeneration::new(1),
             ),
         );
-        let (error_sender, error_receiver) = mpsc::channel();
         let runtime = match LoopbackRouterRuntime::start(config) {
-            Ok(runtime) => runtime.with_connection_error_reporter(Arc::new(
-                ChannelConnectionErrorReporter::new(error_sender),
-            )),
+            Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
         let router_address = runtime.local_addr();
@@ -4455,25 +4431,147 @@ mod tests {
             Err(error) => panic!("local websocket client should connect: {error}"),
         };
 
-        let diagnostic = match error_receiver.recv_timeout(Duration::from_secs(2)) {
-            Ok(diagnostic) => diagnostic,
-            Err(error) => {
-                shutdown.cancel();
-                drop(client);
-                panic!("unbounded websocket failure should be reported: {error}");
-            }
-        };
-        drop(client);
+        thread::sleep(Duration::from_millis(350));
         shutdown.cancel();
+        drop(client);
         match server_thread.join() {
-            Ok(Ok(handled)) => assert!(handled >= 1, "server should accept the failing websocket"),
-            Ok(Err(error)) => panic!("unbounded serve should report but not return error: {error}"),
+            Ok(Ok(handled)) => panic!(
+                "unbounded cancelled serve should propagate the websocket failure, handled={handled}"
+            ),
+            Ok(Err(error)) => assert!(
+                error.to_string().contains("FirstFrameTimeout"),
+                "unbounded cancelled serve should return websocket failure reason, got {error}"
+            ),
             Err(error) => panic!("server thread panicked: {error:?}"),
         }
-        assert!(
-            diagnostic.contains("FirstFrameTimeout"),
-            "diagnostic should include the websocket failure reason, got {diagnostic}"
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn loopback_router_runtime_shutdown_drains_active_websocket_sessions() {
+        let temp_dir = ProxyTestTempDir::new("runtime_shutdown_drains_websocket");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_ws_shutdown"),
+            "ws-shutdown",
+            AccountStatus::Enabled,
         );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &account,
+            90,
+            "runtime-shutdown-token",
+        );
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let (upstream_ready_sender, upstream_ready_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket =
+                match accept_hdr(stream, |_request: &Request, response: Response| {
+                    Ok(response)
+                }) {
+                    Ok(websocket) => websocket,
+                    Err(error) => {
+                        panic!("mock websocket upstream handshake should accept: {error}")
+                    }
+                };
+            match websocket.read() {
+                Ok(_message) => {}
+                Err(error) => panic!("mock websocket upstream should read first frame: {error}"),
+            }
+            if let Err(error) = upstream_ready_sender.send(()) {
+                panic!("mock websocket upstream readiness should send: {error}");
+            }
+            let _close_or_error = websocket.read();
+        });
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => Arc::new(runtime),
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown_for_thread = shutdown.clone();
+        let runtime_for_thread = Arc::clone(&runtime);
+        let server_thread = thread::spawn(move || {
+            runtime_for_thread
+                .serve_protocol_connections_until_cancelled(usize::MAX, shutdown_for_thread)
+        });
+        let mut request = match format!("ws://{router_address}/v1/responses").into_client_request()
+        {
+            Ok(request) => request,
+            Err(error) => panic!("local websocket request should build: {error}"),
+        };
+        request.headers_mut().insert(
+            "X-Codex-Router-Token",
+            HeaderValue::from_static("current-token"),
+        );
+        let (mut client, _response) = match connect(request) {
+            Ok(connection) => connection,
+            Err(error) => panic!("local websocket client should connect: {error}"),
+        };
+        if let Err(error) = client.send(Message::text(r#"{"type":"response.create"}"#)) {
+            panic!("local websocket client should send first frame: {error}");
+        }
+        match upstream_ready_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => {}
+            Err(error) => panic!("upstream should receive first frame: {error}"),
+        }
+        assert_eq!(runtime.websocket_registry_snapshot().active_sessions, 1);
+
+        shutdown.cancel();
+        drop(client);
+        match server_thread.join() {
+            Ok(Ok(handled)) => assert!(handled >= 1, "server should accept websocket"),
+            Ok(Err(error)) => panic!("shutdown should drain active websocket cleanly: {error}"),
+            Err(error) => panic!("server thread panicked: {error:?}"),
+        }
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("upstream thread panicked: {error:?}"),
+        }
+        let snapshot = runtime.websocket_registry_snapshot();
+        assert_eq!(snapshot.active_sessions, 0);
+        assert_eq!(snapshot.high_water_sessions, 1);
+        assert_eq!(snapshot.closed_sessions, 1);
     }
 
     #[test]
