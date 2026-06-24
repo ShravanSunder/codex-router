@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "row_id": "I-21",
+  "layer": "integration",
+  "owner": "T1/T2",
+  "command": "scripts/proof-matrix.sh I-21",
+  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "git_head": "9fbd57e9592cb229ab310df47c480e0a56afc462",
+  "timestamp_utc": "2026-06-24T13:50:15Z",
+  "status_before": "[ ] pending",
+  "status_after": "[ ] pending",
+  "result": "pending_unimplemented",
+  "exit_code": 3,
+  "expected_observation": "listener binds and first request is accepted while broad quota refresh is slow or stalled",
+  "touched_targets": [],
+  "freshness_guard": "crates/codex-router-cli/src/lib.rs crates/codex-router-proxy/src/server.rs crates/codex-router-quota/src/* crates/codex-router-state/src/*",
+  "freshness_check": "not_evaluated",
+  "redaction_check": "pass",
+  "artifact_paths": [],
+  "notes": "T1 scaffold receipt; pending rows are not proof of implementation."
+}

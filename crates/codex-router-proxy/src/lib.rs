@@ -51,6 +51,9 @@ mod tests {
     use crate::routes::RouteClass;
     use crate::routes::RouteKind;
     use crate::routes::classify_route;
+    use crate::server::AsyncLoopbackServerRuntime;
+    use crate::server::HyperProtocolDispatch;
+    use crate::server::HyperProtocolSwitchpoint;
     use crate::server::LoopbackBindAddress;
     use crate::server::LoopbackHttpAdapter;
     use crate::server::LoopbackHttpServer;
@@ -2010,6 +2013,68 @@ mod tests {
 
         assert!(runtime.local_addr().ip().is_loopback());
         assert_ne!(runtime.local_addr().port(), 0);
+    }
+
+    #[tokio::test]
+    async fn async_loopback_server_binds_ephemeral_listener_and_stops_on_cancellation() {
+        let address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("loopback address should validate: {error}"),
+        };
+        let runtime = match AsyncLoopbackServerRuntime::bind(address).await {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("async loopback bind should succeed: {error}"),
+        };
+        let local_addr = runtime.local_addr();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown_for_task = shutdown.clone();
+        let serve_task =
+            tokio::spawn(async move { runtime.serve_until_cancelled(shutdown_for_task).await });
+
+        shutdown.cancel();
+        let handled = match serve_task.await {
+            Ok(result) => match result {
+                Ok(handled) => handled,
+                Err(error) => panic!("async runtime should shut down cleanly: {error}"),
+            },
+            Err(error) => panic!("async runtime task should join: {error}"),
+        };
+
+        assert!(local_addr.ip().is_loopback());
+        assert_ne!(local_addr.port(), 0);
+        assert_eq!(handled, 0);
+    }
+
+    #[test]
+    fn hyper_protocol_switchpoint_routes_websocket_upgrade_without_body_buffering() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::UPGRADE,
+            http::HeaderValue::from_static("websocket"),
+        );
+        headers.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("Upgrade"),
+        );
+
+        let dispatch = HyperProtocolSwitchpoint::classify(
+            &http::Method::POST,
+            &must_ok("/v1/responses".parse::<http::Uri>()),
+            &headers,
+        );
+
+        assert_eq!(dispatch, HyperProtocolDispatch::WebSocketUpgrade);
+    }
+
+    #[test]
+    fn hyper_protocol_switchpoint_routes_http_without_upgrade() {
+        let dispatch = HyperProtocolSwitchpoint::classify(
+            &http::Method::POST,
+            &must_ok("/v1/responses".parse::<http::Uri>()),
+            &http::HeaderMap::new(),
+        );
+
+        assert_eq!(dispatch, HyperProtocolDispatch::Http);
     }
 
     #[test]

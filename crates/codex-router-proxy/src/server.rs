@@ -15,6 +15,12 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use http::HeaderMap;
+use http::Method as HttpMethod;
+use http::Uri;
+use tokio::net::TcpListener as TokioTcpListener;
+use tokio_util::sync::CancellationToken;
+
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
@@ -146,6 +152,113 @@ impl LoopbackServerRuntime {
     pub fn listener(&self) -> &TcpListener {
         &self.listener
     }
+}
+
+/// Tokio-owned loopback listener substrate for the async release runtime.
+///
+/// This is intentionally only the T1 listener/task shell. HTTP/SSE routing,
+/// WebSocket upgrade handling, and pump behavior are cut over in later slices.
+#[derive(Debug)]
+pub struct AsyncLoopbackServerRuntime {
+    listener: TokioTcpListener,
+    local_addr: SocketAddr,
+}
+
+impl AsyncLoopbackServerRuntime {
+    /// Binds a Tokio TCP listener to a validated loopback address.
+    pub async fn bind(address: LoopbackBindAddress) -> Result<Self, ServerBindError> {
+        let socket_addr = address.socket_addr();
+        let listener = TokioTcpListener::bind(socket_addr)
+            .await
+            .map_err(|source| ServerBindError::Bind {
+                address: socket_addr,
+                source,
+            })?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|source| ServerBindError::Bind {
+                address: socket_addr,
+                source,
+            })?;
+
+        Ok(Self {
+            listener,
+            local_addr,
+        })
+    }
+
+    /// Returns the actual local address, including kernel-assigned port.
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Runs the async accept shell until cancellation.
+    ///
+    /// T1 accepts and immediately drops streams because the Hyper service,
+    /// HTTP/SSE body forwarding, and WebSocket pumps are later plan slices.
+    pub async fn serve_until_cancelled(
+        self,
+        shutdown: CancellationToken,
+    ) -> Result<usize, LoopbackRouterRuntimeError> {
+        let mut handled_connections = 0_usize;
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return Ok(handled_connections),
+                accepted = self.listener.accept() => {
+                    let (_stream, _peer_addr) = accepted
+                        .map_err(LoopbackRouterRuntimeError::Accept)?;
+                    handled_connections += 1;
+                }
+            }
+        }
+    }
+}
+
+/// First routing decision made by the future Hyper service switchpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HyperProtocolDispatch {
+    /// Ordinary HTTP/SSE request path.
+    Http,
+    /// WebSocket upgrade request path.
+    WebSocketUpgrade,
+}
+
+/// Shared Hyper request switchpoint for HTTP/SSE and WebSocket paths.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HyperProtocolSwitchpoint;
+
+impl HyperProtocolSwitchpoint {
+    /// Classifies a Hyper request head without consuming or buffering the body.
+    #[must_use]
+    pub fn classify(
+        _method: &HttpMethod,
+        _uri: &Uri,
+        headers: &HeaderMap,
+    ) -> HyperProtocolDispatch {
+        if is_websocket_upgrade(headers) {
+            HyperProtocolDispatch::WebSocketUpgrade
+        } else {
+            HyperProtocolDispatch::Http
+        }
+    }
+}
+
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    let has_upgrade_header = headers
+        .get(http::header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    let has_connection_upgrade = headers
+        .get(http::header::CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
+        });
+
+    has_upgrade_header && has_connection_upgrade
 }
 
 /// Runtime configuration for the assembled loopback router.
