@@ -62,6 +62,7 @@ use tokio_tungstenite::tungstenite::handshake::server::Response;
 use tokio_tungstenite::tungstenite::http::HeaderName;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::account_selection::AccountDecisionSelector;
 use crate::account_selection::AsyncAccountDecisionSelector;
@@ -689,6 +690,9 @@ pub struct WebSocketRevocationRegistry {
     connections: Arc<Mutex<HashMap<TokenGeneration, Vec<TcpStream>>>>,
     cancellations: Arc<Mutex<HashMap<TokenGeneration, Vec<WebSocketCancellationEntry>>>>,
     stats: Arc<Mutex<WebSocketRegistryStats>>,
+    registered_session_ids: Arc<Mutex<Vec<u64>>>,
+    completed_session_ids: Arc<Mutex<Vec<u64>>>,
+    closed_session_ids: Arc<Mutex<Vec<u64>>>,
     forwarded_upstream_messages_by_session: Arc<Mutex<HashMap<u64, usize>>>,
     completed_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
     final_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
@@ -726,6 +730,12 @@ pub struct WebSocketRegistrySnapshot {
     pub completed_response_sessions: usize,
     /// Total upstream-to-local WebSocket messages written to local clients.
     pub forwarded_upstream_messages: usize,
+    /// Redacted numeric session ids opened by the router registry.
+    pub registered_session_ids: Vec<u64>,
+    /// Redacted numeric session ids that forwarded response.completed.
+    pub completed_session_ids: Vec<u64>,
+    /// Redacted numeric session ids closed by the router registry.
+    pub closed_session_ids: Vec<u64>,
     /// Upstream-to-local write counts captured when each response.completed event is observed.
     pub completed_session_forwarded_upstream_message_counts: Vec<usize>,
     /// Final upstream-to-local write counts captured once per closed async WebSocket session.
@@ -796,6 +806,18 @@ impl WebSocketRevocationRegistry {
                 closed_sessions: stats.closed_sessions,
                 completed_response_sessions: stats.completed_response_sessions,
                 forwarded_upstream_messages: stats.forwarded_upstream_messages,
+                registered_session_ids: self
+                    .registered_session_ids
+                    .lock()
+                    .map_or_else(|_| Vec::new(), |ids| ids.clone()),
+                completed_session_ids: self
+                    .completed_session_ids
+                    .lock()
+                    .map_or_else(|_| Vec::new(), |ids| ids.clone()),
+                closed_session_ids: self
+                    .closed_session_ids
+                    .lock()
+                    .map_or_else(|_| Vec::new(), |ids| ids.clone()),
                 completed_session_forwarded_upstream_message_counts: self
                     .completed_session_forwarded_upstream_message_counts
                     .lock()
@@ -816,6 +838,9 @@ impl WebSocketRevocationRegistry {
         stats.active_sessions = stats.active_sessions.saturating_add(1);
         stats.registered_sessions = stats.registered_sessions.saturating_add(1);
         stats.high_water_sessions = stats.high_water_sessions.max(stats.active_sessions);
+        if let Ok(mut registered_session_ids) = self.registered_session_ids.lock() {
+            push_bounded_u64(&mut registered_session_ids, stats.next_session_id);
+        }
         stats.next_session_id
     }
 
@@ -831,6 +856,9 @@ impl WebSocketRevocationRegistry {
         if let Ok(mut stats) = self.stats.lock() {
             stats.active_sessions = stats.active_sessions.saturating_sub(1);
             stats.closed_sessions = stats.closed_sessions.saturating_add(1);
+        }
+        if let Ok(mut closed_session_ids) = self.closed_session_ids.lock() {
+            push_bounded_u64(&mut closed_session_ids, session_id);
         }
         let forwarded_count = self
             .forwarded_upstream_messages_by_session
@@ -859,6 +887,9 @@ impl WebSocketRevocationRegistry {
     fn note_response_completed(&self, session_id: u64) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.completed_response_sessions = stats.completed_response_sessions.saturating_add(1);
+        }
+        if let Ok(mut completed_session_ids) = self.completed_session_ids.lock() {
+            push_bounded_u64(&mut completed_session_ids, session_id);
         }
         let forwarded_count = self
             .forwarded_upstream_messages_by_session
@@ -917,6 +948,14 @@ fn push_bounded_count(counts: &mut Vec<usize>, count: usize) {
     if counts.len() > MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS {
         let excess = counts.len() - MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS;
         counts.drain(0..excess);
+    }
+}
+
+fn push_bounded_u64(values: &mut Vec<u64>, value: u64) {
+    values.push(value);
+    if values.len() > MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS {
+        let excess = values.len() - MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS;
+        values.drain(0..excess);
     }
 }
 
@@ -1020,6 +1059,7 @@ mod async_forwarding_tests {
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::protocol::Role;
     use tokio_util::sync::CancellationToken;
+    use tokio_util::task::TaskTracker;
 
     use crate::account_selection::AsyncAccountDecisionSelector;
     use crate::account_selection::SelectedAccountDecision;
@@ -1273,6 +1313,7 @@ mod async_forwarding_tests {
                     max_upstream_messages: 10,
                     affinity_owner_recorder: None,
                     async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -1359,6 +1400,7 @@ mod async_forwarding_tests {
                     max_upstream_messages: 10,
                     affinity_owner_recorder: None,
                     async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -1433,6 +1475,7 @@ mod async_forwarding_tests {
                     max_upstream_messages: 10,
                     affinity_owner_recorder: None,
                     async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown_for_task,
@@ -1488,6 +1531,7 @@ where
     revocations: WebSocketRevocationRegistry,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
+    affinity_record_tasks: TaskTracker,
     session_shutdown: CancellationToken,
 }
 
@@ -1701,6 +1745,7 @@ where
             revocations: WebSocketRevocationRegistry::new(),
             affinity_owner_recorder: None,
             async_affinity_owner_recorder: None,
+            affinity_record_tasks: TaskTracker::new(),
             session_shutdown: CancellationToken::new(),
         }
     }
@@ -1725,6 +1770,7 @@ where
             revocations: WebSocketRevocationRegistry::new(),
             affinity_owner_recorder: None,
             async_affinity_owner_recorder: None,
+            affinity_record_tasks: TaskTracker::new(),
             session_shutdown: CancellationToken::new(),
         }
     }
@@ -1772,6 +1818,13 @@ where
         affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     ) -> Self {
         self.async_affinity_owner_recorder = Some(affinity_owner_recorder);
+        self
+    }
+
+    /// Adds the task tracker used to drain non-blocking affinity-owner writes on shutdown.
+    #[must_use]
+    pub fn with_affinity_owner_task_tracker(mut self, affinity_record_tasks: TaskTracker) -> Self {
+        self.affinity_record_tasks = affinity_record_tasks;
         self
     }
 
@@ -1867,6 +1920,7 @@ where
                 max_upstream_messages,
                 affinity_owner_recorder: self.affinity_owner_recorder.clone(),
                 async_affinity_owner_recorder: self.async_affinity_owner_recorder.clone(),
+                affinity_record_tasks: self.affinity_record_tasks.clone(),
                 affinity_owner_context: affinity_owner_context.as_ref(),
                 revocation: &revocation,
                 session_shutdown: &self.session_shutdown,
@@ -1881,6 +1935,7 @@ struct WebSocketForwardingContext<'a> {
     max_upstream_messages: usize,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
+    affinity_record_tasks: TaskTracker,
     affinity_owner_context: Option<&'a WebSocketAffinityOwnerContext>,
     revocation: &'a CancellationToken,
     session_shutdown: &'a CancellationToken,
@@ -1936,6 +1991,7 @@ where
                 max_upstream_messages: context.max_upstream_messages,
                 affinity_owner_recorder: context.affinity_owner_recorder,
                 async_affinity_owner_recorder: context.async_affinity_owner_recorder,
+                affinity_record_tasks: context.affinity_record_tasks,
                 affinity_owner_context,
             },
         )
@@ -2028,6 +2084,7 @@ struct UpstreamToLocalPumpContext {
     max_upstream_messages: usize,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
+    affinity_record_tasks: TaskTracker,
     affinity_owner_context: Option<WebSocketAffinityOwnerContext>,
 }
 
@@ -2077,11 +2134,11 @@ where
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
                 if let Some(owner) = affinity_owner {
                     if let Some(recorder) = context.async_affinity_owner_recorder.clone() {
-                        tokio::spawn(async move {
+                        context.affinity_record_tasks.spawn(async move {
                             let _result = recorder.record_affinity_owner(owner).await;
                         });
                     } else if let Some(recorder) = context.affinity_owner_recorder.clone() {
-                        tokio::task::spawn_blocking(move || {
+                        context.affinity_record_tasks.spawn_blocking(move || {
                             let _result = recorder.record_affinity_owner(&owner);
                         });
                     }

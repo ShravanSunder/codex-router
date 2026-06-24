@@ -143,6 +143,12 @@ expected_observation() {
     G-10)
       printf 'tokio-tungstenite is the production WebSocket protocol dependency; blocking tungstenite remains test/dev-only'
       ;;
+    G-11)
+      printf 'legacy blocking runtime is test-only and there is exactly one production serve runtime path'
+      ;;
+    G-12)
+      printf 'WebSocket pumps use bounded side effects and persistence cannot delay forwarding or close'
+      ;;
     G-13)
       printf 'compound close-while-pending regression remains in the permanent suite'
       ;;
@@ -442,9 +448,11 @@ if row_id == "E-01":
     if upstream.get("multi_step_interleave_completed") is not True:
         errors.append("multi_step_interleave_completed is not true")
     for status in artifact.get("clients", {}).get("statuses", []):
-        stderr_text = str(status.get("stderr", ""))
-        if "fallback" in stderr_text.lower() or "reconnect" in stderr_text.lower():
-            errors.append("client status contains fallback/reconnect text")
+        markers = status.get("stderr_transport_error_markers")
+        if not isinstance(markers, list):
+            errors.append("client status is missing stderr_transport_error_markers")
+        elif markers:
+            errors.append(f"client stderr contains WebSocket transport error markers: {markers}")
 elif row_id == "E-02":
     if upstream.get("hold_duration_ms", 0) < 300_000:
         errors.append("hold_duration_ms is below five minutes")
@@ -511,6 +519,13 @@ elif row_id == "E-07":
         errors.append("upstream session count correlation is incomplete")
     if registry.get("registered_sessions", 0) < 3 or registry.get("closed_sessions", 0) < 3:
         errors.append("router registry session correlation is incomplete")
+    for field in ["registered_session_ids", "completed_session_ids", "closed_session_ids"]:
+        values = registry.get(field)
+        if not isinstance(values, list) or len(values) < 3:
+            errors.append(f"router registry {field} missing observed session ids")
+    upstream_session_ids = upstream.get("upstream_session_ids")
+    if not isinstance(upstream_session_ids, list) or len(upstream_session_ids) < 3:
+        errors.append("upstream_session_ids missing observed upstream session ids")
     counts = registry.get("final_session_forwarded_upstream_message_counts", [])
     if not isinstance(counts, list) or len(counts) < 3:
         errors.append("router registry final per-session counters are missing")
@@ -529,8 +544,12 @@ elif row_id == "E-07":
             "router_pid",
             "router_session_id",
             "upstream_session_id",
+            "router_session_id_observed",
+            "upstream_session_id_observed",
             "transport",
+            "transport_observed_from_client_stderr",
             "handshake_count",
+            "handshake_count_observed",
             "frame_count",
             "event_count",
             "in_overlap_event_count",
@@ -543,6 +562,14 @@ elif row_id == "E-07":
                 errors.append(f"runtime correlation {index} missing {field}")
         if correlation.get("transport") != "websocket":
             errors.append(f"runtime correlation {index} transport is not websocket")
+        if correlation.get("router_session_id_observed") is not True:
+            errors.append(f"runtime correlation {index} router_session_id is not observed")
+        if correlation.get("upstream_session_id_observed") is not True:
+            errors.append(f"runtime correlation {index} upstream_session_id is not observed")
+        if correlation.get("transport_observed_from_client_stderr") is not True:
+            errors.append(f"runtime correlation {index} transport was not derived from client stderr")
+        if correlation.get("handshake_count_observed") is not True:
+            errors.append(f"runtime correlation {index} handshake_count is not observed")
         if correlation.get("router_pid") != router_process.get("pid"):
             errors.append(f"runtime correlation {index} router_pid does not match router process")
         if correlation.get("handshake_count") != 1:
@@ -812,7 +839,7 @@ PY
       exit 1
       ;;
     I-05a)
-      if cargo test -p codex-router-proxy loopback_router_runtime_accepts_second_websocket_while_first_is_blocked -- --nocapture; then
+      if cargo test -p codex-router-proxy legacy_single_lane_accept_loop_reproducer_blocks_second_client_until_first_finishes -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
           receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
@@ -833,7 +860,7 @@ payload["touched_targets"] = [
     "crates/codex-router-proxy/src/lib.rs",
 ]
 payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
-payload["notes"] = "Old-failure equivalent reproducer passed: a second WebSocket is accepted and completed while the first WebSocket handler is intentionally blocked."
+payload["notes"] = "Old-failure equivalent reproducer passed: a single-lane accept loop leaves the second client without application progress until the first handler is released."
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
@@ -1067,7 +1094,7 @@ PY
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
-    G-06|G-08|G-09|G-10|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-22)
+    G-06|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-22)
       if ! ensure_guarded_source_paths_clean "$row_id"; then
         receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
         printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
@@ -1127,8 +1154,21 @@ elif row_id == "G-08":
         require_contains("release serve switchpoint", server, marker)
 elif row_id == "G-09":
     checker = read("scripts/check-release-runtime-guardrails.py")
-    for marker in ["release_proxy_source_paths", "strip_cfg_test_items", "release_scan_forbidden", "proxy_src.rglob(\"*.rs\")"]:
+    for marker in ["release_runtime_source_paths", "strip_cfg_test_items", "release_scan_forbidden", "RELEASE_RUNTIME_CRATES"]:
         require_contains("release reachability checker", checker, marker)
+    for crate_name in [
+        "codex-router-auth",
+        "codex-router-cli",
+        "codex-router-core",
+        "codex-router-proxy",
+        "codex-router-quota",
+        "codex-router-secret-store",
+        "codex-router-selection",
+        "codex-router-state",
+    ]:
+        require_contains("release reachability checker", checker, f'"{crate_name}"')
+    if "codex-router-test-support" in checker:
+        errors.append("release reachability checker explicitly includes test-support crate")
 elif row_id == "G-10":
     root_manifest = read("Cargo.toml")
     proxy_manifest = read("crates/codex-router-proxy/Cargo.toml")
@@ -1136,6 +1176,28 @@ elif row_id == "G-10":
     require_contains("proxy manifest", proxy_manifest, "tokio-tungstenite.workspace = true")
     if re.search(r'(?m)^\s*tungstenite\s*=', proxy_manifest):
         errors.append("proxy production manifest declares blocking tungstenite directly")
+elif row_id == "G-11":
+    cli = read("crates/codex-router-cli/src/lib.rs")
+    server = read("crates/codex-router-proxy/src/server.rs")
+    websocket = read("crates/codex-router-proxy/src/websocket.rs")
+    require_contains("CLI serve path", cli, "LoopbackRouterRuntime::start")
+    require_contains("CLI serve path", cli, "serve_protocol_connections_until_cancelled")
+    if "LoopbackHttpServer::bind" in cli or "LoopbackHttpAdapter::handle" in cli:
+        errors.append("CLI serve path still references legacy blocking loopback server")
+    if "pub struct BlockingWebSocketTunnel" in websocket and "#[cfg(test)]" not in websocket:
+        errors.append("blocking websocket tunnel is not visibly test-gated")
+    require_contains("server handler lifecycle", server, "JoinSet")
+    require_contains("server handler lifecycle", server, "handle_connection_join_result")
+elif row_id == "G-12":
+    websocket = read("crates/codex-router-proxy/src/websocket.rs")
+    server = read("crates/codex-router-proxy/src/server.rs")
+    proxy_tests = test_list("codex-router-proxy")
+    for marker in ["unbounded_channel", "mpsc::unbounded"]:
+        if marker in websocket or marker in server:
+            errors.append(f"runtime contains unbounded channel marker: {marker}")
+    require_contains("affinity write tracker", websocket, "TaskTracker")
+    require_contains("affinity write tracker", server, "affinity_record_tasks.wait().await")
+    require_contains("permanent test inventory", proxy_tests, "async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder")
 elif row_id in {"G-13", "G-14", "G-15", "G-16", "G-19", "G-20"}:
     proxy_tests = test_list("codex-router-proxy")
     cli_tests = test_list("codex-router-cli") if row_id in {"G-16", "G-19"} else ""
@@ -1224,7 +1286,7 @@ PY
       exit $?
       ;;
     G-21)
-      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23; do
+      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23; do
         CODEX_ROUTER_PROOF_VERIFY_ONLY=1 "$0" "$guardrail_row" >/dev/null
       done
       if ! ensure_guarded_source_paths_clean "$row_id"; then
@@ -1253,6 +1315,8 @@ payload["artifact_paths"] = [
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-08.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-09.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-10.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-11.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-12.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-13.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-14.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-15.json",

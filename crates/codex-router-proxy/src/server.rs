@@ -36,7 +36,10 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener as TokioTcpListener;
+use tokio::task::JoinError;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::affinity::hash_previous_response_id;
@@ -569,24 +572,43 @@ impl LoopbackRouterRuntime {
         shutdown: Option<CancellationToken>,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         let mut handled_connections = 0_usize;
-        let mut handlers = Vec::new();
+        let mut handlers = JoinSet::new();
         let session_shutdown = shutdown.clone().unwrap_or_default();
+        let affinity_record_tasks = TaskTracker::new();
         let connection_handler =
-            Arc::new(self.protocol_connection_handler(session_shutdown.clone()));
+            Arc::new(self.protocol_connection_handler(
+                session_shutdown.clone(),
+                affinity_record_tasks.clone(),
+            ));
         while handled_connections < max_connections {
-            let (stream, _peer_addr) = if let Some(shutdown) = shutdown.as_ref() {
-                tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    accepted = self.server.listener.accept() => {
-                        accepted.map_err(LoopbackRouterRuntimeError::Accept)?
+            let stream = if let Some(shutdown) = shutdown.as_ref() {
+                loop {
+                    tokio::select! {
+                        () = shutdown.cancelled() => break None,
+                        joined = handlers.join_next(), if !handlers.is_empty() => {
+                            handle_connection_join_result(joined.expect("join_next only returns None for an empty JoinSet"))?;
+                        }
+                        accepted = self.server.listener.accept() => {
+                            let (stream, _peer_addr) = accepted.map_err(LoopbackRouterRuntimeError::Accept)?;
+                            break Some(stream);
+                        }
                     }
                 }
             } else {
-                self.server
-                    .listener
-                    .accept()
-                    .await
-                    .map_err(LoopbackRouterRuntimeError::Accept)?
+                loop {
+                    tokio::select! {
+                        joined = handlers.join_next(), if !handlers.is_empty() => {
+                            handle_connection_join_result(joined.expect("join_next only returns None for an empty JoinSet"))?;
+                        }
+                        accepted = self.server.listener.accept() => {
+                            let (stream, _peer_addr) = accepted.map_err(LoopbackRouterRuntimeError::Accept)?;
+                            break Some(stream);
+                        }
+                    }
+                }
+            };
+            let Some(stream) = stream else {
+                break;
             };
             let handler_context = Arc::clone(&connection_handler);
             let handler =
@@ -597,7 +619,11 @@ impl LoopbackRouterRuntime {
                     Arc::clone(&self.connection_error_reporter),
                 );
             } else {
-                handlers.push(handler);
+                handlers.spawn(async move {
+                    handler
+                        .await
+                        .map_err(LoopbackRouterRuntimeError::ConnectionJoin)?
+                });
             }
             handled_connections += 1;
         }
@@ -608,13 +634,11 @@ impl LoopbackRouterRuntime {
             session_shutdown.cancel();
         }
 
-        for handler in handlers {
-            match handler.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(source) => return Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
-            }
+        while let Some(joined) = handlers.join_next().await {
+            handle_connection_join_result(joined)?;
         }
+        affinity_record_tasks.close();
+        affinity_record_tasks.wait().await;
 
         Ok(handled_connections)
     }
@@ -622,12 +646,14 @@ impl LoopbackRouterRuntime {
     fn protocol_connection_handler(
         &self,
         session_shutdown: CancellationToken,
+        affinity_record_tasks: TaskTracker,
     ) -> LoopbackProtocolConnectionHandler {
         LoopbackProtocolConnectionHandler {
             state_database_path: self.state_database_path.clone(),
             secret_store: self.secret_store.clone(),
             affinity_secret_provider: self.affinity_secret_provider.clone(),
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
+            affinity_record_tasks,
             auth_gate: self.auth_gate.clone(),
             upstream: self.upstream.clone(),
             upstream_endpoint: self.upstream_endpoint.clone(),
@@ -640,6 +666,16 @@ impl LoopbackRouterRuntime {
             fixed_now_unix_seconds: self.fixed_now_unix_seconds,
             session_shutdown,
         }
+    }
+}
+
+fn handle_connection_join_result(
+    joined: Result<Result<(), LoopbackRouterRuntimeError>, JoinError>,
+) -> Result<(), LoopbackRouterRuntimeError> {
+    match joined {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(source) => Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
     }
 }
 
@@ -666,6 +702,7 @@ struct LoopbackProtocolConnectionHandler {
     secret_store: ProxyRuntimeSecretStore,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    affinity_record_tasks: TaskTracker,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -819,7 +856,8 @@ impl LoopbackProtocolConnectionHandler {
         .with_revocation_registry(self.websocket_revocations.clone())
         .with_session_shutdown(self.session_shutdown.clone())
         .with_affinity_secret_provider(&self.affinity_secret_provider)
-        .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder));
+        .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))
+        .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone());
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
         tunnel
             .handle_upgraded_connection(
@@ -909,6 +947,7 @@ impl LoopbackProtocolConnectionHandler {
             body,
             completion,
             Arc::clone(&self.affinity_owner_recorder),
+            self.affinity_record_tasks.clone(),
         )
     }
 
@@ -1076,8 +1115,14 @@ fn async_streaming_http_response_to_hyper(
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     completion: StreamingHttpProxyCompletion,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    affinity_record_tasks: TaskTracker,
 ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
-    let body = record_affinity_owner_from_async_body(body, completion, affinity_owner_recorder);
+    let body = record_affinity_owner_from_async_body(
+        body,
+        completion,
+        affinity_owner_recorder,
+        affinity_record_tasks,
+    );
     let mut builder = HttpResponse::builder().status(status);
     for header in headers.as_slice() {
         builder = builder.header(header.name(), header.value());
@@ -1091,6 +1136,7 @@ fn record_affinity_owner_from_async_body(
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     completion: StreamingHttpProxyCompletion,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    affinity_record_tasks: TaskTracker,
 ) -> BoxBody<Bytes, AsyncHttpBodyError> {
     let Some(affinity_secret) = completion.affinity_secret().cloned() else {
         return body;
@@ -1108,7 +1154,7 @@ fn record_affinity_owner_from_async_body(
                 let recorder = Arc::clone(&affinity_owner_recorder);
                 let account_id = account_id.clone();
                 let affinity_secret = affinity_secret.clone();
-                tokio::spawn(async move {
+                affinity_record_tasks.spawn(async move {
                     let Ok(affinity_key_hash) =
                         hash_previous_response_id(&affinity_secret, &response_id)
                     else {

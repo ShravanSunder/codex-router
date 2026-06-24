@@ -572,6 +572,12 @@ fn assert_concurrent_websocket_contract(
                 upstream.in_overlap_session_event_counts, config.upstream.expected_sessions
             ));
         }
+        if upstream.upstream_session_ids.len() < config.upstream.expected_sessions {
+            return Err(format!(
+                "soak upstream session ids {:?} had fewer entries than expected sessions {}",
+                upstream.upstream_session_ids, config.upstream.expected_sessions
+            ));
+        }
         if upstream.normal_close_sessions < config.upstream.expected_sessions
             || upstream.abnormal_close_sessions != 0
         {
@@ -1654,6 +1660,9 @@ struct RouterWebSocketRegistryReport {
     closed_sessions: usize,
     completed_response_sessions: usize,
     forwarded_upstream_messages: usize,
+    registered_session_ids: Vec<u64>,
+    completed_session_ids: Vec<u64>,
+    closed_session_ids: Vec<u64>,
     completed_session_forwarded_upstream_message_counts: Vec<usize>,
     final_session_forwarded_upstream_message_counts: Vec<usize>,
 }
@@ -1695,6 +1704,9 @@ impl RouterWebSocketRegistryReport {
                 registry,
                 "forwarded_upstream_messages",
             )?,
+            registered_session_ids: required_u64_array_field(registry, "registered_session_ids")?,
+            completed_session_ids: required_u64_array_field(registry, "completed_session_ids")?,
+            closed_session_ids: required_u64_array_field(registry, "closed_session_ids")?,
             completed_session_forwarded_upstream_message_counts: required_usize_array_field(
                 registry,
                 "completed_session_forwarded_upstream_message_counts",
@@ -1743,6 +1755,20 @@ fn required_usize_array_field(value: &Value, field: &'static str) -> Result<Vec<
             })?;
             usize::try_from(raw).map_err(|_| {
                 format!("router websocket registry report field {field} overflowed usize")
+            })
+        })
+        .collect()
+}
+
+fn required_u64_array_field(value: &Value, field: &'static str) -> Result<Vec<u64>, String> {
+    let raw = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("router websocket registry report missing numeric array {field}"))?;
+    raw.iter()
+        .map(|item| {
+            item.as_u64().ok_or_else(|| {
+                format!("router websocket registry report field {field} contained non-number")
             })
         })
         .collect()
@@ -1953,6 +1979,7 @@ fn write_redacted_three_websocket_transcript(
                 "status": run.output.status.to_string(),
                 "stdout_contains_smoke_text": String::from_utf8_lossy(&run.output.stdout).contains(SMOKE_EXPECTED_TEXT),
                 "stderr_line_count": String::from_utf8_lossy(&run.output.stderr).lines().count(),
+                "stderr_transport_error_markers": stderr_transport_error_markers(&String::from_utf8_lossy(&run.output.stderr)),
             })
         })
         .collect::<Vec<_>>();
@@ -1980,6 +2007,9 @@ fn write_redacted_three_websocket_transcript(
             "closed_sessions": report.closed_sessions,
             "completed_response_sessions": report.completed_response_sessions,
             "forwarded_upstream_messages": report.forwarded_upstream_messages,
+            "registered_session_ids": report.registered_session_ids,
+            "completed_session_ids": report.completed_session_ids,
+            "closed_session_ids": report.closed_session_ids,
             "completed_session_forwarded_upstream_message_counts": report.completed_session_forwarded_upstream_message_counts,
             "final_session_forwarded_upstream_message_counts": report.final_session_forwarded_upstream_message_counts,
         })),
@@ -2002,6 +2032,7 @@ fn write_redacted_three_websocket_transcript(
             "real_overlap_duration_ms": input.upstream.real_overlap_duration_ms,
             "hold_duration_ms": input.upstream.hold_duration.as_millis(),
             "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
+            "upstream_session_ids": input.upstream.upstream_session_ids,
             "session_frame_counts": input.upstream.session_frame_counts,
             "session_event_counts": input.upstream.session_event_counts,
             "in_overlap_session_event_counts": input.upstream.in_overlap_session_event_counts,
@@ -2044,10 +2075,14 @@ fn runtime_correlations_for_three_websocket(
                 "client_index": index,
                 "client_pid": run.pid,
                 "router_pid": input.router_process.pid,
-                "router_session_id": index + 1,
-                "upstream_session_id": index + 1,
-                "transport": "websocket",
-                "handshake_count": 1,
+                "router_session_id": input.registry_report.and_then(|report| report.completed_session_ids.get(index).copied()),
+                "router_session_id_observed": input.registry_report.and_then(|report| report.completed_session_ids.get(index)).is_some(),
+                "upstream_session_id": input.upstream.upstream_session_ids.get(index).copied(),
+                "upstream_session_id_observed": input.upstream.upstream_session_ids.get(index).is_some(),
+                "transport": if stderr_transport_error_markers(&String::from_utf8_lossy(&run.output.stderr)).is_empty() { "websocket" } else { "websocket_error" },
+                "transport_observed_from_client_stderr": true,
+                "handshake_count": input.upstream.upstream_session_ids.get(index).map(|_session_id| 1),
+                "handshake_count_observed": input.upstream.upstream_session_ids.get(index).is_some(),
                 "frame_count": input.upstream.session_frame_counts.get(index).copied(),
                 "event_count": input.upstream.session_event_counts.get(index).copied(),
                 "in_overlap_event_count": input.upstream.in_overlap_session_event_counts.get(index).copied(),
@@ -2057,6 +2092,24 @@ fn runtime_correlations_for_three_websocket(
             })
         })
         .collect()
+}
+
+fn stderr_transport_error_markers(stderr: &str) -> Vec<&'static str> {
+    let stderr = stderr.to_ascii_lowercase();
+    [
+        ("fallback", "fallback"),
+        ("reconnect", "reconnect"),
+        ("websocket protocol error", "websocket_protocol_error"),
+        ("handshake not finished", "handshake_not_finished"),
+        (
+            "stream disconnected before completion",
+            "stream_disconnected_before_completion",
+        ),
+        ("request timed out", "request_timed_out"),
+    ]
+    .into_iter()
+    .filter_map(|(needle, marker)| stderr.contains(needle).then_some(marker))
+    .collect()
 }
 
 fn sanitized_artifact_path(path: &Path) -> Result<String, String> {
@@ -2341,6 +2394,7 @@ struct ConcurrentWebSocketTranscript {
     real_overlap_duration_ms: u128,
     hold_duration: Duration,
     http_probe_count: usize,
+    upstream_session_ids: Vec<u64>,
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
     in_overlap_session_event_counts: Vec<usize>,
@@ -2374,6 +2428,7 @@ struct ConcurrentUpstreamState {
     overlap_completed_unix_ms: Option<u128>,
     real_overlap_completed_unix_ms: Option<u128>,
     http_probe_count: usize,
+    upstream_session_ids: Vec<u64>,
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
     in_overlap_session_event_counts: Vec<usize>,
@@ -2659,6 +2714,7 @@ impl MockConcurrentWebSocketUpstream {
                 overlap_completed_unix_ms: None,
                 real_overlap_completed_unix_ms: None,
                 http_probe_count: 0,
+                upstream_session_ids: Vec::new(),
                 session_frame_counts: Vec::new(),
                 session_event_counts: Vec::new(),
                 in_overlap_session_event_counts: Vec::new(),
@@ -2736,6 +2792,7 @@ impl MockConcurrentWebSocketUpstream {
             real_overlap_duration_ms: real_overlap_duration_ms(&state),
             hold_duration: state.hold_duration,
             http_probe_count: state.http_probe_count,
+            upstream_session_ids: state.upstream_session_ids,
             session_frame_counts: state.session_frame_counts,
             session_event_counts: state.session_event_counts,
             in_overlap_session_event_counts: state.in_overlap_session_event_counts,
@@ -2958,7 +3015,7 @@ fn run_concurrent_mock_websocket_session(
             }
             continue;
         }
-        register_concurrent_non_prewarm_session(&state)?;
+        let _upstream_session_id = register_concurrent_non_prewarm_session(&state)?;
         let overlap_started_at = wait_for_concurrent_session_barrier(&state)?;
         let run_multi_step_interleave = claim_multi_step_interleave(&state)?;
         let (event_count, in_overlap_event_count) = if run_multi_step_interleave {
@@ -3029,13 +3086,16 @@ fn complete_multi_step_interleave(
 
 fn register_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut state = shared
         .state
         .lock()
         .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
     state.active_non_prewarm_sessions = state.active_non_prewarm_sessions.saturating_add(1);
     state.non_prewarm_session_count = state.non_prewarm_session_count.saturating_add(1);
+    let upstream_session_id = u64::try_from(state.non_prewarm_session_count)
+        .map_err(|_| "concurrent upstream session id overflowed u64".to_owned())?;
+    state.upstream_session_ids.push(upstream_session_id);
     state.active_high_water = state
         .active_high_water
         .max(state.active_non_prewarm_sessions);
@@ -3044,7 +3104,7 @@ fn register_concurrent_non_prewarm_session(
         state.overlap_started_unix_ms = Some(timestamp_millis());
     }
     shared.condition.notify_all();
-    Ok(())
+    Ok(upstream_session_id)
 }
 
 fn wait_for_concurrent_session_barrier(

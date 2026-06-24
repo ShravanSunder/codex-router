@@ -158,6 +158,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::handshake::server::Response;
     use tokio_tungstenite::tungstenite::http::HeaderValue;
     use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_util::task::TaskTracker;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
     static TEST_AFFINITY_SECRET_PROVIDER: TestAffinitySecretProvider = TestAffinitySecretProvider;
@@ -3941,6 +3942,92 @@ mod tests {
 
     #[test]
     #[allow(clippy::result_large_err)]
+    fn legacy_single_lane_accept_loop_reproducer_blocks_second_client_until_first_finishes() {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("legacy reproducer listener should bind: {error}"),
+        };
+        let address = match listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("legacy reproducer listener address should read: {error}"),
+        };
+        let (first_accepted_sender, first_accepted_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (mut first_stream, _peer) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("legacy reproducer should accept first client: {error}"),
+            };
+            if let Err(error) = first_stream.write_all(b"first accepted\n") {
+                panic!("legacy reproducer should write first response: {error}");
+            }
+            if let Err(error) = first_accepted_sender.send(()) {
+                panic!("legacy reproducer should signal first accept: {error}");
+            }
+            match release_receiver.recv_timeout(Duration::from_secs(2)) {
+                Ok(()) => {}
+                Err(error) => panic!("legacy reproducer release should arrive: {error}"),
+            }
+            let (mut second_stream, _peer) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("legacy reproducer should accept second client: {error}"),
+            };
+            if let Err(error) = second_stream.write_all(b"second accepted\n") {
+                panic!("legacy reproducer should write second response: {error}");
+            }
+        });
+
+        let mut first_client = match TcpStream::connect(address) {
+            Ok(stream) => stream,
+            Err(error) => panic!("first reproducer client should connect: {error}"),
+        };
+        let mut first_response = [0_u8; 15];
+        if let Err(error) = first_client.read_exact(&mut first_response) {
+            panic!("first reproducer client should read response: {error}");
+        }
+        assert_eq!(&first_response, b"first accepted\n");
+        match first_accepted_receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(()) => {}
+            Err(error) => panic!("legacy reproducer should signal first accept: {error}"),
+        }
+
+        let mut second_client = match TcpStream::connect(address) {
+            Ok(stream) => stream,
+            Err(error) => panic!("second reproducer client should connect: {error}"),
+        };
+        if let Err(error) = second_client.set_read_timeout(Some(Duration::from_millis(100))) {
+            panic!("second reproducer client should set read timeout: {error}");
+        }
+        let mut blocked_probe = [0_u8; 1];
+        match second_client.read(&mut blocked_probe) {
+            Ok(bytes_read) => panic!(
+                "legacy single-lane accept loop unexpectedly handled second client before first finished; bytes_read={bytes_read}"
+            ),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => panic!("second reproducer read failed for unexpected reason: {error}"),
+        }
+
+        if let Err(error) = release_sender.send(()) {
+            panic!("legacy reproducer release should send: {error}");
+        }
+        if let Err(error) = second_client.set_read_timeout(Some(Duration::from_secs(1))) {
+            panic!("second reproducer client should reset read timeout: {error}");
+        }
+        let mut second_response = Vec::new();
+        if let Err(error) = second_client.read_to_end(&mut second_response) {
+            panic!("second reproducer client should read after release: {error}");
+        }
+        assert_eq!(second_response, b"second accepted\n");
+        match server_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("legacy reproducer server thread panicked: {error:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
     fn loopback_router_runtime_accepts_second_websocket_while_first_is_blocked() {
         let temp_dir = ProxyTestTempDir::new("runtime_websocket_concurrent_websockets");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -6898,9 +6985,11 @@ mod tests {
             recorder_entered_sender,
             recorder_release_receiver,
         ));
+        let affinity_record_tasks = TaskTracker::new();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
             .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
-            .with_affinity_owner_recorder(recorder.clone());
+            .with_affinity_owner_recorder(recorder.clone())
+            .with_affinity_owner_task_tracker(affinity_record_tasks.clone());
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
         let server_future = async {
             let (stream, _peer_address) = match local_listener.accept().await {
@@ -6956,8 +7045,26 @@ mod tests {
             Ok(()) => {}
             Err(error) => panic!("blocking recorder should start after forwarding: {error}"),
         }
+        let mut drain_task = tokio::spawn({
+            let affinity_record_tasks = affinity_record_tasks.clone();
+            async move {
+                affinity_record_tasks.close();
+                affinity_record_tasks.wait().await;
+            }
+        });
+        match tokio::time::timeout(Duration::from_millis(50), &mut drain_task).await {
+            Ok(join_result) => panic!(
+                "affinity recorder drain finished before blocked recorder was released: {join_result:?}"
+            ),
+            Err(_elapsed) => {}
+        }
         if let Err(error) = recorder_release_sender.send(()) {
             panic!("blocking recorder release should send: {error}");
+        }
+        match tokio::time::timeout(Duration::from_secs(1), drain_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("affinity recorder drain task should join: {error}"),
+            Err(_elapsed) => panic!("affinity recorder drain should finish after release"),
         }
         for _attempt in 0..50 {
             if recorder.records_snapshot().len() == 1 {

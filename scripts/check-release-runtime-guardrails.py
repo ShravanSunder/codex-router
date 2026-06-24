@@ -15,6 +15,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLAN_ROOT = REPO_ROOT / "tmp/plan-workflows/2026-06-24-async-router-runtime"
 EVIDENCE_ROOT = PLAN_ROOT / "evidence/structural"
+RELEASE_RUNTIME_CRATES = (
+    "codex-router-auth",
+    "codex-router-cli",
+    "codex-router-core",
+    "codex-router-proxy",
+    "codex-router-quota",
+    "codex-router-secret-store",
+    "codex-router-selection",
+    "codex-router-state",
+)
 
 
 @dataclass(frozen=True)
@@ -131,7 +141,7 @@ def main() -> int:
     args = parser.parse_args()
     check = CHECKS[args.row_id]
     production_sources: dict[str, str] = {}
-    release_sources = release_proxy_sources()
+    release_sources = release_runtime_sources()
     failures: list[dict[str, str]] = []
 
     for relative_path, needle in check.forbidden + check.required:
@@ -257,9 +267,9 @@ def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
                 path
                 for path, _needle in check.forbidden + check.required
             }
-            | set(release_proxy_source_paths())
+            | set(release_runtime_source_paths())
         ),
-        "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/*",
+        "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/*/src/**/*.rs scripts/*",
         "freshness_check": "guarded_source_paths_clean_at_git_head"
         if not any(failure["kind"] == "dirty_guarded_source_path" for failure in failures)
         else "guarded_source_paths_dirty",
@@ -271,13 +281,16 @@ def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
     return receipt_path
 
 
-def release_proxy_source_paths() -> list[str]:
-    proxy_src = REPO_ROOT / "crates/codex-router-proxy/src"
-    return sorted(
-        str(path.relative_to(REPO_ROOT))
-        for path in proxy_src.rglob("*.rs")
-        if path.is_file()
-    )
+def release_runtime_source_paths() -> list[str]:
+    paths: list[str] = []
+    for crate_name in RELEASE_RUNTIME_CRATES:
+        crate_src = REPO_ROOT / "crates" / crate_name / "src"
+        paths.extend(
+            str(path.relative_to(REPO_ROOT))
+            for path in crate_src.rglob("*.rs")
+            if path.is_file()
+        )
+    return sorted(paths)
 
 
 def guarded_source_paths() -> list[str]:
@@ -285,13 +298,14 @@ def guarded_source_paths() -> list[str]:
         "Cargo.toml",
         "deny.toml",
         "crates/*/Cargo.toml",
-        "crates/codex-router-proxy/src/*.rs",
+        "crates/*/src/*.rs",
+        "crates/*/src/**/*.rs",
         "scripts/*",
         ".github/workflows/*",
     ]
     paths: list[str] = []
     for pattern in patterns:
-        matches = sorted(glob.glob(str(REPO_ROOT / pattern)))
+        matches = sorted(glob.glob(str(REPO_ROOT / pattern), recursive=True))
         if matches:
             paths.extend(
                 str(Path(match).relative_to(REPO_ROOT))
@@ -325,10 +339,10 @@ def dirty_guarded_source_paths() -> list[str]:
     return sorted(dirty)
 
 
-def release_proxy_sources() -> dict[str, str]:
+def release_runtime_sources() -> dict[str, str]:
     return {
         relative_path: strip_cfg_test_items(REPO_ROOT / relative_path)
-        for relative_path in release_proxy_source_paths()
+        for relative_path in release_runtime_source_paths()
     }
 
 
