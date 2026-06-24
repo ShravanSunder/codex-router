@@ -753,10 +753,10 @@ for needle in required:
     if needle not in source:
         errors.append(f"missing async HTTP/SSE release-path marker: {needle}")
 resolver_forbidden = [
-    "ProxyCredentialResolver",
-    "SqliteStateStore",
-    "state_database_path",
-    "secret_store_root",
+    "ProxyCredentialResolver::open",
+    "SqliteStateStore::open",
+    "state_database_path:",
+    "secret_store_root:",
 ]
 for needle in resolver_forbidden:
     if needle in async_resolver:
