@@ -87,8 +87,8 @@ where
             )
             .with_max_websocket_upstream_messages(command.max_websocket_upstream_messages);
             let token_reload_watcher = if command.require_local_token {
-                let secret_store = FileSecretStore::open(&secret_root)
-                    .map_err(TokenCommandError::SecretStore)?;
+                let secret_store =
+                    FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
                 let token_service = LocalRouterTokenService::new(secret_store.clone());
                 let local_token = token_service.load_current()?;
                 let initial_token_generation = local_token.generation();

@@ -246,6 +246,8 @@ impl LoopbackRouterRuntimeConfig {
 /// Assembled loopback router runtime for HTTP/SSE forwarding.
 pub struct LoopbackRouterRuntime {
     server: LoopbackServerRuntime,
+    state_database_path: PathBuf,
+    secret_store_root: PathBuf,
     state_store: SqliteStateStore,
     secret_store: ProxyRuntimeSecretStore,
     affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
@@ -292,6 +294,8 @@ impl LoopbackRouterRuntime {
 
         Ok(Self {
             server,
+            state_database_path: config.state_database_path,
+            secret_store_root: config.secret_store_root,
             state_store,
             secret_store,
             affinity_owner_recorder,
@@ -373,17 +377,90 @@ impl LoopbackRouterRuntime {
             .try_clone()
             .map_err(LoopbackRouterRuntimeError::ListenerClone)?;
         let mut handled_connections = 0_usize;
+        let mut handlers = Vec::new();
+        let connection_handler = self.protocol_connection_handler();
         while handled_connections < max_connections {
             let (stream, _peer_addr) = listener
                 .accept()
                 .map_err(LoopbackRouterRuntimeError::Accept)?;
-            let _connection_result = self.handle_protocol_connection(stream);
+            let handler_context = connection_handler.clone();
+            let handler =
+                std::thread::spawn(move || handler_context.handle_protocol_connection(stream));
+            if max_connections == usize::MAX {
+                drop(handler);
+            } else {
+                handlers.push(handler);
+            }
             handled_connections += 1;
+        }
+
+        for handler in handlers {
+            match handler.join() {
+                Ok(_result) => {}
+                Err(_panic) => return Err(LoopbackRouterRuntimeError::ConnectionPanic),
+            }
         }
 
         Ok(handled_connections)
     }
 
+    fn protocol_connection_handler(&self) -> LoopbackProtocolConnectionHandler {
+        LoopbackProtocolConnectionHandler {
+            state_database_path: self.state_database_path.clone(),
+            secret_store_root: self.secret_store_root.clone(),
+            secret_store: self.secret_store.clone(),
+            affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
+            auth_gate: self.auth_gate.clone(),
+            upstream: self.upstream.clone(),
+            upstream_endpoint: self.upstream_endpoint.clone(),
+            max_websocket_upstream_messages: self.max_websocket_upstream_messages,
+            websocket_revocations: self.websocket_revocations.clone(),
+            audit_sink: self.audit_sink.clone(),
+            weighted_selectors: Arc::clone(&self.weighted_selectors),
+            account_holds: Arc::clone(&self.account_holds),
+            fixed_now_unix_seconds: self.fixed_now_unix_seconds,
+        }
+    }
+
+    fn repository_backed_account_selector(
+        &self,
+    ) -> RepositoryBackedAccountSelector<'_, SqliteStateStore> {
+        let fixed_now_unix_seconds = self.fixed_now_unix_seconds;
+        RepositoryBackedAccountSelector::new_with_runtime(
+            &self.state_store,
+            Arc::clone(&self.weighted_selectors),
+            Arc::clone(&self.account_holds),
+            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(move || {
+                fixed_now_unix_seconds.unwrap_or_else(|| match current_unix_seconds() {
+                    Ok(now_unix_seconds) => now_unix_seconds,
+                    Err(error) => {
+                        panic!("system clock must remain after Unix epoch for routing: {error}")
+                    }
+                })
+            }),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct LoopbackProtocolConnectionHandler {
+    state_database_path: PathBuf,
+    secret_store_root: PathBuf,
+    secret_store: ProxyRuntimeSecretStore,
+    affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
+    auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    upstream: HttpUpstreamTransport,
+    upstream_endpoint: UpstreamEndpoint,
+    max_websocket_upstream_messages: usize,
+    websocket_revocations: WebSocketRevocationRegistry,
+    audit_sink: Option<AuditFileSink>,
+    weighted_selectors: RouteBandWeightedSelectors,
+    account_holds: RouteBandAccountHolds,
+    fixed_now_unix_seconds: Option<u64>,
+}
+
+impl LoopbackProtocolConnectionHandler {
     fn handle_protocol_connection(
         &self,
         stream: TcpStream,
@@ -435,13 +512,15 @@ impl LoopbackRouterRuntime {
                 }
             }
 
-            let selector = self.repository_backed_account_selector();
+            let state_store = SqliteStateStore::open(&self.state_database_path)?;
+            let credential_resolver = self.open_credential_resolver()?;
+            let selector = self.repository_backed_account_selector(&state_store);
             let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
             let tunnel = if let Some(audit_sink) = &self.audit_sink {
                 BlockingWebSocketTunnel::new_with_revocation_registry_and_audit_sink(
                     &self.auth_gate,
                     &selector,
-                    &self.credential_resolver,
+                    &credential_resolver,
                     &protocol_router,
                     self.websocket_revocations.clone(),
                     audit_sink,
@@ -452,7 +531,7 @@ impl LoopbackRouterRuntime {
                 BlockingWebSocketTunnel::new_with_revocation_registry(
                     &self.auth_gate,
                     &selector,
-                    &self.credential_resolver,
+                    &credential_resolver,
                     &protocol_router,
                     self.websocket_revocations.clone(),
                 )
@@ -473,11 +552,13 @@ impl LoopbackRouterRuntime {
             return Ok(());
         }
 
-        let selector = self.repository_backed_account_selector();
+        let state_store = SqliteStateStore::open(&self.state_database_path)?;
+        let credential_resolver = self.open_credential_resolver()?;
+        let selector = self.repository_backed_account_selector(&state_store);
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,
-            &self.credential_resolver,
+            &credential_resolver,
             &self.upstream,
         )
         .with_affinity_secret_provider(&self.secret_store)
@@ -491,12 +572,13 @@ impl LoopbackRouterRuntime {
             .map_err(LoopbackRouterRuntimeError::Connection)
     }
 
-    fn repository_backed_account_selector(
+    fn repository_backed_account_selector<'a>(
         &self,
-    ) -> RepositoryBackedAccountSelector<'_, SqliteStateStore> {
+        state_store: &'a SqliteStateStore,
+    ) -> RepositoryBackedAccountSelector<'a, SqliteStateStore> {
         let fixed_now_unix_seconds = self.fixed_now_unix_seconds;
         RepositoryBackedAccountSelector::new_with_runtime(
-            &self.state_store,
+            state_store,
             Arc::clone(&self.weighted_selectors),
             Arc::clone(&self.account_holds),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
@@ -509,6 +591,21 @@ impl LoopbackRouterRuntime {
                 })
             }),
         )
+    }
+
+    fn open_credential_resolver(
+        &self,
+    ) -> Result<ProxyCredentialResolver, LoopbackRouterRuntimeError> {
+        let now_unix_seconds = match self.fixed_now_unix_seconds {
+            Some(now_unix_seconds) => now_unix_seconds,
+            None => current_unix_seconds().map_err(LoopbackRouterRuntimeError::SystemClock)?,
+        };
+        ProxyCredentialResolver::open(
+            &self.state_database_path,
+            &self.secret_store_root,
+            now_unix_seconds,
+        )
+        .map_err(LoopbackRouterRuntimeError::CredentialResolver)
     }
 }
 
@@ -766,6 +863,9 @@ pub enum LoopbackRouterRuntimeError {
     /// Listener cloning failed before the bounded serve loop.
     #[error("failed to clone loopback listener")]
     ListenerClone(#[source] std::io::Error),
+    /// A loopback connection handler panicked.
+    #[error("loopback router connection handler panicked")]
+    ConnectionPanic,
     /// Serving a loopback connection failed.
     #[error(transparent)]
     Connection(#[from] ServerConnectionError),

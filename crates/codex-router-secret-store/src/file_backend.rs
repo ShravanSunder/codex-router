@@ -6,12 +6,16 @@ use std::io::Write;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use codex_router_core::redaction::SecretString;
 
 use crate::backend::SecretStore;
 use crate::model::SecretKey;
 use crate::model::SecretStoreError;
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// File-backed secret store rooted in router-owned private storage.
 #[derive(Clone, Debug)]
@@ -41,9 +45,12 @@ impl SecretStore for FileSecretStore {
         let target_path = self.secret_path(key);
         reject_symlink_path(&target_path)?;
 
-        let temp_path = self
-            .root
-            .join(format!(".{}.tmp.{}", key.as_str(), std::process::id()));
+        let temp_path = self.root.join(format!(
+            ".{}.tmp.{}.{}",
+            key.as_str(),
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
         reject_symlink_path(&temp_path)?;
 
         let mut temp_file = open_private_temp_file(&temp_path)?;

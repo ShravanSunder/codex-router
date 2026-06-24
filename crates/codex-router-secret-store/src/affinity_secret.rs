@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::Read;
+use std::sync::Mutex;
 
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::redaction::SecretString;
@@ -12,6 +13,8 @@ use crate::model::SecretStoreError;
 
 /// Stable secret-store key for the router affinity HMAC secret.
 pub const ROUTER_AFFINITY_HASH_SECRET_KEY: &str = "router_affinity_hash_secret.v1";
+
+static LOAD_OR_CREATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Origin of the loaded affinity secret.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +59,9 @@ impl LoadedRouterAffinityHashSecret {
 pub fn load_or_create_router_affinity_hash_secret(
     store: &impl SecretStore,
 ) -> Result<LoadedRouterAffinityHashSecret, SecretStoreError> {
+    let _guard = LOAD_OR_CREATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = router_affinity_hash_secret_key()?;
     match store.read_secret(&key) {
         Ok(secret) => parse_loaded_secret(secret, RouterAffinityHashSecretOrigin::LoadedExisting),

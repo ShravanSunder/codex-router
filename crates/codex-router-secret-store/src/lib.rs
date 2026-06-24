@@ -20,8 +20,11 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::Barrier;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::thread;
 
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
@@ -179,6 +182,42 @@ mod tests {
             ROUTER_AFFINITY_HASH_SECRET_KEY
         );
         assert!(!format!("{created:?}").contains(created.secret().expose_secret()));
+    }
+
+    #[test]
+    fn router_affinity_hash_secret_concurrent_create_returns_one_value() {
+        let test_root = TestRoot::new("affinity-secret-concurrent");
+        let store = Arc::new(must_ok(FileSecretStore::open(test_root.path())));
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+
+        for _worker_index in 0..8 {
+            let worker_store = Arc::clone(&store);
+            let worker_barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || {
+                worker_barrier.wait();
+                let loaded = must_ok(load_or_create_router_affinity_hash_secret(
+                    worker_store.as_ref(),
+                ));
+                loaded.secret().expose_secret().to_owned()
+            }));
+        }
+
+        let mut loaded_values = Vec::new();
+        for thread in threads {
+            let value = match thread.join() {
+                Ok(value) => value,
+                Err(error) => panic!("affinity worker thread panicked: {error:?}"),
+            };
+            loaded_values.push(value);
+        }
+
+        let first = loaded_values
+            .first()
+            .unwrap_or_else(|| panic!("workers should produce values"));
+        assert!(loaded_values.iter().all(|value| value == first));
+        let loaded_after = must_ok(load_or_create_router_affinity_hash_secret(store.as_ref()));
+        assert_eq!(loaded_after.secret().expose_secret(), first);
     }
 
     #[test]

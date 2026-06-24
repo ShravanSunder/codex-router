@@ -2594,7 +2594,10 @@ mod tests {
                 Ok(response) => response,
                 Err(error) => panic!("client thread panicked: {error:?}"),
             };
-            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(
+                response.starts_with("HTTP/1.1 200 OK\r\n"),
+                "client should receive 200 OK, got:\n{response}"
+            );
         }
 
         let first_authorization = match upstream_receiver.recv() {
@@ -3323,11 +3326,11 @@ mod tests {
             let split_at = request
                 .find("Upgrade: websocket")
                 .unwrap_or_else(|| panic!("test request should contain upgrade header"));
-            if let Err(error) = client.write_all(request[..split_at].as_bytes()) {
+            if let Err(error) = client.write_all(&request.as_bytes()[..split_at]) {
                 panic!("fragmented client should write first header fragment: {error}");
             }
             thread::sleep(Duration::from_millis(50));
-            if let Err(error) = client.write_all(request[split_at..].as_bytes()) {
+            if let Err(error) = client.write_all(&request.as_bytes()[split_at..]) {
                 panic!("fragmented client should write second header fragment: {error}");
             }
 
@@ -3374,6 +3377,394 @@ mod tests {
         match upstream_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn loopback_router_runtime_accepts_http_while_websocket_is_blocked() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_concurrent_accept");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_ws_concurrent"),
+            "ws-concurrent",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &account,
+            90,
+            "concurrent-upstream-token",
+        );
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket = match accept_hdr(stream, |request: &Request, response: Response| {
+                let authorization = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                if let Err(error) = upstream_sender.send(format!("ws-auth:{authorization}")) {
+                    panic!("mock websocket upstream auth should record: {error}");
+                }
+                Ok(response)
+            }) {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("mock websocket upstream handshake should accept: {error}"),
+            };
+            let first_frame = match websocket.read() {
+                Ok(message) => message,
+                Err(error) => panic!("mock websocket upstream should read first frame: {error}"),
+            };
+            if let Err(error) = upstream_sender.send(format!("ws-frame:{first_frame}")) {
+                panic!("mock websocket upstream first frame should record: {error}");
+            }
+
+            if let Err(error) = upstream_listener.set_nonblocking(true) {
+                let _ = websocket.send(Message::text(r#"{"type":"response.completed"}"#));
+                panic!("mock upstream listener should become nonblocking: {error}");
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut http_stream, _peer_address) = loop {
+                match upstream_listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            let _ =
+                                websocket.send(Message::text(r#"{"type":"response.completed"}"#));
+                            panic!("router should accept HTTP while websocket handler is blocked");
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => {
+                        let _ = websocket.send(Message::text(r#"{"type":"response.completed"}"#));
+                        panic!("mock upstream should accept concurrent HTTP request: {error}");
+                    }
+                }
+            };
+            if let Err(error) = http_stream.set_nonblocking(false) {
+                let _ = websocket.send(Message::text(r#"{"type":"response.completed"}"#));
+                panic!("mock upstream HTTP stream should become blocking: {error}");
+            }
+            let http_request = read_test_http_request(&mut http_stream);
+            if let Err(error) = upstream_sender.send(format!("http-request:{http_request}")) {
+                panic!("mock upstream HTTP request should record: {error}");
+            }
+            if let Err(error) =
+                http_stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            {
+                panic!("mock upstream should write HTTP response: {error}");
+            }
+            if let Err(error) = websocket.send(Message::text(r#"{"type":"response.completed"}"#)) {
+                panic!("mock websocket upstream should release first tunnel: {error}");
+            }
+        });
+
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+        )
+        .with_quota_clock(1_030, 60)
+        .with_max_websocket_upstream_messages(1);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let server_thread = thread::spawn(move || match runtime.serve_protocol_connections(2) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve concurrent connections: {error}"),
+        });
+        let websocket_client_thread = thread::spawn(move || {
+            let request = match format!("ws://{router_address}/v1/responses").into_client_request()
+            {
+                Ok(request) => request,
+                Err(error) => panic!("local websocket request should build: {error}"),
+            };
+            let (mut client, _response) = match connect(request) {
+                Ok(connection) => connection,
+                Err(error) => panic!("local websocket client should connect: {error}"),
+            };
+            if let Err(error) = client.send(Message::text(r#"{"type":"response.create"}"#)) {
+                panic!("local websocket client should send first frame: {error}");
+            }
+            match client.read() {
+                Ok(message) => message.to_string(),
+                Err(error) => panic!("local websocket client should read response: {error}"),
+            }
+        });
+
+        let recorded_first_frame = loop {
+            let recorded = match upstream_receiver.recv_timeout(Duration::from_secs(2)) {
+                Ok(recorded) => recorded,
+                Err(error) => panic!("upstream should observe first websocket frame: {error}"),
+            };
+            if recorded.starts_with("ws-frame:") {
+                break recorded;
+            }
+        };
+        assert_eq!(
+            recorded_first_frame,
+            r#"ws-frame:{"type":"response.create"}"#
+        );
+
+        let http_response = send_loopback_request_with_read_timeout(
+            router_address,
+            "POST /v1/responses HTTP/1.1\r\n",
+            br#"{"model":"gpt-5","concurrent":true}"#,
+            Duration::from_secs(2),
+        );
+        assert!(http_response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(http_response.ends_with("\r\nok"));
+
+        let recorded_http = match upstream_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(recorded) => recorded,
+            Err(error) => panic!("upstream should record concurrent HTTP request: {error}"),
+        };
+        assert!(recorded_http.starts_with("http-request:POST /v1/responses HTTP/1.1\r\n"));
+        assert!(recorded_http.contains("authorization: Bearer concurrent-upstream-token\r\n"));
+
+        let websocket_response = match websocket_client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("websocket client thread panicked: {error:?}"),
+        };
+        assert_eq!(websocket_response, r#"{"type":"response.completed"}"#);
+        match server_thread.join() {
+            Ok(handled) => assert_eq!(handled, 2),
+            Err(error) => panic!("server thread panicked: {error:?}"),
+        }
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn loopback_router_runtime_accepts_second_websocket_while_first_is_blocked() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_concurrent_websockets");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_ws_pair"),
+            "ws-pair",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &account,
+            90,
+            "paired-websocket-upstream-token",
+        );
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (first_stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock upstream should accept first websocket: {error}"),
+            };
+            let mut first_websocket =
+                match accept_hdr(first_stream, |_request: &Request, response: Response| {
+                    Ok(response)
+                }) {
+                    Ok(websocket) => websocket,
+                    Err(error) => panic!("mock upstream first handshake should accept: {error}"),
+                };
+            let first_frame = match first_websocket.read() {
+                Ok(message) => message,
+                Err(error) => panic!("mock upstream should read first websocket frame: {error}"),
+            };
+            if let Err(error) = upstream_sender.send(format!("ws1-frame:{first_frame}")) {
+                panic!("mock upstream first frame should record: {error}");
+            }
+
+            if let Err(error) = upstream_listener.set_nonblocking(true) {
+                let _ =
+                    first_websocket.send(Message::text(r#"{"type":"response.completed","id":1}"#));
+                panic!("mock upstream listener should become nonblocking: {error}");
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (second_stream, _peer_address) = loop {
+                match upstream_listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            let _ = first_websocket
+                                .send(Message::text(r#"{"type":"response.completed","id":1}"#));
+                            panic!("router should accept second websocket while first is blocked");
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => {
+                        let _ = first_websocket
+                            .send(Message::text(r#"{"type":"response.completed","id":1}"#));
+                        panic!("mock upstream should accept second websocket: {error}");
+                    }
+                }
+            };
+            if let Err(error) = second_stream.set_nonblocking(false) {
+                let _ =
+                    first_websocket.send(Message::text(r#"{"type":"response.completed","id":1}"#));
+                panic!("mock upstream second websocket should become blocking: {error}");
+            }
+            let mut second_websocket =
+                match accept_hdr(second_stream, |_request: &Request, response: Response| {
+                    Ok(response)
+                }) {
+                    Ok(websocket) => websocket,
+                    Err(error) => panic!("mock upstream second handshake should accept: {error}"),
+                };
+            let second_frame = match second_websocket.read() {
+                Ok(message) => message,
+                Err(error) => panic!("mock upstream should read second websocket frame: {error}"),
+            };
+            if let Err(error) = upstream_sender.send(format!("ws2-frame:{second_frame}")) {
+                panic!("mock upstream second frame should record: {error}");
+            }
+            if let Err(error) =
+                second_websocket.send(Message::text(r#"{"type":"response.completed","id":2}"#))
+            {
+                panic!("mock upstream should respond to second websocket: {error}");
+            }
+            if let Err(error) =
+                first_websocket.send(Message::text(r#"{"type":"response.completed","id":1}"#))
+            {
+                panic!("mock upstream should release first websocket: {error}");
+            }
+        });
+
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+        )
+        .with_quota_clock(1_030, 60)
+        .with_max_websocket_upstream_messages(1);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let server_thread = thread::spawn(move || match runtime.serve_protocol_connections(2) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve concurrent websockets: {error}"),
+        });
+        let first_client_thread = thread::spawn(move || {
+            let mut websocket =
+                connect_local_websocket_with_timeout(router_address, Duration::from_secs(2));
+            if let Err(error) =
+                websocket.send(Message::text(r#"{"type":"response.create","id":1}"#))
+            {
+                panic!("first websocket client should send frame: {error}");
+            }
+            match websocket.read() {
+                Ok(message) => message.to_string(),
+                Err(error) => panic!("first websocket client should read response: {error}"),
+            }
+        });
+
+        let recorded_first_frame = match upstream_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(recorded) => recorded,
+            Err(error) => panic!("upstream should receive first websocket frame: {error}"),
+        };
+        assert_eq!(
+            recorded_first_frame,
+            r#"ws1-frame:{"type":"response.create","id":1}"#
+        );
+
+        let mut second_websocket =
+            connect_local_websocket_with_timeout(router_address, Duration::from_secs(2));
+        if let Err(error) =
+            second_websocket.send(Message::text(r#"{"type":"response.create","id":2}"#))
+        {
+            panic!("second websocket client should send frame: {error}");
+        }
+        let second_response = match second_websocket.read() {
+            Ok(message) => message.to_string(),
+            Err(error) => panic!("second websocket client should read response: {error}"),
+        };
+        assert_eq!(second_response, r#"{"type":"response.completed","id":2}"#);
+
+        let recorded_second_frame = match upstream_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(recorded) => recorded,
+            Err(error) => panic!("upstream should receive second websocket frame: {error}"),
+        };
+        assert_eq!(
+            recorded_second_frame,
+            r#"ws2-frame:{"type":"response.create","id":2}"#
+        );
+        let first_response = match first_client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("first websocket client thread panicked: {error:?}"),
+        };
+        assert_eq!(first_response, r#"{"type":"response.completed","id":1}"#);
+        match server_thread.join() {
+            Ok(handled) => assert_eq!(handled, 2),
+            Err(error) => panic!("server thread panicked: {error:?}"),
+        }
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream thread panicked: {error:?}"),
         }
     }
 
@@ -3818,6 +4209,67 @@ mod tests {
         }
 
         response
+    }
+
+    fn send_loopback_request_with_read_timeout(
+        server_address: std::net::SocketAddr,
+        request_line: &str,
+        body: &[u8],
+        read_timeout: Duration,
+    ) -> String {
+        let mut client = match TcpStream::connect(server_address) {
+            Ok(client) => client,
+            Err(error) => panic!("client should connect to loopback listener: {error}"),
+        };
+        if let Err(error) = client.set_read_timeout(Some(read_timeout)) {
+            panic!("client read timeout should be set: {error}");
+        }
+        let request = format!(
+            "{request_line}Host: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        if let Err(error) = client.write_all(request.as_bytes()) {
+            panic!("client request write should succeed: {error}");
+        }
+        if let Err(error) = client.shutdown(Shutdown::Write) {
+            panic!("client write shutdown should succeed: {error}");
+        }
+        let mut response = String::new();
+        if let Err(error) = client.read_to_string(&mut response) {
+            panic!("client response read should succeed before timeout: {error}");
+        }
+
+        response
+    }
+
+    fn connect_local_websocket_with_timeout(
+        server_address: std::net::SocketAddr,
+        read_timeout: Duration,
+    ) -> WebSocket<TcpStream> {
+        let mut client = match TcpStream::connect(server_address) {
+            Ok(client) => client,
+            Err(error) => panic!("websocket client should connect to loopback listener: {error}"),
+        };
+        if let Err(error) = client.set_read_timeout(Some(read_timeout)) {
+            panic!("websocket client read timeout should be set: {error}");
+        }
+        if let Err(error) = client.set_write_timeout(Some(read_timeout)) {
+            panic!("websocket client write timeout should be set: {error}");
+        }
+        let request = format!(
+            "GET /v1/responses HTTP/1.1\r\nHost: {server_address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        if let Err(error) = client.write_all(request.as_bytes()) {
+            panic!("websocket client should write handshake: {error}");
+        }
+        let handshake_response = read_http_response_headers(&mut client);
+        assert!(
+            handshake_response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+            "websocket handshake should complete, got:\n{handshake_response}"
+        );
+
+        WebSocket::from_raw_socket(client, Role::Client, None)
     }
 
     fn send_loopback_request_with_token(
