@@ -990,20 +990,260 @@ mod registry_tests {
 
 #[cfg(test)]
 mod async_forwarding_tests {
+    use super::AsyncWebSocketTunnel;
+    use super::FirstFramePolicy;
     use super::TokenGeneration;
     use super::WebSocketForwardingContext;
+    use super::WebSocketHandshakeRequest;
+    use super::WebSocketProtocolRouter;
     use super::WebSocketRevocationRegistry;
     use super::WebSocketTunnelError;
     use super::forward_duplex_until_complete;
     use bytes::Bytes;
+    use codex_router_auth::resolver::CredentialResolverError;
+    use codex_router_auth::resolver::ResolvedProviderCredential;
+    use codex_router_core::affinity::RouterAffinityHashSecret;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::ids::TokenGeneration as LocalTokenGeneration;
+    use codex_router_core::redaction::SecretString;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
+    use futures_util::future::BoxFuture;
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::duplex;
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
     use tokio_tungstenite::WebSocketStream;
     use tokio_util::sync::CancellationToken;
     use tungstenite::Message;
     use tungstenite::protocol::Role;
+
+    use crate::account_selection::AsyncAccountDecisionSelector;
+    use crate::account_selection::SelectedAccountDecision;
+    use crate::http_sse::AsyncProviderCredentialResolver;
+    use crate::http_sse::HttpAffinitySecretProvider;
+    use crate::http_sse::HttpProxyError;
+    use crate::http_sse::HttpProxyRequest;
+    use crate::local_auth::ProxyLocalAuthGate;
+
+    #[derive(Clone, Debug)]
+    struct PendingAsyncSelector {
+        started: Arc<Notify>,
+    }
+
+    impl AsyncAccountDecisionSelector for PendingAsyncSelector {
+        fn select_upstream_account<'a>(
+            &'a self,
+            _request: &'a HttpProxyRequest,
+            _token_generation: LocalTokenGeneration,
+            _affinity_secret: Option<&'a RouterAffinityHashSecret>,
+        ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
+            Box::pin(async move {
+                self.started.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FixedAsyncSelector {
+        account_id: AccountId,
+    }
+
+    impl AsyncAccountDecisionSelector for FixedAsyncSelector {
+        fn select_upstream_account<'a>(
+            &'a self,
+            _request: &'a HttpProxyRequest,
+            _token_generation: LocalTokenGeneration,
+            _affinity_secret: Option<&'a RouterAffinityHashSecret>,
+        ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
+            Box::pin(async move {
+                Ok(SelectedAccountDecision::new(
+                    self.account_id.clone(),
+                    "test-fixed",
+                ))
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FixedAsyncCredentialResolver {
+        account_id: AccountId,
+    }
+
+    impl AsyncProviderCredentialResolver for FixedAsyncCredentialResolver {
+        fn resolve_provider_credentials<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+        ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
+            Box::pin(async move {
+                Ok(ResolvedProviderCredential::new(
+                    self.account_id.clone(),
+                    SecretString::new("test-access-token"),
+                    1,
+                ))
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FixedAffinitySecretProvider {
+        secret: RouterAffinityHashSecret,
+    }
+
+    impl FixedAffinitySecretProvider {
+        fn new() -> Self {
+            Self {
+                secret: RouterAffinityHashSecret::new(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}")),
+            }
+        }
+    }
+
+    impl HttpAffinitySecretProvider for FixedAffinitySecretProvider {
+        fn load_or_create_affinity_secret(
+            &self,
+        ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
+            Ok(self.secret.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_cancels_pending_first_frame_routing() {
+        let account_id = AccountId::new("acct_ws_test")
+            .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+        let selector_started = Arc::new(Notify::new());
+        let selector = PendingAsyncSelector {
+            started: Arc::clone(&selector_started),
+        };
+        let credential_resolver = FixedAsyncCredentialResolver { account_id };
+        let auth_gate = ProxyLocalAuthGate::disabled();
+        let affinity_secret_provider = FixedAffinitySecretProvider::new();
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let registry = WebSocketRevocationRegistry::new();
+        let session_shutdown = CancellationToken::new();
+        let tunnel = AsyncWebSocketTunnel::new(
+            &auth_gate,
+            &selector,
+            &credential_resolver,
+            &protocol_router,
+        )
+        .with_revocation_registry(registry.clone())
+        .with_session_shutdown(session_shutdown.clone())
+        .with_affinity_secret_provider(&affinity_secret_provider);
+        let (router_local_stream, client_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let router_future = tunnel.handle_upgraded_connection(
+            router_local_websocket,
+            WebSocketHandshakeRequest::new(),
+            "ws://127.0.0.1:1/v1/responses",
+            10,
+        );
+        let peer_future = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first local frame should send: {error}"));
+            tokio::time::timeout(Duration::from_secs(1), selector_started.notified())
+                .await
+                .unwrap_or_else(|_elapsed| panic!("selector should start before shutdown"));
+            session_shutdown.cancel();
+        };
+        let (router_result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(router_future, peer_future)
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("router should exit while routing is pending"));
+
+        assert!(
+            router_result.is_ok(),
+            "shutdown should close pending first-frame routing cleanly, got {router_result:?}"
+        );
+        assert_eq!(registry.snapshot().active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_cancels_pending_upstream_connect() {
+        let account_id = AccountId::new("acct_ws_test")
+            .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+        let selector = FixedAsyncSelector {
+            account_id: account_id.clone(),
+        };
+        let credential_resolver = FixedAsyncCredentialResolver { account_id };
+        let auth_gate = ProxyLocalAuthGate::disabled();
+        let affinity_secret_provider = FixedAffinitySecretProvider::new();
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let registry = WebSocketRevocationRegistry::new();
+        let session_shutdown = CancellationToken::new();
+        let tunnel = AsyncWebSocketTunnel::new(
+            &auth_gate,
+            &selector,
+            &credential_resolver,
+            &protocol_router,
+        )
+        .with_revocation_registry(registry.clone())
+        .with_session_shutdown(session_shutdown.clone())
+        .with_affinity_secret_provider(&affinity_secret_provider);
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap_or_else(|error| panic!("blackhole listener should bind: {error}"));
+        let upstream_url = format!(
+            "ws://{}/v1/responses",
+            listener
+                .local_addr()
+                .unwrap_or_else(|error| panic!("local addr should read: {error}"))
+        );
+        let accepted = Arc::new(Notify::new());
+        let accepted_for_task = Arc::clone(&accepted);
+        let accept_task = tokio::spawn(async move {
+            let (_stream, _addr) = listener
+                .accept()
+                .await
+                .unwrap_or_else(|error| panic!("blackhole should accept: {error}"));
+            accepted_for_task.notify_one();
+            std::future::pending::<()>().await;
+        });
+        let (router_local_stream, client_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let router_future = tunnel.handle_upgraded_connection(
+            router_local_websocket,
+            WebSocketHandshakeRequest::new(),
+            &upstream_url,
+            10,
+        );
+        let peer_future = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first local frame should send: {error}"));
+            tokio::time::timeout(Duration::from_secs(1), accepted.notified())
+                .await
+                .unwrap_or_else(|_elapsed| panic!("upstream connection should be accepted"));
+            assert_eq!(registry.snapshot().active_sessions, 1);
+            session_shutdown.cancel();
+        };
+        let (router_result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(router_future, peer_future)
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("router should exit while connect is pending"));
+        accept_task.abort();
+
+        assert!(
+            router_result.is_ok(),
+            "shutdown should close pending upstream connect cleanly, got {router_result:?}"
+        );
+        assert_eq!(registry.snapshot().active_sessions, 0);
+    }
 
     #[tokio::test]
     async fn reset_during_new_turn_after_prior_completion_is_reported() {
@@ -1528,8 +1768,13 @@ where
     where
         LocalStream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let first_message =
-            match tokio::time::timeout(Duration::from_millis(250), local_websocket.next()).await {
+        let first_message = tokio::select! {
+            () = self.session_shutdown.cancelled() => {
+                local_websocket.close(None).await?;
+                return Ok(());
+            }
+            first_message = tokio::time::timeout(Duration::from_millis(250), local_websocket.next()) => {
+                match first_message {
                 Ok(Some(Ok(message))) => message,
                 Ok(Some(Err(error))) => return Err(WebSocketTunnelError::Transport(error)),
                 Ok(None) => {
@@ -1544,13 +1789,19 @@ where
                         WebSocketCloseReason::FirstFrameTimeout,
                     ));
                 }
-            };
+                }
+            }
+        };
         let first_frame = frame_from_message(first_message);
-        let decision = self
-            .router
-            .route_first_frame(handshake, first_frame)
-            .await
-            .map_err(WebSocketTunnelError::CloseReason)?;
+        let decision = tokio::select! {
+            () = self.session_shutdown.cancelled() => {
+                local_websocket.close(None).await?;
+                return Ok(());
+            }
+            decision = self.router.route_first_frame(handshake, first_frame) => {
+                decision.map_err(WebSocketTunnelError::CloseReason)?
+            }
+        };
         let WebSocketFirstFrameDecision::OpenUpstream {
             token_generation,
             headers,
@@ -1562,10 +1813,33 @@ where
 
         let mut upstream_request = upstream_url.into_client_request()?;
         apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
-        let (mut upstream_websocket, _response) = connect_async(upstream_request).await?;
-        upstream_websocket
-            .send(message_from_frame(first_frame)?)
-            .await?;
+        let (mut upstream_websocket, _response) = tokio::select! {
+            () = self.session_shutdown.cancelled() => {
+                local_websocket.close(None).await?;
+                return Ok(());
+            }
+            () = revocation.cancelled() => {
+                local_websocket.close(None).await?;
+                return Ok(());
+            }
+            connection = connect_async(upstream_request) => connection?,
+        };
+        let upstream_first_message = message_from_frame(first_frame)?;
+        tokio::select! {
+            () = self.session_shutdown.cancelled() => {
+                local_websocket.close(None).await?;
+                upstream_websocket.close(None).await?;
+                return Ok(());
+            }
+            () = revocation.cancelled() => {
+                local_websocket.close(None).await?;
+                upstream_websocket.close(None).await?;
+                return Ok(());
+            }
+            result = upstream_websocket.send(upstream_first_message) => {
+                result?;
+            }
+        }
 
         forward_duplex_until_complete(
             local_websocket,

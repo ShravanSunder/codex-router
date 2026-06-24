@@ -247,6 +247,125 @@ impl AsyncSqliteStateStore {
         Ok(accounts)
     }
 
+    /// Loads account metadata through the async state connection pool.
+    pub async fn load_account(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<AccountRecord>, StateStoreError> {
+        let row = sqlx::query(
+            "SELECT account_id, label, status, active_credential_generation
+               FROM accounts
+              WHERE account_id = ?1",
+        )
+        .bind(account_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        parse_account_row(
+            row.get::<String, _>(0),
+            row.get::<String, _>(1),
+            row.get::<String, _>(2),
+            row.get::<Option<i64>, _>(3),
+        )
+        .map(Some)
+    }
+
+    /// Returns the next credential generation through the async state pool.
+    pub async fn next_credential_generation(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<u64, StateStoreError> {
+        let current_generation = self
+            .load_account(account_id)
+            .await?
+            .and_then(|account| account.active_credential_generation())
+            .unwrap_or(0);
+
+        current_generation
+            .checked_add(1)
+            .ok_or_else(|| StateStoreError::Sqlite {
+                message: "credential generation overflow".to_owned(),
+            })
+    }
+
+    /// Activates one credential generation and invalidates quota selector state.
+    pub async fn activate_account_credential_generation_and_invalidate_quota(
+        &self,
+        account_id: &AccountId,
+        active_credential_generation: u64,
+        status: AccountStatus,
+    ) -> Result<(), StateStoreError> {
+        let active_generation = u64_to_i64(active_credential_generation)?;
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query(
+            "UPDATE accounts
+                SET status = ?2,
+                    active_credential_generation = ?3
+              WHERE account_id = ?1",
+        )
+        .bind(account_id.as_str())
+        .bind(status.as_str())
+        .bind(active_generation)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        for route_band in CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS {
+            sqlx::query(
+                "INSERT INTO quota_snapshots (
+                   account_id, source, observed_unix_seconds, route_band,
+                   remaining_headroom, reset_unix_seconds, stale_penalty
+                 )
+                 VALUES (?1, ?2, 0, ?3, 0, NULL, 1)
+                 ON CONFLICT(account_id, route_band) DO UPDATE SET
+                   source = excluded.source,
+                   observed_unix_seconds = excluded.observed_unix_seconds,
+                   remaining_headroom = excluded.remaining_headroom,
+                   reset_unix_seconds = excluded.reset_unix_seconds,
+                   stale_penalty = excluded.stale_penalty",
+            )
+            .bind(account_id.as_str())
+            .bind(QuotaSnapshotSource::CredentialMutation.as_str())
+            .bind(*route_band)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+            sqlx::query(
+                "DELETE FROM selector_quota_windows
+                  WHERE account_id = ?1 AND route_band = ?2",
+            )
+            .bind(account_id.as_str())
+            .bind(*route_band)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+            if selector_route_band(route_band) {
+                sqlx::query(
+                    "INSERT INTO selector_quota_windows (
+                       account_id, route_band, limit_window_seconds, status,
+                       remaining_headroom, reset_unix_seconds, effective,
+                       observed_unix_seconds
+                     )
+                     VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, 0)",
+                )
+                .bind(account_id.as_str())
+                .bind(*route_band)
+                .bind(u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?)
+                .bind(SelectorQuotaWindowStatus::Ineligible.as_str())
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?;
+            }
+        }
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
     async fn load_quota_refresh_status(
         &self,
         account_id: &AccountId,

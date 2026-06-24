@@ -31,23 +31,6 @@ where
     refresh_leases: RefreshLeaseRegistry,
 }
 
-impl ProxyCredentialResolver<OpenAiOAuthRefreshClient> {
-    /// Opens router-owned credential state for runtime resolution.
-    pub(crate) fn open(
-        state_database_path: &Path,
-        secret_store_root: &Path,
-        now_unix_seconds: u64,
-    ) -> Result<Self, ProxyCredentialResolverOpenError> {
-        Ok(Self {
-            state_store: SqliteStateStore::open(state_database_path)?,
-            secret_store: open_proxy_secret_store(secret_store_root)?,
-            fallback_now_unix_seconds: now_unix_seconds,
-            refresh_client: OpenAiOAuthRefreshClient::new(),
-            refresh_leases: RefreshLeaseRegistry::new(),
-        })
-    }
-}
-
 #[cfg(test)]
 impl<C> ProxyCredentialResolver<C>
 where

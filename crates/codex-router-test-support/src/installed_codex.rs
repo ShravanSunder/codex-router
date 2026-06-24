@@ -1981,7 +1981,6 @@ fn write_redacted_three_websocket_transcript(
             "raw_state_counts": input.socket_cleanup.raw_state_counts,
         },
         "shared_router_pid": input.router_process.pid,
-        "quota_selected_account_safe_label": input.seed.expected_account_label,
     });
     let rendered = serde_json::to_string_pretty(&payload)
         .map_err(|error| format!("failed to render three-client transcript: {error}"))?;
@@ -2056,6 +2055,7 @@ fn assert_redacted_three_websocket_payload(
         Some(seed.local_token.as_str()),
         Some(seed.expected_upstream_token.as_str()),
         Some(seed.local_token_assignment.as_str()),
+        Some(seed.expected_account_label.as_str()),
         Some("installed-smoke-matches-token"),
         Some("prompt-canary"),
         Some("raw-previous-response-id-canary"),

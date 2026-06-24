@@ -2,6 +2,7 @@
 """Structural guardrails for the release codex-router serve runtime."""
 
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -165,6 +166,15 @@ def main() -> int:
                     }
                 )
 
+    for dirty_path in dirty_guarded_source_paths():
+        failures.append(
+            {
+                "kind": "dirty_guarded_source_path",
+                "path": dirty_path,
+                "needle": "worktree_or_index_differs_from_HEAD",
+            }
+        )
+
     receipt_path = write_receipt(check, failures)
     if failures:
         print(f"release runtime guardrail {check.row_id} failed: {receipt_path}", file=sys.stderr)
@@ -250,7 +260,9 @@ def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
             | set(release_proxy_source_paths())
         ),
         "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/*",
-        "freshness_check": "current_git_head_recorded",
+        "freshness_check": "guarded_source_paths_clean_at_git_head"
+        if not any(failure["kind"] == "dirty_guarded_source_path" for failure in failures)
+        else "guarded_source_paths_dirty",
         "redaction_check": "pass",
         "artifact_paths": [],
         "failures": failures,
@@ -266,6 +278,51 @@ def release_proxy_source_paths() -> list[str]:
         for path in proxy_src.rglob("*.rs")
         if path.is_file()
     )
+
+
+def guarded_source_paths() -> list[str]:
+    patterns = [
+        "Cargo.toml",
+        "deny.toml",
+        "crates/*/Cargo.toml",
+        "crates/codex-router-proxy/src/*.rs",
+        "scripts/*",
+        ".github/workflows/*",
+    ]
+    paths: list[str] = []
+    for pattern in patterns:
+        matches = sorted(glob.glob(str(REPO_ROOT / pattern)))
+        if matches:
+            paths.extend(
+                str(Path(match).relative_to(REPO_ROOT))
+                for match in matches
+                if Path(match).is_file()
+            )
+        else:
+            paths.append(pattern)
+    return sorted(set(paths))
+
+
+def dirty_guarded_source_paths() -> list[str]:
+    paths = guarded_source_paths()
+    dirty: set[str] = set()
+    worktree = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD", "--", *paths],
+        check=False,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    index = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--", *paths],
+        check=False,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    dirty.update(line for line in worktree.stdout.splitlines() if line)
+    dirty.update(line for line in index.stdout.splitlines() if line)
+    return sorted(dirty)
 
 
 def release_proxy_sources() -> dict[str, str]:

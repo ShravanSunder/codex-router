@@ -40,7 +40,8 @@ row_owner() {
     U-06|U-07|I-16) printf 'T2' ;;
     I-21) printf 'T1/T2' ;;
     I-17b) printf 'T5/T6' ;;
-    E-02|E-03|E-04|E-05|E-06|E-08) printf 'T8' ;;
+    S-01|S-02|S-03|S-04) printf 'T7' ;;
+    E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) printf 'T8' ;;
     G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23) printf 'T6' ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-09) printf 'T0/T6' ;;
     P-07|P-08|P-10) printf 'final' ;;
@@ -52,6 +53,9 @@ expected_observation() {
   case "$1" in
     E-02)
       printf 'five-minute soak holds three installed Codex WebSocket sessions through one real router process'
+      ;;
+    E-01)
+      printf 'three installed Codex WebSocket children share one router PID and complete without fallback/retry/downgrade'
       ;;
     E-03)
       printf 'soak artifact overlap timestamps prove concurrent activity'
@@ -65,8 +69,26 @@ expected_observation() {
     E-06)
       printf 'router-owned WebSocket registry records high-water 3 and zero active after completion'
       ;;
+    E-07)
+      printf 'per-runtime client/router/upstream correlation and positive WebSocket continuity are present'
+      ;;
     E-08)
       printf 'live router socket table has no leaked ESTABLISHED or CLOSE_WAIT TCP sessions after completion'
+      ;;
+    E-09)
+      printf 'three-WebSocket artifact allowlist redaction passes and negative canaries are absent'
+      ;;
+    S-01)
+      printf 'installed Codex tokenless default router profile succeeds without CODEX_ROUTER_TOKEN'
+      ;;
+    S-02)
+      printf 'installed Codex hardening smoke rejects missing/wrong/smuggled/stale local auth before upstream selection'
+      ;;
+    S-03)
+      printf 'installed Codex smoke uses spawned built codex-router serve binary and records process metadata'
+      ;;
+    S-04)
+      printf 'installed Codex mock upstream proves deterministic WebSocket behavior without fallback/reconnect/retry'
       ;;
     I-21)
       printf 'listener binds and first request is accepted while broad quota refresh is slow or stalled'
@@ -120,6 +142,48 @@ freshness_guard() {
     G-*) printf 'Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*' ;;
     P-*) printf 'tmp/plan-workflows/2026-06-24-async-router-runtime/* tmp/spec-workflows/2026-06-24-async-router-runtime/*' ;;
   esac
+}
+
+ensure_guarded_source_paths_clean() {
+  local row_id="$1"
+  local guard
+  guard="$(freshness_guard "$row_id")"
+  python3 - "$row_id" "$guard" <<'PY'
+import glob
+import shlex
+import subprocess
+import sys
+
+row_id = sys.argv[1]
+guard = sys.argv[2]
+patterns = shlex.split(guard)
+paths: list[str] = []
+for pattern in patterns:
+    matches = sorted(glob.glob(pattern))
+    if matches:
+        paths.extend(matches)
+    else:
+        paths.append(pattern)
+paths = sorted(set(paths))
+if not paths:
+    print(f"proof row {row_id} has no guarded paths", file=sys.stderr)
+    raise SystemExit(1)
+
+worktree = subprocess.run(
+    ["git", "diff", "--quiet", "HEAD", "--", *paths],
+    check=False,
+)
+index = subprocess.run(
+    ["git", "diff", "--cached", "--quiet", "--", *paths],
+    check=False,
+)
+if worktree.returncode != 0 or index.returncode != 0:
+    print(
+        f"proof row {row_id} guarded source paths are dirty; commit or revert guarded paths before accepting this receipt",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
 }
 
 known_row() {
@@ -238,7 +302,7 @@ main() {
   owner=$(row_owner "$row_id")
 
   case "$row_id" in
-    E-02|E-03|E-04|E-05|E-06|E-08)
+    E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09)
       three_websocket_artifact="${CODEX_ROUTER_THREE_WEBSOCKET_ARTIFACT:-}"
       artifact_source="CODEX_ROUTER_THREE_WEBSOCKET_ARTIFACT"
       if [[ -z "$three_websocket_artifact" ]]; then
@@ -313,7 +377,21 @@ upstream = artifact.get("upstream", {})
 registry = artifact.get("router_websocket_registry", {})
 socket_cleanup = artifact.get("socket_cleanup", {})
 
-if row_id == "E-02":
+if row_id == "E-01":
+    router_process = artifact.get("router_process", {})
+    if artifact.get("shared_router_pid") != router_process.get("pid"):
+        errors.append("shared_router_pid does not match router_process.pid")
+    if router_process.get("spawned_real_serve_child") is not True:
+        errors.append("router_process.spawned_real_serve_child is not true")
+    if upstream.get("active_high_water", 0) < 3:
+        errors.append("upstream active_high_water is below 3")
+    if upstream.get("multi_step_interleave_completed") is not True:
+        errors.append("multi_step_interleave_completed is not true")
+    for status in artifact.get("clients", {}).get("statuses", []):
+        stderr_text = str(status.get("stderr", ""))
+        if "fallback" in stderr_text.lower() or "reconnect" in stderr_text.lower():
+            errors.append("client status contains fallback/reconnect text")
+elif row_id == "E-02":
     if upstream.get("hold_duration_ms", 0) < 300_000:
         errors.append("hold_duration_ms is below five minutes")
     if upstream.get("active_high_water", 0) < 3:
@@ -363,6 +441,27 @@ elif row_id == "E-06":
         errors.append("router registry closed_sessions is below 3")
     if registry.get("completed_response_sessions", 0) < 3:
         errors.append("router registry completed_response_sessions is below 3")
+elif row_id == "E-07":
+    router_process = artifact.get("router_process", {})
+    if not router_process.get("binary_path"):
+        errors.append("router_process.binary_path is missing")
+    if not router_process.get("argv"):
+        errors.append("router_process.argv is missing")
+    if not router_process.get("listener"):
+        errors.append("router_process.listener is missing")
+    if not router_process.get("readiness_line"):
+        errors.append("router_process.readiness_line is missing")
+    if artifact.get("shared_router_pid") != router_process.get("pid"):
+        errors.append("shared router PID correlation is missing")
+    if upstream.get("expected_sessions") != 3 or upstream.get("completed_sessions") != 3:
+        errors.append("upstream session count correlation is incomplete")
+    if registry.get("registered_sessions", 0) < 3 or registry.get("closed_sessions", 0) < 3:
+        errors.append("router registry session correlation is incomplete")
+    counts = registry.get("final_session_forwarded_upstream_message_counts", [])
+    if not isinstance(counts, list) or len(counts) < 3:
+        errors.append("router registry final per-session counters are missing")
+    if upstream.get("http_probe_count") != 0:
+        errors.append("unexpected HTTP probe count in WebSocket continuity artifact")
 elif row_id == "E-08":
     if upstream.get("normal_close_sessions", 0) < 3:
         errors.append("upstream normal_close_sessions is below 3")
@@ -379,6 +478,40 @@ elif row_id == "E-08":
         errors.append("socket cleanup close_wait_count is not 0")
     if not isinstance(socket_cleanup.get("raw_state_counts"), list):
         errors.append("socket cleanup raw_state_counts is missing")
+elif row_id == "E-09":
+    forbidden_fragments = [
+        "installed-smoke-upstream-token",
+        "installed-smoke-matches-token",
+        "local-token",
+        "CODEX_ROUTER_TOKEN=",
+        "Bearer ",
+        "prompt-canary",
+        "raw-previous-response-id-canary",
+        "response.create",
+        "codex-router smoke ok",
+        "acct_",
+        "askluna",
+        "matches",
+        "ssdev",
+    ]
+    rendered_artifact = artifact_path.read_text()
+    for fragment in forbidden_fragments:
+        if fragment in rendered_artifact:
+            errors.append(f"artifact leaked forbidden fragment: {fragment}")
+    allowed_top_level = {
+        "clients",
+        "codex_version",
+        "git_head",
+        "mode",
+        "router_process",
+        "router_websocket_registry",
+        "shared_router_pid",
+        "socket_cleanup",
+        "upstream",
+    }
+    extra_keys = set(artifact) - allowed_top_level
+    if extra_keys:
+        errors.append(f"artifact contains non-allowlisted top-level keys: {sorted(extra_keys)}")
 
 receipt["status_after"] = "[x] passed" if not errors else "[ ] pending"
 receipt["result"] = "pass" if not errors else "fail"
@@ -416,6 +549,84 @@ PY
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
+    S-01|S-03|S-04)
+      if tests/smoke/installed_codex_mock.sh --transport websocket --scenario serial; then
+        if ! ensure_guarded_source_paths_clean "$row_id"; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+          exit 1
+        fi
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$row_id" "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+row_id = sys.argv[1]
+path = Path(sys.argv[2])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-test-support/src/installed_codex.rs",
+    "tests/smoke/installed_codex_mock.sh",
+    "crates/codex-router-cli/src/lib.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/websocket.rs",
+]
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = {
+    "S-01": "Installed Codex WebSocket smoke passed with tokenless spawned router profile.",
+    "S-03": "Installed Codex WebSocket smoke passed through spawned built codex-router serve child.",
+    "S-04": "Installed Codex WebSocket mock upstream smoke passed deterministic runtime/no-fallback contract.",
+}[row_id]
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
+    S-02)
+      if cargo test -p codex-router-test-support installed_codex_hostile_no_token_smoke_keeps_upstream_empty -- --ignored --nocapture --test-threads=1 \
+        && cargo test -p codex-router-proxy authenticated_http_proxy_rejects_forbidden_local_auth_carriers_before_selection -- --nocapture \
+        && cargo test -p codex-router-proxy loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket -- --nocapture \
+        && cargo test -p codex-router-proxy loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_accept -- --nocapture \
+        && cargo test -p codex-router-proxy authenticated_websocket_router_rejects_first_frame_auth_smuggling_before_selection -- --nocapture; then
+        if ! ensure_guarded_source_paths_clean "$row_id"; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+          exit 1
+        fi
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+        python3 - "$receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["touched_targets"] = [
+    "crates/codex-router-test-support/src/installed_codex.rs",
+    "crates/codex-router-proxy/src/lib.rs",
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/websocket.rs",
+]
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = "Hardening smoke/tests passed: missing local token does not reach upstream, forbidden carriers reject before selection, stale WebSocket generation closes on rotation, and WebSocket token smuggling is rejected."
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
     I-17b)
       if cargo test -p codex-router-proxy async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder -- --nocapture; then
         receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
@@ -445,9 +656,16 @@ PY
       ;;
     I-19)
       if cargo test -p codex-router-proxy runtime_shutdown_cancels_active_duplex_pumps -- --nocapture \
+        && cargo test -p codex-router-proxy runtime_shutdown_cancels_pending_first_frame_routing -- --nocapture \
+        && cargo test -p codex-router-proxy runtime_shutdown_cancels_pending_upstream_connect -- --nocapture \
         && cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture \
         && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_during_new_turn_after_prior_completion_is_reported -- --nocapture \
         && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture; then
+        if ! ensure_guarded_source_paths_clean "$row_id"; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+          exit 1
+        fi
         receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
@@ -463,8 +681,8 @@ payload["touched_targets"] = [
     "crates/codex-router-proxy/src/server.rs",
     "crates/codex-router-proxy/src/lib.rs",
 ]
-payload["freshness_check"] = "current_git_head_recorded"
-payload["notes"] = "Focused pump cleanup family passed: active duplex pumps cancel on shutdown, serve shutdown drains active sessions, and reset/idle-close handling does not leak failed turns."
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = "Focused pump cleanup family passed: active duplex pumps cancel on shutdown, pre-duplex routing/connect phases cancel on shutdown, serve shutdown drains active sessions, and reset/idle-close handling does not leak failed turns."
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
         printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
@@ -478,6 +696,11 @@ PY
       if cargo test -p codex-router-proxy websocket_first_response_create_frame_selects_and_forwards_unchanged -- --nocapture \
         && cargo test -p codex-router-proxy websocket_first_direct_response_create_payload_selects_and_forwards_unchanged -- --nocapture \
         && cargo test -p codex-router-proxy async_websocket_tunnel_forwards_first_frame_and_second_local_frame -- --nocapture; then
+        if ! ensure_guarded_source_paths_clean "$row_id"; then
+          receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+          printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+          exit 1
+        fi
         receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
         python3 - "$receipt" <<'PY'
 import json
@@ -492,7 +715,7 @@ payload["touched_targets"] = [
     "crates/codex-router-proxy/src/websocket.rs",
     "crates/codex-router-proxy/src/lib.rs",
 ]
-payload["freshness_check"] = "current_git_head_recorded"
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
 payload["notes"] = "Focused exact-forwarding tests passed: first response.create frame and direct response payload route once and reach upstream unchanged, including async tunnel forwarding."
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
@@ -508,19 +731,41 @@ PY
 from pathlib import Path
 source = Path("crates/codex-router-proxy/src/server.rs").read_text()
 errors = []
+async_resolver_start = source.find("struct AsyncProxyCredentialResolver")
+async_resolver_end = source.find("impl HttpAffinitySecretProvider")
+if async_resolver_start == -1 or async_resolver_end == -1:
+    errors.append("missing AsyncProxyCredentialResolver section")
+    async_resolver = ""
+else:
+    async_resolver = source[async_resolver_start:async_resolver_end]
 required = [
     "prepare_streaming_http_request_async",
     "AsyncSqliteStateStore::open",
     "AsyncRepositoryBackedAccountSelector::new_with_runtime",
+    "AsyncProxyCredentialResolver::new(\n            state_store.clone(),\n            self.secret_store.clone(),",
     "service.prepare_streaming_request_async(request).await",
+    "state_store: AsyncSqliteStateStore",
+    "secret_store: ProxyRuntimeSecretStore",
+    ".load_account(account_id)\n            .await",
+    ".activate_account_credential_generation_and_invalidate_quota(",
 ]
 for needle in required:
     if needle not in source:
         errors.append(f"missing async HTTP/SSE release-path marker: {needle}")
+resolver_forbidden = [
+    "ProxyCredentialResolver",
+    "SqliteStateStore",
+    "state_database_path",
+    "secret_store_root",
+]
+for needle in resolver_forbidden:
+    if needle in async_resolver:
+        errors.append(f"async credential resolver still has sync/path marker: {needle}")
 forbidden = [
     "prepare_context.prepare_streaming_http_request",
     "fn prepare_streaming_http_request(",
     "let prepared = tokio::task::spawn_blocking(move ||",
+    "ProxyCredentialResolver::open(",
 ]
 for needle in forbidden:
     if needle in source:
@@ -532,6 +777,11 @@ if errors:
 PY
       then
         if cargo test -p codex-router-cli served_router_http_uses_persisted_quota_while_background_refresh_is_blocked -- --nocapture; then
+          if ! ensure_guarded_source_paths_clean "$row_id"; then
+            receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+            printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+            exit 1
+          fi
           receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
           python3 - "$receipt" <<'PY'
 import json
@@ -547,8 +797,8 @@ payload["touched_targets"] = [
     "crates/codex-router-proxy/src/http_sse.rs",
     "crates/codex-router-cli/src/lib.rs",
 ]
-payload["freshness_check"] = "current_git_head_recorded"
-payload["notes"] = "Release HTTP/SSE request prep uses SQLx-backed AsyncSqliteStateStore and async selector; served-router startup/nonblocking HTTP quota regression passed."
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = "Release HTTP/SSE request prep uses SQLx-backed AsyncSqliteStateStore, async selector, and async credential state access; served-router startup/nonblocking HTTP quota regression passed."
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
           printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
@@ -569,6 +819,11 @@ PY
         CODEX_ROUTER_PROOF_COMMAND="scripts/proof-matrix.sh $guardrail_row" \
           scripts/check-release-runtime-guardrails.py "$guardrail_row" >/dev/null
       done
+      if ! ensure_guarded_source_paths_clean "$row_id"; then
+        receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+        exit 1
+      fi
       receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
       python3 - "$receipt" <<'PY'
 import json
@@ -588,6 +843,7 @@ payload["artifact_paths"] = [
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-07.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-23.json",
 ]
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
 payload["notes"] = "T6 aggregate guardrail row passed through proof-matrix."
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
