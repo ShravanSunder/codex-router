@@ -823,15 +823,14 @@ fn reset_credits_available_from_json(value: &Value) -> Option<u32> {
                 if matches!(
                     normalized_key.as_str(),
                     "resetcreditsavailable" | "availableresetcredits"
-                ) {
-                    if let Some(value) = json_u32(child) {
-                        return Some(value);
-                    }
+                ) && let Some(value) = json_u32(child)
+                {
+                    return Some(value);
                 }
-                if normalized_key == "resetcredits" {
-                    if let Some(value) = reset_credits_available_from_reset_credits_value(child) {
-                        return Some(value);
-                    }
+                if normalized_key == "resetcredits"
+                    && let Some(value) = reset_credits_available_from_reset_credits_value(child)
+                {
+                    return Some(value);
                 }
             }
             object.values().find_map(reset_credits_available_from_json)

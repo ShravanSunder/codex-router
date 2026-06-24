@@ -607,16 +607,16 @@ pub fn assess_route_band(
     });
 
     for account in &mut accounts {
-        if selected_pool_matches(selected_pool, account.availability) {
-            if let Some(weight) = account.routing_weight {
-                let weight = selected_pool_weight(
-                    weight,
-                    account.freshness,
-                    has_fresh_account_in_selected_pool,
-                    input.policy,
-                );
-                account.routing_weight = Some(weight);
-            }
+        if selected_pool_matches(selected_pool, account.availability)
+            && let Some(weight) = account.routing_weight
+        {
+            let weight = selected_pool_weight(
+                weight,
+                account.freshness,
+                has_fresh_account_in_selected_pool,
+                input.policy,
+            );
+            account.routing_weight = Some(weight);
         }
     }
 

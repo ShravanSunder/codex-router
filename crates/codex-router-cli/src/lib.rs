@@ -1028,6 +1028,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::MutexGuard;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::AtomicUsize;
@@ -2709,7 +2710,7 @@ exit 42
 
         must_ok(refresh_quota_with_dependencies(
             &mut stdout,
-            router_root.clone(),
+            router_root,
             "https://chatgpt.com/backend-api".to_owned(),
             &resolver,
             &provider,
@@ -3218,7 +3219,7 @@ exit 42
 
         must_ok(refresh_quota_with_dependencies(
             &mut stdout,
-            router_root.clone(),
+            router_root,
             "https://chatgpt.com/backend-api".to_owned(),
             &resolver,
             &provider,
@@ -4868,21 +4869,18 @@ exit 42
             _request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
             if !self.blocked_once.swap(true, Ordering::SeqCst) {
-                let maybe_started_sender = self
-                    .started_sender
-                    .lock()
-                    .expect("started sender lock should be available")
-                    .take();
-                if let Some(started_sender) = maybe_started_sender {
-                    if let Err(error) = started_sender.send(()) {
-                        panic!("background refresh started signal should send: {error}");
-                    }
+                let maybe_started_sender =
+                    lock_test_mutex(&self.started_sender, "started sender").take();
+                if let Some(started_sender) = maybe_started_sender
+                    && let Err(error) = started_sender.send(())
+                {
+                    panic!("background refresh started signal should send: {error}");
                 }
-                self.release_receiver
-                    .lock()
-                    .expect("release receiver lock should be available")
-                    .recv()
-                    .expect("test should release blocked quota refresh");
+                let receive_result =
+                    lock_test_mutex(&self.release_receiver, "release receiver").recv();
+                if let Err(error) = receive_result {
+                    panic!("test should release blocked quota refresh: {error}");
+                }
             }
             Ok(QuotaRefreshProviderResponse {
                 windows: verified_quota_windows(self.remaining_headroom),
@@ -4971,6 +4969,13 @@ exit 42
         match result {
             Ok(value) => value,
             Err(error) => panic!("expected Ok, got error: {error}"),
+        }
+    }
+
+    fn lock_test_mutex<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(error) => panic!("{label} lock should be available: {error}"),
         }
     }
 

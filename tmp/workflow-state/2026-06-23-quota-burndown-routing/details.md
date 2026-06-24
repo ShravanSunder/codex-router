@@ -1291,6 +1291,40 @@ Remaining before terminal completion:
 - installed-Codex WebSocket e2e
 - implementation review and PR-ready wrapup
 
+## Implementation Checkpoint: Final Lint Gate Unblocked
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan validation checkpoint.
+
+Checkpoint result:
+complete for clearing the current workspace strict-lint blocker.
+
+Evidence:
+
+- Collapsed clippy-only nested conditionals in burn-down selection and proxy
+  account hold reuse without changing selector behavior.
+- Removed redundant closure/clone warnings in proxy and CLI code.
+- Replaced test-only mutex `expect` calls with explicit panic helpers.
+- Wrapped installed-Codex smoke contract assertion inputs in a struct and
+  refreshed its quota-status fixture text for the `resets available` column.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo check --workspace`: passed.
+- `cargo test --workspace`: passed; auth 13, CLI 62, core 15, proxy 87,
+  quota 4, secret-store 11, selection 21, state 18, test-support 6 passed;
+  2 installed-Codex smoke tests remain ignored by design and require the smoke
+  script gate.
+- `git diff --check`: passed.
+
+Remaining before terminal completion:
+
+- route-native black-box proof for all routed APIs
+- installed-Codex HTTP/SSE e2e
+- installed-Codex WebSocket e2e
+- implementation review and PR-ready wrapup
+
 ## Implementation Checkpoint: T4 Reset Credits Status Display
 
 Date: 2026-06-23

@@ -186,16 +186,15 @@ pub fn run_installed_codex_mock_smoke() -> Result<InstalledCodexSmokeReport, Str
             redacted_command_text(&websocket_codex_output.stderr, &seed)
         )
     })?;
-    assert_smoke_contract(
-        &http_sse_codex_output.status,
-        &websocket_codex_output.status,
-        &upstream_result,
-        &seed.local_token,
-        &seed.expected_upstream_token,
-        &seed.expected_account_label,
-        &seed.routable_upstream_tokens,
-        &seed.quota_status,
-    )?;
+    assert_smoke_contract(SmokeContractAssertion {
+        http_sse_codex_status: &http_sse_codex_output.status,
+        websocket_codex_status: &websocket_codex_output.status,
+        upstream: &upstream_result,
+        local_token: &seed.local_token,
+        expected_account_label: &seed.expected_account_label,
+        routable_upstream_tokens: &seed.routable_upstream_tokens,
+        quota_status: &seed.quota_status,
+    })?;
     let transcript_path = write_redacted_transcript(RedactedTranscriptInput {
         codex_version: codex_version.trim(),
         profile_path: &profile_path,
@@ -704,33 +703,38 @@ fn assert_codex_visible_output(
     Ok(())
 }
 
-fn assert_smoke_contract(
-    http_sse_codex_status: &ExitStatus,
-    websocket_codex_status: &ExitStatus,
-    upstream: &MockWebSocketTranscript,
-    local_token: &str,
-    _preferred_upstream_token: &str,
-    expected_account_label: &str,
-    routable_upstream_tokens: &[String],
-    quota_status: &SmokeQuotaStatus,
-) -> Result<(), String> {
-    if !http_sse_codex_status.success() {
+struct SmokeContractAssertion<'a> {
+    http_sse_codex_status: &'a ExitStatus,
+    websocket_codex_status: &'a ExitStatus,
+    upstream: &'a MockWebSocketTranscript,
+    local_token: &'a str,
+    expected_account_label: &'a str,
+    routable_upstream_tokens: &'a [String],
+    quota_status: &'a SmokeQuotaStatus,
+}
+
+fn assert_smoke_contract(assertion: SmokeContractAssertion<'_>) -> Result<(), String> {
+    if !assertion.http_sse_codex_status.success() {
         return Err(format!(
-            "installed codex HTTP/SSE smoke exited with status {http_sse_codex_status}"
+            "installed codex HTTP/SSE smoke exited with status {}",
+            assertion.http_sse_codex_status
         ));
     }
-    if !websocket_codex_status.success() {
+    if !assertion.websocket_codex_status.success() {
         return Err(format!(
-            "installed codex WebSocket smoke exited with status {websocket_codex_status}"
+            "installed codex WebSocket smoke exited with status {}",
+            assertion.websocket_codex_status
         ));
     }
-    let authorization = upstream
+    let authorization = assertion
+        .upstream
         .header("authorization")
         .ok_or_else(|| "mock upstream did not receive Authorization header".to_owned())?;
     let websocket_token = authorization
         .strip_prefix("Bearer ")
         .ok_or_else(|| "mock upstream Authorization header was not bearer".to_owned())?;
-    if !routable_upstream_tokens
+    if !assertion
+        .routable_upstream_tokens
         .iter()
         .any(|token| token == websocket_token)
     {
@@ -738,20 +742,21 @@ fn assert_smoke_contract(
             "mock upstream WebSocket token was not one of the routable account tokens".to_owned(),
         );
     }
-    if upstream.header("x-codex-router-token").is_some() {
+    if assertion.upstream.header("x-codex-router-token").is_some() {
         return Err("mock upstream websocket received local router token header".to_owned());
     }
-    if upstream
+    if assertion
+        .upstream
         .request_frames
         .iter()
-        .any(|frame| frame.contains(local_token))
+        .any(|frame| frame.contains(assertion.local_token))
     {
         return Err("mock upstream websocket frame leaked local router token".to_owned());
     }
-    let http_sse = upstream
-        .http_sse
-        .as_ref()
-        .ok_or_else(|| "mock upstream did not capture HTTP/SSE /v1/responses traffic".to_owned())?;
+    let http_sse =
+        assertion.upstream.http_sse.as_ref().ok_or_else(|| {
+            "mock upstream did not capture HTTP/SSE /v1/responses traffic".to_owned()
+        })?;
     if !http_sse.request_line.starts_with("POST /v1/responses ") {
         return Err(format!(
             "HTTP/SSE request was not POST /v1/responses: {}",
@@ -761,7 +766,7 @@ fn assert_smoke_contract(
     if http_sse.header("x-codex-router-token").is_some() {
         return Err("HTTP/SSE request leaked local router token header upstream".to_owned());
     }
-    if http_sse.body.contains(local_token) {
+    if http_sse.body.contains(assertion.local_token) {
         return Err("HTTP/SSE request body leaked local router token upstream".to_owned());
     }
     if !http_sse.body.contains("\"stream\":true") {
@@ -773,7 +778,8 @@ fn assert_smoke_contract(
     let http_sse_token = http_sse_authorization
         .strip_prefix("Bearer ")
         .ok_or_else(|| "HTTP/SSE Authorization header was not bearer".to_owned())?;
-    if !routable_upstream_tokens
+    if !assertion
+        .routable_upstream_tokens
         .iter()
         .any(|token| token == http_sse_token)
     {
@@ -781,13 +787,15 @@ fn assert_smoke_contract(
     }
     if http_sse_authorization != authorization {
         return Err(format!(
-            "WebSocket did not reuse the held HTTP/SSE account inside cooldown; expected_account_hint={expected_account_label}; http_sse_authorization={http_sse_authorization}; websocket_authorization={authorization}"
+            "WebSocket did not reuse the held HTTP/SSE account inside cooldown; expected_account_hint={}; http_sse_authorization={http_sse_authorization}; websocket_authorization={authorization}",
+            assertion.expected_account_label
         ));
     }
-    if upstream.websocket_request_frame_count == 0 {
+    if assertion.upstream.websocket_request_frame_count == 0 {
         return Err("mock upstream did not receive a WebSocket request frame".to_owned());
     }
-    if !upstream
+    if !assertion
+        .upstream
         .request_frames
         .iter()
         .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
@@ -797,26 +805,40 @@ fn assert_smoke_contract(
             "mock upstream did not receive a non-prewarm WebSocket response request".to_owned(),
         );
     }
-    if !quota_status.table.contains(expected_account_label) {
+    if !assertion
+        .quota_status
+        .table
+        .contains(assertion.expected_account_label)
+    {
         return Err("quota status table did not include selected account label".to_owned());
     }
-    if !quota_status.plain.contains(expected_account_label) {
+    if !assertion
+        .quota_status
+        .plain
+        .contains(assertion.expected_account_label)
+    {
         return Err("quota status plain output did not include selected account label".to_owned());
     }
-    if !quota_status.json.contains(expected_account_label) {
+    if !assertion
+        .quota_status
+        .json
+        .contains(assertion.expected_account_label)
+    {
         return Err("quota status json did not include selected account label".to_owned());
     }
-    if !quota_status.plain.contains("\tnext") {
+    if !assertion.quota_status.plain.contains("\tnext") {
         return Err("quota status plain output did not mark a next account".to_owned());
     }
     for forbidden in [
-        local_token,
+        assertion.local_token,
         "X-Codex-Router-Token",
         "authorization",
         "bottleneck",
         "pp",
     ] {
-        if quota_status.table.contains(forbidden) || quota_status.plain.contains(forbidden) {
+        if assertion.quota_status.table.contains(forbidden)
+            || assertion.quota_status.plain.contains(forbidden)
+        {
             return Err(format!(
                 "human quota status leaked forbidden text: {forbidden}"
             ));
@@ -1619,6 +1641,7 @@ mod tests {
     use super::MockHttpSseTranscript;
     use super::MockWebSocketTranscript;
     use super::SMOKE_EXPECTED_TEXT;
+    use super::SmokeContractAssertion;
     use super::SmokeQuotaStatus;
     use super::SmokeTempRoot;
     use super::assert_codex_visible_output;
@@ -1670,24 +1693,26 @@ mod tests {
 
     fn valid_quota_status() -> SmokeQuotaStatus {
         SmokeQuotaStatus {
-            table: "matches 5h weekly routing next use\n".to_owned(),
-            plain: "account\tstatus\t5h\tweekly\trouting\tnext use\nmatches\tenabled\t██████████ 91% resets in 4h\t██████░░░░ 54% resets in 6d\t✓ preferred 5h 91%\tnext\nresponses route\tnext: matches\twhy: ✓ preferred 5h 91%\n".to_owned(),
+            table: "matches 5h weekly resets available routing next use\n".to_owned(),
+            plain: "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use\nmatches\tenabled\t██████████ 91% resets in 4h\t██████░░░░ 54% resets in 6d\t-\t✓ preferred 5h 91%\tnext\nresponses route\tnext: matches\twhy: ✓ preferred 5h 91%\n".to_owned(),
             json: r#"{"preferred_next_account_id":"acct_matches","accounts":[{"account_id":"acct_matches","safe_account_label":"matches"}]}"#.to_owned(),
         }
     }
 
     #[test]
     fn smoke_contract_rejects_local_token_in_upstream_http_body() {
-        let error = match assert_smoke_contract(
-            &success_status(),
-            &success_status(),
-            &valid_transcript(true, false),
-            "local-token-canary",
-            upstream_account_token(),
-            "matches",
-            &[upstream_account_token().to_owned()],
-            &valid_quota_status(),
-        ) {
+        let routable_upstream_tokens = [upstream_account_token().to_owned()];
+        let quota_status = valid_quota_status();
+        let upstream = valid_transcript(true, false);
+        let error = match assert_smoke_contract(SmokeContractAssertion {
+            http_sse_codex_status: &success_status(),
+            websocket_codex_status: &success_status(),
+            upstream: &upstream,
+            local_token: "local-token-canary",
+            expected_account_label: "matches",
+            routable_upstream_tokens: &routable_upstream_tokens,
+            quota_status: &quota_status,
+        }) {
             Ok(()) => panic!("HTTP/SSE body local-token leak must fail smoke contract"),
             Err(error) => error,
         };
@@ -1697,16 +1722,18 @@ mod tests {
 
     #[test]
     fn smoke_contract_rejects_local_token_in_upstream_websocket_frame() {
-        let error = match assert_smoke_contract(
-            &success_status(),
-            &success_status(),
-            &valid_transcript(false, true),
-            "local-token-canary",
-            upstream_account_token(),
-            "matches",
-            &[upstream_account_token().to_owned()],
-            &valid_quota_status(),
-        ) {
+        let routable_upstream_tokens = [upstream_account_token().to_owned()];
+        let quota_status = valid_quota_status();
+        let upstream = valid_transcript(false, true);
+        let error = match assert_smoke_contract(SmokeContractAssertion {
+            http_sse_codex_status: &success_status(),
+            websocket_codex_status: &success_status(),
+            upstream: &upstream,
+            local_token: "local-token-canary",
+            expected_account_label: "matches",
+            routable_upstream_tokens: &routable_upstream_tokens,
+            quota_status: &quota_status,
+        }) {
             Ok(()) => panic!("WebSocket frame local-token leak must fail smoke contract"),
             Err(error) => error,
         };

@@ -388,7 +388,7 @@ fn select_from_account_states_with_selector(
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
     let account_inputs = accounts
         .iter()
-        .map(|account| account_input_from_quota_state(account))
+        .map(account_input_from_quota_state)
         .collect::<Vec<_>>();
     let assessment_input = BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
@@ -451,13 +451,12 @@ fn select_from_burn_down_assessment(
         weighted_candidates,
         minimum_account_hold_cooldown_seconds,
         now_unix_seconds,
-    ) {
-        if weighted_selector.record_selection(weighted_candidates, &held_account_id) {
-            return Ok(SelectedAccountDecision::new(
-                held_account_id,
-                "account_hold_cooldown",
-            ));
-        }
+    ) && weighted_selector.record_selection(weighted_candidates, &held_account_id)
+    {
+        return Ok(SelectedAccountDecision::new(
+            held_account_id,
+            "account_hold_cooldown",
+        ));
     }
 
     let selected_account_id =

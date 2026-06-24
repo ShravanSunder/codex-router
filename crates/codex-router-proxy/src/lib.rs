@@ -125,6 +125,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::MutexGuard;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
@@ -179,11 +180,16 @@ mod tests {
         records: Arc<Mutex<Vec<PreviousResponseAffinityOwnerRecord>>>,
     }
 
+    fn lock_test_mutex<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(error) => panic!("{label} lock should be available: {error}"),
+        }
+    }
+
     impl RecordingAffinityOwnerRecorder {
         fn take_records(&self) -> Vec<PreviousResponseAffinityOwnerRecord> {
-            self.records
-                .lock()
-                .expect("test recorder lock should be available")
+            lock_test_mutex(&self.records, "test recorder")
                 .drain(..)
                 .collect()
         }
@@ -194,10 +200,7 @@ mod tests {
             &self,
             owner: &PreviousResponseAffinityOwnerRecord,
         ) -> Result<(), HttpProxyError> {
-            self.records
-                .lock()
-                .expect("test recorder lock should be available")
-                .push(owner.clone());
+            lock_test_mutex(&self.records, "test recorder").push(owner.clone());
             Ok(())
         }
     }
@@ -1708,11 +1711,7 @@ mod tests {
             RouteBandWeightedSelectors::default(),
             RouteBandAccountHolds::default(),
             120,
-            Arc::new(move || {
-                *clock_now
-                    .lock()
-                    .expect("test clock lock should be available")
-            }),
+            Arc::new(move || *lock_test_mutex(&clock_now, "test clock")),
         );
 
         let first = match selector.select_upstream_account(
@@ -1768,11 +1767,7 @@ mod tests {
             RouteBandWeightedSelectors::default(),
             RouteBandAccountHolds::default(),
             120,
-            Arc::new(move || {
-                *clock_now
-                    .lock()
-                    .expect("test clock lock should be available")
-            }),
+            Arc::new(move || *lock_test_mutex(&clock_now, "test clock")),
         );
 
         let first = match selector.select_upstream_account(
@@ -1784,7 +1779,7 @@ mod tests {
             Err(error) => panic!("first request should select account: {error}"),
         };
         {
-            let mut now = now.lock().expect("test clock lock should be available");
+            let mut now = lock_test_mutex(&now, "test clock");
             *now = now.saturating_add(121);
         }
         let second = match selector.select_upstream_account(
