@@ -1336,6 +1336,44 @@ Remaining before terminal completion:
 - installed-Codex WebSocket e2e
 - implementation review and PR-ready wrapup
 
+## Implementation Checkpoint: T9/T10 Installed-Codex Transport E2E
+
+Date: 2026-06-23
+
+Phase:
+implementation-execute-plan checkpoint.
+
+Checkpoint result:
+complete for installed-Codex HTTP/SSE and WebSocket e2e command coverage.
+
+Evidence:
+
+- Added `installed_codex_http_sse_e2e_exercises_generated_profile_token` under
+  the required `installed_codex_http_sse_` ignored-test prefix.
+- Added `installed_codex_websocket_e2e_exercises_generated_profile_token` under
+  the required `installed_codex_websocket_` ignored-test prefix.
+- `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --list`:
+  2 tests.
+- `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --list`:
+  2 tests.
+- `tests/smoke/installed_codex_mock.sh --transport http-sse`: 2 passed.
+- `tests/smoke/installed_codex_mock.sh --transport websocket`: 2 passed.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p codex-router-test-support --all-targets -- -D warnings`:
+  passed.
+- `cargo check --workspace`: passed.
+- HTTP/SSE evidence:
+  `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/http-sse/installed-codex-http-sse-transcript.json`.
+- WebSocket evidence:
+  `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/websocket/installed-codex-websocket-transcript.json`.
+- Evidence canary search over `evidence/installed-codex` found no forbidden
+  token/header/raw prompt/affinity-secret fragments.
+
+Remaining before terminal completion:
+
+- implementation review
+- PR-ready wrapup
+
 ## Implementation Checkpoint: T8a Proof Harness Contract
 
 Date: 2026-06-23

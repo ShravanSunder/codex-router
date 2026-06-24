@@ -1937,6 +1937,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "T9 installed-Codex HTTP/SSE e2e; run through tests/smoke/installed_codex_mock.sh --transport http-sse"]
+    fn installed_codex_http_sse_e2e_exercises_generated_profile_token() {
+        let report = match run_installed_codex_mock_smoke() {
+            Ok(report) => report,
+            Err(error) => panic!("installed Codex HTTP/SSE e2e failed: {error}"),
+        };
+
+        assert!(report.transcript_path().exists());
+    }
+
+    #[test]
     #[ignore = "T8a inventory preflight; run full WebSocket smoke through tests/smoke/installed_codex_mock.sh --transport websocket"]
     fn installed_codex_websocket_harness_inventory_preflight() {
         let routable_upstream_tokens = [upstream_account_token().to_owned()];
@@ -1954,6 +1965,17 @@ mod tests {
         }) {
             panic!("WebSocket harness preflight failed: {error}");
         }
+    }
+
+    #[test]
+    #[ignore = "T10 installed-Codex WebSocket e2e; run through tests/smoke/installed_codex_mock.sh --transport websocket"]
+    fn installed_codex_websocket_e2e_exercises_generated_profile_token() {
+        let report = match run_installed_codex_mock_smoke() {
+            Ok(report) => report,
+            Err(error) => panic!("installed Codex WebSocket e2e failed: {error}"),
+        };
+
+        assert!(report.transcript_path().exists());
     }
 
     #[test]

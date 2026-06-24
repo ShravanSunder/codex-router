@@ -260,6 +260,63 @@ Notes:
   helper failure; rerunning that single test passed before the final
   workspace gate passed.
 
+## T9/T10 Installed-Codex Transport E2E Proof
+
+Plan rows:
+
+- T9 installed-Codex HTTP/SSE e2e proof must run through the generated Codex
+  profile, `CODEX_ROUTER_TOKEN`, served router, persisted multi-account quota
+  state, and mock upstream.
+- T10 installed-Codex WebSocket e2e proof must run through the generated Codex
+  profile, `CODEX_ROUTER_TOKEN`, served router, persisted multi-account quota
+  state, and mock upstream.
+- Transport-specific cargo filters and smoke script flags must invoke real e2e
+  tests, not only inventory preflights.
+- Redacted evidence must show selected account/status agreement, upstream auth
+  present but redacted, and local router auth stripped.
+
+Files changed:
+
+- `crates/codex-router-test-support/src/installed_codex.rs`
+- `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/http-sse/installed-codex-http-sse-transcript.json`
+- `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex/websocket/installed-codex-websocket-transcript.json`
+
+Implemented:
+
+- Added explicit ignored e2e tests under the required transport-specific
+  prefixes:
+  `installed_codex_http_sse_e2e_exercises_generated_profile_token` and
+  `installed_codex_websocket_e2e_exercises_generated_profile_token`.
+- The existing installed-Codex smoke path now runs under each transport-specific
+  command instead of only under the broad `installed_codex_` filter.
+- Copied the latest redacted smoke transcripts into the plan evidence roots for
+  HTTP/SSE and WebSocket.
+
+Proof:
+
+- `cargo test -p codex-router-test-support installed_codex_http_sse_ -- --ignored --list`
+  passed: 2 tests, including the HTTP/SSE e2e test.
+- `cargo test -p codex-router-test-support installed_codex_websocket_ -- --ignored --list`
+  passed: 2 tests, including the WebSocket e2e test.
+- `tests/smoke/installed_codex_mock.sh --transport http-sse` passed:
+  2 tests.
+- `tests/smoke/installed_codex_mock.sh --transport websocket` passed:
+  2 tests.
+- `cargo fmt --all -- --check` passed.
+- `cargo clippy -p codex-router-test-support --all-targets -- -D warnings`
+  passed.
+- `cargo check --workspace` passed.
+- Evidence canary search over
+  `tmp/plan-workflows/2026-06-23-reset-aware-burndown-routing/evidence/installed-codex`
+  found no forbidden token/header/raw prompt/affinity-secret fragments.
+
+Notes:
+
+- The transport-specific tests currently reuse the combined installed-Codex
+  smoke harness; this proves both HTTP/SSE and WebSocket product paths through
+  each e2e command, but a later cleanup may split the shared harness into
+  single-transport internals if review asks for stricter isolation.
+
 ## T2c Affinity Secret Store Contract
 
 Plan rows:

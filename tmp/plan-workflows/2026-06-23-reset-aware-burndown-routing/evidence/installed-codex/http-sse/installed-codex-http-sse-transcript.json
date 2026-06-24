@@ -1,0 +1,38 @@
+{
+  "codex_version": "codex-cli 0.142.0",
+  "expected_account_label": "ssdev",
+  "http_sse_codex_status": "exit status: 0",
+  "http_sse_codex_stderr_line_count": 18,
+  "http_sse_codex_stdout_contains_smoke_text": true,
+  "http_sse_last_message_path": "/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T/codex-router-installed-codex-6228-1782262739399/http-sse-last-message.txt",
+  "profile_path": "/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T/codex-router-installed-codex-6228-1782262739399/codex-home/codex-router.config.toml",
+  "quota_status": {
+    "json_selected_account_label": "ssdev",
+    "plain_contains_expected_account": true,
+    "plain_marks_next": true,
+    "table_contains_expected_account": true
+  },
+  "router_completed": true,
+  "upstream": {
+    "authorization_header": "<redacted-present>",
+    "first_frame_shape": {
+      "json_object": true,
+      "non_prewarm_response_create": false
+    },
+    "handshake_count": 1,
+    "http_probe_count": 0,
+    "http_sse_authorization_header": "<redacted-present>",
+    "http_sse_local_router_header_present": false,
+    "http_sse_local_router_token_in_body": false,
+    "http_sse_request_line": "POST /v1/responses HTTP/1.1",
+    "http_sse_stream_requested": true,
+    "local_router_header_present": false,
+    "websocket_local_router_token_in_first_frame": false,
+    "websocket_non_prewarm_request_frame_count": 1,
+    "websocket_request_frame_count": 2
+  },
+  "websocket_codex_status": "exit status: 0",
+  "websocket_codex_stderr_line_count": 18,
+  "websocket_codex_stdout_contains_smoke_text": true,
+  "websocket_last_message_path": "/var/folders/4f/697ggy6x26q8kh9qb2js4xnc0000gn/T/codex-router-installed-codex-6228-1782262739399/websocket-last-message.txt"
+}
