@@ -1,0 +1,25 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh I-05b",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "async runtime lets survivor WebSocket complete and drains active sessions cleanly",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "crates/codex-router-proxy/src/* crates/codex-router-cli/src/* crates/codex-router-state/src/* crates/codex-router-auth/src/*",
+  "git_head": "f5126b56917f29415bf26a56d98dffd4f4dbf26f",
+  "layer": "integration",
+  "notes": "Async comparison fixtures passed: blocked first WebSocket does not block survivor, served runtime drains active sessions on shutdown, and active duplex pumps cancel cleanly.",
+  "owner": "pending-owner",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "I-05b",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-24T21:37:23Z",
+  "touched_targets": [
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/websocket.rs",
+    "crates/codex-router-proxy/src/lib.rs"
+  ]
+}
