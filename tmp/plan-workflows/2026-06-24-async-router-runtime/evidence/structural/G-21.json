@@ -1,0 +1,29 @@
+{
+  "artifact_paths": [
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-01.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-02.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-03.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-04.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-05.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-07.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-23.json"
+  ],
+  "command": "scripts/proof-matrix.sh G-21",
+  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "exit_code": 0,
+  "expected_observation": "release runtime structural guardrails run through proof-matrix",
+  "freshness_check": "not_evaluated",
+  "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
+  "git_head": "9ac7e96a88a88fff4048822f8a9594652780dd1c",
+  "layer": "structural",
+  "notes": "T6 aggregate guardrail row passed through proof-matrix.",
+  "owner": "T6",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "G-21",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-24T15:59:52Z",
+  "touched_targets": []
+}

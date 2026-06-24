@@ -1204,6 +1204,7 @@ pub enum LoopbackRouterRuntimeError {
     #[error("Hyper connection task failed")]
     ConnectionJoin(#[source] tokio::task::JoinError),
     /// Serving a loopback connection failed.
+    #[cfg(test)]
     #[error(transparent)]
     Connection(#[from] ServerConnectionError),
     /// Serving a WebSocket tunnel failed.
@@ -1523,6 +1524,7 @@ fn write_streaming_http_response(
 }
 
 /// One-connection loopback HTTP adapter failure.
+#[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 pub enum ServerConnectionError {
     /// Accepting a loopback connection failed.

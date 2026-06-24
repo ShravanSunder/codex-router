@@ -1,0 +1,24 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh G-03",
+  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "exit_code": 0,
+  "expected_observation": "no blocking tungstenite accept/connect in release serve path",
+  "failures": [],
+  "freshness_check": "current_git_head_recorded",
+  "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/*",
+  "git_head": "9ac7e96a88a88fff4048822f8a9594652780dd1c",
+  "layer": "structural",
+  "owner": "T6",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "G-03",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-24T15:59:52Z",
+  "touched_targets": [
+    "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/websocket.rs"
+  ]
+}

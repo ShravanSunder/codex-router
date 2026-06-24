@@ -1,8 +1,11 @@
 //! WebSocket first-frame routing protocol.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::io::ErrorKind;
+#[cfg(test)]
 use std::net::Shutdown;
+#[cfg(test)]
 use std::net::TcpStream;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -42,11 +45,16 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
+#[cfg(test)]
 use tungstenite::WebSocket;
+#[cfg(test)]
 use tungstenite::accept_hdr;
 use tungstenite::client::IntoClientRequest;
+#[cfg(test)]
 use tungstenite::connect;
+#[cfg(test)]
 use tungstenite::handshake::server::Request;
+#[cfg(test)]
 use tungstenite::handshake::server::Response;
 use tungstenite::http::HeaderName;
 use tungstenite::http::HeaderValue;
@@ -677,6 +685,7 @@ fn websocket_credential_rejection_audit_event(account_hash: String) -> AuditEven
 /// Tracks active local WebSocket streams by local token generation.
 #[derive(Clone, Debug, Default)]
 pub struct WebSocketRevocationRegistry {
+    #[cfg(test)]
     connections: Arc<Mutex<HashMap<TokenGeneration, Vec<TcpStream>>>>,
     cancellations: Arc<Mutex<HashMap<TokenGeneration, Vec<WebSocketCancellationEntry>>>>,
     stats: Arc<Mutex<WebSocketRegistryStats>>,
@@ -725,6 +734,7 @@ impl WebSocketRevocationRegistry {
         Self::default()
     }
 
+    #[cfg(test)]
     fn register(
         &self,
         generation: TokenGeneration,
@@ -803,22 +813,24 @@ impl WebSocketRevocationRegistry {
 
     /// Closes connections that authenticated with generations other than the active one.
     pub fn close_all_except(&self, active_generation: TokenGeneration) {
-        let Ok(mut connections) = self.connections.lock() else {
-            return;
-        };
-        let stale_generations = connections
-            .keys()
-            .copied()
-            .filter(|generation| *generation != active_generation)
-            .collect::<Vec<_>>();
-        for stale_generation in stale_generations {
-            if let Some(streams) = connections.remove(&stale_generation) {
-                for stream in streams {
-                    let _result = stream.shutdown(Shutdown::Both);
+        #[cfg(test)]
+        {
+            let Ok(mut connections) = self.connections.lock() else {
+                return;
+            };
+            let stale_generations = connections
+                .keys()
+                .copied()
+                .filter(|generation| *generation != active_generation)
+                .collect::<Vec<_>>();
+            for stale_generation in stale_generations {
+                if let Some(streams) = connections.remove(&stale_generation) {
+                    for stream in streams {
+                        let _result = stream.shutdown(Shutdown::Both);
+                    }
                 }
             }
         }
-        drop(connections);
         let Ok(mut cancellations) = self.cancellations.lock() else {
             return;
         };
@@ -892,6 +904,7 @@ mod registry_tests {
 }
 
 /// Blocking WebSocket tunnel that uses the authenticated first-frame router.
+#[cfg(test)]
 #[derive(Clone)]
 pub struct BlockingWebSocketTunnel<'a, S, C>
 where
@@ -915,6 +928,7 @@ where
     affinity_owner_recorder: Option<&'a dyn HttpAffinityOwnerRecorder>,
 }
 
+#[cfg(test)]
 impl<'a, S, C> BlockingWebSocketTunnel<'a, S, C>
 where
     S: AccountDecisionSelector,
@@ -1300,6 +1314,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn forward_upstream_response(
     upstream_websocket: &mut WebSocket<impl std::io::Read + std::io::Write>,
     local_websocket: &mut WebSocket<impl std::io::Read + std::io::Write>,
@@ -1393,6 +1408,7 @@ fn current_unix_seconds() -> u64 {
 }
 
 #[allow(clippy::result_large_err)]
+#[cfg(test)]
 fn accept_local_websocket<F>(
     local_stream: TcpStream,
     on_request: F,
@@ -1410,6 +1426,7 @@ where
     .map_err(|_error| WebSocketTunnelError::Handshake)
 }
 
+#[cfg(test)]
 fn handshake_from_request(request: &Request) -> WebSocketHandshakeRequest {
     request
         .headers()
@@ -1425,6 +1442,7 @@ fn handshake_from_request(request: &Request) -> WebSocketHandshakeRequest {
         })
 }
 
+#[cfg(test)]
 fn take_captured_handshake(
     captured_handshake: &Mutex<Option<WebSocketHandshakeRequest>>,
 ) -> Result<WebSocketHandshakeRequest, WebSocketTunnelError> {
