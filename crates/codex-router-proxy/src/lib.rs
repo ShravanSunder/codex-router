@@ -135,12 +135,14 @@ mod tests {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
     use tungstenite::Message;
+    use tungstenite::WebSocket;
     use tungstenite::accept_hdr;
     use tungstenite::client::IntoClientRequest;
     use tungstenite::connect;
     use tungstenite::handshake::server::Request;
     use tungstenite::handshake::server::Response;
     use tungstenite::http::HeaderValue;
+    use tungstenite::protocol::Role;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
     static TEST_AFFINITY_SECRET_PROVIDER: TestAffinitySecretProvider = TestAffinitySecretProvider;
@@ -3222,6 +3224,160 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::result_large_err)]
+    fn loopback_router_runtime_accepts_fragmented_websocket_upgrade() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_fragmented_upgrade");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_ws_fragmented"),
+            "ws-fragmented",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &account,
+            90,
+            "fragmented-ws-upstream-token",
+        );
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket = match accept_hdr(stream, |request: &Request, response: Response| {
+                let authorization = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                if let Err(error) = upstream_sender.send(authorization) {
+                    panic!("mock websocket upstream auth should record: {error}");
+                }
+                Ok(response)
+            }) {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("mock websocket upstream handshake should accept: {error}"),
+            };
+            let first_frame = match websocket.read() {
+                Ok(message) => message,
+                Err(error) => panic!("mock websocket upstream should read first frame: {error}"),
+            };
+            if let Err(error) = upstream_sender.send(first_frame.to_string()) {
+                panic!("mock websocket upstream first frame should record: {error}");
+            }
+            if let Err(error) = websocket.send(Message::text(r#"{"type":"response.completed"}"#)) {
+                panic!("mock websocket upstream should send response: {error}");
+            }
+        });
+
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+        )
+        .with_quota_clock(1_030, 60)
+        .with_max_websocket_upstream_messages(1);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            let mut client = match TcpStream::connect(router_address) {
+                Ok(client) => client,
+                Err(error) => panic!("fragmented client should connect: {error}"),
+            };
+            let request = format!(
+                "GET /v1/responses HTTP/1.1\r\nHost: {router_address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            );
+            let split_at = request
+                .find("Upgrade: websocket")
+                .unwrap_or_else(|| panic!("test request should contain upgrade header"));
+            if let Err(error) = client.write_all(request[..split_at].as_bytes()) {
+                panic!("fragmented client should write first header fragment: {error}");
+            }
+            thread::sleep(Duration::from_millis(50));
+            if let Err(error) = client.write_all(request[split_at..].as_bytes()) {
+                panic!("fragmented client should write second header fragment: {error}");
+            }
+
+            let handshake_response = read_http_response_headers(&mut client);
+            assert!(
+                handshake_response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+                "fragmented websocket handshake should complete, got:\n{handshake_response}"
+            );
+            let mut websocket = WebSocket::from_raw_socket(client, Role::Client, None);
+            let first_frame = r#"{"type":"response.create","fragmented":true}"#;
+            if let Err(error) = websocket.send(Message::text(first_frame)) {
+                panic!("fragmented websocket client should send first frame: {error}");
+            }
+            match websocket.read() {
+                Ok(message) => message.to_string(),
+                Err(error) => panic!("fragmented websocket client should read response: {error}"),
+            }
+        });
+
+        let handled = match runtime.serve_protocol_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve fragmented websocket: {error}"),
+        };
+        assert_eq!(handled, 1);
+        let client_response = match client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("fragmented websocket client thread panicked: {error:?}"),
+        };
+        assert_eq!(client_response, r#"{"type":"response.completed"}"#);
+        let authorization = match upstream_receiver.recv() {
+            Ok(recorded) => recorded,
+            Err(error) => panic!("upstream auth should be recorded: {error}"),
+        };
+        assert_eq!(authorization, "Bearer fragmented-ws-upstream-token");
+        let recorded_first_frame = match upstream_receiver.recv() {
+            Ok(recorded) => recorded,
+            Err(error) => panic!("upstream first frame should be recorded: {error}"),
+        };
+        assert_eq!(
+            recorded_first_frame,
+            r#"{"type":"response.create","fragmented":true}"#
+        );
+
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
+        }
+    }
+
+    #[test]
     fn loopback_router_runtime_rejects_websocket_upgrade_without_token() {
         let temp_dir = ProxyTestTempDir::new("runtime_websocket_missing_token");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -3739,6 +3895,25 @@ mod tests {
         }
 
         String::from_utf8_lossy(&request_bytes[..body_end]).into_owned()
+    }
+
+    fn read_http_response_headers(stream: &mut TcpStream) -> String {
+        let mut response = Vec::new();
+        loop {
+            let mut buffer = [0_u8; 512];
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(bytes_read) => {
+                    response.extend_from_slice(&buffer[..bytes_read]);
+                    if response.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(error) => panic!("client should read response headers: {error}"),
+            }
+        }
+
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     fn read_until_contains(
