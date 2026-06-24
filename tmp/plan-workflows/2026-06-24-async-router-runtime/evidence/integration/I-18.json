@@ -6,7 +6,7 @@
   "expected_observation": "served-router WebSocket fixture traverses listener, Hyper upgrade, registry cleanup, and blocked background refresh",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "crates/codex-router-proxy/src/* crates/codex-router-cli/src/* crates/codex-router-state/src/* crates/codex-router-auth/src/*",
-  "git_head": "f5126b56917f29415bf26a56d98dffd4f4dbf26f",
+  "git_head": "eb50e1122bf600a816a1236222152c3deaaec290",
   "layer": "integration",
   "notes": "Real served-router WebSocket fixture traversed actual listener, Hyper upgrade, persisted quota selection during blocked refresh, upstream forwarding, and registry shutdown cleanup.",
   "owner": "pending-owner",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T21:37:24Z",
+  "timestamp_utc": "2026-06-24T21:58:45Z",
   "touched_targets": [
     "crates/codex-router-cli/src/lib.rs",
     "crates/codex-router-proxy/src/server.rs",

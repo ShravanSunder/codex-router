@@ -1,12 +1,12 @@
 {
   "artifact_paths": [],
   "command": "scripts/proof-matrix.sh I-21",
-  "cwd": "/Users/shravansunder/Documents/dev/open-source/ai-dev/codex-router",
+  "cwd": ".",
   "exit_code": 0,
   "expected_observation": "listener binds and first request is accepted while broad quota refresh is slow or stalled",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "crates/codex-router-cli/src/lib.rs crates/codex-router-proxy/src/server.rs crates/codex-router-quota/src/* crates/codex-router-state/src/*",
-  "git_head": "2f030786d6a7917220b1a5fcbd5eb13e3c8dd641",
+  "git_head": "eb50e1122bf600a816a1236222152c3deaaec290",
   "layer": "integration",
   "notes": "Release HTTP/SSE request prep uses SQLx-backed AsyncSqliteStateStore, async selector, and async credential state access; served-router startup/nonblocking HTTP quota regression passed.",
   "owner": "T1/T2",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T20:46:36Z",
+  "timestamp_utc": "2026-06-24T21:59:40Z",
   "touched_targets": [
     "crates/codex-router-proxy/src/server.rs",
     "crates/codex-router-proxy/src/http_sse.rs",

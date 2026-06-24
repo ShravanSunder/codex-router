@@ -6,7 +6,7 @@
   "expected_observation": "no helper/private alternate parser, handshake, or frame runtime is reachable from release serve",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "ff689cbd4aa87311414a0130ed73ed27c42d7931",
+  "git_head": "eb50e1122bf600a816a1236222152c3deaaec290",
   "layer": "structural",
   "notes": "Structural/inventory guard passed.",
   "owner": "T6",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-24T21:35:44Z",
+  "timestamp_utc": "2026-06-24T21:58:32Z",
   "touched_targets": [
     "scripts/proof-matrix.sh",
     "scripts/check-release-runtime-guardrails.py",

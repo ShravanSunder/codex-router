@@ -1005,7 +1005,7 @@ required = [
     "state_store: AsyncSqliteStateStore",
     "secret_store: ProxyRuntimeSecretStore",
     ".load_account(account_id)\n            .await",
-    ".activate_account_credential_generation_and_invalidate_quota(",
+    ".activate_account_credential_generation_if_current_and_invalidate_quota(",
 ]
 for needle in required:
     if needle not in source:
