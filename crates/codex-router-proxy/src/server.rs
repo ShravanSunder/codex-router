@@ -586,7 +586,7 @@ impl LoopbackRouterRuntime {
                     tokio::select! {
                         () = shutdown.cancelled() => break None,
                         joined = handlers.join_next(), if !handlers.is_empty() => {
-                            handle_connection_join_result(joined.expect("join_next only returns None for an empty JoinSet"))?;
+                            handle_optional_connection_join_result(joined)?;
                         }
                         accepted = self.server.listener.accept() => {
                             let (stream, _peer_addr) = accepted.map_err(LoopbackRouterRuntimeError::Accept)?;
@@ -598,7 +598,7 @@ impl LoopbackRouterRuntime {
                 loop {
                     tokio::select! {
                         joined = handlers.join_next(), if !handlers.is_empty() => {
-                            handle_connection_join_result(joined.expect("join_next only returns None for an empty JoinSet"))?;
+                            handle_optional_connection_join_result(joined)?;
                         }
                         accepted = self.server.listener.accept() => {
                             let (stream, _peer_addr) = accepted.map_err(LoopbackRouterRuntimeError::Accept)?;
@@ -676,6 +676,15 @@ fn handle_connection_join_result(
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(error),
         Err(source) => Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
+    }
+}
+
+fn handle_optional_connection_join_result(
+    joined: Option<Result<Result<(), LoopbackRouterRuntimeError>, JoinError>>,
+) -> Result<(), LoopbackRouterRuntimeError> {
+    match joined {
+        Some(joined) => handle_connection_join_result(joined),
+        None => Ok(()),
     }
 }
 
