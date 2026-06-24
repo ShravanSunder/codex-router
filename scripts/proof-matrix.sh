@@ -166,6 +166,52 @@ EOF
   printf '%s\n' "$receipt"
 }
 
+write_verify_only_receipt() {
+  local row_id="$1"
+  local layer="$2"
+  local owner="$3"
+  local result="$4"
+  local exit_code="$5"
+  local timestamp
+  local git_head
+  local receipt
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  git_head=$(git rev-parse HEAD)
+  receipt=$(mktemp "${TMPDIR:-/tmp}/codex-router-proof-${row_id}.XXXXXX")
+  cat > "$receipt" <<EOF
+{
+  "schema_version": 1,
+  "row_id": "$(json_escape "$row_id")",
+  "layer": "$(json_escape "$layer")",
+  "owner": "$(json_escape "$owner")",
+  "command": "scripts/proof-matrix.sh $(json_escape "$row_id")",
+  "cwd": "$(json_escape "$(pwd)")",
+  "git_head": "$(json_escape "$git_head")",
+  "timestamp_utc": "$(json_escape "$timestamp")",
+  "status_before": "[ ] pending",
+  "status_after": "[ ] pending",
+  "result": "$(json_escape "$result")",
+  "exit_code": $exit_code,
+  "expected_observation": "$(json_escape "$(expected_observation "$row_id")")",
+  "touched_targets": [],
+  "freshness_guard": "$(json_escape "$(freshness_guard "$row_id")")",
+  "freshness_check": "verify_only_not_persisted",
+  "redaction_check": "pass",
+  "artifact_paths": [],
+  "notes": "verify-only receipt; not persisted to repo evidence."
+}
+EOF
+  printf '%s\n' "$receipt"
+}
+
+write_proof_receipt() {
+  if [[ "${CODEX_ROUTER_PROOF_VERIFY_ONLY:-}" == "1" ]]; then
+    write_verify_only_receipt "$@"
+  else
+    write_receipt "$@"
+  fi
+}
+
 main() {
   if [[ $# -ne 1 ]]; then
     usage
@@ -196,16 +242,16 @@ main() {
         fi
       fi
       if [[ -z "$three_websocket_artifact" ]]; then
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
         printf 'proof row %s failed; no explicit installed-codex three-websocket artifact found; run tests/smoke/installed_codex_mock.sh --transport websocket --scenario soak first or set CODEX_ROUTER_THREE_WEBSOCKET_ARTIFACT; receipt: %s\n' "$row_id" "$receipt" >&2
         exit 1
       fi
       if [[ ! -f "$three_websocket_artifact" ]]; then
-        receipt=$(write_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
         printf 'proof row %s failed; installed-codex three-websocket artifact does not exist: %s; receipt: %s\n' "$row_id" "$three_websocket_artifact" "$receipt" >&2
         exit 1
       fi
-      receipt=$(write_receipt "$row_id" "$layer" "$owner" "pass" 0)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
       if python3 - "$row_id" "$three_websocket_artifact" "$receipt" "$artifact_source" <<'PY'
 import json
 import sys
