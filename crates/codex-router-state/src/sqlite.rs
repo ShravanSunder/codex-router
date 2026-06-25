@@ -22,8 +22,10 @@ use crate::account::AccountStatus;
 use crate::affinity_owner::AffinitySourceTransport;
 use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
 use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
+use crate::quota_snapshot::PersistedQuotaHistoryObservation;
 use crate::quota_snapshot::PersistedQuotaSnapshot;
 use crate::quota_snapshot::PersistedSelectorQuotaWindow;
+use crate::quota_snapshot::QuotaHistoryRefreshOutcome;
 use crate::quota_snapshot::QuotaRefreshErrorClass;
 use crate::quota_snapshot::QuotaRefreshStatusView;
 use crate::quota_snapshot::QuotaSnapshotSource;
@@ -101,6 +103,28 @@ const ASYNC_V1_SCHEMA_STATEMENTS: &[&str] = &[
         PRIMARY KEY (affinity_key_hash, route_band, account_id)
     )",
     "PRAGMA user_version = 7",
+];
+const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS quota_history_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id TEXT NOT NULL,
+        account_label TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        limit_window_seconds INTEGER NOT NULL,
+        observed_unix_seconds INTEGER NOT NULL,
+        remaining_headroom INTEGER NOT NULL,
+        reset_unix_seconds INTEGER,
+        window_status TEXT NOT NULL,
+        effective INTEGER NOT NULL,
+        refresh_source TEXT NOT NULL,
+        refresh_success INTEGER NOT NULL,
+        refresh_error_class TEXT,
+        reset_credits_available INTEGER
+    )",
+    "CREATE INDEX IF NOT EXISTS quota_history_window_lookup
+        ON quota_history_observations (
+            account_id, route_band, limit_window_seconds, observed_unix_seconds
+        )",
 ];
 
 /// SQLite state store failure.
@@ -180,6 +204,7 @@ impl AsyncSqliteStateStore {
             pool,
         };
         store.migrate().await?;
+        store.ensure_quota_history_schema().await?;
 
         Ok(store)
     }
@@ -598,6 +623,108 @@ impl AsyncSqliteStateStore {
         }
     }
 
+    /// Appends one quota history observation through the async state pool.
+    pub async fn append_quota_history_observation(
+        &self,
+        observation: &PersistedQuotaHistoryObservation,
+    ) -> Result<(), StateStoreError> {
+        let (refresh_success, refresh_error_class) = match observation.refresh_outcome() {
+            QuotaHistoryRefreshOutcome::Success => (1_i64, None),
+            QuotaHistoryRefreshOutcome::Failure { error_class } => {
+                (0_i64, Some(error_class.as_str()))
+            }
+        };
+        sqlx::query(
+            "INSERT INTO quota_history_observations (
+                account_id, account_label, route_band, limit_window_seconds,
+                observed_unix_seconds, remaining_headroom, reset_unix_seconds,
+                window_status, effective, refresh_source, refresh_success,
+                refresh_error_class, reset_credits_available
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        )
+        .bind(observation.account_id().as_str())
+        .bind(observation.account_label())
+        .bind(observation.route_band())
+        .bind(u64_to_i64(observation.limit_window_seconds())?)
+        .bind(u64_to_i64(observation.observed_unix_seconds())?)
+        .bind(u32_to_i64(observation.remaining_headroom()))
+        .bind(
+            observation
+                .reset_unix_seconds()
+                .map(u64_to_i64)
+                .transpose()?,
+        )
+        .bind(observation.window_status().as_str())
+        .bind(if observation.effective() {
+            1_i64
+        } else {
+            0_i64
+        })
+        .bind(observation.refresh_source().as_str())
+        .bind(refresh_success)
+        .bind(refresh_error_class)
+        .bind(observation.reset_credits_available().map(u32_to_i64))
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Loads quota history observations for one account/route/window/time range.
+    pub async fn quota_history_observations_for_window(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+        limit_window_seconds: u64,
+        observed_from_unix_seconds: u64,
+        observed_to_unix_seconds: u64,
+    ) -> Result<Vec<PersistedQuotaHistoryObservation>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT account_id, account_label, route_band, limit_window_seconds,
+                    observed_unix_seconds, remaining_headroom, reset_unix_seconds,
+                    window_status, effective, refresh_source, refresh_success,
+                    refresh_error_class, reset_credits_available
+               FROM quota_history_observations
+              WHERE account_id = ?1
+                AND route_band = ?2
+                AND limit_window_seconds = ?3
+                AND observed_unix_seconds >= ?4
+                AND observed_unix_seconds <= ?5
+              ORDER BY observed_unix_seconds, id",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .bind(u64_to_i64(limit_window_seconds)?)
+        .bind(u64_to_i64(observed_from_unix_seconds)?)
+        .bind(u64_to_i64(observed_to_unix_seconds)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        rows.into_iter()
+            .map(parse_quota_history_observation_row)
+            .collect()
+    }
+
+    /// Purges quota history older than the given observation timestamp.
+    pub async fn purge_quota_history_before(
+        &self,
+        observed_before_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "DELETE FROM quota_history_observations
+              WHERE observed_unix_seconds < ?1",
+        )
+        .bind(u64_to_i64(observed_before_unix_seconds)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
     async fn migrate(&self) -> Result<(), StateStoreError> {
         match self.schema_version().await? {
             0 => self.apply_v1().await,
@@ -615,6 +742,81 @@ impl AsyncSqliteStateStore {
         }
 
         Ok(())
+    }
+
+    async fn ensure_quota_history_schema(&self) -> Result<(), StateStoreError> {
+        for statement in ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS {
+            sqlx::query(*statement)
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Async quota history repository contract for Tokio runtime callers.
+pub trait AsyncQuotaHistoryRepository {
+    /// Appends one quota history observation.
+    fn append_quota_history_observation<'a>(
+        &'a self,
+        observation: &'a PersistedQuotaHistoryObservation,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>>;
+
+    /// Loads quota history observations for one account/route/window/time range.
+    fn quota_history_observations_for_window<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        route_band: &'a str,
+        limit_window_seconds: u64,
+        observed_from_unix_seconds: u64,
+        observed_to_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<PersistedQuotaHistoryObservation>, StateStoreError>>;
+
+    /// Purges quota history older than the given observation timestamp.
+    fn purge_quota_history_before(
+        &self,
+        observed_before_unix_seconds: u64,
+    ) -> BoxFuture<'_, Result<(), StateStoreError>>;
+}
+
+impl AsyncQuotaHistoryRepository for AsyncSqliteStateStore {
+    fn append_quota_history_observation<'a>(
+        &'a self,
+        observation: &'a PersistedQuotaHistoryObservation,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+        Box::pin(async move { self.append_quota_history_observation(observation).await })
+    }
+
+    fn quota_history_observations_for_window<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        route_band: &'a str,
+        limit_window_seconds: u64,
+        observed_from_unix_seconds: u64,
+        observed_to_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<PersistedQuotaHistoryObservation>, StateStoreError>> {
+        Box::pin(async move {
+            self.quota_history_observations_for_window(
+                account_id,
+                route_band,
+                limit_window_seconds,
+                observed_from_unix_seconds,
+                observed_to_unix_seconds,
+            )
+            .await
+        })
+    }
+
+    fn purge_quota_history_before(
+        &self,
+        observed_before_unix_seconds: u64,
+    ) -> BoxFuture<'_, Result<(), StateStoreError>> {
+        Box::pin(async move {
+            self.purge_quota_history_before(observed_before_unix_seconds)
+                .await
+        })
     }
 }
 
@@ -2138,6 +2340,100 @@ fn parse_refresh_error_class(value: &str) -> Result<QuotaRefreshErrorClass, Stat
         account_id: "<quota-refresh-status>".to_owned(),
         field: "last_error_class",
     })
+}
+
+fn parse_quota_history_observation_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<PersistedQuotaHistoryObservation, StateStoreError> {
+    let account_id_value = row.get::<String, _>(0);
+    let account_id =
+        AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
+            account_id: account_id_value.clone(),
+            field: "account_id",
+        })?;
+    let route_band = row.get::<String, _>(2);
+    let window_status_value = row.get::<String, _>(7);
+    let window_status =
+        SelectorQuotaWindowStatus::parse(&window_status_value).ok_or_else(|| {
+            StateStoreError::CorruptQuotaSnapshot {
+                account_id: account_id_value.clone(),
+                field: "window_status",
+            }
+        })?;
+    let effective = match row.get::<i64, _>(8) {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(StateStoreError::CorruptQuotaSnapshot {
+                account_id: account_id_value,
+                field: "effective",
+            });
+        }
+    };
+    let refresh_source_value = row.get::<String, _>(9);
+    let refresh_source = QuotaSnapshotSource::parse(&refresh_source_value).ok_or_else(|| {
+        StateStoreError::CorruptQuotaSnapshot {
+            account_id: account_id_value.clone(),
+            field: "refresh_source",
+        }
+    })?;
+    let refresh_success = row.get::<i64, _>(10);
+    let refresh_error_class_value = row.get::<Option<String>, _>(11);
+    let refresh_outcome = match (refresh_success, refresh_error_class_value.as_deref()) {
+        (1, None) => QuotaHistoryRefreshOutcome::Success,
+        (0, Some(error_class)) => QuotaHistoryRefreshOutcome::Failure {
+            error_class: parse_refresh_error_class(error_class)?,
+        },
+        (0, None) => QuotaHistoryRefreshOutcome::Failure {
+            error_class: QuotaRefreshErrorClass::ProviderError,
+        },
+        _ => {
+            return Err(StateStoreError::CorruptQuotaSnapshot {
+                account_id: account_id_value,
+                field: "refresh_success",
+            });
+        }
+    };
+    let mut observation = PersistedQuotaHistoryObservation::new(
+        account_id,
+        row.get::<String, _>(1),
+        route_band,
+        i64_to_u64(
+            row.get::<i64, _>(3),
+            &account_id_value,
+            "limit_window_seconds",
+        )?,
+        i64_to_u64(
+            row.get::<i64, _>(4),
+            &account_id_value,
+            "observed_unix_seconds",
+        )?,
+        i64_to_u32(
+            row.get::<i64, _>(5),
+            &account_id_value,
+            "remaining_headroom",
+        )?,
+    )
+    .with_window_status(window_status)
+    .with_effective(effective)
+    .with_refresh_source(refresh_source)
+    .with_refresh_outcome(refresh_outcome);
+    if let Some(reset_unix_seconds) = row
+        .get::<Option<i64>, _>(6)
+        .map(|value| i64_to_u64(value, &account_id_value, "reset_unix_seconds"))
+        .transpose()?
+    {
+        observation = observation.with_reset_unix_seconds(reset_unix_seconds);
+    }
+    if let Some(reset_credits_available) = row
+        .get::<Option<i64>, _>(12)
+        .map(|value| i64_to_u32(value, &account_id_value, "reset_credits_available"))
+        .transpose()?
+    {
+        observation = observation.with_reset_credits_available(reset_credits_available);
+    }
+
+    Ok(observation)
 }
 
 fn parse_previous_response_owner_row(
