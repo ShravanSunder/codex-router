@@ -1,7 +1,7 @@
 # Spec: Router Burndown, Codex-Safe Quota, Sessions
 
 Date: 2026-06-25
-Status: draft for review
+Status: reviewed once; accepted spec-review-cycle-1 findings applied
 
 ## Product Model
 

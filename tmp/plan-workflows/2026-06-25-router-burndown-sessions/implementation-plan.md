@@ -1,7 +1,7 @@
 # Implementation Plan: Router Burndown, Quota Safety, Sessions
 
 Date: 2026-06-25
-Status: draft plan, pending plan-review-swarm
+Status: reviewed once; accepted plan-review-cycle-1 findings applied
 Source spec: tmp/spec-workflows/2026-06-25-router-burndown-sessions/router-burndown-quota-safety-sessions-spec.md
 
 ## Goal
@@ -284,4 +284,4 @@ Live-gated quota proof must be a separate documented command that refuses to pri
 
 ## Review Gate
 
-Before implementation starts, run `spec-review-swarm` or `plan-review-swarm` on this spec and plan. The review packet must include the Codex lifecycle finding that normal usage-limit errors are terminal and that physical WebSockets can span logical turns.
+Spec review cycle 1 is complete in `spec-review-cycle-1/review-report.md`, and plan review cycle 1 is complete in `plan-review-cycle-1/review-report.md`. Accepted findings from both cycles have been applied. Any material change to the spec or plan after this point requires another matching review cycle before implementation continues against the changed contract.
