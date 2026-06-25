@@ -1,14 +1,26 @@
 use serde_json::Value;
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::routes::RouteBand;
 use codex_router_state::sqlite::AsyncQuotaExhaustionRepository;
 use codex_router_state::sqlite::StateStoreError;
+use futures_util::future::BoxFuture;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderErrorClassification {
     Unknown,
     AccountQuotaExhausted,
     WebSocketConnectionLimit,
+}
+
+pub trait AsyncProviderErrorObserver: Send + Sync {
+    fn observe_provider_error<'a>(
+        &'a self,
+        account_id: AccountId,
+        route_band: RouteBand,
+        body: Vec<u8>,
+        observed_unix_seconds: u64,
+    ) -> BoxFuture<'a, ()>;
 }
 
 pub fn classify_provider_error_envelope(body: &[u8]) -> ProviderErrorClassification {

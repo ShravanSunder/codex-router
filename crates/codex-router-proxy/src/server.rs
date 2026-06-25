@@ -92,6 +92,8 @@ use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::extract_response_id_from_body;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::local_auth::extract_presented_local_token_from_request;
+use crate::provider_error::AsyncProviderErrorObserver;
+use crate::provider_error::record_provider_error_observation;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
@@ -895,6 +897,9 @@ impl LoopbackProtocolConnectionHandler {
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))
         .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone())
+        .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
+            state_store.clone(),
+        )))
         .with_local_peer_addr(local_peer_addr);
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
         tunnel
@@ -1379,6 +1384,38 @@ impl AsyncHttpAffinityOwnerRecorder for AsyncSqliteAffinityOwnerRecorder {
                     reason:
                         crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
                 })
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AsyncSqliteProviderErrorObserver {
+    state_store: AsyncSqliteStateStore,
+}
+
+impl AsyncSqliteProviderErrorObserver {
+    const fn new(state_store: AsyncSqliteStateStore) -> Self {
+        Self { state_store }
+    }
+}
+
+impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
+    fn observe_provider_error<'a>(
+        &'a self,
+        account_id: codex_router_core::ids::AccountId,
+        route_band: RouteBand,
+        body: Vec<u8>,
+        observed_unix_seconds: u64,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let _result = record_provider_error_observation(
+                &self.state_store,
+                &account_id,
+                route_band.as_str(),
+                &body,
+                observed_unix_seconds,
+            )
+            .await;
         })
     }
 }

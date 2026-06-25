@@ -83,6 +83,9 @@ use crate::http_sse::redacted_account_hash;
 use crate::local_auth::ProxyLocalAuthGate;
 use crate::local_auth::extract_presented_local_token_from_request;
 use crate::local_auth::has_forbidden_top_level_json_auth_carrier;
+use crate::provider_error::AsyncProviderErrorObserver;
+use crate::provider_error::ProviderErrorClassification;
+use crate::provider_error::classify_provider_error_envelope;
 
 use crate::routes::Method;
 
@@ -1094,6 +1097,7 @@ mod async_forwarding_tests {
     use futures_util::StreamExt;
     use futures_util::future::BoxFuture;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::io::duplex;
     use tokio::net::TcpListener;
@@ -1111,6 +1115,51 @@ mod async_forwarding_tests {
     use crate::http_sse::HttpProxyError;
     use crate::http_sse::HttpProxyRequest;
     use crate::local_auth::ProxyLocalAuthGate;
+    use crate::provider_error::AsyncProviderErrorObserver;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct RecordedProviderError {
+        account_id: AccountId,
+        route_band: codex_router_core::routes::RouteBand,
+        body: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingAsyncProviderErrorObserver {
+        records: Arc<Mutex<Vec<RecordedProviderError>>>,
+        observed: Arc<Notify>,
+    }
+
+    impl RecordingAsyncProviderErrorObserver {
+        fn records(&self) -> Vec<RecordedProviderError> {
+            self.records.lock().map_or_else(
+                |error| panic!("records lock should be available: {error}"),
+                |records| records.clone(),
+            )
+        }
+    }
+
+    impl AsyncProviderErrorObserver for RecordingAsyncProviderErrorObserver {
+        fn observe_provider_error<'a>(
+            &'a self,
+            account_id: AccountId,
+            route_band: codex_router_core::routes::RouteBand,
+            body: Vec<u8>,
+            _observed_unix_seconds: u64,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.records
+                    .lock()
+                    .unwrap_or_else(|error| panic!("records lock should be available: {error}"))
+                    .push(RecordedProviderError {
+                        account_id,
+                        route_band,
+                        body,
+                    });
+                self.observed.notify_one();
+            })
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct PendingAsyncSelector {
@@ -1385,6 +1434,7 @@ mod async_forwarding_tests {
                     async_affinity_owner_recorder: None,
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
+                    provider_error_observer: None,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -1471,6 +1521,7 @@ mod async_forwarding_tests {
                     async_affinity_owner_recorder: None,
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
+                    provider_error_observer: None,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -1518,6 +1569,98 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
+    async fn upstream_usage_limit_frame_is_forwarded_unchanged_and_observed() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let provider_error_observer = Arc::new(RecordingAsyncProviderErrorObserver::default());
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: Some(provider_error_observer.clone()),
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(usage_limit_frame))
+                .await
+                .unwrap_or_else(|error| panic!("usage limit should send: {error}"));
+            let client_message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive usage-limit frame: {error}"),
+                None => panic!("client should receive usage-limit frame"),
+            };
+            assert_eq!(client_message.to_string(), usage_limit_frame);
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should keep provider error as pass-through frame, got {router_result:?}"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            provider_error_observer.observed.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("provider error should be observed"));
+        assert_eq!(
+            provider_error_observer.records(),
+            vec![RecordedProviderError {
+                account_id: selected_account,
+                route_band: codex_router_core::routes::RouteBand::Responses,
+                body: usage_limit_frame.as_bytes().to_vec(),
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_shutdown_cancels_active_duplex_pumps() {
         let (router_local_stream, client_stream) = duplex(4096);
         let (router_upstream_stream, upstream_stream) = duplex(4096);
@@ -1545,6 +1688,7 @@ mod async_forwarding_tests {
                     async_affinity_owner_recorder: None,
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
+                    provider_error_observer: None,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown_for_task,
                 },
@@ -1600,6 +1744,7 @@ where
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
+    provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
     session_shutdown: CancellationToken,
     local_peer_addr: Option<SocketAddr>,
 }
@@ -1803,6 +1948,7 @@ where
             affinity_owner_recorder: None,
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
+            provider_error_observer: None,
             session_shutdown: CancellationToken::new(),
             local_peer_addr: None,
         }
@@ -1829,6 +1975,7 @@ where
             affinity_owner_recorder: None,
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
+            provider_error_observer: None,
             session_shutdown: CancellationToken::new(),
             local_peer_addr: None,
         }
@@ -1884,6 +2031,16 @@ where
     #[must_use]
     pub fn with_affinity_owner_task_tracker(mut self, affinity_record_tasks: TaskTracker) -> Self {
         self.affinity_record_tasks = affinity_record_tasks;
+        self
+    }
+
+    /// Adds async provider error observer for quota accounting.
+    #[must_use]
+    pub fn with_provider_error_observer(
+        mut self,
+        provider_error_observer: Arc<dyn AsyncProviderErrorObserver>,
+    ) -> Self {
+        self.provider_error_observer = Some(provider_error_observer);
         self
     }
 
@@ -1969,6 +2126,7 @@ where
                 async_affinity_owner_recorder: self.async_affinity_owner_recorder.clone(),
                 affinity_record_tasks: self.affinity_record_tasks.clone(),
                 affinity_owner_context: affinity_owner_context.as_ref(),
+                provider_error_observer: self.provider_error_observer.clone(),
                 revocation: &revocation,
                 session_shutdown: &self.session_shutdown,
             },
@@ -2016,6 +2174,7 @@ struct WebSocketForwardingContext<'a> {
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
     affinity_owner_context: Option<&'a WebSocketAffinityOwnerContext>,
+    provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
     revocation: &'a CancellationToken,
     session_shutdown: &'a CancellationToken,
 }
@@ -2060,6 +2219,7 @@ where
                 async_affinity_owner_recorder: context.async_affinity_owner_recorder,
                 affinity_record_tasks: context.affinity_record_tasks,
                 affinity_owner_context,
+                provider_error_observer: context.provider_error_observer,
             },
         )
         .await
@@ -2142,6 +2302,7 @@ struct UpstreamToLocalPumpContext {
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
     affinity_owner_context: Option<WebSocketAffinityOwnerContext>,
+    provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
 }
 
 async fn pump_upstream_to_local<LocalStream, UpstreamStream>(
@@ -2178,6 +2339,7 @@ where
                 };
                 let is_close = matches!(upstream_message, Message::Close(_));
                 let metadata_text = websocket_metadata_text_handle(&upstream_message);
+                let provider_error_body = provider_error_body_from_message(&upstream_message);
                 local_write.send(upstream_message).await?;
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
                 if let Some(metadata_text) = metadata_text {
@@ -2197,6 +2359,22 @@ where
                             affinity_owner_recorder,
                         )
                         .await;
+                    });
+                }
+                if let Some(provider_error_body) = provider_error_body
+                    && let Some(provider_error_observer) = context.provider_error_observer.clone()
+                    && let Some(affinity_owner_context) = context.affinity_owner_context.as_ref()
+                {
+                    let account_id = affinity_owner_context.account_id.clone();
+                    context.affinity_record_tasks.spawn(async move {
+                        provider_error_observer
+                            .observe_provider_error(
+                                account_id,
+                                RouteBand::Responses,
+                                provider_error_body,
+                                current_unix_seconds(),
+                            )
+                            .await;
                     });
                 }
                 if is_close {
@@ -2361,6 +2539,18 @@ fn websocket_metadata_text_handle(message: &Message) -> Option<tungstenite::Utf8
         return None;
     };
     Some(text.clone())
+}
+
+fn provider_error_body_from_message(message: &Message) -> Option<Vec<u8>> {
+    let Message::Text(text) = message else {
+        return None;
+    };
+    let body = text.as_str().as_bytes();
+    if classify_provider_error_envelope(body) == ProviderErrorClassification::Unknown {
+        return None;
+    }
+
+    Some(body.to_vec())
 }
 
 fn current_unix_seconds() -> u64 {
