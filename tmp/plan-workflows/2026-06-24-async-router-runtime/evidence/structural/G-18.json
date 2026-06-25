@@ -6,7 +6,7 @@
   "expected_observation": "long-running three-runtime soak remains available",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "d69388e3fe9b259a8837492eba6ef3e8c64af8e2",
+  "git_head": "8eb79e22f3d1836e395eecf7f9d27e3792688d5d",
   "layer": "structural",
   "notes": "Structural/inventory guard passed.",
   "owner": "T6",
@@ -16,7 +16,7 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-25T11:11:40Z",
+  "timestamp_utc": "2026-06-25T11:31:00Z",
   "touched_targets": [
     "scripts/proof-matrix.sh",
     "scripts/check-release-runtime-guardrails.py",

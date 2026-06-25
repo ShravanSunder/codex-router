@@ -4,36 +4,37 @@
     "count": 3,
     "statuses": [
       {
-        "pid": 58927,
+        "pid": 62845,
         "status": "exit status: 0",
         "stderr_line_count": 30,
         "stderr_transport_error_markers": [],
         "stdout_contains_smoke_text": true
       },
       {
-        "pid": 58926,
-        "status": "exit status: 0",
-        "stderr_line_count": 30,
-        "stderr_transport_error_markers": [],
-        "stdout_contains_smoke_text": true
-      },
-      {
-        "pid": 58928,
+        "pid": 62846,
         "status": "exit status: 0",
         "stderr_line_count": 34,
         "stderr_transport_error_markers": [],
         "stdout_contains_smoke_text": true
+      },
+      {
+        "pid": 62844,
+        "status": "exit status: 0",
+        "stderr_line_count": 30,
+        "stderr_transport_error_markers": [],
+        "stdout_contains_smoke_text": true
       }
-    ]
+    ],
+    "target_model": "gpt-5.4-mini"
   },
   "codex_version": "codex-cli 0.142.2",
-  "git_head": "ab5beee6f2b06aa9a6396e28946bddbec92942d1",
+  "git_head": "8eb79e22f3d1836e395eecf7f9d27e3792688d5d",
   "mode": "three-websocket-soak",
   "router_process": {
     "argv": [
       "serve",
       "--port",
-      "52219",
+      "52059",
       "--listen-host",
       "127.0.0.1",
       "--state-db",
@@ -41,7 +42,7 @@
       "--secret-root",
       "<secret-root-path>",
       "--upstream-base-url",
-      "http://127.0.0.1:52218/v1",
+      "http://127.0.0.1:52056/v1",
       "--now-unix-seconds",
       "1030",
       "--max-snapshot-age-seconds",
@@ -56,17 +57,17 @@
     ],
     "binary_path": "<repo>/target/debug/codex-router",
     "cleanup_result": "exited:exit status: 0",
-    "listener": "127.0.0.1:52219",
-    "pid": 58922,
-    "readiness_line": "listening: 127.0.0.1:52219",
+    "listener": "127.0.0.1:52059",
+    "pid": 62820,
+    "readiness_line": "listening: 127.0.0.1:52059",
     "spawned_real_serve_child": true
   },
   "router_websocket_registry": {
     "active_sessions": 0,
     "closed_session_ids": [
-      2,
       1,
-      3
+      3,
+      2
     ],
     "closed_sessions": 3,
     "completed_response_sessions": 7,
@@ -80,18 +81,18 @@
       15
     ],
     "completed_session_ids": [
+      1,
       2,
+      3,
+      3,
       1,
       3,
-      3,
-      2,
-      3,
-      1
+      2
     ],
     "final_session_forwarded_upstream_message_counts": [
       16,
-      16,
-      19
+      19,
+      16
     ],
     "forwarded_upstream_messages": 51,
     "handled_connections": 3,
@@ -104,15 +105,15 @@
     "registered_sessions": 3,
     "session_peer_addrs": [
       {
-        "local_port": 52230,
+        "local_port": 52067,
         "session_id": 1
       },
       {
-        "local_port": 52228,
+        "local_port": 52069,
         "session_id": 2
       },
       {
-        "local_port": 52229,
+        "local_port": 52068,
         "session_id": 3
       }
     ]
@@ -120,39 +121,33 @@
   "runtime_correlations": [
     {
       "client_index": 0,
-      "client_pid": 58927,
-      "router_pid": 58922,
+      "client_pid": 62845,
+      "router_pid": 62820,
       "router_session_id": 2,
       "stderr_transport_error_markers": [],
       "stdout_contains_smoke_text": true,
       "transport": "websocket",
-      "transport_observed_from_client_stderr": true,
-      "upstream_session_id": 2,
-      "websocket_handshake_count": 1
+      "upstream_session_id": 2
     },
     {
       "client_index": 1,
-      "client_pid": 58926,
-      "router_pid": 58922,
-      "router_session_id": 1,
-      "stderr_transport_error_markers": [],
-      "stdout_contains_smoke_text": true,
-      "transport": "websocket",
-      "transport_observed_from_client_stderr": true,
-      "upstream_session_id": 1,
-      "websocket_handshake_count": 1
-    },
-    {
-      "client_index": 2,
-      "client_pid": 58928,
-      "router_pid": 58922,
+      "client_pid": 62846,
+      "router_pid": 62820,
       "router_session_id": 3,
       "stderr_transport_error_markers": [],
       "stdout_contains_smoke_text": true,
       "transport": "websocket",
-      "transport_observed_from_client_stderr": true,
-      "upstream_session_id": 3,
-      "websocket_handshake_count": 1
+      "upstream_session_id": 3
+    },
+    {
+      "client_index": 2,
+      "client_pid": 62844,
+      "router_pid": 62820,
+      "router_session_id": 1,
+      "stderr_transport_error_markers": [],
+      "stdout_contains_smoke_text": true,
+      "transport": "websocket",
+      "upstream_session_id": 1
     }
   ],
   "session_continuity": {
@@ -160,41 +155,38 @@
     "per_client_join_keys": [
       {
         "client_index": 0,
-        "client_pid": 58927,
-        "handshake_count": 1,
+        "client_pid": 62845,
         "router_session_id": 2,
         "upstream_session_id": 2
       },
       {
         "client_index": 1,
-        "client_pid": 58926,
-        "handshake_count": 1,
-        "router_session_id": 1,
-        "upstream_session_id": 1
+        "client_pid": 62846,
+        "router_session_id": 3,
+        "upstream_session_id": 3
       },
       {
         "client_index": 2,
-        "client_pid": 58928,
-        "handshake_count": 1,
-        "router_session_id": 3,
-        "upstream_session_id": 3
+        "client_pid": 62844,
+        "router_session_id": 1,
+        "upstream_session_id": 1
       }
     ],
     "per_client_session_join_key_observed": true,
     "router_closed_session_ids": [
-      2,
       1,
-      3
+      3,
+      2
     ],
     "router_closed_unique_session_count": 3,
-    "router_pid": 58922,
+    "router_pid": 62820,
     "router_registered_session_ids": [
       1,
       2,
       3
     ],
     "router_registered_unique_session_count": 3,
-    "shared_router_pid": 58922,
+    "shared_router_pid": 62820,
     "upstream_session_ids": [
       1,
       2,
@@ -202,7 +194,7 @@
     ],
     "upstream_unique_session_count": 3
   },
-  "shared_router_pid": 58922,
+  "shared_router_pid": 62820,
   "socket_cleanup": {
     "close_wait_count": 0,
     "established_count": 0,
@@ -221,21 +213,21 @@
     "in_overlap_session_event_counts": [
       13,
       13,
-      16
+      11
     ],
     "multi_step_completed_before_overlap_end": true,
     "multi_step_followup_active_session_count": 3,
     "multi_step_followup_frame_count": 1,
-    "multi_step_followup_unix_ms": 1782384815377,
+    "multi_step_followup_unix_ms": 1782386732553,
     "multi_step_interleave_completed": true,
     "non_prewarm_session_count": 3,
     "normal_close_sessions": 3,
-    "overlap_completed_unix_ms": 1782385116358,
-    "overlap_duration_ms": 301010,
+    "overlap_completed_unix_ms": 1782387033526,
+    "overlap_duration_ms": 300994,
     "overlap_proven": true,
-    "overlap_started_unix_ms": 1782384815348,
-    "real_overlap_completed_unix_ms": 1782385116358,
-    "real_overlap_duration_ms": 301010,
+    "overlap_started_unix_ms": 1782386732532,
+    "real_overlap_completed_unix_ms": 1782387033522,
+    "real_overlap_duration_ms": 300990,
     "session_close_outcomes": [
       "normal",
       "normal",
@@ -243,17 +235,20 @@
     ],
     "session_event_counts": [
       13,
-      13,
-      16
+      16,
+      13
     ],
     "session_frame_counts": [
       2,
-      2,
-      3
+      3,
+      2
     ],
+    "target_model": "gpt-5.4-mini",
+    "target_model_session_count": 3,
+    "unexpected_response_create_models": [],
     "upstream_client_sessions": [
       {
-        "client_index": 1,
+        "client_index": 2,
         "upstream_session_id": 1
       },
       {
@@ -261,7 +256,7 @@
         "upstream_session_id": 2
       },
       {
-        "client_index": 2,
+        "client_index": 1,
         "upstream_session_id": 3
       }
     ],

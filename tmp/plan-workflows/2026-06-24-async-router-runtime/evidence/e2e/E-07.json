@@ -9,7 +9,7 @@
   "expected_observation": "three client processes share one router PID with aggregate unique router/upstream WebSocket session continuity and clean client transports",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "ab5beee6f2b06aa9a6396e28946bddbec92942d1",
+  "git_head": "8eb79e22f3d1836e395eecf7f9d27e3792688d5d",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -23,35 +23,36 @@
       "count": 3,
       "statuses": [
         {
-          "pid": 58927,
+          "pid": 62845,
           "status": "exit status: 0",
           "stderr_line_count": 30,
           "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         },
         {
-          "pid": 58926,
-          "status": "exit status: 0",
-          "stderr_line_count": 30,
-          "stderr_transport_error_markers": [],
-          "stdout_contains_smoke_text": true
-        },
-        {
-          "pid": 58928,
+          "pid": 62846,
           "status": "exit status: 0",
           "stderr_line_count": 34,
           "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
+        },
+        {
+          "pid": 62844,
+          "status": "exit status: 0",
+          "stderr_line_count": 30,
+          "stderr_transport_error_markers": [],
+          "stdout_contains_smoke_text": true
         }
-      ]
+      ],
+      "target_model": "gpt-5.4-mini"
     },
     "mode": "three-websocket-soak",
     "router_websocket_registry": {
       "active_sessions": 0,
       "closed_session_ids": [
-        2,
         1,
-        3
+        3,
+        2
       ],
       "closed_sessions": 3,
       "completed_response_sessions": 7,
@@ -65,18 +66,18 @@
         15
       ],
       "completed_session_ids": [
+        1,
         2,
+        3,
+        3,
         1,
         3,
-        3,
-        2,
-        3,
-        1
+        2
       ],
       "final_session_forwarded_upstream_message_counts": [
         16,
-        16,
-        19
+        19,
+        16
       ],
       "forwarded_upstream_messages": 51,
       "handled_connections": 3,
@@ -89,15 +90,15 @@
       "registered_sessions": 3,
       "session_peer_addrs": [
         {
-          "local_port": 52230,
+          "local_port": 52067,
           "session_id": 1
         },
         {
-          "local_port": 52228,
+          "local_port": 52069,
           "session_id": 2
         },
         {
-          "local_port": 52229,
+          "local_port": 52068,
           "session_id": 3
         }
       ]
@@ -120,21 +121,21 @@
       "in_overlap_session_event_counts": [
         13,
         13,
-        16
+        11
       ],
       "multi_step_completed_before_overlap_end": true,
       "multi_step_followup_active_session_count": 3,
       "multi_step_followup_frame_count": 1,
-      "multi_step_followup_unix_ms": 1782384815377,
+      "multi_step_followup_unix_ms": 1782386732553,
       "multi_step_interleave_completed": true,
       "non_prewarm_session_count": 3,
       "normal_close_sessions": 3,
-      "overlap_completed_unix_ms": 1782385116358,
-      "overlap_duration_ms": 301010,
+      "overlap_completed_unix_ms": 1782387033526,
+      "overlap_duration_ms": 300994,
       "overlap_proven": true,
-      "overlap_started_unix_ms": 1782384815348,
-      "real_overlap_completed_unix_ms": 1782385116358,
-      "real_overlap_duration_ms": 301010,
+      "overlap_started_unix_ms": 1782386732532,
+      "real_overlap_completed_unix_ms": 1782387033522,
+      "real_overlap_duration_ms": 300990,
       "session_close_outcomes": [
         "normal",
         "normal",
@@ -142,17 +143,20 @@
       ],
       "session_event_counts": [
         13,
-        13,
-        16
+        16,
+        13
       ],
       "session_frame_counts": [
         2,
-        2,
-        3
+        3,
+        2
       ],
+      "target_model": "gpt-5.4-mini",
+      "target_model_session_count": 3,
+      "unexpected_response_create_models": [],
       "upstream_client_sessions": [
         {
-          "client_index": 1,
+          "client_index": 2,
           "upstream_session_id": 1
         },
         {
@@ -160,7 +164,7 @@
           "upstream_session_id": 2
         },
         {
-          "client_index": 2,
+          "client_index": 1,
           "upstream_session_id": 3
         }
       ],
@@ -173,7 +177,7 @@
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-25T10:58:44Z",
+  "timestamp_utc": "2026-06-25T11:30:43Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",
