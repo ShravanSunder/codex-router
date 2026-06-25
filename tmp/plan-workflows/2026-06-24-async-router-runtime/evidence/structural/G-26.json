@@ -1,0 +1,21 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh G-26",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "supported application routes are upstream pass-through and /v1/models is not synthesized",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
+  "git_head": "699ef5924bba01e153526edb908572031f151a0c",
+  "layer": "structural",
+  "notes": "Structural guard and Hyper transport regression passed: /v1/models reaches upstream and no synthetic models payload remains in release code.",
+  "owner": "T6",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "G-26",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-25T00:42:55Z",
+  "touched_targets": []
+}
