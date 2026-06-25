@@ -411,13 +411,17 @@ pub const fn package_name() -> &'static str {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CliContext {
     env: Vec<(String, String)>,
+    current_dir: PathBuf,
 }
 
 impl CliContext {
     /// Creates a context from explicit environment pairs.
     #[must_use]
     pub fn new(env: Vec<(String, String)>) -> Self {
-        Self { env }
+        Self {
+            env,
+            current_dir: current_dir_or_dot(),
+        }
     }
 
     /// Creates a context from the current process environment.
@@ -425,7 +429,15 @@ impl CliContext {
     pub fn from_process() -> Self {
         Self {
             env: std::env::vars().collect(),
+            current_dir: current_dir_or_dot(),
         }
+    }
+
+    /// Sets the current directory for process-independent tests.
+    #[must_use]
+    pub fn with_current_dir(mut self, current_dir: PathBuf) -> Self {
+        self.current_dir = current_dir;
+        self
     }
 
     fn env_var(&self, name: &str) -> Option<&str> {
@@ -435,6 +447,14 @@ impl CliContext {
             .map(|(_, env_value)| env_value.as_str())
             .filter(|env_value| !env_value.is_empty())
     }
+
+    fn current_dir(&self) -> &std::path::Path {
+        &self.current_dir
+    }
+}
+
+fn current_dir_or_dot() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_error| PathBuf::from("."))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4131,6 +4151,139 @@ exit 42
     }
 
     #[test]
+    fn sessions_list_json_applies_scope_provider_and_source_filters() {
+        const PROMPT_CANARY: &str = "FILTER_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-filters");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project_a = test_root.path().join("project-a");
+        let project_a_src = project_a.join("src");
+        let project_a_tools = project_a.join("tools");
+        let project_b = test_root.path().join("project-b");
+        let project_b_src = project_b.join("src");
+        for directory in [
+            &codex_home,
+            &project_a,
+            &project_a_src,
+            &project_a_tools,
+            &project_b,
+            &project_b_src,
+        ] {
+            must_ok(fs::create_dir(directory));
+        }
+        must_ok(fs::create_dir(project_a.join(".git")));
+        must_ok(fs::create_dir(project_b.join(".git")));
+
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            PROMPT_CANARY,
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-a-src",
+                    &project_a_src,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    4000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-a-tools",
+                    &project_a_tools,
+                    "codex-router",
+                    "vscode",
+                    "vscode",
+                    "main",
+                    3000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-a-openai",
+                    &project_a_src,
+                    "openai",
+                    "cli",
+                    "cli",
+                    "main",
+                    2000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-a-subagent",
+                    &project_a_src,
+                    "codex-router",
+                    "subagent",
+                    "subagent",
+                    "main",
+                    1000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-b-src",
+                    &project_b_src,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    5000,
+                ),
+            ],
+        );
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project_a_src);
+
+        let cwd_output = run_cli(
+            [
+                "sessions",
+                "--scope",
+                "cwd",
+                "--provider",
+                "codex-router",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+            ],
+            context.clone(),
+        );
+        assert_session_ids(&cwd_output.stdout, &["thread-a-src"]);
+
+        let worktree_output = run_cli(
+            [
+                "sessions",
+                "--scope",
+                "worktree",
+                "--provider",
+                "codex-router",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+            ],
+            context.clone(),
+        );
+        assert_session_ids(&worktree_output.stdout, &["thread-a-src", "thread-a-tools"]);
+
+        let subagent_output = run_cli(
+            [
+                "sessions",
+                "--scope",
+                "any",
+                "--provider",
+                "codex-router",
+                "--source",
+                "subagents",
+                "--list",
+                "--format",
+                "json",
+            ],
+            context,
+        );
+        assert_session_ids(&subagent_output.stdout, &["thread-a-subagent"]);
+    }
+
+    #[test]
     fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
         let test_root = TestRoot::new("serve-command");
         must_ok(fs::create_dir(test_root.path()));
@@ -5246,7 +5399,96 @@ exit 42
         }
     }
 
+    fn assert_session_ids(stdout: &str, expected_session_ids: &[&str]) {
+        let sessions: serde_json::Value = must_ok(serde_json::from_str(stdout));
+        let sessions = match sessions.as_array() {
+            Some(sessions) => sessions,
+            None => panic!("sessions output should be array"),
+        };
+        let actual_session_ids = sessions
+            .iter()
+            .map(|session| match session["session_id"].as_str() {
+                Some(session_id) => session_id,
+                None => panic!("session_id should be string in {session}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_session_ids, expected_session_ids);
+    }
+
+    struct CodexStateThreadFixture {
+        id: String,
+        cwd: PathBuf,
+        provider: String,
+        model: String,
+        source: String,
+        thread_source: String,
+        git_branch: String,
+        recency_at_ms: i64,
+    }
+
+    impl CodexStateThreadFixture {
+        fn new(
+            id: &str,
+            cwd: &Path,
+            provider: &str,
+            source: &str,
+            thread_source: &str,
+            git_branch: &str,
+            recency_at_ms: i64,
+        ) -> Self {
+            Self {
+                id: id.to_owned(),
+                cwd: cwd.to_path_buf(),
+                provider: provider.to_owned(),
+                model: "gpt-5.4-mini".to_owned(),
+                source: source.to_owned(),
+                thread_source: thread_source.to_owned(),
+                git_branch: git_branch.to_owned(),
+                recency_at_ms,
+            }
+        }
+    }
+
     fn create_codex_state_db_with_threads(state_database_path: &Path, prompt_canary: &str) {
+        let codex_home = match state_database_path.parent() {
+            Some(codex_home) => codex_home,
+            None => panic!("state database should have codex home parent"),
+        };
+        let test_root = match codex_home.parent() {
+            Some(test_root) => test_root,
+            None => panic!("codex home should have test root parent"),
+        };
+        create_codex_state_db_with_thread_rows(
+            state_database_path,
+            prompt_canary,
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-older",
+                    &test_root.join("project-b"),
+                    "openai",
+                    "cli",
+                    "cli",
+                    "feature",
+                    1000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-newer",
+                    &test_root.join("project-a"),
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2000,
+                ),
+            ],
+        );
+    }
+
+    fn create_codex_state_db_with_thread_rows(
+        state_database_path: &Path,
+        prompt_canary: &str,
+        rows: &[CodexStateThreadFixture],
+    ) {
         let runtime = must_ok(
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -5303,28 +5545,7 @@ exit 42
                 .execute(&pool)
                 .await,
             );
-            for (id, recency_at_ms, cwd, provider, model, source, thread_source, git_branch) in [
-                (
-                    "thread-older",
-                    1000_i64,
-                    "project-b",
-                    "openai",
-                    "gpt-5.4-mini",
-                    "cli",
-                    "cli",
-                    "feature",
-                ),
-                (
-                    "thread-newer",
-                    2000_i64,
-                    "project-a",
-                    "codex-router",
-                    "gpt-5.4-mini",
-                    "cli",
-                    "cli",
-                    "main",
-                ),
-            ] {
+            for row in rows {
                 must_ok(
                     sqlx::query(
                         r#"
@@ -5343,37 +5564,25 @@ exit 42
                     )
                     "#,
                     )
-                    .bind(id)
-                    .bind(source)
-                    .bind(provider)
-                    .bind(test_root_relative_path(state_database_path, cwd))
+                    .bind(&row.id)
+                    .bind(&row.source)
+                    .bind(&row.provider)
+                    .bind(row.cwd.display().to_string())
                     .bind(prompt_canary)
-                    .bind(git_branch)
+                    .bind(&row.git_branch)
                     .bind(prompt_canary)
-                    .bind(model)
-                    .bind(recency_at_ms - 100)
-                    .bind(recency_at_ms)
-                    .bind(thread_source)
+                    .bind(&row.model)
+                    .bind(row.recency_at_ms - 100)
+                    .bind(row.recency_at_ms)
+                    .bind(&row.thread_source)
                     .bind(prompt_canary)
-                    .bind(recency_at_ms)
+                    .bind(row.recency_at_ms)
                     .execute(&pool)
                     .await,
                 );
             }
             pool.close().await;
         });
-    }
-
-    fn test_root_relative_path(state_database_path: &Path, child_name: &str) -> String {
-        let codex_home = match state_database_path.parent() {
-            Some(codex_home) => codex_home,
-            None => panic!("state database should have codex home parent"),
-        };
-        let test_root = match codex_home.parent() {
-            Some(test_root) => test_root,
-            None => panic!("codex home should have test root parent"),
-        };
-        test_root.join(child_name).display().to_string()
     }
 
     fn path_to_str(path: &Path) -> &str {

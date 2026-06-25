@@ -1,7 +1,9 @@
 //! Router-owned Codex session picker command contract.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -180,11 +182,9 @@ async fn load_session_records(
     if command.last {
         return Err(SessionsCommandError::LastNotImplemented);
     }
-    if !matches!(command.scope, SessionsScope::Any) {
-        return Err(SessionsCommandError::ScopedListNotImplemented);
-    }
-    if !matches!(command.provider, SessionsProvider::Any) {
-        return Err(SessionsCommandError::ProviderFilterNotImplemented);
+    let scope_filter = ScopeFilter::from_command(command.scope, context);
+    if matches!(command.provider, SessionsProvider::Current) {
+        return Err(SessionsCommandError::CurrentProviderNotImplemented);
     }
 
     let state_database_path = codex_home(context)?.join("state_5.sqlite");
@@ -219,12 +219,22 @@ async fn load_session_records(
     for row in rows {
         let source = row.get::<Option<String>, _>("source");
         let thread_source = row.get::<Option<String>, _>("thread_source");
+        let cwd = row.get::<Option<String>, _>("cwd");
         if !source_matches(command.source, source.as_deref(), thread_source.as_deref()) {
+            continue;
+        }
+        if !provider_matches(
+            &command.provider,
+            row.get::<Option<String>, _>("model_provider").as_deref(),
+        ) {
+            continue;
+        }
+        if !scope_filter.matches(cwd.as_deref()) {
             continue;
         }
         records.push(SessionRecord {
             session_id: row.get("id"),
-            cwd: row.get::<Option<String>, _>("cwd"),
+            cwd,
             provider: row.get::<Option<String>, _>("model_provider"),
             model: row.get::<Option<String>, _>("model"),
             source,
@@ -238,6 +248,40 @@ async fn load_session_records(
     pool.close().await;
 
     Ok(records)
+}
+
+#[derive(Debug)]
+enum ScopeFilter {
+    Any,
+    Cwd(PathBuf),
+    Worktree(PathBuf),
+}
+
+impl ScopeFilter {
+    fn from_command(scope: SessionsScope, context: &CliContext) -> Self {
+        match scope {
+            SessionsScope::Any => Self::Any,
+            SessionsScope::Cwd => Self::Cwd(normalize_path(context.current_dir())),
+            SessionsScope::Worktree => Self::Worktree(
+                find_worktree_root(context.current_dir())
+                    .unwrap_or_else(|| normalize_path(context.current_dir())),
+            ),
+        }
+    }
+
+    fn matches(&self, cwd: Option<&str>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Cwd(current_dir) => cwd
+                .map(|session_cwd| normalize_path(Path::new(session_cwd)) == *current_dir)
+                .unwrap_or(false),
+            Self::Worktree(worktree_root) => cwd
+                .map(|session_cwd| {
+                    path_is_equal_or_child(&normalize_path(Path::new(session_cwd)), worktree_root)
+                })
+                .unwrap_or(false),
+        }
+    }
 }
 
 fn codex_home(context: &CliContext) -> Result<PathBuf, SessionsCommandError> {
@@ -257,6 +301,14 @@ fn sort_key(sort: SessionsSort) -> &'static str {
     }
 }
 
+fn provider_matches(provider_filter: &SessionsProvider, provider: Option<&str>) -> bool {
+    match provider_filter {
+        SessionsProvider::Any => true,
+        SessionsProvider::Id(expected_provider) => provider == Some(expected_provider.as_str()),
+        SessionsProvider::Current => false,
+    }
+}
+
 fn source_matches(
     source_filter: SessionsSource,
     source: Option<&str>,
@@ -272,6 +324,23 @@ fn source_matches(
             matches!(source, Some("subagent")) || matches!(thread_source, Some("subagent"))
         }
     }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_error| path.to_path_buf())
+}
+
+fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
+    for ancestor in current_dir.ancestors() {
+        if ancestor.join(".git").exists() {
+            return Some(normalize_path(ancestor));
+        }
+    }
+    None
+}
+
+fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
+    candidate == parent || candidate.starts_with(parent)
 }
 
 #[derive(Debug, Serialize)]
@@ -309,12 +378,11 @@ pub enum SessionsCommandError {
     /// Latest-session launch has not landed yet.
     #[error("sessions --last is not implemented yet")]
     LastNotImplemented,
-    /// Scoped session filtering has not landed yet.
-    #[error("sessions scoped list is not implemented yet; use --scope any")]
-    ScopedListNotImplemented,
-    /// Provider filtering has not landed yet.
-    #[error("sessions provider filter is not implemented yet; use --provider any")]
-    ProviderFilterNotImplemented,
+    /// Current-provider filtering has not landed yet.
+    #[error(
+        "sessions --provider current is not implemented yet; use --provider any or an exact provider id"
+    )]
+    CurrentProviderNotImplemented,
     /// CODEX_HOME and HOME were both unavailable.
     #[error("could not locate Codex home; set CODEX_HOME or HOME")]
     CodexHomeUnavailable,
