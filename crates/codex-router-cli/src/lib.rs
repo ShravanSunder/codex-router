@@ -4611,6 +4611,42 @@ exit 42
     }
 
     #[test]
+    fn sessions_dependency_contract_uses_inquire_without_disallowed_direct_tui_crates() {
+        let workspace_manifest = must_ok(fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| panic!("cli crate should have workspace root parent"))
+                .join("Cargo.toml"),
+        ));
+        let cli_manifest = must_ok(fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+        ));
+
+        assert!(workspace_manifest.contains("inquire = "));
+        assert!(cli_manifest.contains("inquire.workspace = true"));
+        assert!(cli_manifest.contains("comfy-table.workspace = true"));
+        for disallowed_dependency in ["ratatui", "dialoguer", "crossterm"] {
+            assert!(
+                !cli_manifest.contains(&format!("{disallowed_dependency}.workspace"))
+                    && !cli_manifest.contains(&format!("{disallowed_dependency} =")),
+                "sessions V1 must not add direct {disallowed_dependency} dependency"
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_sql_boundary_uses_sqlx_without_rusqlite() {
+        let sessions_source = must_ok(fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sessions.rs"),
+        ));
+
+        assert!(sessions_source.contains("use sqlx::"));
+        assert!(sessions_source.contains("SqliteConnectOptions"));
+        assert!(!sessions_source.contains("rusqlite"));
+    }
+
+    #[test]
     fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
         let test_root = TestRoot::new("serve-command");
         must_ok(fs::create_dir(test_root.path()));
