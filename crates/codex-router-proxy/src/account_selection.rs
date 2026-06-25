@@ -24,15 +24,21 @@ use codex_router_selection::burn_down::SelectedPool;
 use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
 use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::burn_down::assess_route_band;
+use codex_router_selection::run_rate::QuotaRunRateConfidence;
+use codex_router_selection::run_rate::QuotaRunRateEstimator;
+use codex_router_selection::run_rate::QuotaRunRateObservation;
 use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup;
+use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::AsyncAffinityRepository;
+use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
 use codex_router_state::sqlite::AsyncSelectorQuotaRepository;
+use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
 use thiserror::Error;
 
@@ -48,6 +54,8 @@ pub type RouteBandAccountHolds = Arc<Mutex<HashMap<String, AccountHold>>>;
 
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
+const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 604_800;
+const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
@@ -213,7 +221,7 @@ where
 /// Async selector that hydrates account state from repositories at request time.
 pub struct AsyncRepositoryBackedAccountSelector<'a, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + Sync,
+    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
 {
     state_repository: &'a R,
     weighted_selectors: RouteBandWeightedSelectors,
@@ -275,7 +283,7 @@ where
 
 impl<'a, R> AsyncRepositoryBackedAccountSelector<'a, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + Sync,
+    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
 {
     /// Creates an async repository-backed selector.
     #[must_use]
@@ -424,7 +432,7 @@ where
 
 impl<R> AsyncAccountDecisionSelector for AsyncRepositoryBackedAccountSelector<'_, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + Sync,
+    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
 {
     fn select_upstream_account<'a>(
         &'a self,
@@ -445,10 +453,16 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
-            let selector_accounts = selector_inputs
-                .iter()
-                .map(account_input_from_selector_input)
-                .collect::<Vec<_>>();
+            let selector_accounts = account_inputs_from_selector_inputs_with_history(
+                self.state_repository,
+                route_band.as_str(),
+                now_unix_seconds,
+                &selector_inputs,
+            )
+            .await
+            .map_err(|_error| HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::StateUnavailable,
+            })?;
             let assessment_input = BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
@@ -710,24 +724,118 @@ fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAcco
     let windows = input
         .windows()
         .iter()
-        .map(|window| {
-            let mut fact = QuotaWindowFact::new(
-                window.limit_window_seconds(),
-                quota_window_status_from_selector_status(window.status()),
-            )
-            .with_remaining_headroom(window.remaining_headroom())
-            .with_observed_unix_seconds(window.observed_unix_seconds())
-            .with_effective(window.effective());
-            if let Some(reset_unix_seconds) = window.reset_unix_seconds() {
-                fact = fact.with_reset_unix_seconds(reset_unix_seconds);
-            }
-            fact
-        })
+        .map(quota_window_fact_from_selector_window)
         .collect::<Vec<_>>();
 
     BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
         .with_account_enabled(input.account_status() == AccountStatus::Enabled)
         .with_active_credential(input.active_credential_generation().is_some())
+}
+
+async fn account_inputs_from_selector_inputs_with_history<R>(
+    state_repository: &R,
+    route_band: &str,
+    now_unix_seconds: u64,
+    selector_inputs: &[SelectorQuotaInput],
+) -> Result<Vec<BurnDownAccountInput>, StateStoreError>
+where
+    R: AsyncQuotaHistoryRepository + Sync,
+{
+    let mut account_inputs = Vec::new();
+    for input in selector_inputs {
+        let mut windows = Vec::new();
+        for window in input.windows() {
+            let mut fact = quota_window_fact_from_selector_window(window);
+            if let Some(projected_exhaustion_unix_seconds) = projected_exhaustion_from_history(
+                state_repository,
+                input,
+                route_band,
+                window,
+                now_unix_seconds,
+            )
+            .await?
+            {
+                fact =
+                    fact.with_projected_exhaustion_unix_seconds(projected_exhaustion_unix_seconds);
+            }
+            windows.push(fact);
+        }
+        account_inputs.push(
+            BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
+                .with_account_enabled(input.account_status() == AccountStatus::Enabled)
+                .with_active_credential(input.active_credential_generation().is_some()),
+        );
+    }
+
+    Ok(account_inputs)
+}
+
+fn quota_window_fact_from_selector_window(
+    window: &PersistedSelectorQuotaWindow,
+) -> QuotaWindowFact {
+    let mut fact = QuotaWindowFact::new(
+        window.limit_window_seconds(),
+        quota_window_status_from_selector_status(window.status()),
+    )
+    .with_remaining_headroom(window.remaining_headroom())
+    .with_observed_unix_seconds(window.observed_unix_seconds())
+    .with_effective(window.effective());
+    if let Some(reset_unix_seconds) = window.reset_unix_seconds() {
+        fact = fact.with_reset_unix_seconds(reset_unix_seconds);
+    }
+
+    fact
+}
+
+async fn projected_exhaustion_from_history<R>(
+    state_repository: &R,
+    input: &SelectorQuotaInput,
+    route_band: &str,
+    window: &PersistedSelectorQuotaWindow,
+    now_unix_seconds: u64,
+) -> Result<Option<u64>, StateStoreError>
+where
+    R: AsyncQuotaHistoryRepository + Sync,
+{
+    let Some(reset_unix_seconds) = window.reset_unix_seconds() else {
+        return Ok(None);
+    };
+    let history = AsyncQuotaHistoryRepository::quota_history_observations_for_window(
+        state_repository,
+        input.account_id(),
+        route_band,
+        window.limit_window_seconds(),
+        now_unix_seconds.saturating_sub(QUOTA_HISTORY_LOOKBACK_SECONDS),
+        now_unix_seconds,
+    )
+    .await?;
+    let observations = history
+        .iter()
+        .filter_map(|observation| {
+            observation
+                .reset_unix_seconds()
+                .map(|history_reset_unix_seconds| {
+                    QuotaRunRateObservation::new(
+                        observation.observed_unix_seconds(),
+                        history_reset_unix_seconds,
+                        observation.remaining_headroom(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    let estimate = QuotaRunRateEstimator::new(QUOTA_HISTORY_FRESHNESS_SECONDS).estimate(
+        now_unix_seconds,
+        reset_unix_seconds,
+        &observations,
+    );
+    if !matches!(
+        estimate.confidence(),
+        QuotaRunRateConfidence::Low | QuotaRunRateConfidence::Normal
+    ) {
+        return Ok(None);
+    }
+
+    Ok(estimate.projected_exhaustion_unix_seconds(now_unix_seconds))
 }
 
 fn route_kind_for_request(

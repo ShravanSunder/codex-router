@@ -1442,6 +1442,7 @@ fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
         RoutingReason::PreferredWeeklyHealthier
         | RoutingReason::PreferredWeeklyResetSoon
         | RoutingReason::PreferredShortResetSoon
+        | RoutingReason::PreferredProjectedBurn
         | RoutingReason::PreferredHighestWeight => "preferred",
         RoutingReason::AvailableSamePool => "available",
         RoutingReason::HeldReserve | RoutingReason::HeldUnknown => "held",

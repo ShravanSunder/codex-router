@@ -97,6 +97,7 @@ mod tests {
     use codex_router_core::audit::ResponseCommitState;
     use codex_router_core::audit::RouteKind as AuditRouteKind;
     use codex_router_core::audit::TransportKind;
+    use codex_router_core::ids::AccountId;
     use codex_router_core::ids::RequestId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::local_auth::LocalAuthError;
@@ -115,20 +116,24 @@ mod tests {
     use codex_router_state::affinity_owner::AffinitySourceTransport;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+    use codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
     use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
+    use codex_router_state::quota_snapshot::QuotaHistoryRefreshOutcome;
     use codex_router_state::quota_snapshot::QuotaSnapshotSource;
     use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
     use codex_router_state::repositories::AccountStateRepository;
     use codex_router_state::repositories::AffinityRepository;
     use codex_router_state::repositories::QuotaSnapshotRepository;
     use codex_router_state::repositories::SelectorQuotaRepository;
+    use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
     use codex_router_state::sqlite::SqliteStateStore;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
     use futures_util::future::BoxFuture;
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::env;
     use std::fs;
     use std::io::Read;
@@ -1443,6 +1448,80 @@ mod tests {
                 reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
             })
         );
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_prefers_slower_projected_burn_history() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_history_burn");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let fast_burn = AccountRecord::new(
+            account_id("acct_fast_burn"),
+            "fast-burn",
+            AccountStatus::Enabled,
+        );
+        let slow_burn = AccountRecord::new(
+            account_id("acct_slow_burn"),
+            "slow-burn",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &fast_burn,
+            "responses",
+            &[(18_000, 70, true), (604_800, 70, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &slow_burn,
+            "responses",
+            &[(18_000, 70, true), (604_800, 70, false)],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        append_history_series(
+            &async_state,
+            fast_burn.account_id(),
+            "responses",
+            18_000,
+            &[(9_000, 90), (9_450, 80), (9_900, 70)],
+        )
+        .await;
+        append_history_series(
+            &async_state,
+            slow_burn.account_id(),
+            "responses",
+            18_000,
+            &[(9_000, 72), (9_450, 71), (9_900, 70)],
+        )
+        .await;
+
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            0,
+            Arc::new(|| 9_900),
+        );
+        let selected = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("selector should choose slower projected burn: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), slow_burn.account_id());
+        assert_eq!(selected.selection_reason(), "preferred_projected_burn");
     }
 
     #[test]
@@ -5469,6 +5548,35 @@ mod tests {
         };
         if let Err(error) = secrets.write_secret(&token_key, &bundle) {
             panic!("upstream token should persist: {error}");
+        }
+    }
+
+    async fn append_history_series(
+        state: &AsyncSqliteStateStore,
+        account_id: &AccountId,
+        route_band: &str,
+        limit_window_seconds: u64,
+        samples: &[(u64, u32)],
+    ) {
+        for (observed_unix_seconds, remaining_headroom) in samples {
+            let observation = PersistedQuotaHistoryObservation::new(
+                account_id.clone(),
+                account_id.as_str(),
+                route_band,
+                limit_window_seconds,
+                *observed_unix_seconds,
+                *remaining_headroom,
+            )
+            .with_window_status(SelectorQuotaWindowStatus::Eligible)
+            .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
+            .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success)
+            .with_reset_unix_seconds(selector_reset_seconds(limit_window_seconds));
+            if let Err(error) =
+                AsyncQuotaHistoryRepository::append_quota_history_observation(state, &observation)
+                    .await
+            {
+                panic!("quota history should append: {error}");
+            }
         }
     }
 

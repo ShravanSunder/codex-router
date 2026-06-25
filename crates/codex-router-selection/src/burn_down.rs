@@ -113,6 +113,7 @@ pub struct QuotaWindowFact {
     reset_unix_seconds: Option<u64>,
     observed_unix_seconds: u64,
     effective: bool,
+    projected_exhaustion_unix_seconds: Option<u64>,
 }
 
 impl QuotaWindowFact {
@@ -126,6 +127,7 @@ impl QuotaWindowFact {
             reset_unix_seconds: None,
             observed_unix_seconds: 0,
             effective: false,
+            projected_exhaustion_unix_seconds: None,
         }
     }
 
@@ -154,6 +156,16 @@ impl QuotaWindowFact {
     #[must_use]
     pub const fn with_effective(mut self, effective: bool) -> Self {
         self.effective = effective;
+        self
+    }
+
+    /// Sets projected exhaustion time.
+    #[must_use]
+    pub const fn with_projected_exhaustion_unix_seconds(
+        mut self,
+        projected_exhaustion_unix_seconds: u64,
+    ) -> Self {
+        self.projected_exhaustion_unix_seconds = Some(projected_exhaustion_unix_seconds);
         self
     }
 
@@ -279,6 +291,7 @@ pub struct BurnDownAccountAssessment {
     long_pressure: u32,
     short_salvage: u32,
     long_salvage: u32,
+    projected_burn_pressure: u32,
     routing_weight: Option<u32>,
     routing_reason: RoutingReason,
     preferred_next: bool,
@@ -453,6 +466,8 @@ pub enum RoutingReason {
     PreferredWeeklyResetSoon,
     /// Preferred because the short window reset is near.
     PreferredShortResetSoon,
+    /// Preferred because projected burn lasts longer than alternatives.
+    PreferredProjectedBurn,
     /// Preferred by neutral quota weight.
     PreferredHighestWeight,
     /// Same-pool selectable account.
@@ -483,6 +498,7 @@ impl RoutingReason {
             Self::PreferredWeeklyHealthier => "preferred_weekly_healthier",
             Self::PreferredWeeklyResetSoon => "preferred_weekly_reset_soon",
             Self::PreferredShortResetSoon => "preferred_short_reset_soon",
+            Self::PreferredProjectedBurn => "preferred_projected_burn",
             Self::PreferredHighestWeight => "preferred_highest_weight",
             Self::AvailableSamePool => "available_same_pool",
             Self::HeldReserve => "held_reserve",
@@ -503,6 +519,7 @@ impl RoutingReason {
             Self::PreferredWeeklyHealthier => "preferred next: weekly healthier",
             Self::PreferredWeeklyResetSoon => "preferred next: weekly reset soon",
             Self::PreferredShortResetSoon => "preferred next: 5h reset soon",
+            Self::PreferredProjectedBurn => "preferred next: projected burn",
             Self::PreferredHighestWeight => "preferred next: safest quota",
             Self::AvailableSamePool => "available: same pool",
             Self::HeldReserve => "held: reserve",
@@ -565,6 +582,7 @@ struct WindowAssessment {
     reset_unix_seconds: Option<u64>,
     status: QuotaWindowStatus,
     pressure: u32,
+    projected_pressure: u32,
     surplus: u32,
     time_left_seconds: Option<u64>,
     near_reset: bool,
@@ -682,6 +700,7 @@ fn assess_account(
         long_pressure: 0,
         short_salvage: 0,
         long_salvage: 0,
+        projected_burn_pressure: 0,
         routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
         routing_reason: RoutingReason::UnknownFallbackAvailable,
         preferred_next: false,
@@ -807,6 +826,11 @@ fn assess_account(
             .saturating_mul(long_pressure)
             .saturating_add(short_pressure),
     );
+    let projected_burn_pressure = windows
+        .iter()
+        .map(|window| window.projected_pressure)
+        .max()
+        .unwrap_or(0);
     let risk_adjusted_weight = i64::from(usable_headroom) - i64::from(risk_penalty)
         + i64::from(short_salvage)
         + i64::from(long_salvage);
@@ -830,6 +854,7 @@ fn assess_account(
         long_pressure,
         short_salvage,
         long_salvage,
+        projected_burn_pressure,
         routing_weight: Some(routing_weight),
         salvage_sort_key: salvage_sort_key(&windows, short_salvage, long_salvage, policy),
         routing_reason: RoutingReason::AvailableSamePool,
@@ -851,7 +876,9 @@ fn assess_window(
         .map(|time_left_seconds| ceil_percent(time_left_seconds, window.window_seconds))
         .unwrap_or(0);
     let remaining_headroom = window.remaining_headroom.min(100);
-    let pressure = expected_remaining_percent.saturating_sub(remaining_headroom);
+    let baseline_pressure = expected_remaining_percent.saturating_sub(remaining_headroom);
+    let projected_pressure = projected_pressure(window, now_unix_seconds);
+    let pressure = baseline_pressure.max(projected_pressure);
     let surplus = remaining_headroom.saturating_sub(expected_remaining_percent);
     let near_reset = time_left_seconds.is_some_and(|time_left_seconds| {
         time_left_seconds <= near_reset_seconds(window.window_seconds, policy)
@@ -863,6 +890,7 @@ fn assess_window(
         reset_unix_seconds: window.reset_unix_seconds,
         status: window.status,
         pressure,
+        projected_pressure,
         surplus,
         time_left_seconds,
         near_reset,
@@ -992,7 +1020,9 @@ fn selected_pool_weight(
 struct RoutingReasonContext {
     selected_pool: SelectedPool,
     preferred_long_pressure: u32,
+    preferred_projected_burn_pressure: u32,
     has_worse_known_selected_pool_long_pressure: bool,
+    has_worse_known_selected_pool_projected_burn_pressure: bool,
     has_held_reserve_account: bool,
 }
 
@@ -1002,6 +1032,10 @@ impl RoutingReasonContext {
             .iter()
             .find(|account| account.preferred_next)
             .map_or(0, |account| account.long_pressure);
+        let preferred_projected_burn_pressure = accounts
+            .iter()
+            .find(|account| account.preferred_next)
+            .map_or(0, |account| account.projected_burn_pressure);
         let has_worse_known_selected_pool_long_pressure = accounts.iter().any(|account| {
             selected_pool_matches(selected_pool, account.availability)
                 && matches!(
@@ -1011,6 +1045,16 @@ impl RoutingReasonContext {
                 && !account.preferred_next
                 && account.long_pressure > preferred_long_pressure
         });
+        let has_worse_known_selected_pool_projected_burn_pressure =
+            accounts.iter().any(|account| {
+                selected_pool_matches(selected_pool, account.availability)
+                    && matches!(
+                        account.availability,
+                        AccountAvailability::Usable | AccountAvailability::Reserve
+                    )
+                    && !account.preferred_next
+                    && account.projected_burn_pressure > preferred_projected_burn_pressure
+            });
         let has_held_reserve_account = selected_pool == SelectedPool::Usable
             && accounts
                 .iter()
@@ -1019,7 +1063,9 @@ impl RoutingReasonContext {
         Self {
             selected_pool,
             preferred_long_pressure,
+            preferred_projected_burn_pressure,
             has_worse_known_selected_pool_long_pressure,
+            has_worse_known_selected_pool_projected_burn_pressure,
             has_held_reserve_account,
         }
     }
@@ -1077,8 +1123,32 @@ fn routing_reason_for_account(
     if account.short_salvage > 0 {
         return RoutingReason::PreferredShortResetSoon;
     }
+    if account.projected_burn_pressure == context.preferred_projected_burn_pressure
+        && context.has_worse_known_selected_pool_projected_burn_pressure
+    {
+        return RoutingReason::PreferredProjectedBurn;
+    }
 
     RoutingReason::PreferredHighestWeight
+}
+
+fn projected_pressure(window: &QuotaWindowFact, now_unix_seconds: u64) -> u32 {
+    let Some(projected_exhaustion_unix_seconds) = window.projected_exhaustion_unix_seconds else {
+        return 0;
+    };
+    let Some(reset_unix_seconds) = window.reset_unix_seconds else {
+        return 0;
+    };
+    if projected_exhaustion_unix_seconds <= now_unix_seconds
+        || projected_exhaustion_unix_seconds >= reset_unix_seconds
+    {
+        return 0;
+    }
+
+    ceil_percent(
+        reset_unix_seconds.saturating_sub(projected_exhaustion_unix_seconds),
+        window.window_seconds,
+    )
 }
 
 fn compare_salvage_key(
