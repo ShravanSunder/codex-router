@@ -45,6 +45,7 @@ use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::local_auth::ProxyLocalAuthGate;
 use crate::local_auth::extract_presented_local_token_from_request;
+use crate::provider_error::AsyncProviderErrorObserver;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::RouteKind;
@@ -555,9 +556,11 @@ impl PreparedAsyncStreamingHttpProxyRequest {
 pub struct StreamingHttpProxyCompletion {
     affinity_secret: Option<RouterAffinityHashSecret>,
     account_id: AccountId,
+    route_band: RouteBand,
     credential_generation: u64,
     allowed_audit_event: AuditEvent,
     active_reservation_guard: Option<ActiveReservationGuard>,
+    provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
 }
 
 impl StreamingHttpProxyCompletion {
@@ -573,10 +576,20 @@ impl StreamingHttpProxyCompletion {
         Self {
             affinity_secret,
             account_id,
+            route_band: RouteBand::Responses,
             credential_generation,
             allowed_audit_event,
             active_reservation_guard: None,
+            provider_error_observer: None,
         }
+    }
+
+    /// Sets the route band for internal runtime tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_route_band_for_test(mut self, route_band: RouteBand) -> Self {
+        self.route_band = route_band;
+        self
     }
 
     /// Returns the affinity secret for response-owner recording.
@@ -589,6 +602,12 @@ impl StreamingHttpProxyCompletion {
     #[must_use]
     pub const fn account_id(&self) -> &AccountId {
         &self.account_id
+    }
+
+    /// Returns selected route band.
+    #[must_use]
+    pub const fn route_band(&self) -> RouteBand {
+        self.route_band
     }
 
     /// Returns selected credential generation.
@@ -607,6 +626,12 @@ impl StreamingHttpProxyCompletion {
     #[must_use]
     pub const fn active_reservation_guard(&self) -> Option<&ActiveReservationGuard> {
         self.active_reservation_guard.as_ref()
+    }
+
+    /// Returns the optional provider-error observer for quota safety metadata.
+    #[must_use]
+    pub fn provider_error_observer(&self) -> Option<&Arc<dyn AsyncProviderErrorObserver>> {
+        self.provider_error_observer.as_ref()
     }
 }
 
@@ -725,6 +750,7 @@ pub struct AuthenticatedHttpProxyService<'a, T, S, C> {
     audit_sink: Option<&'a AuditFileSink>,
     affinity_secret_provider: Option<&'a dyn HttpAffinitySecretProvider>,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
+    provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
 }
 
 impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C> {
@@ -744,6 +770,7 @@ impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C> {
             audit_sink: None,
             affinity_secret_provider: None,
             affinity_owner_recorder: None,
+            provider_error_observer: None,
         }
     }
 
@@ -771,6 +798,16 @@ impl<'a, T, S, C> AuthenticatedHttpProxyService<'a, T, S, C> {
         affinity_owner_recorder: Arc<dyn HttpAffinityOwnerRecorder>,
     ) -> Self {
         self.affinity_owner_recorder = Some(affinity_owner_recorder);
+        self
+    }
+
+    /// Adds the provider-error observer used for quota-exhaustion accounting.
+    #[must_use]
+    pub fn with_provider_error_observer(
+        mut self,
+        provider_error_observer: Arc<dyn AsyncProviderErrorObserver>,
+    ) -> Self {
+        self.provider_error_observer = Some(provider_error_observer);
         self
     }
 
@@ -837,6 +874,8 @@ where
                 return Err(HttpProxyError::LocalAuth { reason });
             }
         };
+        let route_kind = request_route_kind(&request)?;
+        let route_band = route_kind.route_band();
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
         let selected = self
             .selector
@@ -863,6 +902,7 @@ where
         let completion = StreamingHttpProxyCompletion {
             affinity_secret,
             account_id: selected.account_id().clone(),
+            route_band,
             credential_generation: resolved.credential_generation(),
             allowed_audit_event: allowed_audit_event(
                 TransportKind::Http,
@@ -870,6 +910,7 @@ where
                 account_hash,
             ),
             active_reservation_guard: selected.active_reservation_guard().cloned(),
+            provider_error_observer: self.provider_error_observer.clone(),
         };
 
         Ok(PreparedStreamingHttpProxyRequest {
@@ -920,6 +961,8 @@ where
                 return Err(HttpProxyError::LocalAuth { reason });
             }
         };
+        let route_kind = request_route_kind(&request)?;
+        let route_band = route_kind.route_band();
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
         let selected = self
             .selector
@@ -948,6 +991,7 @@ where
         let completion = StreamingHttpProxyCompletion {
             affinity_secret,
             account_id: selected.account_id().clone(),
+            route_band,
             credential_generation: resolved.credential_generation(),
             allowed_audit_event: allowed_audit_event(
                 TransportKind::Http,
@@ -955,6 +999,7 @@ where
                 account_hash,
             ),
             active_reservation_guard: selected.active_reservation_guard().cloned(),
+            provider_error_observer: self.provider_error_observer.clone(),
         };
 
         Ok(PreparedStreamingHttpProxyRequest {
@@ -1328,14 +1373,18 @@ fn http_credential_rejection_audit_event(
 
 fn audit_route_kind_for_request(request: &HttpProxyRequest) -> AuditRouteKind {
     match request_route_kind(request) {
-        Ok(route_kind) => match route_kind {
-            RouteKind::Responses => AuditRouteKind::Responses,
-            RouteKind::ResponsesWebSocket => AuditRouteKind::ResponsesWebSocket,
-            RouteKind::Models => AuditRouteKind::Models,
-            RouteKind::MemoriesTraceSummarize => AuditRouteKind::MemoryTrace,
-            RouteKind::ResponsesCompact => AuditRouteKind::Compact,
-        },
+        Ok(route_kind) => audit_route_kind_for_route_kind(route_kind),
         Err(_error) => AuditRouteKind::Responses,
+    }
+}
+
+fn audit_route_kind_for_route_kind(route_kind: RouteKind) -> AuditRouteKind {
+    match route_kind {
+        RouteKind::Responses => AuditRouteKind::Responses,
+        RouteKind::ResponsesWebSocket => AuditRouteKind::ResponsesWebSocket,
+        RouteKind::Models => AuditRouteKind::Models,
+        RouteKind::MemoriesTraceSummarize => AuditRouteKind::MemoryTrace,
+        RouteKind::ResponsesCompact => AuditRouteKind::Compact,
     }
 }
 

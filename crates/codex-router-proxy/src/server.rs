@@ -93,6 +93,8 @@ use crate::http_sse::extract_response_id_from_body;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::local_auth::extract_presented_local_token_from_request;
 use crate::provider_error::AsyncProviderErrorObserver;
+use crate::provider_error::ProviderErrorClassification;
+use crate::provider_error::classify_provider_error_envelope;
 use crate::provider_error::record_provider_error_observation;
 use crate::routes::Method;
 use crate::routes::RouteClass;
@@ -959,7 +961,10 @@ impl LoopbackProtocolConnectionHandler {
             &credential_resolver,
             &self.upstream,
         )
-        .with_affinity_secret_provider(&self.affinity_secret_provider);
+        .with_affinity_secret_provider(&self.affinity_secret_provider)
+        .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
+            state_store.clone(),
+        )));
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
         } else {
@@ -1234,6 +1239,7 @@ fn async_streaming_http_response_to_hyper(
         body,
         completion,
         affinity_owner_recorder,
+        None,
         affinity_record_tasks,
     );
     let mut builder = HttpResponse::builder().status(status);
@@ -1249,22 +1255,31 @@ fn record_affinity_owner_from_async_body(
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     completion: StreamingHttpProxyCompletion,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
     affinity_record_tasks: TaskTracker,
 ) -> BoxBody<Bytes, AsyncHttpBodyError> {
     let active_reservation_guard = completion.active_reservation_guard().cloned();
-    let Some(affinity_secret) = completion.affinity_secret().cloned() else {
+    let affinity_secret = completion.affinity_secret().cloned();
+    let provider_error_observer =
+        provider_error_observer.or_else(|| completion.provider_error_observer().cloned());
+    if affinity_secret.is_none() && provider_error_observer.is_none() {
         return hold_active_reservation_until_body_drop(body, active_reservation_guard);
-    };
+    }
     let account_id = completion.account_id().clone();
+    let route_band = completion.route_band();
     let credential_generation = completion.credential_generation();
     let mut buffered = Vec::new();
-    let mut recorded = false;
+    let mut affinity_recorded = false;
+    let mut provider_error_recorded = false;
     let mut scanned_bytes = 0_usize;
     let mut scanned_events = 0_usize;
 
     body.map_frame(move |frame| {
         let _active_reservation_guard = &active_reservation_guard;
-        if !recorded
+        let should_scan_affinity = affinity_secret.is_some() && !affinity_recorded;
+        let should_scan_provider_error =
+            provider_error_observer.is_some() && !provider_error_recorded;
+        if (should_scan_affinity || should_scan_provider_error)
             && scanned_bytes < HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES
             && scanned_events < HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS
             && let Some(data) = frame.data_ref()
@@ -1274,22 +1289,73 @@ fn record_affinity_owner_from_async_body(
             let bytes_to_scan = data.len().min(remaining_bytes);
             buffered.extend_from_slice(&data[..bytes_to_scan]);
             scanned_bytes += bytes_to_scan;
-            if let Ok(Some(response_id)) = extract_response_id_from_body(&buffered) {
-                recorded = true;
+            if should_scan_affinity
+                && let Some(secret) = affinity_secret.as_ref()
+                && let Ok(Some(response_id)) = extract_response_id_from_body(&buffered)
+            {
+                affinity_recorded = true;
                 spawn_async_affinity_owner_record(
                     Arc::clone(&affinity_owner_recorder),
-                    affinity_secret.clone(),
+                    secret.clone(),
                     account_id.clone(),
                     credential_generation,
                     response_id,
                     affinity_record_tasks.clone(),
                 );
             }
+            if should_scan_provider_error
+                && let Some(provider_error_body) = provider_error_body_from_http_buffer(&buffered)
+            {
+                provider_error_recorded = true;
+                if let Some(observer) = provider_error_observer.as_ref() {
+                    spawn_async_provider_error_observation(
+                        Arc::clone(observer),
+                        account_id.clone(),
+                        route_band,
+                        provider_error_body,
+                        affinity_record_tasks.clone(),
+                    );
+                }
+            }
         }
 
         frame
     })
     .boxed()
+}
+
+fn provider_error_body_from_http_buffer(buffered: &[u8]) -> Option<Vec<u8>> {
+    if classify_provider_error_envelope(buffered) != ProviderErrorClassification::Unknown {
+        return Some(buffered.to_vec());
+    }
+
+    for line in buffered.split(|byte| *byte == b'\n') {
+        let line = trim_ascii_bytes(line);
+        let Some(data) = line.strip_prefix(b"data:") else {
+            continue;
+        };
+        let data = trim_ascii_bytes(data);
+        if data == b"[DONE]" || data.is_empty() {
+            continue;
+        }
+        if classify_provider_error_envelope(data) != ProviderErrorClassification::Unknown {
+            return Some(data.to_vec());
+        }
+    }
+
+    None
+}
+
+fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    &bytes[start..end]
 }
 
 fn hold_active_reservation_until_body_drop(
@@ -1329,6 +1395,25 @@ fn spawn_async_affinity_owner_record(
             current_unix_seconds().map_or(0, |seconds| seconds),
         );
         let _record_result = recorder.record_affinity_owner(owner).await;
+    });
+}
+
+fn spawn_async_provider_error_observation(
+    observer: Arc<dyn AsyncProviderErrorObserver>,
+    account_id: codex_router_core::ids::AccountId,
+    route_band: RouteBand,
+    body: Vec<u8>,
+    affinity_record_tasks: TaskTracker,
+) {
+    affinity_record_tasks.spawn(async move {
+        observer
+            .observe_provider_error(
+                account_id,
+                route_band,
+                body,
+                current_unix_seconds().map_or(0, |seconds| seconds),
+            )
+            .await;
     });
 }
 
@@ -1435,6 +1520,50 @@ mod tests {
         records: Arc<Mutex<Vec<PreviousResponseAffinityOwnerRecord>>>,
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct RecordedHttpProviderError {
+        account_id: codex_router_core::ids::AccountId,
+        route_band: RouteBand,
+        body: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingAsyncProviderErrorObserver {
+        records: Arc<Mutex<Vec<RecordedHttpProviderError>>>,
+    }
+
+    impl RecordingAsyncProviderErrorObserver {
+        fn records(&self) -> Vec<RecordedHttpProviderError> {
+            match self.records.lock() {
+                Ok(records) => records.clone(),
+                Err(error) => panic!("test provider observer lock should be available: {error}"),
+            }
+        }
+    }
+
+    impl AsyncProviderErrorObserver for RecordingAsyncProviderErrorObserver {
+        fn observe_provider_error<'a>(
+            &'a self,
+            account_id: codex_router_core::ids::AccountId,
+            route_band: RouteBand,
+            body: Vec<u8>,
+            _observed_unix_seconds: u64,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                match self.records.lock() {
+                    Ok(mut records) => records.push(RecordedHttpProviderError {
+                        account_id,
+                        route_band,
+                        body,
+                    }),
+                    Err(error) => {
+                        panic!("test provider observer lock should be available: {error}")
+                    }
+                }
+            })
+        }
+    }
+
     impl RecordingAsyncAffinityOwnerRecorder {
         fn records(&self) -> Vec<PreviousResponseAffinityOwnerRecord> {
             match self.records.lock() {
@@ -1499,6 +1628,7 @@ mod tests {
             body,
             completion,
             Arc::new(recorder.clone()),
+            None,
             affinity_record_tasks.clone(),
         );
         let forwarded_bytes = match forwarded_body.collect().await {
@@ -1510,6 +1640,168 @@ mod tests {
 
         assert!(forwarded_bytes.ends_with(&late_response_id));
         assert_eq!(recorder.records(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn async_http_usage_limit_body_is_forwarded_unchanged_and_observed() {
+        let affinity_recorder = RecordingAsyncAffinityOwnerRecorder::default();
+        let provider_error_observer = RecordingAsyncProviderErrorObserver::default();
+        let account_id = match codex_router_core::ids::AccountId::new("acct_selected") {
+            Ok(account_id) => account_id,
+            Err(error) => panic!("test account id should validate: {error}"),
+        };
+        let completion = StreamingHttpProxyCompletion::new_for_test(
+            None,
+            account_id.clone(),
+            7,
+            crate::http_sse::allowed_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::Responses,
+                "acct_hash".to_owned(),
+            ),
+        )
+        .with_route_band_for_test(RouteBand::Responses);
+        let usage_limit_body = Bytes::from_static(
+            br#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#,
+        );
+        let body_stream = futures_util::stream::iter(std::iter::once(Ok::<_, AsyncHttpBodyError>(
+            Frame::data(usage_limit_body.clone()),
+        )));
+        let body = BodyExt::boxed(StreamBody::new(body_stream));
+        let metadata_tasks = TaskTracker::new();
+        let forwarded_body = record_affinity_owner_from_async_body(
+            body,
+            completion,
+            Arc::new(affinity_recorder.clone()),
+            Some(Arc::new(provider_error_observer.clone())),
+            metadata_tasks.clone(),
+        );
+
+        let forwarded_bytes = match forwarded_body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(error) => panic!("forwarded body should collect: {error}"),
+        };
+        metadata_tasks.close();
+        metadata_tasks.wait().await;
+
+        assert_eq!(forwarded_bytes, usage_limit_body);
+        assert_eq!(affinity_recorder.records(), Vec::new());
+        assert_eq!(
+            provider_error_observer.records(),
+            vec![RecordedHttpProviderError {
+                account_id,
+                route_band: RouteBand::Responses,
+                body: usage_limit_body.to_vec(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn async_sse_usage_limit_data_line_is_forwarded_unchanged_and_observed() {
+        let affinity_recorder = RecordingAsyncAffinityOwnerRecorder::default();
+        let provider_error_observer = RecordingAsyncProviderErrorObserver::default();
+        let account_id = match codex_router_core::ids::AccountId::new("acct_selected") {
+            Ok(account_id) => account_id,
+            Err(error) => panic!("test account id should validate: {error}"),
+        };
+        let completion = StreamingHttpProxyCompletion::new_for_test(
+            None,
+            account_id.clone(),
+            7,
+            crate::http_sse::allowed_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::Responses,
+                "acct_hash".to_owned(),
+            ),
+        )
+        .with_route_band_for_test(RouteBand::Responses);
+        let provider_error_json = br#"{"type":"error","error":{"code":"usage_limit_reached"}}"#;
+        let sse_body = Bytes::from(
+            [
+                b"event: error\n".as_slice(),
+                b"data: ".as_slice(),
+                provider_error_json.as_slice(),
+                b"\n\n".as_slice(),
+            ]
+            .concat(),
+        );
+        let body_stream = futures_util::stream::iter(std::iter::once(Ok::<_, AsyncHttpBodyError>(
+            Frame::data(sse_body.clone()),
+        )));
+        let body = BodyExt::boxed(StreamBody::new(body_stream));
+        let metadata_tasks = TaskTracker::new();
+        let forwarded_body = record_affinity_owner_from_async_body(
+            body,
+            completion,
+            Arc::new(affinity_recorder.clone()),
+            Some(Arc::new(provider_error_observer.clone())),
+            metadata_tasks.clone(),
+        );
+
+        let forwarded_bytes = match forwarded_body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(error) => panic!("forwarded body should collect: {error}"),
+        };
+        metadata_tasks.close();
+        metadata_tasks.wait().await;
+
+        assert_eq!(forwarded_bytes, sse_body);
+        assert_eq!(affinity_recorder.records(), Vec::new());
+        assert_eq!(
+            provider_error_observer.records(),
+            vec![RecordedHttpProviderError {
+                account_id,
+                route_band: RouteBand::Responses,
+                body: provider_error_json.to_vec(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn async_http_ambiguous_quota_text_is_forwarded_unchanged_without_observation() {
+        let affinity_recorder = RecordingAsyncAffinityOwnerRecorder::default();
+        let provider_error_observer = RecordingAsyncProviderErrorObserver::default();
+        let account_id = match codex_router_core::ids::AccountId::new("acct_selected") {
+            Ok(account_id) => account_id,
+            Err(error) => panic!("test account id should validate: {error}"),
+        };
+        let completion = StreamingHttpProxyCompletion::new_for_test(
+            None,
+            account_id,
+            7,
+            crate::http_sse::allowed_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::Responses,
+                "acct_hash".to_owned(),
+            ),
+        )
+        .with_route_band_for_test(RouteBand::Responses);
+        let model_text_body = Bytes::from_static(
+            br#"{"type":"response.output_text.delta","delta":"usage_limit_reached is only text"}"#,
+        );
+        let body_stream = futures_util::stream::iter(std::iter::once(Ok::<_, AsyncHttpBodyError>(
+            Frame::data(model_text_body.clone()),
+        )));
+        let body = BodyExt::boxed(StreamBody::new(body_stream));
+        let metadata_tasks = TaskTracker::new();
+        let forwarded_body = record_affinity_owner_from_async_body(
+            body,
+            completion,
+            Arc::new(affinity_recorder.clone()),
+            Some(Arc::new(provider_error_observer.clone())),
+            metadata_tasks.clone(),
+        );
+
+        let forwarded_bytes = match forwarded_body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(error) => panic!("forwarded body should collect: {error}"),
+        };
+        metadata_tasks.close();
+        metadata_tasks.wait().await;
+
+        assert_eq!(forwarded_bytes, model_text_body);
+        assert_eq!(affinity_recorder.records(), Vec::new());
+        assert_eq!(provider_error_observer.records(), Vec::new());
     }
 }
 
