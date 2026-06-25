@@ -2159,37 +2159,59 @@ where
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
                 };
                 let is_close = matches!(upstream_message, Message::Close(_));
-                let metadata_text = websocket_metadata_text(&upstream_message);
+                let metadata_text = websocket_metadata_text_handle(&upstream_message);
                 local_write.send(upstream_message).await?;
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
-                let is_completed = metadata_text
-                    .as_deref()
-                    .is_some_and(is_response_completed_text);
-                let affinity_owner = metadata_text.as_deref().and_then(|text| {
-                    websocket_affinity_owner_record_from_text(
-                        text,
-                        context.affinity_owner_context.as_ref(),
-                    )
-                });
-                if let Some(owner) = affinity_owner {
-                    if let Some(recorder) = context.async_affinity_owner_recorder.clone() {
-                        context.affinity_record_tasks.spawn(async move {
-                            let _result = recorder.record_affinity_owner(owner).await;
-                        });
-                    } else if let Some(recorder) = context.affinity_owner_recorder.clone() {
-                        context.affinity_record_tasks.spawn_blocking(move || {
-                            let _result = recorder.record_affinity_owner(&owner);
-                        });
-                    }
-                }
-                if is_completed {
-                    context.session_registry.note_response_completed(context.session_id);
+                if let Some(metadata_text) = metadata_text {
+                    let session_registry = context.session_registry.clone();
+                    let session_id = context.session_id;
+                    let affinity_owner_context = context.affinity_owner_context.clone();
+                    let async_affinity_owner_recorder =
+                        context.async_affinity_owner_recorder.clone();
+                    let affinity_owner_recorder = context.affinity_owner_recorder.clone();
+                    context.affinity_record_tasks.spawn(async move {
+                        record_forwarded_websocket_metadata(
+                            metadata_text,
+                            session_registry,
+                            session_id,
+                            affinity_owner_context.as_ref(),
+                            async_affinity_owner_recorder,
+                            affinity_owner_recorder,
+                        )
+                        .await;
+                    });
                 }
                 if is_close {
                     return Ok(());
                 }
             }
         }
+    }
+}
+
+async fn record_forwarded_websocket_metadata(
+    metadata_text: tungstenite::Utf8Bytes,
+    session_registry: WebSocketRevocationRegistry,
+    session_id: u64,
+    affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
+    async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
+    affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
+) {
+    let is_completed = is_response_completed_text(&metadata_text);
+    let affinity_owner =
+        websocket_affinity_owner_record_from_text(&metadata_text, affinity_owner_context);
+    if let Some(owner) = affinity_owner {
+        if let Some(recorder) = async_affinity_owner_recorder {
+            let _result = recorder.record_affinity_owner(owner).await;
+        } else if let Some(recorder) = affinity_owner_recorder {
+            let _join_result = tokio::task::spawn_blocking(move || {
+                let _result = recorder.record_affinity_owner(&owner);
+            })
+            .await;
+        }
+    }
+    if is_completed {
+        session_registry.note_response_completed(session_id);
     }
 }
 
@@ -2257,7 +2279,7 @@ fn websocket_affinity_owner_record(
     upstream_message: &Message,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
 ) -> Option<PreviousResponseAffinityOwnerRecord> {
-    let text = websocket_metadata_text(upstream_message)?;
+    let text = websocket_metadata_text_handle(upstream_message)?;
     websocket_affinity_owner_record_from_text(&text, affinity_owner_context)
 }
 
@@ -2297,7 +2319,7 @@ fn extract_websocket_response_id_from_text(text: &str) -> Option<PreviousRespons
 
 #[cfg(test)]
 fn is_response_completed(message: &Message) -> bool {
-    let Some(text) = websocket_metadata_text(message) else {
+    let Some(text) = websocket_metadata_text_handle(message) else {
         return false;
     };
     is_response_completed_text(&text)
@@ -2316,11 +2338,11 @@ fn is_response_completed_text(text: &str) -> bool {
         == Some("response.completed")
 }
 
-fn websocket_metadata_text(message: &Message) -> Option<String> {
+fn websocket_metadata_text_handle(message: &Message) -> Option<tungstenite::Utf8Bytes> {
     let Message::Text(text) = message else {
         return None;
     };
-    Some(text.to_string())
+    Some(text.clone())
 }
 
 fn current_unix_seconds() -> u64 {

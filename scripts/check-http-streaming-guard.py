@@ -98,20 +98,24 @@ def check_g25() -> None:
     forbid_contains("HTTP/SSE affinity tap", affinity_tap, "buffered.extend_from_slice(data)")
 
     websocket_pump = function_body(websocket, "pump_upstream_to_local")
-    require_contains("WebSocket pump", websocket_pump, "websocket_metadata_text")
+    require_contains("WebSocket pump", websocket_pump, "websocket_metadata_text_handle")
     require_contains("WebSocket pump", websocket_pump, "local_write.send(upstream_message).await?")
-    require_contains("WebSocket pump", websocket_pump, "is_response_completed_text")
-    require_contains("WebSocket pump", websocket_pump, "websocket_affinity_owner_record_from_text")
+    require_contains("WebSocket pump", websocket_pump, "record_forwarded_websocket_metadata")
     if websocket_pump.find("local_write.send(upstream_message).await?") > websocket_pump.find(
-        "is_response_completed_text"
+        "record_forwarded_websocket_metadata"
     ):
-        raise AssertionError("WebSocket pump parses completion before forwarding local frame")
-    if websocket_pump.find("local_write.send(upstream_message).await?") > websocket_pump.find(
-        "websocket_affinity_owner_record_from_text"
-    ):
-        raise AssertionError("WebSocket pump parses affinity before forwarding local frame")
-    websocket_metadata = function_body(websocket, "websocket_metadata_text")
+        raise AssertionError("WebSocket pump records metadata before forwarding local frame")
+    websocket_metadata = function_body(websocket, "websocket_metadata_text_handle")
     require_contains("WebSocket metadata helper", websocket_metadata, "Message::Text")
+    require_contains("WebSocket metadata helper", websocket_metadata, "text.clone()")
+    forbid_contains("WebSocket metadata helper", websocket_metadata, ".to_string()")
+    metadata_recorder = function_body(websocket, "record_forwarded_websocket_metadata")
+    require_contains("WebSocket metadata recorder", metadata_recorder, "is_response_completed_text")
+    require_contains(
+        "WebSocket metadata recorder",
+        metadata_recorder,
+        "websocket_affinity_owner_record_from_text",
+    )
 
 
 def main() -> int:

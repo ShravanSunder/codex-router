@@ -186,7 +186,7 @@ expected_observation() {
       printf 'HTTP/SSE release path streams request bodies without full collection before upstream egress'
       ;;
     G-25)
-      printf 'HTTP/SSE affinity extraction has explicit byte/event bounds and late metadata cannot grow an unbounded buffer'
+      printf 'HTTP/SSE affinity extraction is bounded and WebSocket metadata side effects do not gate upstream frame forwarding'
       ;;
     G-26)
       printf 'supported application routes are upstream pass-through and /v1/models is not synthesized'
