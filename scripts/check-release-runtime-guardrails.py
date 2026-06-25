@@ -132,6 +132,26 @@ CHECKS: dict[str, Check] = {
             ("crates/codex-router-proxy/src/server.rs", "handle_upgraded_connection"),
         ),
     ),
+    "G-26": Check(
+        row_id="G-26",
+        description="supported application routes are pass-through and /v1/models is not synthesized",
+        forbidden=(
+            ("crates/codex-router-proxy/src/upstream.rs", "chatgpt_backend_models_response"),
+            ("crates/codex-router-proxy/src/upstream.rs", "chatgpt_backend_models_async_response"),
+            ("crates/codex-router-proxy/src/upstream.rs", 'br#"{"models":[]}"#'),
+            ("crates/codex-router-proxy/src/upstream.rs", 'Bytes::from_static(br#"{"models":[]}"#)'),
+        ),
+        release_scan_forbidden=(
+            "chatgpt_backend_models_response",
+            "chatgpt_backend_models_async_response",
+            'br#"{"models":[]}"#',
+            'Bytes::from_static(br#"{"models":[]}"#)',
+        ),
+        required=(
+            ("crates/codex-router-proxy/src/upstream.rs", "HyperHttpUpstreamTransport"),
+            ("crates/codex-router-proxy/src/upstream.rs", ".url_for_path(request.path())"),
+        ),
+    ),
     "G-28": Check(
         row_id="G-28",
         description=(

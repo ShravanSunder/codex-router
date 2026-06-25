@@ -415,6 +415,10 @@ mod tests {
             "https://chatgpt.com/backend-api/codex/responses/compact"
         );
         assert_eq!(
+            endpoint.url_for_path("/v1/models"),
+            "https://chatgpt.com/backend-api/models"
+        );
+        assert_eq!(
             endpoint.websocket_url_for_path("/v1/responses"),
             "wss://chatgpt.com/backend-api/codex/responses"
         );

@@ -1,6 +1,5 @@
 //! Upstream request construction.
 
-use std::convert::Infallible;
 #[cfg(test)]
 use std::io::Cursor;
 #[cfg(test)]
@@ -163,12 +162,6 @@ impl StreamingUpstreamHttpTransport for HttpUpstreamTransport {
         &self,
         request: UpstreamHttpRequest,
     ) -> Result<StreamingHttpProxyResponse, HttpProxyError> {
-        if self.endpoint.base_url.ends_with("/backend-api")
-            && request.route_kind() == RouteKind::Models
-        {
-            return Ok(chatgpt_backend_models_response());
-        }
-
         if self.endpoint.base_url.starts_with("https://") {
             return send_https_request(&self.endpoint, request);
         }
@@ -203,12 +196,6 @@ impl HyperHttpUpstreamTransport {
         &self,
         request: UpstreamHttpRequest,
     ) -> Result<AsyncStreamingHttpProxyResponse, HttpProxyError> {
-        if self.endpoint.base_url.ends_with("/backend-api")
-            && request.route_kind() == RouteKind::Models
-        {
-            return Ok(chatgpt_backend_models_async_response());
-        }
-
         let uri = self
             .endpoint
             .url_for_path(request.path())
@@ -253,27 +240,6 @@ impl AsyncStreamingUpstreamHttpTransport for HyperHttpUpstreamTransport {
     ) -> BoxFuture<'a, Result<AsyncStreamingHttpProxyResponse, HttpProxyError>> {
         Box::pin(async move { self.send_streaming_inner(request).await })
     }
-}
-
-#[cfg(test)]
-fn chatgpt_backend_models_response() -> StreamingHttpProxyResponse {
-    StreamingHttpProxyResponse::new(
-        200,
-        HeaderCollection::new(vec![Header::new("Content-Type", "application/json")]),
-        Box::new(Cursor::new(br#"{"models":[]}"#.to_vec())),
-    )
-}
-
-fn chatgpt_backend_models_async_response() -> AsyncStreamingHttpProxyResponse {
-    let body = Full::new(Bytes::from_static(br#"{"models":[]}"#))
-        .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
-        .boxed();
-
-    AsyncStreamingHttpProxyResponse::new(
-        200,
-        HeaderCollection::new(vec![Header::new("Content-Type", "application/json")]),
-        body,
-    )
 }
 
 fn response_headers(headers: &http::HeaderMap) -> Result<Vec<Header>, HttpProxyError> {
@@ -555,6 +521,103 @@ fn reqwest_error(error: reqwest::Error) -> HttpProxyError {
     HttpProxyError::Upstream {
         message: error.to_string(),
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn hyper_http_upstream_transport_passes_backend_api_models_upstream() {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(error) => panic!("mock upstream should bind: {error}"),
+    };
+    let server_address = match listener.local_addr() {
+        Ok(address) => address,
+        Err(error) => panic!("mock upstream address should be readable: {error}"),
+    };
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _peer_address) = match listener.accept().await {
+            Ok(connection) => connection,
+            Err(error) => panic!("mock upstream should accept one connection: {error}"),
+        };
+        let mut request_bytes = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = match stream.read(&mut buffer).await {
+                Ok(read) => read,
+                Err(error) => panic!("mock upstream should read request: {error}"),
+            };
+            if read == 0 {
+                break;
+            }
+            request_bytes.extend_from_slice(&buffer[..read]);
+            if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let body = br#"{"object":"list","data":[{"id":"upstream-model"}]}"#;
+        let response_head = format!(
+            "HTTP/1.1 203 Non-Authoritative Information\r\n\
+             ETag: upstream-models-etag\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        );
+        if let Err(error) = stream.write_all(response_head.as_bytes()).await {
+            panic!("mock upstream should write response head: {error}");
+        }
+        if let Err(error) = stream.write_all(body).await {
+            panic!("mock upstream should write response body: {error}");
+        }
+
+        String::from_utf8(request_bytes)
+            .unwrap_or_else(|error| panic!("mock upstream request should be utf-8: {error}"))
+    });
+    let endpoint = match UpstreamEndpoint::new(format!("http://{server_address}/backend-api")) {
+        Ok(endpoint) => endpoint,
+        Err(error) => panic!("mock endpoint should validate: {error}"),
+    };
+    let upstream = HyperHttpUpstreamTransport::new(endpoint);
+    let request = UpstreamHttpRequest::new_for_test(
+        crate::routes::Method::Get,
+        "/v1/models".to_owned(),
+        crate::routes::RouteKind::Models,
+        HeaderCollection::new(vec![Header::new(
+            "Authorization",
+            "Bearer selected-upstream-token",
+        )]),
+        Vec::new(),
+    );
+
+    let response =
+        match AsyncStreamingUpstreamHttpTransport::send_streaming(&upstream, request).await {
+            Ok(response) => response,
+            Err(error) => panic!("Hyper upstream transport should forward request: {error}"),
+        };
+    let (status, headers, body) = response.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) => panic!("Hyper upstream response body should collect: {error}"),
+    };
+    let recorded_request = match server_task.await {
+        Ok(request) => request,
+        Err(error) => panic!("mock upstream task should complete: {error}"),
+    };
+    let normalized_request = recorded_request.to_ascii_lowercase();
+
+    assert_eq!(status, 203);
+    assert_eq!(headers.value("etag"), Some("upstream-models-etag"));
+    assert_eq!(
+        body_bytes.as_ref(),
+        br#"{"object":"list","data":[{"id":"upstream-model"}]}"#
+    );
+    assert!(recorded_request.starts_with("GET /backend-api/models HTTP/1.1\r\n"));
+    assert!(normalized_request.contains("authorization: bearer selected-upstream-token\r\n"));
+    assert!(!recorded_request.contains(r#"{"models":[]}"#));
 }
 
 /// Builder for an upstream request.

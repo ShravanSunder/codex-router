@@ -180,6 +180,25 @@ pub struct UpstreamHttpRequest {
 }
 
 impl UpstreamHttpRequest {
+    /// Creates a sanitized upstream request for transport-boundary tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn new_for_test(
+        method: Method,
+        path: String,
+        route_kind: RouteKind,
+        headers: HeaderCollection,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            method,
+            path,
+            route_kind,
+            headers,
+            body,
+        }
+    }
+
     /// Returns request method.
     #[must_use]
     pub const fn method(&self) -> Method {
