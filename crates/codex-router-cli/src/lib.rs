@@ -182,7 +182,6 @@ where
             codex_home,
             dry_run,
             approve_codex_home_write,
-            preview_token,
         }) => {
             let profile = CodexRouterProfile::new(port);
             let writer = CodexRouterProfileWriter::new(codex_home);
@@ -190,12 +189,9 @@ where
                 let preview = writer.dry_run(&profile)?;
                 writeln!(stdout, "target: {}", preview.target_path().display())
                     .map_err(CliError::Stdout)?;
-                writeln!(stdout, "preview-token: {}", preview.preview_token())
-                    .map_err(CliError::Stdout)?;
                 write_profile_preview(stdout, &preview).map_err(CliError::Stdout)?;
             } else {
-                let written_path =
-                    writer.write(&profile, approve_codex_home_write, preview_token.as_deref())?;
+                let written_path = writer.write(&profile, approve_codex_home_write)?;
                 writeln!(stdout, "wrote: {}", written_path.display()).map_err(CliError::Stdout)?;
             }
         }
@@ -792,7 +788,6 @@ enum ProfileCommand {
         codex_home: PathBuf,
         dry_run: bool,
         approve_codex_home_write: bool,
-        preview_token: Option<String>,
     },
 }
 
@@ -820,7 +815,6 @@ impl ProfileCommand {
                     codex_home,
                     dry_run,
                     approve_codex_home_write,
-                    preview_token,
                 } = options;
                 let codex_home = codex_home.ok_or(CliError::MissingOption {
                     option: "--codex-home",
@@ -830,7 +824,6 @@ impl ProfileCommand {
                     codex_home,
                     dry_run,
                     approve_codex_home_write,
-                    preview_token,
                 })
             }
             unknown => Err(CliError::UnknownCommand {
@@ -846,7 +839,6 @@ struct ProfileOptions {
     codex_home: Option<PathBuf>,
     dry_run: bool,
     approve_codex_home_write: bool,
-    preview_token: Option<String>,
 }
 
 impl ProfileOptions {
@@ -856,7 +848,6 @@ impl ProfileOptions {
             codex_home: None,
             dry_run: false,
             approve_codex_home_write: false,
-            preview_token: None,
         };
 
         while let Some(argument) = parser.next_string()? {
@@ -874,10 +865,6 @@ impl ProfileOptions {
                 }
                 "--approve-codex-home-write" => {
                     options.approve_codex_home_write = true;
-                }
-                "--preview-token" => {
-                    let value = parser.next_required_value("--preview-token")?;
-                    options.preview_token = Some(value);
                 }
                 unknown => {
                     return Err(CliError::UnknownOption {
@@ -1147,7 +1134,7 @@ commands:
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
-  profile write --codex-home <path> --approve-codex-home-write --preview-token <token>
+  profile write --codex-home <path> --approve-codex-home-write
   live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]
   live quota --profiles-root <path> [--base-url <url>] [--dry-run|--approve-network-account-use]
 ";
@@ -1333,13 +1320,6 @@ mod tests {
         }
     }
 
-    fn preview_token_from_stdout(stdout: &str) -> &str {
-        stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("preview-token: "))
-            .unwrap_or_else(|| panic!("preview-token line missing from output:\n{stdout}"))
-    }
-
     #[test]
     fn reports_package_name() {
         assert_eq!(package_name(), "codex-router-cli");
@@ -1457,12 +1437,12 @@ mod tests {
         assert!(!dry_run.content().contains("[profiles.codex-router]"));
         assert!(!dry_run.target_path().exists());
         assert_eq!(
-            writer.write(&profile, false, Some(dry_run.preview_token())),
+            writer.write(&profile, false),
             Err(ProfileWriteError::ApprovalRequired)
         );
         assert!(!dry_run.target_path().exists());
 
-        let written_path = must_ok(writer.write(&profile, true, Some(dry_run.preview_token())));
+        let written_path = must_ok(writer.write(&profile, true));
 
         assert_eq!(written_path, dry_run.target_path());
         assert_eq!(must_ok(fs::read_to_string(&written_path)), profile.render());
@@ -1615,7 +1595,7 @@ mod tests {
                 .as_str()
             )
         );
-        assert!(output.stdout.contains("preview-token: "));
+        assert!(!output.stdout.contains("preview-token: "));
         assert!(output.stdout.contains("current: <missing>\n"));
         assert!(output.stdout.contains("proposed:\n"));
         assert!(
@@ -1653,7 +1633,7 @@ mod tests {
                 .stdout
                 .contains(format!("target: {}", target_path.display()).as_str())
         );
-        assert!(output.stdout.contains("preview-token: "));
+        assert!(!output.stdout.contains("preview-token: "));
         assert!(output.stdout.contains("current: <missing>\n"));
         assert!(output.stdout.contains("proposed:\n"));
         assert_router_profile_contract(&output.stdout, 9876);
@@ -1692,7 +1672,7 @@ mod tests {
                 .stdout
                 .contains(format!("target: {}", target_path.display()).as_str())
         );
-        assert!(output.stdout.contains("preview-token: "));
+        assert!(!output.stdout.contains("preview-token: "));
         assert!(output.stdout.contains("current:\n"));
         assert!(
             output
@@ -1752,53 +1732,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_write_rejects_stale_preview_after_target_appears() {
-        let test_root = TestRoot::new("profile-stale-missing");
-        must_ok(fs::create_dir(test_root.path()));
-        let codex_home = test_root.path().join("codex-home");
-        let profile = CodexRouterProfile::new(8787);
-        let writer = CodexRouterProfileWriter::new(&codex_home);
-
-        let dry_run = must_ok(writer.dry_run(&profile));
-        let target_path = dry_run.target_path();
-        must_ok(fs::create_dir(&codex_home));
-        must_ok(fs::write(&target_path, ""));
-
-        assert_eq!(
-            writer.write(&profile, true, Some(dry_run.preview_token())),
-            Err(ProfileWriteError::PreviewTokenMismatch)
-        );
-        assert_eq!(must_ok(fs::read_to_string(&target_path)), "");
-    }
-
-    #[test]
-    fn profile_write_rejects_stale_preview_after_target_changes() {
-        let test_root = TestRoot::new("profile-stale-changed");
-        must_ok(fs::create_dir(test_root.path()));
-        let codex_home = test_root.path().join("codex-home");
-        must_ok(fs::create_dir(&codex_home));
-        let target_path = codex_home.join("codex-router.config.toml");
-        must_ok(fs::write(&target_path, "model_provider = \"old-router\"\n"));
-        let profile = CodexRouterProfile::new(8787);
-        let writer = CodexRouterProfileWriter::new(&codex_home);
-
-        let dry_run = must_ok(writer.dry_run(&profile));
-        must_ok(fs::write(
-            &target_path,
-            "model_provider = \"changed-router\"\n",
-        ));
-
-        assert_eq!(
-            writer.write(&profile, true, Some(dry_run.preview_token())),
-            Err(ProfileWriteError::PreviewTokenMismatch)
-        );
-        assert_eq!(
-            must_ok(fs::read_to_string(&target_path)),
-            "model_provider = \"changed-router\"\n"
-        );
-    }
-
-    #[test]
     fn profile_write_rejects_unreadable_existing_profile() {
         let test_root = TestRoot::new("profile-invalid-utf8");
         must_ok(fs::create_dir(test_root.path()));
@@ -1852,56 +1785,10 @@ mod tests {
     }
 
     #[test]
-    fn profile_write_command_requires_preview_token_with_approval_flag() {
-        let test_root = TestRoot::new("profile-write-preview-required");
+    fn profile_write_command_with_approval_writes_only_temp_codex_home() {
+        let test_root = TestRoot::new("profile-write-approved");
         must_ok(fs::create_dir(test_root.path()));
         let codex_home = test_root.path().join("codex-home");
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let error = match run_with_io(
-            vec![
-                "codex-router".into(),
-                "profile".into(),
-                "write".into(),
-                "--codex-home".into(),
-                codex_home.as_os_str().to_owned(),
-                "--approve-codex-home-write".into(),
-            ],
-            &CliContext::new(Vec::new()),
-            &mut stdout,
-            &mut stderr,
-        ) {
-            Ok(()) => panic!("profile write without preview token must fail"),
-            Err(error) => error,
-        };
-
-        assert_eq!(
-            error.to_string(),
-            "profile preview token is required before writing Codex profile files"
-        );
-        assert!(!codex_home.join("codex-router.config.toml").exists());
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn profile_write_command_with_preview_token_writes_only_temp_codex_home() {
-        let test_root = TestRoot::new("profile-write-preview-approved");
-        must_ok(fs::create_dir(test_root.path()));
-        let codex_home = test_root.path().join("codex-home");
-        let preview_output = run_cli(
-            [
-                "codex-router",
-                "profile",
-                "write",
-                "--codex-home",
-                path_to_str(&codex_home),
-                "--dry-run",
-            ],
-            CliContext::new(Vec::new()),
-        );
-        let preview_token = preview_token_from_stdout(&preview_output.stdout);
 
         let output = run_cli(
             [
@@ -1911,8 +1798,6 @@ mod tests {
                 "--codex-home",
                 path_to_str(&codex_home),
                 "--approve-codex-home-write",
-                "--preview-token",
-                preview_token,
             ],
             CliContext::new(Vec::new()),
         );
@@ -1931,24 +1816,43 @@ mod tests {
     }
 
     #[test]
+    fn profile_write_command_rejects_removed_preview_token_option() {
+        let test_root = TestRoot::new("profile-write-preview-removed");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = match run_with_io(
+            vec![
+                "codex-router".into(),
+                "profile".into(),
+                "write".into(),
+                "--codex-home".into(),
+                codex_home.as_os_str().to_owned(),
+                "--approve-codex-home-write".into(),
+                "--preview-token".into(),
+                "old-token-like-value".into(),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("removed preview token option must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "unknown option: --preview-token");
+        assert!(!codex_home.join("codex-router.config.toml").exists());
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
     fn profile_write_approved_writes_only_named_temp_profile_file() {
         let test_root = TestRoot::new("profile-write-plan-row");
         must_ok(fs::create_dir(test_root.path()));
         let codex_home = test_root.path().join("codex-home");
-        let preview_output = run_cli(
-            [
-                "codex-router",
-                "profile",
-                "write",
-                "--codex-home",
-                path_to_str(&codex_home),
-                "--port",
-                "9876",
-                "--dry-run",
-            ],
-            CliContext::new(Vec::new()),
-        );
-        let preview_token = preview_token_from_stdout(&preview_output.stdout);
 
         let output = run_cli(
             [
@@ -1960,8 +1864,6 @@ mod tests {
                 "--port",
                 "9876",
                 "--approve-codex-home-write",
-                "--preview-token",
-                preview_token,
             ],
             CliContext::new(Vec::new()),
         );

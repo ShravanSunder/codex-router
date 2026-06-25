@@ -308,11 +308,8 @@ fn run_installed_codex_mock_smoke_with_mode(
     let audit_path = router_root.join("audit").join("events.jsonl");
     let profile_writer = CodexRouterProfileWriter::new(&codex_home);
     let profile = CodexRouterProfile::new(router_port);
-    let profile_preview = profile_writer
-        .dry_run(&profile)
-        .map_err(|error| format!("failed to preview generated Codex profile: {error}"))?;
     let profile_path = profile_writer
-        .write(&profile, true, Some(profile_preview.preview_token()))
+        .write(&profile, true)
         .map_err(|error| format!("failed to write generated Codex profile: {error}"))?;
     let router_process = start_router_process(
         router_port,
@@ -499,16 +496,9 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
         }
         let profile_writer = CodexRouterProfileWriter::new(&codex_home);
         let profile = CodexRouterProfile::new(router_port);
-        let profile_preview = profile_writer.dry_run(&profile).map_err(|error| {
-            format!("failed to preview generated Codex profile for client {client_index}: {error}")
+        profile_writer.write(&profile, true).map_err(|error| {
+            format!("failed to write generated Codex profile for client {client_index}: {error}")
         })?;
-        profile_writer
-            .write(&profile, true, Some(profile_preview.preview_token()))
-            .map_err(|error| {
-                format!(
-                    "failed to write generated Codex profile for client {client_index}: {error}"
-                )
-            })?;
         let last_message_path = client_root.join("websocket-last-message.txt");
         let child_environment = CodexChildEnvironment::new(
             &process_home,
