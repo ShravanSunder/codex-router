@@ -4381,6 +4381,46 @@ exit 42
     }
 
     #[test]
+    fn sessions_list_table_renders_metadata_without_prompt_leak() {
+        const PROMPT_CANARY: &str = "TABLE_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-table");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            PROMPT_CANARY,
+            &[CodexStateThreadFixture::new(
+                "thread-table",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                1000,
+            )],
+        );
+
+        let output = run_cli(
+            [
+                "sessions", "--scope", "any", "--source", "all", "--list", "--format", "table",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(project),
+        );
+
+        assert!(output.stdout.contains("thread-table"));
+        assert!(output.stdout.contains("codex-router"));
+        assert!(output.stdout.contains("main"));
+        assert!(!output.stdout.contains(PROMPT_CANARY));
+    }
+
+    #[test]
     fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
         let test_root = TestRoot::new("serve-command");
         must_ok(fs::create_dir(test_root.path()));

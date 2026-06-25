@@ -9,6 +9,8 @@ use std::str::FromStr;
 
 use clap::Parser;
 use clap::ValueEnum;
+use comfy_table::Table;
+use comfy_table::presets::UTF8_FULL;
 use serde::Serialize;
 use sqlx::Row;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -156,7 +158,7 @@ pub fn run_sessions_command<W: Write>(
     }
     match command.format {
         SessionsFormat::Json => write_sessions_json(stdout, command, context),
-        SessionsFormat::Table => Err(SessionsCommandError::TableListNotImplemented),
+        SessionsFormat::Table => write_sessions_table(stdout, command, context),
     }
 }
 
@@ -172,6 +174,36 @@ fn write_sessions_json<W: Write>(
     let records = runtime.block_on(load_session_records(command, context))?;
     serde_json::to_writer(&mut *stdout, &records).map_err(SessionsCommandError::Json)?;
     writeln!(stdout).map_err(SessionsCommandError::Stdout)?;
+    Ok(())
+}
+
+fn write_sessions_table<W: Write>(
+    stdout: &mut W,
+    command: SessionsCommand,
+    context: &CliContext,
+) -> Result<(), SessionsCommandError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(SessionsCommandError::Runtime)?;
+    let records = runtime.block_on(load_session_records(command, context))?;
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["session", "provider", "source", "branch", "cwd", "recency"]);
+    for record in records {
+        table.add_row([
+            record.session_id,
+            record.provider.unwrap_or_else(|| "-".to_owned()),
+            record.source.unwrap_or_else(|| "-".to_owned()),
+            record.git_branch.unwrap_or_else(|| "-".to_owned()),
+            record.cwd.unwrap_or_else(|| "-".to_owned()),
+            record
+                .recency_at_ms
+                .map(|recency_at_ms| recency_at_ms.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+        ]);
+    }
+    writeln!(stdout, "{table}").map_err(SessionsCommandError::Stdout)?;
     Ok(())
 }
 
@@ -430,9 +462,6 @@ pub enum SessionsCommandError {
     /// Interactive picker has not landed yet.
     #[error("sessions interactive picker is not implemented yet; use --list --format json")]
     InteractivePickerNotImplemented,
-    /// Table output has not landed yet.
-    #[error("sessions table output is not implemented yet; use --format json")]
-    TableListNotImplemented,
     /// Latest-session launch has not landed yet.
     #[error("sessions --last is not implemented yet")]
     LastNotImplemented,
