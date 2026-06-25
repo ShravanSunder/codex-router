@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::str::FromStr;
 
 use clap::Parser;
@@ -107,6 +108,8 @@ pub struct SessionsCommand {
     pub format: SessionsFormat,
     /// Resume the latest session matching filters.
     pub last: bool,
+    /// Print the command that would be launched instead of executing it.
+    pub dry_run: bool,
 }
 
 impl SessionsCommand {
@@ -124,6 +127,7 @@ impl SessionsCommand {
             list: parsed.list,
             format: parsed.format,
             last: parsed.last,
+            dry_run: parsed.dry_run,
         })
     }
 }
@@ -145,6 +149,8 @@ struct ClapSessionsCommand {
     format: SessionsFormat,
     #[arg(long)]
     last: bool,
+    #[arg(long)]
+    dry_run: bool,
 }
 
 /// Runs the sessions command.
@@ -153,6 +159,9 @@ pub fn run_sessions_command<W: Write>(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
+    if command.last {
+        return run_last_session(stdout, command, context);
+    }
     if !command.list {
         return Err(SessionsCommandError::InteractivePickerNotImplemented);
     }
@@ -211,9 +220,6 @@ async fn load_session_records(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<Vec<SessionRecord>, SessionsCommandError> {
-    if command.last {
-        return Err(SessionsCommandError::LastNotImplemented);
-    }
     let scope_filter = ScopeFilter::from_command(command.scope, context);
     let codex_home_path = codex_home(context)?;
     let provider_filter = ProviderFilter::from_command(&command.provider, &codex_home_path)?;
@@ -276,6 +282,47 @@ async fn load_session_records(
     pool.close().await;
 
     Ok(records)
+}
+
+fn run_last_session<W: Write>(
+    stdout: &mut W,
+    command: SessionsCommand,
+    context: &CliContext,
+) -> Result<(), SessionsCommandError> {
+    let dry_run = command.dry_run;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(SessionsCommandError::Runtime)?;
+    let mut records = runtime.block_on(load_session_records(command, context))?;
+    let Some(record) = records.drain(..).next() else {
+        return Err(SessionsCommandError::NoSessionsMatch);
+    };
+
+    if dry_run {
+        writeln!(
+            stdout,
+            "codex --profile codex-router resume {}",
+            record.session_id
+        )
+        .map_err(SessionsCommandError::Stdout)?;
+        return Ok(());
+    }
+
+    let status = Command::new("codex")
+        .arg("--profile")
+        .arg("codex-router")
+        .arg("resume")
+        .arg(&record.session_id)
+        .status()
+        .map_err(SessionsCommandError::CodexLaunch)?;
+    if !status.success() {
+        return Err(SessionsCommandError::CodexExit {
+            status: status.to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -462,9 +509,18 @@ pub enum SessionsCommandError {
     /// Interactive picker has not landed yet.
     #[error("sessions interactive picker is not implemented yet; use --list --format json")]
     InteractivePickerNotImplemented,
-    /// Latest-session launch has not landed yet.
-    #[error("sessions --last is not implemented yet")]
-    LastNotImplemented,
+    /// No matching session was found.
+    #[error("no Codex sessions matched the requested filters")]
+    NoSessionsMatch,
+    /// Codex failed to launch.
+    #[error("failed to launch codex resume command: {0}")]
+    CodexLaunch(std::io::Error),
+    /// Codex exited unsuccessfully.
+    #[error("codex resume command exited with {status}")]
+    CodexExit {
+        /// Exit status string.
+        status: String,
+    },
     /// Current provider could not be resolved.
     #[error(
         "sessions --provider current could not find model_provider in CODEX_HOME/codex-router.config.toml or CODEX_HOME/config.toml"

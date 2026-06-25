@@ -1134,7 +1134,7 @@ commands:
   account list [--router-root <path>]
   quota refresh [--router-root <path>] [--base-url <url>]
   quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]
-  sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last]
+  sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -4060,6 +4060,7 @@ exit 42
         assert!(!command.list);
         assert_eq!(command.format, crate::sessions::SessionsFormat::Table);
         assert!(!command.last);
+        assert!(!command.dry_run);
     }
 
     #[test]
@@ -4091,6 +4092,7 @@ exit 42
         assert!(command.list);
         assert_eq!(command.format, crate::sessions::SessionsFormat::Json);
         assert!(command.last);
+        assert!(!command.dry_run);
     }
 
     #[test]
@@ -4418,6 +4420,64 @@ exit 42
         assert!(output.stdout.contains("codex-router"));
         assert!(output.stdout.contains("main"));
         assert!(!output.stdout.contains(PROMPT_CANARY));
+    }
+
+    #[test]
+    fn sessions_last_dry_run_prints_codex_resume_command_for_latest_match() {
+        let test_root = TestRoot::new("sessions-last-dry-run");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "LAST_CANARY_SHOULD_NOT_LEAK",
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-old",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    1000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-new",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2000,
+                ),
+            ],
+        );
+
+        let output = run_cli(
+            [
+                "sessions",
+                "--scope",
+                "any",
+                "--source",
+                "interactive",
+                "--provider",
+                "codex-router",
+                "--last",
+                "--dry-run",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(project),
+        );
+
+        assert_eq!(
+            output.stdout,
+            "codex --profile codex-router resume thread-new\n"
+        );
     }
 
     #[test]
