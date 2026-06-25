@@ -79,6 +79,7 @@ mod tests {
     use crate::websocket::WebSocketHandshakeRequest;
     use crate::websocket::WebSocketProtocolRouter;
     use crate::websocket::WebSocketRevocationRegistry;
+    use bytes::Bytes;
     use codex_router_auth::resolver::CredentialRefreshClient;
     use codex_router_auth::resolver::CredentialResolverError;
     use codex_router_auth::resolver::NoopCredentialRefreshClient;
@@ -3390,7 +3391,6 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1)
         .with_audit_file(audit_path.clone());
         let runtime = match LoopbackRouterRuntime::start(config) {
             Ok(runtime) => runtime,
@@ -3684,8 +3684,7 @@ mod tests {
             database_path,
             secret_path,
         )
-        .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1);
+        .with_quota_clock(1_030, 60);
         let runtime = match LoopbackRouterRuntime::start(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
@@ -3874,8 +3873,7 @@ mod tests {
             database_path,
             secret_path,
         )
-        .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1);
+        .with_quota_clock(1_030, 60);
         let runtime = match LoopbackRouterRuntime::start(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
@@ -4160,8 +4158,7 @@ mod tests {
             database_path,
             secret_path,
         )
-        .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1);
+        .with_quota_clock(1_030, 60);
         let runtime = match LoopbackRouterRuntime::start(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
@@ -4409,8 +4406,8 @@ mod tests {
     }
 
     #[test]
-    fn loopback_router_runtime_bounds_websocket_wait_for_first_frame() {
-        let temp_dir = ProxyTestTempDir::new("runtime_websocket_no_first_frame");
+    fn loopback_router_runtime_keeps_websocket_preconnect_open_until_client_close() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_preconnect");
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
@@ -4459,24 +4456,24 @@ mod tests {
             Ok(connection) => connection,
             Err(error) => panic!("local websocket client should connect: {error}"),
         };
-        let bounded_result = done_receiver.recv_timeout(Duration::from_millis(750));
+        match done_receiver.recv_timeout(Duration::from_millis(750)) {
+            Ok(result) => panic!("preconnect should remain open without first data: {result:?}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("server result channel should remain open: {error}"),
+        }
         drop(client);
+        let served_result = match done_receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result,
+            Err(error) => panic!("server should complete after client close: {error}"),
+        };
 
         match server_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("server thread panicked: {error:?}"),
         }
-        match bounded_result {
-            Ok(Err(error)) => assert!(
-                error.contains("FirstFrameTimeout"),
-                "bounded upgraded websocket failure should propagate FirstFrameTimeout, got {error}"
-            ),
-            Ok(Ok(handled)) => {
-                panic!("bounded upgraded websocket failure returned success: handled={handled}");
-            }
-            Err(error) => {
-                panic!("server should stop waiting for first websocket frame promptly: {error}");
-            }
+        match served_result {
+            Ok(handled) => assert_eq!(handled, 1),
+            Err(error) => panic!("client close before first data should be clean: {error}"),
         }
     }
 
@@ -4626,12 +4623,9 @@ mod tests {
         drop(successful_client);
         drop(timeout_client);
         match done_receiver.recv_timeout(Duration::from_secs(2)) {
-            Ok(Err(error)) => assert!(
-                error.contains("FirstFrameTimeout"),
-                "serve should return stored handler error after draining affinity task, got {error}"
-            ),
-            Ok(Ok(handled)) => {
-                panic!("serve should return stored handler error, handled={handled}")
+            Ok(Ok(handled)) => assert_eq!(handled, 2),
+            Ok(Err(error)) => {
+                panic!("idle preconnect close should not return stored handler error: {error}")
             }
             Err(error) => panic!("serve should return after recorder release: {error}"),
         }
@@ -4918,8 +4912,7 @@ mod tests {
                 TokenGeneration::new(1),
             ),
         )
-        .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1);
+        .with_quota_clock(1_030, 60);
         let runtime = match LoopbackRouterRuntime::start(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
@@ -6797,7 +6790,7 @@ mod tests {
             let handshake = WebSocketHandshakeRequest::new()
                 .with_header(Header::new("Authorization", "Bearer current-token"));
             tunnel
-                .handle_upgraded_connection(local_websocket, handshake, &upstream_url, usize::MAX)
+                .handle_upgraded_connection(local_websocket, handshake, &upstream_url)
                 .await
         };
         let client_future = async {
@@ -6807,6 +6800,15 @@ mod tests {
                     Ok(connected) => connected,
                     Err(error) => panic!("local websocket client should connect: {error}"),
                 };
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            assert!(
+                selector.take_recorded().is_empty(),
+                "preconnect must not select before first data frame"
+            );
+            assert!(
+                resolver.take_recorded().is_empty(),
+                "preconnect must not resolve upstream credentials before first data frame"
+            );
             if let Err(error) = client_websocket
                 .send(Message::text(r#"{"type":"response.create","turn":1}"#))
                 .await
@@ -6863,6 +6865,85 @@ mod tests {
         assert_eq!(revocations.snapshot().high_water_sessions, 1);
         assert_eq!(revocations.snapshot().registered_sessions, 1);
         assert_eq!(revocations.snapshot().closed_sessions, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_websocket_tunnel_handles_control_frames_before_first_data_without_selection() {
+        let local_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) => panic!("router websocket listener should bind: {error}"),
+        };
+        let local_address = match local_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("router websocket listener address should read: {error}"),
+        };
+        let auth_gate = local_auth_gate();
+        let selector = RecordingAsyncSelector::default();
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
+        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
+            .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+        let server_future = async {
+            let (stream, _peer_address) = match local_listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => panic!("router websocket listener should accept: {error}"),
+            };
+            let local_websocket = match tokio_tungstenite::accept_async(stream).await {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("local websocket should accept: {error}"),
+            };
+            let handshake = WebSocketHandshakeRequest::new()
+                .with_header(Header::new("Authorization", "Bearer current-token"));
+            tunnel
+                .handle_upgraded_connection(
+                    local_websocket,
+                    handshake,
+                    "ws://127.0.0.1:1/v1/responses",
+                )
+                .await
+        };
+        let client_future = async {
+            let local_url = format!("ws://{local_address}/v1/responses");
+            let (mut client_websocket, _response) =
+                match tokio_tungstenite::connect_async(local_url).await {
+                    Ok(connected) => connected,
+                    Err(error) => panic!("local websocket client should connect: {error}"),
+                };
+            if let Err(error) = client_websocket
+                .send(Message::Ping(Bytes::from_static(b"preconnect")))
+                .await
+            {
+                panic!("local client should send preconnect ping: {error}");
+            }
+            let pong = tokio::time::timeout(Duration::from_secs(1), client_websocket.next())
+                .await
+                .unwrap_or_else(|_elapsed| panic!("local client should receive preconnect pong"));
+            match pong {
+                Some(Ok(Message::Pong(payload))) => {
+                    assert_eq!(payload, Bytes::from_static(b"preconnect"));
+                }
+                Some(Ok(message)) => panic!("local client should receive pong, got {message:?}"),
+                Some(Err(error)) => panic!("local client pong should be valid: {error}"),
+                None => panic!("local client should receive pong before close"),
+            }
+            assert!(
+                selector.take_recorded().is_empty(),
+                "control frames before data must not select an account"
+            );
+            assert!(
+                resolver.take_recorded().is_empty(),
+                "control frames before data must not resolve provider credentials"
+            );
+            if let Err(error) = client_websocket.close(None).await {
+                panic!("local client should close cleanly before first data: {error}");
+            }
+        };
+
+        let (server_result, ()) = tokio::join!(server_future, client_future);
+        match server_result {
+            Ok(()) => {}
+            Err(error) => panic!("pre-upstream control frames should close cleanly: {error}"),
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6950,7 +7031,7 @@ mod tests {
                 .with_header(Header::new("X-Codex-Router-Token", "current-token"))
                 .with_header(Header::new("Authorization", "Bearer current-token"));
             tunnel
-                .handle_upgraded_connection(local_websocket, handshake, &upstream_url, 1)
+                .handle_upgraded_connection(local_websocket, handshake, &upstream_url)
                 .await
         };
         let client_future = async {
@@ -7045,7 +7126,7 @@ mod tests {
             let handshake = WebSocketHandshakeRequest::new()
                 .with_header(Header::new("X-Codex-Router-Token", "current-token"));
             tunnel
-                .handle_upgraded_connection(local_websocket, handshake, &upstream_url, 3)
+                .handle_upgraded_connection(local_websocket, handshake, &upstream_url)
                 .await
         };
         let client_future = async {
@@ -7173,7 +7254,7 @@ mod tests {
             let handshake = WebSocketHandshakeRequest::new()
                 .with_header(Header::new("X-Codex-Router-Token", "current-token"));
             tunnel
-                .handle_upgraded_connection(local_websocket, handshake, &upstream_url, 1)
+                .handle_upgraded_connection(local_websocket, handshake, &upstream_url)
                 .await
         };
         let client_future = async {

@@ -127,8 +127,7 @@ pub(super) fn start_route_native_router(
             secret_root.to_path_buf(),
             local_token,
         )
-        .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1),
+        .with_quota_clock(1_030, 60),
     )
     .map_err(|error| format!("failed to start route-native router: {error}"))?;
     let address = runtime.local_addr();

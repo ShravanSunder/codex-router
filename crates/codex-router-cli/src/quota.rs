@@ -1031,6 +1031,7 @@ fn write_quota_table(
         "5h",
         "weekly",
         "pace",
+        "burn",
         "resets available",
         "routing",
         "next use",
@@ -1042,6 +1043,7 @@ fn write_quota_table(
             row.short_window.as_str(),
             row.weekly_window.as_str(),
             row.pace.as_str(),
+            row.burn.as_str(),
             row.reset_credits_available.as_str(),
             row.routing.as_str(),
             row.next_use.as_str(),
@@ -1058,18 +1060,19 @@ fn write_quota_plain(
 ) -> Result<(), QuotaCommandError> {
     writeln!(
         stdout,
-        "account\tstatus\t5h\tweekly\tpace\tresets available\trouting\tnext use"
+        "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
             row.account_status,
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
             row.pace.replace('\n', " "),
+            row.burn.replace('\n', " "),
             row.reset_credits_available,
             row.routing.replace('\n', " "),
             row.next_use,
@@ -1167,6 +1170,7 @@ struct QuotaStatusRow {
     short_window: String,
     weekly_window: String,
     pace: String,
+    burn: String,
     reset_credits_available: String,
     reset_credits_available_value: Option<u32>,
     routing: String,
@@ -1210,6 +1214,7 @@ impl QuotaStatusRow {
                 unicode_bars,
             ),
             pace: format_pace_cell(&input.windows, assessment, now_unix_seconds),
+            burn: format_burn_cell(assessment),
             reset_credits_available: format_reset_credits(input.reset_credits_available),
             reset_credits_available_value: input.reset_credits_available,
             routing: format_routing_cell(assessment),
@@ -1365,6 +1370,28 @@ fn format_pace_cell(
         now_unix_seconds,
     );
     format!("{short}\n{weekly}")
+}
+
+fn format_burn_cell(assessment: &BurnDownAccountAssessment) -> String {
+    if matches!(
+        assessment.quota_evidence_reason(),
+        QuotaEvidenceReason::NeedsQuotaProbe
+            | QuotaEvidenceReason::MissingExpectedWindow
+            | QuotaEvidenceReason::UnknownQuotaWindow
+            | QuotaEvidenceReason::MissingResetTime
+    ) {
+        return "needs refresh".to_owned();
+    }
+
+    let score = assessment.routing_weight().map_or_else(
+        || "not selectable".to_owned(),
+        |weight| format!("score {weight}"),
+    );
+    format!(
+        "{score}\nrisk 5h {}% / weekly {}%",
+        assessment.short_pressure(),
+        assessment.long_pressure()
+    )
 }
 
 fn format_window_pace(

@@ -86,7 +86,6 @@ struct ConcurrentWebSocketHarnessConfig {
     artifact_mode: &'static str,
     upstream: ConcurrentUpstreamConfig,
     codex_command_timeout: Duration,
-    router_max_upstream_messages: usize,
     router_max_connections: usize,
     capture_registry_report: bool,
 }
@@ -97,7 +96,6 @@ impl ConcurrentWebSocketHarnessConfig {
             artifact_mode: "three-websocket",
             upstream: ConcurrentUpstreamConfig::quick(3),
             codex_command_timeout: CODEX_COMMAND_TIMEOUT,
-            router_max_upstream_messages: 4,
             router_max_connections: 3,
             capture_registry_report: false,
         }
@@ -109,7 +107,6 @@ impl ConcurrentWebSocketHarnessConfig {
             artifact_mode: "three-websocket-soak",
             upstream: ConcurrentUpstreamConfig::soak(3, hold_duration),
             codex_command_timeout: hold_duration.saturating_add(SOAK_COMMAND_TIMEOUT_SLACK),
-            router_max_upstream_messages: 64,
             router_max_connections: 3,
             capture_registry_report: true,
         }
@@ -418,7 +415,6 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
         local_token: None,
         upstream_base_url: format!("http://{}/v1", upstream.address()),
         audit_path,
-        max_websocket_upstream_messages: config.router_max_upstream_messages,
         max_connections: config.router_max_connections,
         websocket_registry_report_file: registry_report_path.clone(),
     })?;
@@ -1012,7 +1008,6 @@ fn start_router_process(
         local_token,
         upstream_base_url,
         audit_path,
-        max_websocket_upstream_messages: 4,
         max_connections: 64,
         websocket_registry_report_file: None,
     })
@@ -1025,7 +1020,6 @@ struct RouterProcessStartOptions {
     local_token: Option<String>,
     upstream_base_url: String,
     audit_path: PathBuf,
-    max_websocket_upstream_messages: usize,
     max_connections: usize,
     websocket_registry_report_file: Option<PathBuf>,
 }
@@ -1051,8 +1045,6 @@ fn start_router_process_with_options(
         "--max-snapshot-age-seconds".to_owned(),
         "60".to_owned(),
         "--disable-background-quota-refresh".to_owned(),
-        "--max-websocket-upstream-messages".to_owned(),
-        options.max_websocket_upstream_messages.to_string(),
         "--max-connections".to_owned(),
         options.max_connections.to_string(),
         "--audit-file".to_owned(),

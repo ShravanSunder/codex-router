@@ -93,6 +93,8 @@ json_output="${smoke_root}/quota-status.json"
 grep -q "account" "${table_output}"
 grep -q "5h" "${table_output}"
 grep -q "weekly" "${table_output}"
+grep -q "pace" "${table_output}"
+grep -q "burn" "${table_output}"
 grep -q "routing" "${table_output}"
 grep -q "next use" "${table_output}"
 grep -q "█" "${table_output}"
@@ -100,9 +102,9 @@ grep -q "askluna" "${table_output}"
 grep -q "matches" "${table_output}"
 grep -q "ssdev" "${table_output}"
 grep -Eq "preferred|available|blocked|needs probe" "${table_output}"
-grep -q "█" "${plain_output}"
-if grep -q "\\[" "${plain_output}"; then
-  echo "plain quota status used legacy ASCII bars" >&2
+grep -q "score" "${plain_output}"
+if grep -q "█" "${plain_output}"; then
+  echo "plain quota status used unicode table bars" >&2
   exit 1
 fi
 grep -q "selected_pool" "${json_output}"
@@ -127,19 +129,30 @@ assert len(payload["accounts"]) == 3
 
 by_label = {account["safe_account_label"]: account for account in payload["accounts"]}
 assert by_label["askluna"]["availability"] == "blocked"
-assert by_label["askluna"]["next_use"] == "no"
+assert by_label["askluna"]["next_use"] == "blocked"
 assert by_label["matches"]["availability"] in {"usable", "reserve"}
 assert by_label["ssdev"]["availability"] in {"usable", "reserve"}
+assert by_label["ssdev"]["routing_weight"] == 7
+assert by_label["ssdev"]["long_pressure"] == 3
+assert by_label["matches"]["routing_weight"] == 1
+assert by_label["matches"]["long_pressure"] == 32
 
 for account in payload["accounts"]:
     assert len(account["windows"]) == 2
     assert account["routing_reason"] in {
-        "preferred_next",
-        "available",
-        "held",
-        "blocked",
-        "needs_probe",
-        "excluded",
+        "preferred_weekly_healthier",
+        "preferred_weekly_reset_soon",
+        "preferred_short_reset_soon",
+        "preferred_highest_weight",
+        "available_same_pool",
+        "held_reserve",
+        "held_unknown",
+        "unknown_fallback_preferred",
+        "unknown_fallback_available",
+        "excluded_disabled",
+        "excluded_missing_credential",
+        "blocked_window_exhausted",
+        "blocked_window_ineligible",
     }
 PY
 

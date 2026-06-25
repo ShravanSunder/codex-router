@@ -339,6 +339,43 @@ write_proof_receipt() {
   fi
 }
 
+mark_row_pass() {
+  local row_id="$1"
+  local layer="$2"
+  local owner="$3"
+  local notes="$4"
+  shift 4
+
+  for command in "$@"; do
+    bash -lc "$command"
+  done
+
+  if ! ensure_guarded_source_paths_clean "$row_id"; then
+    receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
+    printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+    exit 1
+  fi
+
+  receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
+  python3 - "$receipt" "$notes" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+notes = sys.argv[2]
+payload = json.loads(path.read_text())
+payload["status_after"] = "[x] passed"
+payload["result"] = "pass"
+payload["exit_code"] = 0
+payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+payload["notes"] = notes
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+  printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+  exit 0
+}
+
 main() {
   if [[ $# -ne 1 ]]; then
     usage
@@ -358,6 +395,134 @@ main() {
   owner=$(row_owner "$row_id")
 
   case "$row_id" in
+    U-01)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Route classification and unsupported route unit proofs passed." \
+        "cargo test -p codex-router-proxy route_classifier_supports_required_codex_routes_and_rejects_realtime -- --nocapture" \
+        "cargo test -p codex-router-proxy http_proxy_rejects_unsupported_paths_before_upstream -- --nocapture" \
+        "cargo test -p codex-router-proxy loopback_router_runtime_rejects_unsupported_websocket_path_before_accept -- --nocapture"
+      ;;
+    U-02)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Local auth tokenless/token-required and smuggling unit proofs passed." \
+        "cargo test -p codex-router-proxy local_auth -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_http_proxy_rejects_forbidden_local_auth_carriers_before_selection -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_websocket_router_rejects_first_frame_auth_smuggling_before_selection -- --nocapture"
+      ;;
+    U-03)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "WebSocket first request data validation and pre-duplex cancellation proofs passed." \
+        "cargo test -p codex-router-proxy websocket_first_frame_rejects_hostile_preselection_cases -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_websocket_router_rejects_first_frame_before_selection_or_credentials -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::runtime_shutdown_cancels_pending_first_frame_routing -- --nocapture"
+      ;;
+    U-04)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "HTTP/SSE and WebSocket affinity metadata extraction unit proofs passed." \
+        "cargo test -p codex-router-proxy authenticated_http_proxy_records_top_level_response_id_owner -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_http_proxy_ignores_nested_response_ids -- --nocapture" \
+        "cargo test -p codex-router-proxy async_websocket_tunnel_records_top_level_response_owner -- --nocapture"
+      ;;
+    U-05)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Header sanitation proofs passed for HTTP/SSE and WebSocket upstream auth injection." \
+        "cargo test -p codex-router-proxy upstream_request_strips_local_and_hop_headers_and_injects_auth_once -- --nocapture" \
+        "cargo test -p codex-router-proxy async_websocket_tunnel_sanitizes_upstream_handshake -- --nocapture"
+      ;;
+    U-06)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Selection preservation proofs passed across async state projection and proxy selector behavior." \
+        "cargo test -p codex-router-state async_selector_input_matches_sync_repository_projection -- --nocapture" \
+        "cargo test -p codex-router-proxy async_repository_backed_selector -- --nocapture" \
+        "cargo test -p codex-router-proxy repository_backed_selector -- --nocapture"
+      ;;
+    U-08)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Release request-time async trait compile and selector boundary proofs passed." \
+        "cargo check -p codex-router-proxy" \
+        "cargo test -p codex-router-proxy async_repository_backed_selector -- --nocapture"
+      ;;
+    I-01)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Concurrent WebSocket sessions progress independently in the mock runtime fixture." \
+        "cargo test -p codex-router-proxy loopback_router_runtime_accepts_second_websocket_while_first_is_blocked -- --nocapture"
+      ;;
+    I-02)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "A stalled upstream WebSocket does not block sibling WebSocket completion." \
+        "cargo test -p codex-router-proxy loopback_router_runtime_accepts_second_websocket_while_first_is_blocked -- --nocapture"
+      ;;
+    I-03)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "A stalled WebSocket does not block independent HTTP/SSE completion." \
+        "cargo test -p codex-router-proxy loopback_router_runtime_accepts_http_while_websocket_is_blocked -- --nocapture"
+      ;;
+    I-04)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Same-session bidirectional interleave proof passed before response completion." \
+        "cargo test -p codex-router-proxy async_websocket_tunnel_forwards_first_frame_and_second_local_frame -- --nocapture"
+      ;;
+    I-06)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Upstream/local close cleanup proof passed through async pump shutdown fixtures." \
+        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::runtime_shutdown_cancels_active_duplex_pumps -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture"
+      ;;
+    I-07)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Blocked write/backpressure cleanup proof passed through duplex pump cancellation fixture." \
+        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::runtime_shutdown_cancels_active_duplex_pumps -- --nocapture"
+      ;;
+    I-08)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Post-upgrade pre-upstream failure classes close deterministically with redacted router outcomes." \
+        "cargo test -p codex-router-proxy authenticated_websocket_router_rejects_first_frame_before_selection_or_credentials -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_websocket_router_requires_affinity_secret_before_selection -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_websocket_router_missing_refresh_token_fails_closed_before_upstream_open -- --nocapture"
+      ;;
+    I-09)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Fragmented WebSocket upgrade proof passed through the loopback runtime." \
+        "cargo test -p codex-router-proxy loopback_router_runtime_accepts_fragmented_websocket_upgrade -- --nocapture"
+      ;;
+    I-10)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Unsupported HTTP and WebSocket routes reject before selection/upstream." \
+        "cargo test -p codex-router-proxy http_proxy_rejects_unsupported_paths_before_upstream -- --nocapture" \
+        "cargo test -p codex-router-proxy loopback_router_runtime_rejects_unsupported_websocket_path_before_accept -- --nocapture"
+      ;;
+    I-11)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Hostile auth probes reject before route classification, selection, or upstream egress." \
+        "cargo test -p codex-router-proxy authenticated_http_proxy_rejects_forbidden_local_auth_carriers_before_selection -- --nocapture" \
+        "cargo test -p codex-router-proxy loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_accept -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_websocket_router_rejects_first_frame_auth_smuggling_before_selection -- --nocapture"
+      ;;
+    I-12)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Local router auth stripping and upstream auth injection canaries passed." \
+        "cargo test -p codex-router-proxy upstream_request_strips_local_and_hop_headers_and_injects_auth_once -- --nocapture" \
+        "cargo test -p codex-router-test-support route_native_black_box_all_supported_routes_and_rejections -- --ignored --nocapture"
+      ;;
+    I-13)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Previous-response affinity owner recording proofs passed for HTTP/SSE and WebSocket." \
+        "cargo test -p codex-router-proxy authenticated_http_proxy_records_top_level_response_id_owner -- --nocapture" \
+        "cargo test -p codex-router-proxy authenticated_http_proxy_records_streaming_sse_response_id_after_body_read -- --nocapture" \
+        "cargo test -p codex-router-proxy async_websocket_tunnel_records_top_level_response_owner -- --nocapture"
+      ;;
+    I-14)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Token generation revocation closes stale explicit-token WebSocket sessions only." \
+        "cargo test -p codex-router-proxy loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::registry_tests::registry_revokes_only_stale_generation_cancellations -- --nocapture"
+      ;;
+    I-15)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Registry cleanup proof passed for close/revocation/shutdown paths." \
+        "cargo test -p codex-router-proxy websocket::registry_tests::registry_snapshot_tracks_active_high_water_and_cleanup -- --nocapture" \
+        "cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture"
+      ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09)
       three_websocket_artifact="${CODEX_ROUTER_THREE_WEBSOCKET_ARTIFACT:-}"
       artifact_source="CODEX_ROUTER_THREE_WEBSOCKET_ARTIFACT"

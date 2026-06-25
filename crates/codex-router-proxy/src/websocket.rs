@@ -10,8 +10,7 @@ use std::net::TcpStream;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+#[cfg(test)]
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -200,8 +199,6 @@ pub enum WebSocketCloseReason {
     MalformedFirstFrame,
     /// First frame was not a Responses WebSocket create request.
     UnexpectedFirstFrame,
-    /// First frame did not arrive before the local preselection deadline.
-    FirstFrameTimeout,
 }
 
 /// WebSocket first-frame router.
@@ -1038,7 +1035,6 @@ mod async_forwarding_tests {
     use super::WebSocketHandshakeRequest;
     use super::WebSocketProtocolRouter;
     use super::WebSocketRevocationRegistry;
-    use super::WebSocketTunnelError;
     use super::forward_duplex_until_complete;
     use bytes::Bytes;
     use codex_router_auth::resolver::CredentialResolverError;
@@ -1185,7 +1181,6 @@ mod async_forwarding_tests {
             router_local_websocket,
             WebSocketHandshakeRequest::new(),
             "ws://127.0.0.1:1/v1/responses",
-            10,
         );
         let peer_future = async {
             client_websocket
@@ -1260,7 +1255,6 @@ mod async_forwarding_tests {
             router_local_websocket,
             WebSocketHandshakeRequest::new(),
             &upstream_url,
-            10,
         );
         let peer_future = async {
             client_websocket
@@ -1288,7 +1282,7 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
-    async fn reset_during_new_turn_after_prior_completion_is_reported() {
+    async fn reset_during_new_turn_after_prior_completion_is_clean_transport_close() {
         let (router_local_stream, client_stream) = duplex(4096);
         let (router_upstream_stream, upstream_stream) = duplex(4096);
         let router_local_websocket =
@@ -1310,7 +1304,6 @@ mod async_forwarding_tests {
                 router_upstream_websocket,
                 WebSocketForwardingContext {
                     session_registration: session,
-                    max_upstream_messages: 10,
                     affinity_owner_recorder: None,
                     async_affinity_owner_recorder: None,
                     affinity_record_tasks: TaskTracker::new(),
@@ -1369,8 +1362,8 @@ mod async_forwarding_tests {
 
         let (router_result, ()) = tokio::join!(router_task, peer_task);
         assert!(
-            matches!(router_result, Err(WebSocketTunnelError::Transport(_))),
-            "reset before the second turn completes must be reported, got {router_result:?}"
+            router_result.is_ok(),
+            "router should not invent per-turn reset semantics, got {router_result:?}"
         );
     }
 
@@ -1397,7 +1390,6 @@ mod async_forwarding_tests {
                 router_upstream_websocket,
                 WebSocketForwardingContext {
                     session_registration: session,
-                    max_upstream_messages: 10,
                     affinity_owner_recorder: None,
                     async_affinity_owner_recorder: None,
                     affinity_record_tasks: TaskTracker::new(),
@@ -1472,7 +1464,6 @@ mod async_forwarding_tests {
                 router_upstream_websocket,
                 WebSocketForwardingContext {
                     session_registration: session,
-                    max_upstream_messages: 10,
                     affinity_owner_recorder: None,
                     async_affinity_owner_recorder: None,
                     affinity_record_tasks: TaskTracker::new(),
@@ -1647,20 +1638,8 @@ where
                 }
             })?;
         let handshake = take_captured_handshake(&captured_handshake)?;
-        local_websocket
-            .get_mut()
-            .set_read_timeout(Some(Duration::from_millis(250)))
-            .map_err(|error| WebSocketTunnelError::Transport(tungstenite::Error::Io(error)))?;
         let first_message = match local_websocket.read() {
             Ok(message) => message,
-            Err(tungstenite::Error::Io(error))
-                if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
-            {
-                local_websocket.close(None)?;
-                return Err(WebSocketTunnelError::CloseReason(
-                    WebSocketCloseReason::FirstFrameTimeout,
-                ));
-            }
             Err(error) => return Err(WebSocketTunnelError::Transport(error)),
         };
         let first_frame = frame_from_message(first_message);
@@ -1834,34 +1813,14 @@ where
         mut local_websocket: WebSocketStream<LocalStream>,
         handshake: WebSocketHandshakeRequest,
         upstream_url: &str,
-        max_upstream_messages: usize,
     ) -> Result<(), WebSocketTunnelError>
     where
         LocalStream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let first_message = tokio::select! {
-            () = self.session_shutdown.cancelled() => {
-                local_websocket.close(None).await?;
-                return Ok(());
-            }
-            first_message = tokio::time::timeout(Duration::from_millis(250), local_websocket.next()) => {
-                match first_message {
-                Ok(Some(Ok(message))) => message,
-                Ok(Some(Err(error))) => return Err(WebSocketTunnelError::Transport(error)),
-                Ok(None) => {
-                    local_websocket.close(None).await?;
-                    return Err(WebSocketTunnelError::CloseReason(
-                        WebSocketCloseReason::FirstFrameTimeout,
-                    ));
-                }
-                Err(_elapsed) => {
-                    local_websocket.close(None).await?;
-                    return Err(WebSocketTunnelError::CloseReason(
-                        WebSocketCloseReason::FirstFrameTimeout,
-                    ));
-                }
-                }
-            }
+        let Some(first_message) =
+            next_data_message_before_upstream(&mut local_websocket, &self.session_shutdown).await?
+        else {
+            return Ok(());
         };
         let first_frame = frame_from_message(first_message);
         let decision = tokio::select! {
@@ -1917,7 +1876,6 @@ where
             upstream_websocket,
             WebSocketForwardingContext {
                 session_registration,
-                max_upstream_messages,
                 affinity_owner_recorder: self.affinity_owner_recorder.clone(),
                 async_affinity_owner_recorder: self.async_affinity_owner_recorder.clone(),
                 affinity_record_tasks: self.affinity_record_tasks.clone(),
@@ -1930,9 +1888,41 @@ where
     }
 }
 
+async fn next_data_message_before_upstream<LocalStream>(
+    local_websocket: &mut WebSocketStream<LocalStream>,
+    session_shutdown: &CancellationToken,
+) -> Result<Option<Message>, WebSocketTunnelError>
+where
+    LocalStream: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let message = tokio::select! {
+            () = session_shutdown.cancelled() => {
+                local_websocket.close(None).await?;
+                return Ok(None);
+            }
+            message = local_websocket.next() => message,
+        };
+
+        match message {
+            Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
+                return Ok(Some(message));
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                local_websocket.send(Message::Pong(payload)).await?;
+            }
+            Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Close(_close_frame))) => return Ok(None),
+            Some(Ok(Message::Frame(_))) => {}
+            Some(Err(error)) if is_reset_without_closing_handshake(&error) => return Ok(None),
+            Some(Err(error)) => return Err(WebSocketTunnelError::Transport(error)),
+            None => return Ok(None),
+        }
+    }
+}
+
 struct WebSocketForwardingContext<'a> {
     session_registration: WebSocketSessionRegistration,
-    max_upstream_messages: usize,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
@@ -1942,29 +1932,20 @@ struct WebSocketForwardingContext<'a> {
 }
 
 async fn forward_duplex_until_complete<LocalStream, UpstreamStream>(
-    mut local_websocket: WebSocketStream<LocalStream>,
-    mut upstream_websocket: WebSocketStream<UpstreamStream>,
+    local_websocket: WebSocketStream<LocalStream>,
+    upstream_websocket: WebSocketStream<UpstreamStream>,
     context: WebSocketForwardingContext<'_>,
 ) -> Result<(), WebSocketTunnelError>
 where
     LocalStream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     UpstreamStream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    if context.max_upstream_messages == 0 {
-        local_websocket.close(None).await?;
-        upstream_websocket.close(None).await?;
-        return Ok(());
-    }
-
-    let response_outstanding = Arc::new(AtomicBool::new(true));
     let (local_write, local_read) = local_websocket.split();
     let (upstream_write, upstream_read) = upstream_websocket.split();
     let local_to_upstream_revocation = context.revocation.clone();
     let upstream_to_local_revocation = context.revocation.clone();
     let local_to_upstream_shutdown = context.session_shutdown.clone();
     let upstream_to_local_shutdown = context.session_shutdown.clone();
-    let local_to_upstream_outstanding = Arc::clone(&response_outstanding);
-    let upstream_to_local_outstanding = Arc::clone(&response_outstanding);
     let session_registry = context.session_registration.registry.clone();
     let session_id = context.session_registration.session_id;
     let affinity_owner_context = context.affinity_owner_context.cloned();
@@ -1972,7 +1953,6 @@ where
         pump_local_to_upstream(
             local_read,
             upstream_write,
-            local_to_upstream_outstanding,
             local_to_upstream_revocation,
             local_to_upstream_shutdown,
         )
@@ -1983,12 +1963,10 @@ where
             upstream_read,
             local_write,
             UpstreamToLocalPumpContext {
-                response_outstanding: upstream_to_local_outstanding,
                 revocation: upstream_to_local_revocation,
                 session_shutdown: upstream_to_local_shutdown,
                 session_registry,
                 session_id,
-                max_upstream_messages: context.max_upstream_messages,
                 affinity_owner_recorder: context.affinity_owner_recorder,
                 async_affinity_owner_recorder: context.async_affinity_owner_recorder,
                 affinity_record_tasks: context.affinity_record_tasks,
@@ -2026,7 +2004,6 @@ where
 async fn pump_local_to_upstream<LocalStream, UpstreamStream>(
     mut local_read: SplitStream<WebSocketStream<LocalStream>>,
     mut upstream_write: SplitSink<WebSocketStream<UpstreamStream>, Message>,
-    response_outstanding: Arc<AtomicBool>,
     revocation: CancellationToken,
     session_shutdown: CancellationToken,
 ) -> Result<(), WebSocketTunnelError>
@@ -2051,24 +2028,16 @@ where
                 };
                 let local_message = match local_message {
                     Ok(message) => message,
-                    Err(error)
-                        if !response_outstanding.load(Ordering::SeqCst)
-                            && is_reset_without_closing_handshake(&error) =>
-                    {
+                    Err(error) if is_reset_without_closing_handshake(&error) => {
                         upstream_write.close().await?;
                         return Ok(());
                     }
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
                 };
                 let is_close = matches!(local_message, Message::Close(_));
-                let is_application_frame =
-                    matches!(local_message, Message::Text(_) | Message::Binary(_));
                 upstream_write.send(local_message).await?;
                 if is_close {
                     return Ok(());
-                }
-                if is_application_frame {
-                    response_outstanding.store(true, Ordering::SeqCst);
                 }
             }
         }
@@ -2076,12 +2045,10 @@ where
 }
 
 struct UpstreamToLocalPumpContext {
-    response_outstanding: Arc<AtomicBool>,
     revocation: CancellationToken,
     session_shutdown: CancellationToken,
     session_registry: WebSocketRevocationRegistry,
     session_id: u64,
-    max_upstream_messages: usize,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
@@ -2097,7 +2064,6 @@ where
     LocalStream: AsyncRead + AsyncWrite + Unpin,
     UpstreamStream: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut upstream_message_count = 0_usize;
     loop {
         tokio::select! {
             () = context.revocation.cancelled() => {
@@ -2115,10 +2081,7 @@ where
                 };
                 let upstream_message = match upstream_message {
                     Ok(message) => message,
-                    Err(error)
-                        if !context.response_outstanding.load(Ordering::SeqCst)
-                            && is_reset_without_closing_handshake(&error) =>
-                    {
+                    Err(error) if is_reset_without_closing_handshake(&error) => {
                         local_write.close().await?;
                         return Ok(());
                     }
@@ -2143,12 +2106,10 @@ where
                         });
                     }
                 }
-                upstream_message_count = upstream_message_count.saturating_add(1);
                 if is_completed {
-                    context.response_outstanding.store(false, Ordering::SeqCst);
                     context.session_registry.note_response_completed(context.session_id);
                 }
-                if is_close || upstream_message_count >= context.max_upstream_messages {
+                if is_close {
                     return Ok(());
                 }
             }

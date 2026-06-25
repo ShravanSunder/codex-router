@@ -85,8 +85,7 @@ where
                 upstream_endpoint,
                 command.state_db,
                 command.secret_root,
-            )
-            .with_max_websocket_upstream_messages(command.max_websocket_upstream_messages);
+            );
             if let Some(audit_file) = command.audit_file {
                 runtime_config = runtime_config.with_audit_file(audit_file);
             }
@@ -495,7 +494,6 @@ struct ServeCommand {
     quota_refresh_interval_seconds: u64,
     background_quota_refresh_enabled: bool,
     require_local_token: bool,
-    max_websocket_upstream_messages: usize,
     max_connections: usize,
     audit_file: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
@@ -530,9 +528,6 @@ impl ServeCommand {
             quota_refresh_interval_seconds: options.quota_refresh_interval_seconds.unwrap_or(300),
             background_quota_refresh_enabled: !options.disable_background_quota_refresh,
             require_local_token: options.require_local_token,
-            max_websocket_upstream_messages: options
-                .max_websocket_upstream_messages
-                .unwrap_or(usize::MAX),
             max_connections: options.max_connections.unwrap_or(usize::MAX),
             audit_file: options.audit_file,
             websocket_registry_report_file: options.websocket_registry_report_file,
@@ -552,7 +547,6 @@ struct ServeCommandOptions {
     quota_refresh_interval_seconds: Option<u64>,
     disable_background_quota_refresh: bool,
     require_local_token: bool,
-    max_websocket_upstream_messages: Option<usize>,
     max_connections: Option<usize>,
     audit_file: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
@@ -571,7 +565,6 @@ impl ServeCommandOptions {
             quota_refresh_interval_seconds: None,
             disable_background_quota_refresh: false,
             require_local_token: false,
-            max_websocket_upstream_messages: None,
             max_connections: None,
             audit_file: None,
             websocket_registry_report_file: None,
@@ -625,13 +618,6 @@ impl ServeCommandOptions {
                     let value = parser.next_required_value("--max-connections")?;
                     options.max_connections =
                         Some(parse_usize_option("--max-connections", &value)?);
-                }
-                "--max-websocket-upstream-messages" => {
-                    let value = parser.next_required_value("--max-websocket-upstream-messages")?;
-                    options.max_websocket_upstream_messages = Some(parse_usize_option(
-                        "--max-websocket-upstream-messages",
-                        &value,
-                    )?);
                 }
                 "--audit-file" => {
                     let value = parser.next_required_value("--audit-file")?;
@@ -1091,7 +1077,7 @@ codex-router
 
 commands:
   serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh] [--require-local-token]
-  serve internal proof flags: [--max-connections <n>] [--max-websocket-upstream-messages <n>] [--audit-file <path>] [--websocket-registry-report-file <path>]
+  serve internal proof flags: [--max-connections <n>] [--audit-file <path>] [--websocket-registry-report-file <path>]
   account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets
   account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
@@ -2479,11 +2465,11 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
         );
         assert_eq!(
             lines[2],
@@ -2571,11 +2557,11 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind weekly 20% behind\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind weekly 20% behind\tscore 1 risk 5h 25% / weekly 20%\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
         );
         assert_eq!(
             lines[2],
@@ -4272,8 +4258,6 @@ exit 42
                 "--disable-background-quota-refresh",
                 "--max-connections",
                 "1",
-                "--max-websocket-upstream-messages",
-                "1",
             ],
             CliContext::new(Vec::new()),
         );
@@ -4378,8 +4362,7 @@ exit 42
             secret_root.clone(),
             local_token.clone(),
         )
-        .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1);
+        .with_quota_clock(1_030, 60);
         let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config));
         let runtime_address = runtime.local_addr();
         assert_eq!(runtime_address.port(), router_port);
@@ -4531,8 +4514,7 @@ exit 42
             secret_root.clone(),
             local_token.clone(),
         )
-        .with_quota_clock(1_030, 60)
-        .with_max_websocket_upstream_messages(1);
+        .with_quota_clock(1_030, 60);
         let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config));
         assert_eq!(runtime.local_addr().port(), router_port);
         let router_thread = thread::spawn(move || {

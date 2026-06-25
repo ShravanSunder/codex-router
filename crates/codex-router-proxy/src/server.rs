@@ -317,7 +317,6 @@ pub struct LoopbackRouterRuntimeConfig {
     local_token: Option<LocalRouterTokenRecord>,
     fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
-    max_websocket_upstream_messages: usize,
     audit_file_path: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
 }
@@ -355,7 +354,6 @@ impl LoopbackRouterRuntimeConfig {
             local_token: Some(local_token),
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
-            max_websocket_upstream_messages: usize::MAX,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -377,7 +375,6 @@ impl LoopbackRouterRuntimeConfig {
             local_token: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
-            max_websocket_upstream_messages: usize::MAX,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -399,16 +396,6 @@ impl LoopbackRouterRuntimeConfig {
     ) -> Self {
         self.fixed_now_unix_seconds = Some(now_unix_seconds);
         self.max_snapshot_age_seconds = max_snapshot_age_seconds;
-        self
-    }
-
-    /// Sets the bounded upstream-to-local WebSocket frame count.
-    #[must_use]
-    pub const fn with_max_websocket_upstream_messages(
-        mut self,
-        max_websocket_upstream_messages: usize,
-    ) -> Self {
-        self.max_websocket_upstream_messages = max_websocket_upstream_messages;
         self
     }
 
@@ -438,7 +425,6 @@ pub struct LoopbackRouterRuntime {
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
-    max_websocket_upstream_messages: usize,
     websocket_revocations: WebSocketRevocationRegistry,
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
@@ -486,7 +472,6 @@ impl LoopbackRouterRuntime {
             auth_gate,
             upstream,
             upstream_endpoint,
-            max_websocket_upstream_messages: config.max_websocket_upstream_messages,
             websocket_revocations,
             audit_sink,
             weighted_selectors: Default::default(),
@@ -683,7 +668,6 @@ impl LoopbackRouterRuntime {
             auth_gate: self.auth_gate.clone(),
             upstream: self.upstream.clone(),
             upstream_endpoint: self.upstream_endpoint.clone(),
-            max_websocket_upstream_messages: self.max_websocket_upstream_messages,
             websocket_revocations: self.websocket_revocations.clone(),
             audit_sink: self.audit_sink.clone(),
             weighted_selectors: Arc::clone(&self.weighted_selectors),
@@ -757,7 +741,6 @@ struct LoopbackProtocolConnectionHandler {
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
-    max_websocket_upstream_messages: usize,
     websocket_revocations: WebSocketRevocationRegistry,
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
@@ -911,12 +894,7 @@ impl LoopbackProtocolConnectionHandler {
         .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone());
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
         tunnel
-            .handle_upgraded_connection(
-                local_websocket,
-                handshake,
-                upstream_url.as_str(),
-                self.max_websocket_upstream_messages,
-            )
+            .handle_upgraded_connection(local_websocket, handshake, upstream_url.as_str())
             .await
             .map_err(LoopbackRouterRuntimeError::WebSocket)
     }
