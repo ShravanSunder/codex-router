@@ -1575,15 +1575,17 @@ PY
       ;;
     G-24)
       mark_row_pass "$row_id" "$layer" "$owner" \
-        "Structural guard and streaming behavior passed: release HTTP/SSE request bodies are forwarded as Hyper bodies without full collection before upstream egress." \
+        "Structural guard and streaming behavior passed: release HTTP/SSE request bodies are forwarded as Hyper bodies without full collection before upstream egress, and routing metadata survives split DATA frames." \
         "scripts/check-http-streaming-guard.py G-24" \
-        "cargo test -p codex-router-proxy hyper_http_upstream_transport_streams_request_body_before_eof -- --nocapture"
+        "cargo test -p codex-router-proxy hyper_http_upstream_transport_streams_request_body_before_eof -- --nocapture" \
+        "cargo test -p codex-router-proxy assembled_loopback_router_runtime_routes_split_frame_previous_response_affinity -- --nocapture"
       ;;
     G-25)
       mark_row_pass "$row_id" "$layer" "$owner" \
-        "Structural guard and bounded-scan behavior passed: HTTP/SSE affinity extraction stops at explicit byte/event bounds without gating body forwarding." \
+        "Structural guard and bounded-scan behavior passed: HTTP/SSE and WebSocket affinity extraction stop at explicit bounds without gating body/frame forwarding." \
         "scripts/check-http-streaming-guard.py G-25" \
-        "cargo test -p codex-router-proxy async_http_affinity_scan_stops_at_explicit_bounds_without_gating_body -- --nocapture"
+        "cargo test -p codex-router-proxy async_http_affinity_scan_stops_at_explicit_bounds_without_gating_body -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket_metadata_scan_ignores_oversized_late_affinity_and_completion_fields -- --nocapture"
       ;;
     G-26)
       mark_row_pass "$row_id" "$layer" "$owner" \

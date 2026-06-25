@@ -49,11 +49,18 @@ def check_g24() -> None:
     http_sse = read("crates/codex-router-proxy/src/http_sse.rs")
 
     request_adapter = function_body(server, "hyper_request_to_streaming_proxy_request")
-    request_prefix = function_body(server, "bounded_request_metadata_prefix")
-    require_contains("HTTP request adapter", request_adapter, "bounded_request_metadata_prefix")
-    require_contains("HTTP request prefix helper", request_prefix, "HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES")
-    require_contains("HTTP request adapter", request_adapter, "FirstFrameThenIncomingBody::new")
-    require_contains("HTTP request adapter", request_adapter, ".frame()")
+    request_prefix = function_body(server, "bounded_request_metadata_body")
+    request_body = function_body(server, "request_metadata_prefix_is_complete_json")
+    require_contains("HTTP request adapter", request_adapter, "bounded_request_metadata_body")
+    require_contains(
+        "HTTP request prefix helper",
+        request_prefix,
+        "HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES",
+    )
+    require_contains("HTTP request prefix helper", request_prefix, "body.frame().await")
+    require_contains("HTTP request prefix helper", request_prefix, "VecDeque")
+    require_contains("HTTP request prefix helper", request_prefix, "PrefixFramesThenIncomingBody::new")
+    require_contains("HTTP request complete helper", request_body, "serde_json::from_slice")
     forbid_contains("HTTP request adapter", request_adapter, ".collect()")
     forbid_contains("HTTP request adapter", request_adapter, ".to_bytes()")
 
@@ -78,9 +85,15 @@ def check_g24() -> None:
 
 def check_g25() -> None:
     server = read("crates/codex-router-proxy/src/server.rs")
+    websocket = read("crates/codex-router-proxy/src/websocket.rs")
 
     require_contains("HTTP/SSE affinity constants", server, "HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES")
     require_contains("HTTP/SSE affinity constants", server, "HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS")
+    require_contains(
+        "WebSocket affinity constants",
+        websocket,
+        "WEBSOCKET_METADATA_SCAN_MAX_BYTES",
+    )
 
     affinity_tap = function_body(server, "record_affinity_owner_from_async_body")
     require_contains("HTTP/SSE affinity tap", affinity_tap, "scanned_bytes")
@@ -89,6 +102,27 @@ def check_g25() -> None:
     require_contains("HTTP/SSE affinity tap", affinity_tap, "HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS")
     require_contains("HTTP/SSE affinity tap", affinity_tap, "data[..bytes_to_scan]")
     forbid_contains("HTTP/SSE affinity tap", affinity_tap, "buffered.extend_from_slice(data)")
+
+    websocket_pump = function_body(websocket, "pump_upstream_to_local")
+    require_contains("WebSocket pump", websocket_pump, "bounded_websocket_metadata_text")
+    require_contains("WebSocket pump", websocket_pump, "local_write.send(upstream_message).await?")
+    require_contains("WebSocket pump", websocket_pump, "is_response_completed_text")
+    require_contains("WebSocket pump", websocket_pump, "websocket_affinity_owner_record_from_text")
+    if websocket_pump.find("local_write.send(upstream_message).await?") > websocket_pump.find(
+        "is_response_completed_text"
+    ):
+        raise AssertionError("WebSocket pump parses completion before forwarding local frame")
+    if websocket_pump.find("local_write.send(upstream_message).await?") > websocket_pump.find(
+        "websocket_affinity_owner_record_from_text"
+    ):
+        raise AssertionError("WebSocket pump parses affinity before forwarding local frame")
+    websocket_metadata = function_body(websocket, "bounded_websocket_metadata_text")
+    require_contains(
+        "WebSocket metadata helper",
+        websocket_metadata,
+        "WEBSOCKET_METADATA_SCAN_MAX_BYTES",
+    )
+    require_contains("WebSocket metadata helper", websocket_metadata, "text.len() <=")
 
 
 def main() -> int:

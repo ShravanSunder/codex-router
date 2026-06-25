@@ -1,5 +1,6 @@
 //! Loopback-only server runtime primitives.
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
 #[cfg(test)]
 use std::io::Read;
@@ -1102,51 +1103,72 @@ const HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS: usize = 64;
 async fn hyper_request_to_streaming_proxy_request(
     request: HttpRequest<Incoming>,
 ) -> Result<(HttpProxyRequest, BoxBody<Bytes, AsyncHttpBodyError>), LoopbackRouterRuntimeError> {
-    let (parts, mut body) = request.into_parts();
+    let (parts, body) = request.into_parts();
     let path = parts
         .uri
         .path_and_query()
         .map_or("/", http::uri::PathAndQuery::as_str)
         .to_owned();
-    let first_frame = body
-        .frame()
+    let (metadata_prefix, replay_body) = bounded_request_metadata_body(body)
         .await
-        .transpose()
         .map_err(LoopbackRouterRuntimeError::HyperBody)?;
-    let metadata_prefix = first_frame
-        .as_ref()
-        .and_then(Frame::data_ref)
-        .map_or_else(Vec::new, bounded_request_metadata_prefix);
     let mut proxy_request = HttpProxyRequest::new(method_from_hyper(&parts.method), path);
     for (name, value) in &parts.headers {
         if let Ok(value) = value.to_str() {
             proxy_request = proxy_request.with_header(Header::new(name.as_str(), value));
         }
     }
-    let streaming_body = FirstFrameThenIncomingBody::new(first_frame, body)
-        .map_err(incoming_body_error)
-        .boxed();
+    let streaming_body = replay_body.map_err(incoming_body_error).boxed();
 
     Ok((proxy_request.with_body(metadata_prefix), streaming_body))
 }
 
-fn bounded_request_metadata_prefix(data: &Bytes) -> Vec<u8> {
-    let prefix_length = data.len().min(HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES);
-    data[..prefix_length].to_vec()
+async fn bounded_request_metadata_body(
+    mut body: Incoming,
+) -> Result<(Vec<u8>, PrefixFramesThenIncomingBody), hyper::Error> {
+    let mut metadata_prefix = Vec::new();
+    let mut replay_frames = VecDeque::new();
+    while metadata_prefix.len() < HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES {
+        let Some(frame) = body.frame().await.transpose()? else {
+            break;
+        };
+        if let Some(data) = frame.data_ref() {
+            let remaining_bytes = HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES - metadata_prefix.len();
+            let bytes_to_scan = data.len().min(remaining_bytes);
+            metadata_prefix.extend_from_slice(&data[..bytes_to_scan]);
+        }
+        let metadata_is_complete = request_metadata_prefix_is_complete_json(&metadata_prefix);
+        replay_frames.push_back(frame);
+        if metadata_is_complete || metadata_prefix.len() >= HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES {
+            break;
+        }
+    }
+
+    Ok((
+        metadata_prefix,
+        PrefixFramesThenIncomingBody::new(replay_frames, body),
+    ))
 }
 
-struct FirstFrameThenIncomingBody {
-    first_frame: Option<Frame<Bytes>>,
+fn request_metadata_prefix_is_complete_json(metadata_prefix: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(metadata_prefix).is_ok()
+}
+
+struct PrefixFramesThenIncomingBody {
+    prefix_frames: VecDeque<Frame<Bytes>>,
     inner: Incoming,
 }
 
-impl FirstFrameThenIncomingBody {
-    fn new(first_frame: Option<Frame<Bytes>>, inner: Incoming) -> Self {
-        Self { first_frame, inner }
+impl PrefixFramesThenIncomingBody {
+    fn new(prefix_frames: VecDeque<Frame<Bytes>>, inner: Incoming) -> Self {
+        Self {
+            prefix_frames,
+            inner,
+        }
     }
 }
 
-impl HyperBody for FirstFrameThenIncomingBody {
+impl HyperBody for PrefixFramesThenIncomingBody {
     type Data = Bytes;
     type Error = hyper::Error;
 
@@ -1154,7 +1176,7 @@ impl HyperBody for FirstFrameThenIncomingBody {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        if let Some(frame) = self.first_frame.take() {
+        if let Some(frame) = self.prefix_frames.pop_front() {
             return Poll::Ready(Some(Ok(frame)));
         }
 
@@ -1162,7 +1184,7 @@ impl HyperBody for FirstFrameThenIncomingBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.first_frame.is_none() && self.inner.is_end_stream()
+        self.prefix_frames.is_empty() && self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
