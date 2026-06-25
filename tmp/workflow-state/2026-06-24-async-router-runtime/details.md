@@ -21,12 +21,13 @@ Completion requires:
 ## Current Workflow
 
 - Current workflow: `shravan-dev-workflow:orchestrator-goal`
-- Latest completed workflow: `shravan-dev-workflow:plan-review-swarm`
+- Latest completed workflow: `shravan-dev-workflow:implementation-execute-plan`
 - Phase result: `complete`
-- Next workflow: `shravan-dev-workflow:implementation-execute-plan`
-- Current focus: execute the reviewed account-router async runtime plan. Start
-  by proving the first unproven release-serve request-time auth/state boundary
-  and pass-through guardrails before code changes claim green status.
+- Next workflow: `shravan-dev-workflow:implementation-pr-wrapup`
+- Current focus: close the PR-ready non-merge boundary. Implementation,
+  post-review fixes, current-head proof receipts, and final push are complete at
+  `ff54355f3fc11898f972b0c0eb39bc55298228ad`, but no open PR currently exists
+  for this already-pushed `main` branch state.
 
 ## Required Reading
 
