@@ -1,7 +1,8 @@
 # Async Router Runtime Implementation Plan
 
 Date: 2026-06-24
-Status: revised after plan-review-swarm findings
+Status: focused account-router plan review passed; ready for
+implementation-execute-plan
 Goal id: `2026-06-24-async-router-runtime`
 
 ## Objective
@@ -12,6 +13,11 @@ implementation must prove that multiple concurrent installed Codex WebSocket
 clients can use one router process without WebSocket fallback, stalls, leaked
 sessions, or hidden blocking protocol/runtime paths.
 
+`codex-router` is an account router, not a Codex behavior layer. The runtime
+may choose/cycle upstream accounts and apply the minimum local-auth removal,
+upstream-auth injection, hop-by-hop header handling, and redacted routing
+metadata needed for that account route. Everything else remains pass-through.
+
 Terminal condition for this goal is PR-ready, not merged.
 
 ## Source Coverage
@@ -19,13 +25,16 @@ Terminal condition for this goal is PR-ready, not merged.
 Accepted source artifacts:
 
 - `tmp/spec-workflows/2026-06-24-async-router-runtime/async-router-runtime-spec.md`
-  - line count: 759
-  - parent coverage: read lines 1-759 in chunks
+  - line count: 823
+  - parent coverage: read lines 1-823 in chunks
 - `tmp/spec-workflows/2026-06-24-async-router-runtime/review-ledger.md`
   - line count: 240
   - parent coverage: read lines 1-240
 - `tmp/workflow-state/2026-06-24-async-router-runtime/details.md`
 - `tmp/workflow-state/2026-06-24-async-router-runtime/events.jsonl`
+- `tmp/research-workflows/2026-06-24-codex-websocket-invariants/research-ledger.md`
+  - line count: 230
+  - parent coverage: read lines 1-230
 
 Planning lanes:
 
@@ -47,6 +56,36 @@ Planning lanes:
   runtime
 - no live OAuth/provider proof unless separately approved
 - no merge
+
+## Security Context
+
+Sensitive assets:
+
+- local router bearer tokens when token mode is enabled
+- upstream provider access tokens and credential generations
+- account ids, account labels, quota state, and affinity keys
+- prompt, tool, image, file, memory, response, and provider payload data
+
+Entry points and trust boundaries:
+
+- local Codex client to loopback router over HTTP/SSE and WebSocket
+- router local-auth boundary before route classification, account selection, or
+  upstream egress
+- router to upstream provider after selected-account credential injection
+- router runtime to SQLx state and secret-store boundaries
+- subprocess, log, trace, audit, and proof-artifact boundaries
+
+Security invariants owned by proof rows:
+
+- local auth and auth-smuggling rejection: U-02, I-11, S-02
+- selected upstream auth/header sanitation: U-05, I-12, I-24, I-25
+- Codex-owned response metadata pass-through: I-24, I-25, I-27
+- bounded first request data parsing and no prompt-bearing policy inspection:
+  U-03, I-20, I-22, I-23, G-27
+- account-router pass-through and no synthetic application responses:
+  I-24, I-25, I-26, G-26
+- no full-body buffering or unbounded affinity scan leakage: G-24, G-25
+- evidence redaction and stale-proof protection: E-09 and G-21
 
 ## Implementation Strategy
 
@@ -212,6 +251,11 @@ Behavior:
   `ProviderCredentialResolver`, affinity owner/secret recording, and selector
   state reads so Hyper services do not block Tokio workers or hold sync locks
   across awaits
+- define final release-serve request-time async resolver/state traits before
+  T3/T4 start; every release-reachable request-time `serve` module, including
+  server/session setup and HTTP/SSE/WebSocket transports, may depend only on
+  those traits, not on secret-store operations, refresh clients, raw state
+  commits, or credential refresh sequencing internals
 - define failpoints for credential refresh before refresh response handling,
   after secret write, before state commit, after state commit, and during
   concurrent resolver reads
@@ -236,6 +280,8 @@ Checkpoint:
 
 - runtime callers use async state/auth handles for request-time selection,
   affinity lookup/recording, quota reads, and credential resolution
+- one HTTP caller and one WebSocket caller compile against only the final
+  release-serve request-time async traits
 - auth resolver owns refresh commit semantics; proxy does not sequence secret
   write, generation advance, and quota invalidation
 
@@ -247,11 +293,18 @@ Proof:
 - integration proof against real SQLite for async account/quota/affinity state
 - credential refresh cancellation proof
 - structural proof: no direct `rusqlite` in production proxy runtime path
+- structural proof: every release-reachable request-time `serve` module,
+  including server/session setup and HTTP/SSE/WebSocket transports, does not
+  import or call secret-store operations, refresh clients, direct state commit
+  APIs, raw SQLx/rusqlite, or credential refresh sequencing internals
 
 Split trigger:
 
-- split into T2a request-time async repositories and T2b auth refresh commit if
-  SQLx migration and credential commit proof cannot land safely in one slice
+- split into T2a final release-serve request-time async traits and T2b auth
+  refresh commit internals if SQLx migration and credential commit proof cannot
+  land safely in one slice. T3/T4 may start only after T2a is complete and
+  proven; they must not start against temporary server-owned resolver,
+  session-setup, or secret-store plumbing.
 
 ### T3. Hyper HTTP/SSE Proxy Path
 
@@ -266,7 +319,15 @@ Behavior:
 - local HTTP/SSE serving enters router through Hyper request/service types
 - upstream HTTP/SSE uses Hyper client/response body types
 - preserve route classification, local auth, selection, credential injection,
-  sanitized headers, streaming order, and affinity semantics
+  sanitized headers, Codex-owned response metadata, streaming order, and
+  affinity semantics
+- replace release-path full-body request DTO usage with streaming request body
+  forwarding plus bounded metadata extraction; the release path must not require
+  `collect()` or full `Vec<u8>` request-body materialization before upstream
+  egress
+- response affinity extraction uses an explicit bounded byte/event scan and
+  cannot accumulate full response bodies or full SSE streams when metadata is
+  missing, malformed, or late
 - defer durable affinity/audit persistence outside response-body forwarding
   progress
 
@@ -281,12 +342,19 @@ Likely writes:
 
 Dependencies:
 
-- starts after T1 and request-time parts of T2
+- starts after T1 and final release-serve request-time async traits from T2a
+  are complete and proven
 
 Checkpoint:
 
 - HTTP/SSE path works through real async runtime and Hyper upstream transport
 - mixed progress proof exists for HTTP/SSE while WebSocket is stalled
+- I-24, G-24, and G-25 are runnable from this slice and fail if the release
+  HTTP/SSE path still depends on full request-body collection, full response
+  buffering, or unbounded affinity scans
+- Codex-owned response metadata pass-through is proven for HTTP/SSE headers,
+  including `x-codex-turn-state`, `x-models-etag`, `openai-model`, and
+  `x-reasoning-included`
 
 Proof:
 
@@ -294,8 +362,11 @@ Proof:
   extraction
 - integration proof: unsupported routes reject before selection/upstream,
   auth-smuggling reject before upstream, local auth never leaks, previous-response
-  affinity preserved
+  affinity preserved, Codex-owned response metadata preserved
 - smoke proof: real `codex-router serve` HTTP/SSE path
+- structural/behavioral proof: no release-path `collect()` or full-body
+  `Vec<u8>` request materialization before upstream egress; bounded affinity
+  scan remains non-gating
 
 Split trigger:
 
@@ -319,13 +390,28 @@ Behavior:
   `from_partially_read` in server role
 - upstream side uses the `tokio-tungstenite` client handshake
 - local `accept_async` or `accept_hdr_async` after Hyper upgrade is forbidden
-- bounded first-frame wait validates only routing metadata
-- first-frame policy defines timeout, max first-message bytes, allowed frame
-  type, metadata-only parse fields, and close classes for timeout, too-large,
-  non-text, malformed, unexpected, selection, credential, and upstream-open
-- account selection and upstream credential resolution happen after first frame
+- pre-upstream wait is Codex-compatible: local upgrade may remain open with no
+  immediate request data frame, matching Codex WebSocket preconnect behavior
+- no release-path short wall-clock first request data frame timeout is allowed;
+  legal Codex preconnect remains open until client close, router shutdown,
+  or revocation; this goal does not introduce a new pre-upstream idle cap
+- first request data frame policy defines max first-message bytes, allowed data
+  frame type, explicit metadata-only parse fields, and close classes for
+  too-large, non-text, malformed request data, unexpected data, selection,
+  credential, and upstream-open
+- control frames before upstream open are handled as WebSocket control frames,
+  not invalid routing payloads
+- account selection and upstream credential resolution happen after first
+  request data frame
+- pre-upstream request parsing may inspect only route/account-routing and
+  affinity metadata; prompt-bearing fields such as `input`, messages, tool
+  calls, files, images, and arbitrary provider payload shape are not policy
+  inputs and cannot be required for pass-through
 - post-upgrade/pre-upstream failures close locally with deterministic redacted
   close reasons and no router retry/fallback/account switch
+- WebSocket handshake response headers and WebSocket metadata events that are
+  Codex-owned protocol metadata are passed through unchanged except hop-by-hop
+  transport handling
 
 Likely writes:
 
@@ -336,22 +422,32 @@ Likely writes:
 
 Dependencies:
 
-- starts after T1 and request-time parts of T2
+- starts after final release-serve request-time async traits from T2a are
+  complete and proven
 
 Checkpoint:
 
 - real serve-path upgrade accepts locally before upstream open
-- first-frame policy and pre-upstream failure matrix are proven
+- first request data frame policy, Codex-compatible preconnect behavior, and
+  pre-upstream failure matrix are proven
 
 Proof:
 
-- unit proof: first-frame validation, bounded metadata parsing,
+- unit proof: first request data frame validation, bounded metadata parsing,
   auth-smuggling rejection
-- integration proof: first-frame timeout, invalid frame, selection failure,
-  credential failure, and upstream-open failure each produce deterministic local
-  close and redacted audit/trace outcome
-- integration proof: first frame forwarded to upstream unchanged and selector
-  invoked once per WebSocket session
+- integration proof: legal preconnect/delayed first request is not closed as
+  timeout and performs zero selector calls, zero credential resolutions, and
+  zero upstream opens before request data; invalid request data, selection
+  failure, credential failure, and upstream-open failure each produce
+  deterministic local close and redacted audit/trace outcome
+- integration proof: first request data frame is forwarded to upstream
+  unchanged and selector invoked once per WebSocket session
+- integration proof: legal future-shaped request payloads pass when bounded
+  routing metadata is sufficient, proving the router does not validate
+  prompt-bearing payload shape
+- integration proof: WebSocket handshake headers and metadata events preserve
+  Codex-owned metadata such as `x-codex-turn-state`, `openai-model`, and
+  `x-reasoning-included`
 - smoke proof: fragmented upgrade still works through real serve path
 
 Split trigger:
@@ -385,6 +481,11 @@ Behavior:
   no await on enqueue from frame/body forwarding or close-progress paths, and
   drop/coalesce/fail-open behavior documented per event type
 - no unbounded pump channels or detached production reader tasks are allowed
+- post-upstream termination is transport-owned: peer close, local close,
+  cancellation, revocation, shutdown, or protocol transport error only; remove
+  release-path message-count truncation knobs, synthetic warmup/heartbeat/
+  application close behavior, router retry/fallback, and provider-event-aware
+  termination policy
 
 Likely writes:
 
@@ -404,6 +505,8 @@ Checkpoint:
 - pumps are full-duplex and cancellation-safe
 - registry high-water/zero-active-after can be observed
 - close reasons are emitted redacted
+- G-28 is runnable from this slice and fails if release `serve` still exposes
+  message-count truncation or provider-event-aware termination behavior
 
 Proof:
 
@@ -417,6 +520,8 @@ Proof:
 - pump-side slow sink regression
 - structural proof against unbounded pump channels and detached production
   reader tasks
+- structural proof against release-path WebSocket truncation/policy knobs and
+  router-created application behavior
 
 Split trigger:
 
@@ -468,9 +573,9 @@ Checkpoint:
 
 Proof:
 
-- structural rows G-01 through G-21 in the matrix
+- structural rows G-01 through G-29 in the matrix
 - CI/repo-local validation row
-- final G-01 through G-23 run after T8 and after all harness, manifest, and CI
+- final G-01 through G-29 run after T8 and after all harness, manifest, and CI
   edits
 
 Split trigger:
@@ -590,7 +695,7 @@ T2: SQLx async state/auth boundary
   |
   +-- T3: Hyper HTTP/SSE path
   |
-  +-- T4: WebSocket accept + first-frame/pre-upstream contract
+  +-- T4: WebSocket accept + first request data frame/pre-upstream contract
   |
   +-- T6a: early structural guardrail inventory
   |
@@ -658,11 +763,12 @@ Legend:
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | U-01 | R9 Proof expectations | T3/T4 | U | proxy route tests | unsupported HTTP/WS routes reject before selection/upstream | unit output | route/server changes | yes |
 | U-02 | R9 Proof expectations; R6 Auth invariants | T3/T4 | U | local_auth/proxy tests | tokenless and token-required auth matrix, including smuggling carriers | unit output | local_auth/server changes | yes |
-| U-03 | R9 Proof expectations; R3 Async WebSocket pure proxy | T4 | U | websocket first-frame tests | malformed, oversized, wrong type, unexpected frame fail deterministically | unit output | websocket changes | yes |
+| U-03 | R9 Proof expectations; R3 Async WebSocket pure proxy | T4 | U | websocket first request data frame tests | malformed, oversized, wrong data type, unexpected data frame fail deterministically while control frames are handled as control frames | unit output | websocket changes | yes |
 | U-04 | R9 Proof expectations | T3/T5 | U | affinity extraction tests | only allowed response id metadata is extracted | unit output | http_sse/websocket changes | yes |
 | U-05 | R6 Auth invariants, R9 Proof expectations | T3/T4 | U | header sanitation tests | local auth stripped, provider auth injected once | unit output | headers/http/ws changes | yes |
 | U-06 | goal Required Proof Matrix Seeds, R5 | T2 | U | selection preservation tests | selector eligibility, quota snapshot, and affinity decisions match pre-cutover semantics | unit output | selection/state changes | yes |
 | U-07 | goal Required Proof Matrix Seeds, R5 | T2 | U | credential commit state-machine tests | old generation or fully committed new generation is authoritative; no half state | unit output | auth/state/secret changes | yes |
+| U-08 | R5 SQLx state boundary; dependency map/disallowed edges | T2 | U/G | release-serve request-time async trait compile tests | one HTTP caller and one WebSocket caller compile against final async state/auth traits without importing secret-store operations, refresh clients, raw state commits, or credential refresh sequencing internals; G-29 owns the wider release-reachable request-time path scan | compile/structural output | auth/state/proxy boundary changes | yes |
 | I-01 | R9 Proof expectations | T5 | I | mock WS integration | multiple concurrent WS sessions progress independently | integration log | websocket/server changes | yes |
 | I-02 | R9 Proof expectations | T5 | I | mock WS integration | stalled upstream WS does not block sibling WS completion | integration log | websocket/server changes | yes |
 | I-03 | R9 Proof expectations | T3/T5 | I | mixed HTTP/WS integration | stalled WS does not block independent HTTP/SSE completion | integration log | http_sse/upstream/ws changes | yes |
@@ -671,10 +777,10 @@ Legend:
 | I-05b | R9 Proof expectations; Issue Closure Contract | T5 | I | async comparison fixture | async runtime closes affected session, closes upstream, removes registry entry, and survivor completes | regression artifact | websocket/server changes | yes |
 | I-06 | R9 Proof expectations | T5 | I | upstream-close fixture | upstream close while local idle closes local and terminates task | close artifact | websocket pump changes | yes |
 | I-07 | R9 Proof expectations; Issue Closure Contract | T5 | I | blocked-write/backpressure fixture | peer stopped reading/closed does not leak task or stall opposite close | close artifact | websocket pump changes | yes |
-| I-08 | R9 Proof expectations; R3 Async WebSocket pure proxy Async WebSocket pure proxy| T4 | I | pre-upstream failure fixture | each failure class maps to deterministic close and redacted event | audit/close artifact | websocket/server changes | yes |
+| I-08 | R9 Proof expectations; R3 Async WebSocket pure proxy Async WebSocket pure proxy| T4 | I | pre-upstream failure fixture | each failure class maps to deterministic close and redacted event, and client close before request data is clean close not malformed payload | audit/close artifact | websocket/server changes | yes |
 | I-09 | R9 Proof expectations | T4 | I | fragmented upgrade test | fragmented upgrade succeeds through async serve path | integration output | server/ws changes | yes |
 | I-10 | R9 Proof expectations | T3/T4 | I | unsupported route probe | unsupported route rejects before selection/upstream | upstream transcript | routes/server changes | yes |
-| I-11 | R9 Proof expectations | T3/T4 | I | hostile auth probes | HTTP, WS pre-upgrade query/cookie/subprotocol, mismatched local-auth carriers, and WS post-upgrade first-frame carriers reject with no route classification, no account selection, and upstream count zero | upstream count + audit | auth/server changes | yes |
+| I-11 | R9 Proof expectations | T3/T4 | I | hostile auth probes | HTTP, WS pre-upgrade query/cookie/subprotocol, mismatched local-auth carriers, and WS post-upgrade first request data frame carriers reject with no route classification, no account selection, and upstream count zero | upstream count + audit | auth/server changes | yes |
 | I-12 | R9 Proof expectations | T3/T4 | I | upstream header canary | no local auth reaches upstream | upstream transcript | header/ws/http changes | yes |
 | I-13 | R9 Proof expectations | T3/T5 | I | affinity owner tests | previous-response owner recorded for HTTP/SSE and WS | state artifact | state/affinity changes | yes |
 | I-14 | R9 Proof expectations; R7 Session revocation | T5 | I | token rotation fixture | stale token-mode sessions close; fresh sessions unaffected | registry artifact | registry/auth changes | yes |
@@ -684,19 +790,25 @@ Legend:
 | I-17b | R9 Proof expectations; Permanent Regression Guardrails | T5/T6 | I | WS slow sink fixture | slow affinity recorder, audit sink, state sink, or secret-store boundary cannot delay WS frame forwarding or close | timing artifact | websocket/state/audit changes | yes |
 | I-18 | Issue Closure Contract | T5 | I/S | real `codex-router serve` fixture | close-while-pending traverses actual listener, Hyper upgrade, session registry, cancellation, cleanup | serve artifact | server/ws changes | yes |
 | I-19 | Issue Closure Contract | T5 | I | pump cleanup family | local/upstream close and blocked write cleanup both directions | close artifact | websocket pump changes | yes |
-| I-20 | R3 Async WebSocket pure proxy; R4 No hidden buffering | T4/T5 | I | first-frame exact-forwarding fixture | first client frame is forwarded unchanged to one upstream account/session and no payload-policy inspection occurs | upstream transcript hash | websocket/session changes | yes |
+| I-20 | R3 Async WebSocket pure proxy; R4 No hidden buffering | T4/T5 | I | first request data frame exact-forwarding fixture | first client request data frame is forwarded unchanged to one upstream account/session and no payload-policy inspection occurs beyond bounded routing metadata | upstream transcript hash | websocket/session changes | yes |
 | I-21 | R5 SQLx state boundary | T1/T2 | I/S | slow quota refresh startup fixture | listener binds and first request is accepted while broad quota refresh is slow or stalled | startup timing artifact | cli/state/quota changes | yes |
+| I-22 | R3 Async WebSocket pure proxy; R9 Proof expectations; Codex source invariant research | T4/T5 | I/S | Codex-compatible WS preconnect fixture through real serve path | local WS upgrade succeeds, sends no request data frame during a Codex-compatible idle window, emits no `FirstFrameTimeout`, and ordered lifecycle trace proves selector call, credential resolution, and upstream open are absent before first request data and strictly after first request data when a later `response.create` routes on the same local WS | ordered preconnect lifecycle trace + router log artifact | server/websocket/harness changes | yes |
+| I-23 | R3 Async WebSocket pure proxy; R9 Proof expectations | T4/T5 | I/S | pre-upstream WS control-frame fixture through real serve path | ordered lifecycle trace proves ping/pong and client close before first request data are handled as WebSocket control/clean close behavior with zero selector calls, zero credential resolutions, zero upstream opens, no malformed-payload audit, and no upstream egress | ordered control-frame lifecycle trace + upstream count | server/websocket/harness changes | yes |
+| I-24 | Product law account-router pass-through; R4 No hidden buffering | T3/T6 | I/S | HTTP/SSE pass-through canary through real serve path | method, path, query, normalized request/response headers, request body byte sequence, response status, response chunk order, and response body bytes are preserved except allowed local-auth removal, upstream-auth injection, hop-by-hop headers, and out-of-band redacted routing/observability side effects; slow-stream fixture proves first response chunk reaches client before later upstream chunks or EOF exist | HTTP/SSE transcript hashes + early-delivery timing artifact | server/http_sse/upstream changes | yes |
+| I-25 | Product law account-router pass-through; R3/R4 | T4/T5 | I/S | WS pass-through canary through real serve path | after account selection/upstream open, local/upstream WebSocket frame order, payload bytes, close behavior, and control-frame handling are preserved with no router-created warmup, heartbeat, retry, fallback, or application close; upstream sends more frames than the historical truncation cap plus a benign tail frame after `response.completed`, and every frame/final close reaches the client | long WS transcript hashes + tail-frame artifact | server/websocket changes | yes |
+| I-26 | Product law account-router pass-through | T3 | I/S | `/v1/models` upstream pass-through canary | `GET /v1/models` reaches selected upstream account and returns the upstream status/body; release path does not synthesize `{\"models\":[]}` or any other application response | upstream transcript + client response hash | upstream/server/routes changes | yes |
+| I-27 | Product law account-router pass-through; Codex source invariant research | T3/T4/T5 | I/S | Codex-owned metadata pass-through canary through real serve path | HTTP/SSE response headers and WebSocket handshake/metadata events preserve `x-codex-turn-state`, `x-models-etag`, `openai-model`, `x-reasoning-included`, and unknown future Codex metadata except allowed hop-by-hop/auth mutations | metadata transcript hashes | server/http_sse/websocket/upstream changes | yes |
 | S-01 | R9 Proof expectations | T7 | S | installed-Codex real-serve smoke | tokenless default profile succeeds without `CODEX_ROUTER_TOKEN` | smoke transcript | cli/profile/harness changes | yes |
 | S-02 | R9 Proof expectations | T7 | S | installed-Codex hardening smoke | missing/wrong/old/smuggled tokens reject before selection/upstream; rotation closes stale WS | smoke transcript | auth/harness changes | yes |
 | S-03 | R9 Proof expectations | T7 | S | child `codex-router serve` + installed Codex | installed Codex uses spawned built router binary; artifact records binary path, PID, argv, listener, readiness, and cleanup | smoke transcript | cli/server changes | yes |
 | S-04 | Issue Closure Contract | T7 | S/E | installed-Codex mock upstream | real client behavior, deterministic multi-step interaction, no fallback/reconnect/retry, schema allowlist redaction passes | redacted transcript | harness/ws changes | yes |
-| E-01 | R9 Proof expectations | T8 | E | supervisor/barrier three-Codex e2e | three installed Codex children are released together, share one router PID over WS, and complete multi-step path without fallback/retry/downgrade | e2e artifact | harness/runtime changes | yes |
-| E-02 | R9 Proof expectations | T8 | E | five-minute soak harness | supervisor holds three active WS sessions for at least five continuous minutes with per-runtime frame activity inside the same window | soak artifact | harness/runtime changes | yes |
+| E-01 | R9 Proof expectations | T8 | E | supervisor/barrier three-Codex e2e | three installed Codex children are released together, share one stable router PID over WS, and complete multi-step path without fallback/retry/downgrade/reconnect | e2e artifact | harness/runtime changes | yes |
+| E-02 | R9 Proof expectations | T8 | E | five-minute soak harness | supervisor holds three active WS sessions for at least five continuous minutes with per-runtime frame activity inside the same window, one stable router PID for the full window, and no reconnect/retry/fallback transition | soak artifact | harness/runtime changes | yes |
 | E-03 | Issue Closure Contract | T8 | E | soak artifact validator | overlap window timestamps prove concurrent activity | artifact validation | harness changes | yes |
 | E-04 | Issue Closure Contract | T8 | E | soak artifact validator | each runtime has three post-handshake interactions or frame exchanges during overlap | artifact validation | harness changes | yes |
 | E-05 | Issue Closure Contract | T8 | E | soak artifact validator | one runtime completes tool-call-style/multi-step interleave during overlap | artifact validation | harness changes | yes |
 | E-06 | Issue Closure Contract | T8 | E | registry evidence | router records active high-water 3 and zero active after completion | registry artifact | registry/harness changes | yes |
-| E-07 | Issue Closure Contract | T8 | E | continuity artifact | per-runtime client/router/upstream correlation and positive WS continuity | continuity artifact | harness/observability changes | yes |
+| E-07 | Issue Closure Contract | T8 | E | continuity artifact | per-runtime join keys `{client_pid, router_session_id, upstream_session_id}`, handshake_count == 1 per runtime, transport == websocket for the full overlap, http_probe_count == 0 during WS-only e2e/soak, one stable router PID, and positive WS continuity with no reconnect/retry/fallback transition; validator rejects aggregate-only artifacts | continuity artifact | harness/observability changes | yes |
 | E-08 | Issue Closure Contract | T8 | E | socket cleanup checker | all upstream WS closed, no leaked local established/CLOSE_WAIT sockets, normal close reasons | cleanup artifact | runtime/harness changes | yes |
 | E-09 | Issue Closure Contract | T8 | E | allowlist redaction validator | artifact schema allowlist passes; negative canaries catch tokens, labels, prompts, tool args, response bodies, provider payloads, raw account ids | redaction report | harness changes | yes |
 | G-01 | Permanent Regression Guardrails | T6 | G | release reachability checker | no production `std::net::TcpListener` or `TcpStream` in release serve path | structural report | server/manifests changes | no |
@@ -722,6 +834,12 @@ Legend:
 | G-21 | Permanent Regression Guardrails | T6 | G/P | repo-local/CI validation | guardrails run before done claim; cheap deterministic rows in CI | CI/local report | CI/checker changes | no |
 | G-22 | R4 No hidden buffering | T5/T6 | G/I | pump buffering guard | no unbounded production pump channels and no detached production reader tasks in release serve path | structural/behavioral report | pump/runtime changes | mixed |
 | G-23 | R3 local Hyper upgrade handoff | T4/T6 | G | local WS handoff guard | local Hyper-upgraded streams use `from_raw_socket`/`from_partially_read`; no local `accept_async`/`accept_hdr_async` double-handshake | structural report | server/ws changes | no |
+| G-24 | Product law account-router pass-through; R4 No hidden buffering | T3/T6 | G/I | HTTP request-body streaming guard | production HTTP/SSE release path does not require `collect()` or full `Vec<u8>` request-body materialization before upstream egress; only bounded metadata tee is allowed | structural/behavioral report | server/http_sse changes | mixed |
+| G-25 | R4 No hidden buffering | T3/T5/T6 | G/I | bounded affinity extraction guard | HTTP/SSE and WS affinity extraction has explicit byte/event bounds and missing/late metadata cannot accumulate full bodies, full streams, or gate forwarding/close | structural/behavioral report | http_sse/websocket changes | mixed |
+| G-26 | Product law account-router pass-through | T3/T6 | G/I | no synthetic application response guard | production `serve` cannot synthesize `/v1/models` or other supported-route application responses; supported routes either pass upstream or fail closed before upstream | structural/behavioral report | upstream/server/routes changes | mixed |
+| G-27 | Product law account-router pass-through; R3/R4 | T4/T6 | G/I | WS payload-shape ownership guard | release WebSocket pre-upstream parsing is limited to explicit routing/affinity metadata and does not require prompt-bearing fields such as `input`, messages, tools, files, images, or arbitrary provider payload shape | structural/behavioral report | websocket/selection changes | mixed |
+| G-28 | Product law account-router pass-through; R3/R4 | T5/T6 | G/I | no release WS truncation/policy knob guard | release `serve` path has no message-count truncation knob, synthetic warmup, heartbeat, application close, router retry, router fallback, or provider-event-aware termination policy beyond bounded non-gating metadata observation | structural/behavioral report | server/websocket/runtime changes | mixed |
+| G-29 | R5 SQLx state boundary; disallowed edges | T2/T6 | G | release-serve auth-state boundary guard | every release-reachable request-time `serve` module, including server/session setup and HTTP/SSE/WebSocket transports, cannot import or call secret-store operations, refresh clients, direct state commit APIs, raw SQLx/rusqlite, or credential refresh sequencing internals; the release `serve` path sees only final async resolver/state traits | structural report | auth/state/proxy boundary changes | no |
 | P-01 | Acceptance Gate | T0/T6 | P | plan-review-swarm | full-duplex WS coverage mapped | review report | plan changes | no |
 | P-02 | Acceptance Gate | T0/T6 | P | plan-review-swarm | mixed HTTP/SSE + WS coverage mapped | review report | plan changes | no |
 | P-03 | Acceptance Gate | T0/T6 | P | plan-review-swarm | local auth, selection, affinity semantics preserved | review report | plan changes | no |
@@ -782,9 +900,12 @@ Gate 3: runtime smoke/e2e
 - real `codex-router serve` boot smoke
 - installed-Codex real-serve HTTP/SSE and WebSocket smoke
 - three-runtime e2e
-- these gates must spawn the built `codex-router serve` child process for S/E
-  acceptance rows; in-process runtime helpers are allowed only for lower-layer
-  integration rows that are explicitly not S/E acceptance rows
+- any proof row whose harness says "real serve path", "real
+  `codex-router serve`", or requires a stable router PID must spawn the built
+  `codex-router serve` child process and record binary path, PID, argv,
+  listener, readiness, and cleanup. This applies to I-22 through I-27 as well as
+  S/E acceptance rows. In-process runtime helpers are allowed only for rows that
+  explicitly avoid real-serve acceptance.
 
 Gate 4: final soak and PR readiness
 
@@ -857,12 +978,12 @@ redaction validation.
 
 `shravan-dev-workflow:plan-review-swarm`
 
-phase_result: complete
+phase_result: needs_revision
 evidence:
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/implementation-plan.md`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/plan-ledger.md`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/lanes/`
 recommended_next_workflow: `shravan-dev-workflow:plan-review-swarm`
-recommended_transition_reason: The accepted spec has been converted into a
-source-traced implementation plan with a mandatory proof/guardrail matrix; the
-next lifecycle gate is adversarial plan review before code changes.
+recommended_transition_reason: Account-router invariant research introduced
+new hard proof rows and guardrails; focused plan review must validate the
+revised matrix before implementation resumes.

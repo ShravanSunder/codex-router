@@ -58,6 +58,22 @@ When older sections mention `phase_result` or rejected generated-profile auth
 shapes, the active source of truth is the required-reading list above, the
 latest orchestrator event, and the current primary spec.
 
+## Current Phase Update: Human Burn-Down Pace UX Folded
+
+Focused quota UX investigation on 2026-06-24 found the burn-down selector
+already computes reset-aware 5h/weekly pressure and routing pools, but the
+human `quota status` table/plain output hid that signal while JSON exposed
+pressure/surplus fields.
+
+Plan revision 3 adds RP-16 and T4 proof requiring human table/plain output to
+show a visible `pace` signal for 5h and weekly using `on pace`, `% behind`,
+`% ahead`, or `needs refresh`. Unknown or incomplete quota evidence must not
+invent pace.
+
+Fresh focused proof for the renderer slice:
+
+- `cargo test -p codex-router-cli quota_status -- --nocapture`: 5 passed.
+
 ## Current Phase Update: Second Implementation Review Fixes Folded
 
 The second implementation-review pass found real proof and runtime gaps. The

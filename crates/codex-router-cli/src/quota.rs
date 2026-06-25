@@ -1030,6 +1030,7 @@ fn write_quota_table(
         "status",
         "5h",
         "weekly",
+        "pace",
         "resets available",
         "routing",
         "next use",
@@ -1040,6 +1041,7 @@ fn write_quota_table(
             row.account_status.as_str(),
             row.short_window.as_str(),
             row.weekly_window.as_str(),
+            row.pace.as_str(),
             row.reset_credits_available.as_str(),
             row.routing.as_str(),
             row.next_use.as_str(),
@@ -1056,17 +1058,18 @@ fn write_quota_plain(
 ) -> Result<(), QuotaCommandError> {
     writeln!(
         stdout,
-        "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use"
+        "account\tstatus\t5h\tweekly\tpace\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
             row.account_status,
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
+            row.pace.replace('\n', " "),
             row.reset_credits_available,
             row.routing.replace('\n', " "),
             row.next_use,
@@ -1163,6 +1166,7 @@ struct QuotaStatusRow {
     account_status: String,
     short_window: String,
     weekly_window: String,
+    pace: String,
     reset_credits_available: String,
     reset_credits_available_value: Option<u32>,
     routing: String,
@@ -1205,6 +1209,7 @@ impl QuotaStatusRow {
                 now_unix_seconds,
                 unicode_bars,
             ),
+            pace: format_pace_cell(&input.windows, assessment, now_unix_seconds),
             reset_credits_available: format_reset_credits(input.reset_credits_available),
             reset_credits_available_value: input.reset_credits_available,
             routing: format_routing_cell(assessment),
@@ -1336,6 +1341,60 @@ fn format_reset_credits(reset_credits_available: Option<u32>) -> String {
             }
         },
     )
+}
+
+fn format_pace_cell(
+    windows: &[DisplayQuotaWindow],
+    assessment: &BurnDownAccountAssessment,
+    now_unix_seconds: u64,
+) -> String {
+    if matches!(
+        assessment.quota_evidence_reason(),
+        QuotaEvidenceReason::NeedsQuotaProbe
+            | QuotaEvidenceReason::MissingExpectedWindow
+            | QuotaEvidenceReason::UnknownQuotaWindow
+            | QuotaEvidenceReason::MissingResetTime
+    ) {
+        return "needs refresh".to_owned();
+    }
+    let short = format_window_pace(windows, V1_SHORT_WINDOW_SECONDS, "5h", now_unix_seconds);
+    let weekly = format_window_pace(
+        windows,
+        V1_WEEKLY_WINDOW_SECONDS,
+        "weekly",
+        now_unix_seconds,
+    );
+    format!("{short}\n{weekly}")
+}
+
+fn format_window_pace(
+    windows: &[DisplayQuotaWindow],
+    window_seconds: u64,
+    label: &'static str,
+    now_unix_seconds: u64,
+) -> String {
+    let Some(window) = windows
+        .iter()
+        .find(|window| window.window_seconds == window_seconds)
+    else {
+        return format!("{label} needs refresh");
+    };
+    match window.status {
+        QuotaWindowStatus::Unknown => format!("{label} needs refresh"),
+        QuotaWindowStatus::Ineligible if window.remaining_headroom == 0 => {
+            format!("{label} empty")
+        }
+        QuotaWindowStatus::Ineligible => format!("{label} ineligible"),
+        QuotaWindowStatus::Eligible | QuotaWindowStatus::Stale => {
+            let (pressure, surplus) = window_pressure_and_surplus(window, now_unix_seconds);
+            match (pressure.unwrap_or(0), surplus.unwrap_or(0)) {
+                (0, 0) => format!("{label} on pace"),
+                (behind, 0) => format!("{label} {behind}% behind"),
+                (0, ahead) => format!("{label} {ahead}% ahead"),
+                _ => format!("{label} needs refresh"),
+            }
+        }
+    }
 }
 
 fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {

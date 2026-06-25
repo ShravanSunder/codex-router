@@ -86,6 +86,10 @@ the installed Codex HTTP and WebSocket paths end to end.
 - `crates/codex-router-cli/src/quota.rs` uses comfy-table and Unicode bars, but
   still owns some older status wording and JSON shape instead of rendering the
   full selection-owned contract.
+- Focused 2026-06-24 investigation found the burn-down selector already
+  computes reset-aware 5h/weekly pressure and routing pools, but the human
+  table/plain quota status path hid that pace/burn-down signal; JSON exposed
+  pressure/surplus fields while the default table did not.
 - `crates/codex-router-test-support/src/installed_codex.rs` still emits stale
   forbidden first-frame transcript fields.
 
@@ -108,6 +112,7 @@ the installed Codex HTTP and WebSocket paths end to end.
 | RP-13 | Every routed API has route-native success and fail-closed proof through a stable harness command | route inventory | T8a, T8b | route-native black-box | `cargo test -p codex-router-test-support route_native_ -- --ignored --nocapture` |
 | RP-14 | Installed Codex HTTP/SSE and WebSocket both work through router with transport-specific proof commands | proof expectations | T9, T10 | installed-Codex e2e | `installed_codex_http_sse_` and `installed_codex_websocket_` ignored test receipts |
 | RP-15 | Logs/traces/audit/status/smoke/review artifacts redact tokens, headers, raw body/frame, prompts, unsafe labels, affinity secrets, affinity secret-store identifiers, derived secret material, raw previous-response IDs, and shared JSON `account_id` leakage | security context | T11 | security + smoke | canary negative searches over captured artifacts and review/receipt paths |
+| RP-16 | Human quota table and plain output expose visible reset-aware burn-down/pace for 5h and weekly from the shared assessment/window math, not only JSON debug fields; missing or unknown quota renders `needs refresh` instead of fake pace | status UX contract | T4 | unit + smoke | table/plain snapshots include a `pace` column with `on pace`, `% behind`, `% ahead`, or `needs refresh`, and negative searches still reject `pp`/`bottleneck` |
 
 Freshness guard for every proof row: run from a clean worktree after the
 corresponding task changes; record command, exit code, and relevant artifact
@@ -340,6 +345,13 @@ Implement:
   labels, no raw account ids, no raw scores, no `pp`, no `bottleneck`, one
   logical row per account, and at most one blank continuation line inside a
   cell.
+- Default table and plain output expose a human `pace` signal derived from the
+  same reset-aware window pressure/surplus math as JSON. The signal must name
+  5h and weekly status as `on pace`, `<n>% behind`, `<n>% ahead`, or
+  `needs refresh`; it must not use raw scores, `pp`, or `bottleneck`.
+- Missing expected windows, unknown quota, or missing reset metadata render
+  `needs refresh` in the human pace signal instead of inventing a burn-down
+  value.
 - Status persists provider-reported reset credits from quota refresh and renders
   them as a `resets available` column plus JSON `reset_credits_available`; this
   is display-only and does not affect route scoring in v1.
@@ -357,6 +369,9 @@ Proof:
 - CLI unit/golden tests for table/plain/json.
 - Negative text assertions for forbidden words and secret-like material.
 - JSON schema tests for stable enums and `window_slots`.
+- Table/plain snapshot tests proving the `pace` column renders 5h and weekly
+  burn-down pressure/surplus for known quota, and `needs refresh` for missing
+  or unknown quota evidence.
 - Snapshot matrix for healthy multi-account, 5h/weekly disagreement,
   reset-aware preferred-next, unknown/partial data, blocked/reserve/usable/
   unknown accounts, plain mode, JSON mode, and default no-unrelated-route rows.

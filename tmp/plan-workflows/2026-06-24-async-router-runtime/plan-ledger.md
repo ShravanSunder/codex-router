@@ -2,14 +2,15 @@
 
 Date: 2026-06-24
 Goal id: `2026-06-24-async-router-runtime`
-Status: accepted after focused plan-review-swarm
+Status: revised after account-router invariant research; focused
+plan-review-swarm required before implementation resumes
 
 ## Source Coverage
 
 - Spec:
   `tmp/spec-workflows/2026-06-24-async-router-runtime/async-router-runtime-spec.md`
-  - `wc -l`: 759
-  - parent-read coverage: lines 1-759
+  - `wc -l`: 823
+  - parent-read coverage: lines 1-823
 - Review ledger:
   `tmp/spec-workflows/2026-06-24-async-router-runtime/review-ledger.md`
   - `wc -l`: 240
@@ -18,6 +19,8 @@ Status: accepted after focused plan-review-swarm
   `tmp/workflow-state/2026-06-24-async-router-runtime/details.md`
 - Transition log:
   `tmp/workflow-state/2026-06-24-async-router-runtime/events.jsonl`
+- Account-router invariant research:
+  `tmp/research-workflows/2026-06-24-codex-websocket-invariants/research-ledger.md`
 
 ## Lane Packets And Artifacts
 
@@ -76,7 +79,67 @@ fill the row-specific target behind that command before marking a row green.
 Initial verdict: `needs revision`, addressed in the plan/spec before
 implementation.
 
-Focused re-review verdict: ready for `implementation-execute-plan`.
+Previous focused re-review verdict before later account-router research:
+the older plan-review gate had passed. That historical verdict is superseded by
+the latest account-router revision below.
+
+Latest revision after implementation debugging:
+
+- read-only account-router invariant research found the plan was still too weak
+  to enforce the product law that `codex-router` is only an account router and
+  pass-through proxy outside local auth, account selection/cycling, upstream
+  credential injection, bounded quota/state/affinity metadata, and redacted
+  observability
+- accepted findings were folded into `async-router-runtime-spec.md` and
+  `implementation-plan.md`
+- implementation is paused until a focused `plan-review-swarm` attacks the new
+  account-router/pass-through proof rows and either passes them or returns
+  findings to fold back
+
+Focused account-router plan review reduction:
+
+- accepted blocker: T3 did not explicitly own release-path request streaming,
+  no full-body `collect()`/`Vec<u8>` request DTO usage, and bounded HTTP/SSE
+  affinity scanning. Folded into T3 behavior, checkpoint, and proof.
+- accepted blocker: the real-serve child-process rule applied only to S/E rows,
+  leaving I-22 through I-27 ambiguous. Folded into Gate 3 as a global rule for
+  any row claiming "real serve path", real `codex-router serve`, or stable
+  router PID evidence.
+- accepted important: T5 did not explicitly own removal of release WebSocket
+  truncation/provider-event policy knobs. Folded into T5 behavior, checkpoint,
+  and proof.
+- accepted important: plan lacked explicit security context. Added a security
+  context section mapping assets, trust boundaries, and proof rows.
+- resolved question: no new pre-upstream idle cap is introduced in this goal;
+  legal Codex preconnect remains open until client close, router shutdown, or
+  revocation.
+- accepted nit: source coverage now includes the account-router invariant
+  research ledger and current line count.
+- accepted blocker: I-22/I-23 needed ordered lifecycle proof, not aggregate
+  counts. Folded into row observations requiring ordered traces for local
+  upgrade, first request data, selector call, credential resolution, upstream
+  open, and client close.
+- accepted blocker: HTTP response streaming needed positive early-delivery
+  proof, not only byte/chunk equality. Folded into I-24 and T3 proof.
+- accepted important: soak continuity needed per-runtime join keys and one
+  handshake per runtime. Folded into E-07.
+- accepted important: WS truncation/policy proof needed a long transcript that
+  trips the historical failure shape. Folded into I-25.
+- accepted question: header pass-through must be explicit. Folded into I-24.
+- accepted blocker: Codex-owned response metadata such as `x-codex-turn-state`,
+  `x-models-etag`, `openai-model`, and `x-reasoning-included` was missing from
+  the pass-through boundary. Folded into spec R4, T3/T4 proof, and I-27.
+- accepted important: T2 split allowed transport work to outrun final async
+  auth/state traits. Folded into T2 dependencies, U-08, and G-29.
+- accepted important from focused account-router plan review: G-29 was still
+  too narrow because it guarded only transport modules, allowing server/session
+  setup in the release `serve` path to own secret-store, refresh, or state
+  commit sequencing. Folded into T2 behavior/proof/split wording and G-29 as a
+  full release-reachable request-time `serve` guard.
+- accepted nit from focused account-router plan review: I-24 wording allowed
+  "redacted metadata side effects" to be misread as an in-band mutation
+  exception. Folded into I-24 as out-of-band redacted routing/observability side
+  effects only.
 
 Accepted blocker/important findings folded into
 `implementation-plan.md`:
@@ -100,6 +163,19 @@ Accepted blocker/important findings folded into
   redaction allowlist validation needed explicit rows or slice contracts
 - Clap handling needed an explicit rule: if touched CLI parsing changes, convert
   the touched command contract to Clap and add parser proof
+- Codex-compatible preconnect must prove zero selector calls, zero credential
+  resolutions, and zero upstream opens before first request data
+- pre-upstream ping/pong/client-close control behavior must be proven through
+  real `serve`
+- HTTP/SSE and WebSocket pass-through canaries must prove account-router
+  behavior rather than relying on review-only scope policing
+- `/v1/models` must be upstream pass-through in production, not a synthesized
+  router application response
+- production release path must not full-buffer HTTP request bodies, accumulate
+  unbounded affinity scan buffers, require prompt-bearing WebSocket payload
+  fields for routing policy, or expose a WebSocket message-count truncation knob
+- soak proof must require one stable router PID and no reconnect/retry/fallback
+  transition across the full overlap window
 
 Accepted spec clarification folded into
 `async-router-runtime-spec.md`:
@@ -155,7 +231,10 @@ evidence:
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/implementation-plan.md`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/plan-ledger.md`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/lanes/`
+- `tmp/research-workflows/2026-06-24-codex-websocket-invariants/research-ledger.md`
+- `tmp/plan-workflows/2026-06-24-async-router-runtime/reviews/account-router-focused-plan-review-report.md`
 recommended_next_workflow: `shravan-dev-workflow:implementation-execute-plan`
-recommended_transition_reason: Plan-review-swarm findings were folded back into
-the spec and implementation plan, focused re-review found no remaining blocker,
-and implementation may start against the reviewed proof matrix.
+recommended_transition_reason: Focused account-router plan review found one
+important G-29 scope gap and one I-24 wording nit; both were folded back and
+follow-up verification returned ready with no remaining blocker or important
+finding.

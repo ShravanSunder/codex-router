@@ -2479,11 +2479,11 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
         );
         assert_eq!(
             lines[2],
@@ -2571,11 +2571,11 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind weekly 20% behind\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
         );
         assert_eq!(
             lines[2],

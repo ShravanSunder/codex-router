@@ -60,6 +60,12 @@ Head at plan creation: `0bde7ae`
     self-contained, corrected the WebSocket failure-boundary proof, added
     `--list` inventory preflights for grouped cargo filters, and expanded
     affinity secret-store redaction canaries.
+11. Focused 2026-06-24 quota UX investigation found that the burn-down selector
+    already computes reset-aware 5h/weekly pressure and routing pools, but
+    human table/plain quota output hid the pace/burn-down signal while JSON
+    exposed pressure/surplus. Revision 3 adds RP-16 and T4 proof requiring a
+    visible human `pace` signal with `on pace`, `% behind`, `% ahead`, or
+    `needs refresh`.
 
 ## Accepted Plan Artifact
 
@@ -79,3 +85,8 @@ closure before implementation.
 
 Latest recommendation: run parent artifact checks on Revision 2, then transition
 to `shravan-dev-workflow:implementation-execute-plan` if no new blocker remains.
+
+2026-06-24 update: Revision 3 folds the focused quota UX finding into the plan.
+If implementation is already in progress, treat RP-16 as a required T4
+completion gate and rerun the focused CLI quota status tests before claiming
+quota status complete.

@@ -18,10 +18,21 @@ The router remains a pure proxy:
   compaction, and transport choice.
 - The router owns local auth, route classification, account selection,
   upstream credential injection, quota/state lookups, and response affinity.
+- Product law: `codex-router` is an account router. Other than choosing and
+  cycling upstream accounts and applying the minimum auth/header changes needed
+  to reach that account, traffic is pass-through.
 - The router must preserve Codex methods, paths, query strings, request bodies,
   response status, response bodies, streaming order, WebSocket frames, and
   protocol metadata except for already-specified local auth removal, upstream
   auth injection, hop-by-hop header handling, and redacted routing metadata.
+- Codex-owned response metadata is pass-through. The router must preserve
+  response headers and WebSocket metadata events such as `x-codex-turn-state`,
+  `x-models-etag`, `openai-model`, `x-reasoning-included`, and future
+  Codex-owned protocol metadata unless the metadata is hop-by-hop transport
+  state or one of the explicit auth/header exceptions above.
+- The router must not synthesize Codex application responses. Supported routes,
+  including `/v1/models`, are upstream pass-through after account selection and
+  credential injection. Unsupported routes fail closed before upstream egress.
 
 ## Current Evidence
 
@@ -165,17 +176,24 @@ local upgrade request
   -> apply local auth mode gate and auth-smuggling rejection
   -> classify supported WS route
   -> accept local WebSocket
-  -> wait for bounded first response.create frame
-  -> parse only bounded routing metadata
+  -> allow Codex-compatible preconnect/idle before request data
+  -> wait for first bounded Codex request data frame
+  -> parse only bounded routing metadata from that request data frame
   -> select account
   -> resolve upstream credentials
   -> open upstream WebSocket
-  -> forward the exact first frame unchanged
+  -> forward the exact first request data frame unchanged
   -> pin connection to that account until close
 ```
 
 Route and local-auth failures before local WebSocket accept are local HTTP
-rejections. After the local WebSocket has been accepted, failures in first-frame
+rejections. After the local WebSocket has been accepted, the router may be in a
+pre-upstream state while waiting for the first Codex request data frame. Real
+Codex may preconnect a WebSocket and send no request frame immediately, so the
+router must not close a legal preconnect because no data frame arrives on an
+invented short deadline. Control frames before upstream open are handled as
+WebSocket control frames; client close before request data closes cleanly and
+does not count as malformed routing data. Failures in first request data frame
 validation, selection, credential resolution, or upstream WebSocket open are
 reported by closing the local WebSocket with a router-owned close reason. The
 router must not imply it can delay the local `101 Switching Protocols` response
@@ -184,8 +202,12 @@ separate handshakes.
 
 Post-upgrade, pre-upstream failure contract:
 
-- first-frame timeout or invalid first frame closes the local WebSocket with a
-  redacted router policy close reason and emits a redacted trace/audit event
+- no release-path short wall-clock first request data frame timeout is allowed;
+  legal Codex preconnect may remain idle before request data until client close,
+  router shutdown, or token/session revocation. This goal does not introduce a
+  new pre-upstream idle timeout or local resource-policy cap.
+- invalid first request data frame closes the local WebSocket with a redacted
+  router policy close reason and emits a redacted trace/audit event
 - selection failure closes the local WebSocket with a redacted router policy
   close reason and emits a redacted trace/audit event
 - credential resolution failure closes the local WebSocket with a redacted
@@ -210,6 +232,34 @@ The router must not buffer whole streams or whole WebSocket conversations in
 order to proxy them. It may parse bounded routing/error/affinity metadata that
 the product spec already allows. It must not inspect prompts, tool arguments,
 images, files, memory trace contents, or arbitrary message payloads for policy.
+
+Allowed request metadata is limited to route/account-routing and affinity facts:
+method, path, query, route kind/band, local-safe headers after auth stripping,
+top-level request envelope/type when needed to identify a Codex request frame,
+top-level model when needed for selection/quota, and
+`previous_response_id`/redacted affinity keys. Prompt-bearing fields such as
+`input`, messages, tool calls/arguments, images, files, memory trace content,
+and arbitrary provider payload shape are not routing policy inputs and must not
+be required for a request to pass through.
+
+Allowed response metadata observation is limited to bounded affinity/error
+facts needed for account routing and redacted observability. The router may
+observe but must not own, synthesize, drop, or rewrite Codex-owned metadata
+such as turn-state headers, model headers, reasoning-included headers, models
+ETags, or WebSocket metadata events.
+
+HTTP request bodies and response bodies must stream through the release path.
+The router may tee bounded prefix bytes or bounded parsed metadata needed for
+routing/affinity, but it must not collect a full request body, full response
+body, full SSE stream, or full WebSocket conversation before forwarding.
+Affinity extraction from HTTP/SSE or WebSocket responses must have an explicit
+byte/event scan bound and must not gate body/frame forwarding or close progress.
+
+WebSocket forwarding and termination are transport-owned. The release `serve`
+path must not expose or use a message-count truncation knob, synthetic warmup,
+synthetic heartbeat, synthetic application close, or provider-event-aware
+termination policy. Parsing provider events is allowed only for bounded,
+non-gating affinity/error metadata already named by this spec.
 
 Backpressure must be represented by async body/frame sinks and bounded task
 coordination, not by unbounded channels or detached reader threads.
@@ -298,12 +348,19 @@ R9. Proof expectations
 The implementation plan that follows this spec must define concrete proof
 commands, but this spec requires proof at these layers:
 
-- Unit proof for route classification, local-auth rejection, first-frame
-  validation, affinity metadata extraction, and header sanitation.
+- Unit proof for route classification, local-auth rejection, first request data
+  frame validation, affinity metadata extraction, and header
+  sanitation.
 - Integration proof with mock upstreams for:
   - multiple concurrent WebSocket sessions
   - one WebSocket stalled upstream while another WebSocket completes
   - one WebSocket stalled upstream while HTTP/SSE completes
+  - Codex-compatible WebSocket preconnect: local upgrade succeeds, no request
+    data frame is sent immediately, the router does not emit `FirstFrameTimeout`
+    or force reconnect/fallback, and a later first `response.create` request
+    data frame on the same local WebSocket routes successfully
+  - pre-upstream control frames are handled as WebSocket control frames, not
+    invalid routing payloads
   - same-session bidirectional interleave: one WebSocket session where upstream
     emits a partial/non-terminal event, waits for a second client frame before
     `response.completed`, then completes only after receiving that follow-up
@@ -563,8 +620,9 @@ codex-router-proxy::AsyncHttpProxyService
   exposes: pure proxy response stream
 
 codex-router-proxy::AsyncWebSocketSession
-  owns: first-frame route decision boundary, upstream WS open,
-        bidirectional frame pumps, per-session cancellation
+  owns: first request data frame route decision boundary, upstream WS open,
+        pre-upstream Codex-compatible idle/control handling, bidirectional
+        frame pumps, per-session cancellation
   exposes: one pinned stateful Codex WebSocket proxy session
 
         │ uses
@@ -616,7 +674,7 @@ HTTP/SSE:
 receive request
   -> apply local auth mode gate and auth-smuggling rejection
   -> classify route
-  -> load bounded routing/affinity metadata
+  -> load bounded routing/affinity metadata without collecting the full body
   -> select eligible account
   -> resolve credentials
   -> build sanitized upstream request
@@ -634,10 +692,10 @@ receive upgrade
   -> apply local auth mode gate and auth-smuggling rejection
   -> classify route
   -> accept local WS
-  -> bounded first-frame wait
+  -> Codex-compatible pre-upstream wait for first request data frame
   -> select account and resolve credentials
   -> open upstream WS
-  -> send first frame unchanged
+  -> send first request data frame unchanged
   -> concurrently pump local->upstream and upstream->local
   -> observe bounded affinity metadata from upstream frames
   -> if either side ends, close the other side
@@ -716,7 +774,13 @@ Required security invariants:
 - local auth token is stripped before upstream
 - upstream credential injection occurs only after selection
 - logs/traces/audit events are redacted allowlists
-- WebSocket first-frame parsing is bounded and policy-limited
+- WebSocket first request data frame parsing is bounded and policy-limited
+- WebSocket preconnect/control behavior before upstream open matches Codex
+  client behavior and must not invent a short first request data frame deadline
+- HTTP/SSE request and response bodies stream through the release path without
+  full-body collection for routing, selection, or affinity
+- Supported routes, including `/v1/models`, are not synthetic application
+  responses in production `serve`
 - prompt/tool/message payloads are not logged or used for routing policy
 
 ## Open Questions For Plan Creation

@@ -24,9 +24,9 @@ Completion requires:
 - Latest completed workflow: `shravan-dev-workflow:plan-review-swarm`
 - Phase result: `complete`
 - Next workflow: `shravan-dev-workflow:implementation-execute-plan`
-- First implementation target: continue executing the reviewed implementation
-  plan from the first unproven proof slice, with the current focus on the real
-  child-process `codex-router serve` installed-Codex WebSocket proof path.
+- Current focus: execute the reviewed account-router async runtime plan. Start
+  by proving the first unproven release-serve request-time auth/state boundary
+  and pass-through guardrails before code changes claim green status.
 
 ## Required Reading
 
@@ -48,6 +48,7 @@ Implementation artifacts:
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/plan-ledger.md`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/reviews/plan-review-report.md`
 - `tmp/plan-workflows/2026-06-24-async-router-runtime/execution-receipts/`
+- `tmp/research-workflows/2026-06-24-codex-websocket-invariants/research-ledger.md`
 
 ## Scope
 
@@ -83,9 +84,9 @@ Plan creation must expand these seeds into one row per hard gate with source
 spec anchor, proof layer, harness, command/execution surface, expected
 observation, durable evidence artifact, stale-proof guard, and status checkbox:
 
-- unit proof for route classification, local auth, first-frame parsing, affinity,
-  header sanitation, selection preservation, and cancellation-safe credential
-  commit semantics
+- unit proof for route classification, local auth, first request data frame
+  parsing, affinity, header sanitation, selection preservation, and
+  cancellation-safe credential commit semantics
 - integration proof for concurrent WebSockets, stalled upstream plus sibling
   progress, mixed WebSocket plus HTTP/SSE progress, same-session bidirectional
   interleave, blocked write/backpressure cleanup, post-upgrade/pre-upstream
