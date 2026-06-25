@@ -1,6 +1,5 @@
 //! Loopback-only server runtime primitives.
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 #[cfg(test)]
 use std::io::Read;
@@ -16,7 +15,6 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -41,22 +39,14 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
-use codex_router_core::ids::AccountId;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_core::routes::RouteBand;
-use codex_router_secret_store::SecretStore;
-use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
-use codex_router_secret_store::model::SecretStoreError;
-use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -66,15 +56,17 @@ use crate::account_selection::AsyncRepositoryBackedAccountSelector;
 use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RouteBandAccountHolds;
 use crate::account_selection::RouteBandWeightedSelectors;
+use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
+use crate::credential_runtime::ProxyRuntimeCredentialResources;
+use crate::credential_runtime::ProxyRuntimeCredentialResourcesOpenError;
+use crate::credential_runtime::RuntimeAffinitySecretProvider;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::http_sse::AsyncHttpAffinityOwnerRecorder;
 use crate::http_sse::AsyncHttpBodyError;
-use crate::http_sse::AsyncProviderCredentialResolver;
 use crate::http_sse::AsyncStreamingHttpProxyResponse;
 use crate::http_sse::AsyncStreamingUpstreamHttpTransport;
 use crate::http_sse::AuthenticatedHttpProxyService;
-use crate::http_sse::HttpAffinitySecretProvider;
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 #[cfg(test)]
@@ -95,8 +87,6 @@ use crate::local_auth::extract_presented_local_token_from_request;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
-use crate::secret_store_factory::ProxyRuntimeSecretStore;
-use crate::secret_store_factory::open_proxy_secret_store;
 use crate::upstream::HyperHttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
 use crate::websocket::AsyncWebSocketTunnel;
@@ -105,10 +95,6 @@ use crate::websocket::WebSocketHandshakeRequest;
 use crate::websocket::WebSocketProtocolRouter;
 use crate::websocket::WebSocketRegistrySnapshot;
 use crate::websocket::WebSocketRevocationRegistry;
-use codex_router_auth::resolver::CredentialRefreshClient;
-use codex_router_auth::resolver::CredentialResolverError;
-use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
-use codex_router_auth::resolver::ResolvedProviderCredential;
 
 #[cfg(test)]
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
@@ -419,7 +405,7 @@ pub struct LoopbackRouterRuntime {
     runtime: tokio::runtime::Runtime,
     server: AsyncLoopbackServerRuntime,
     state_database_path: PathBuf,
-    secret_store: ProxyRuntimeSecretStore,
+    credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
@@ -429,7 +415,6 @@ pub struct LoopbackRouterRuntime {
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
-    credential_refresh_leases: AsyncCredentialRefreshLeases,
     fixed_now_unix_seconds: Option<u64>,
     connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
 }
@@ -441,10 +426,12 @@ impl LoopbackRouterRuntime {
             .enable_all()
             .build()
             .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
-        let secret_store = open_proxy_secret_store(&config.secret_store_root)?;
-        let affinity_secret = load_or_create_router_affinity_hash_secret(&secret_store)
-            .map(|loaded| loaded.secret().clone())?;
-        let affinity_secret_provider = RuntimeAffinitySecretProvider::new(affinity_secret);
+        let credential_resources = ProxyRuntimeCredentialResources::open(
+            &config.secret_store_root,
+            config.fixed_now_unix_seconds,
+        )?;
+        let affinity_secret_provider = credential_resources.affinity_secret_provider();
+        let credential_factory = credential_resources.credential_factory();
         let affinity_state_store =
             runtime.block_on(AsyncSqliteStateStore::open(&config.state_database_path))?;
         let affinity_owner_recorder =
@@ -466,7 +453,6 @@ impl LoopbackRouterRuntime {
             runtime,
             server,
             state_database_path: config.state_database_path,
-            secret_store,
             affinity_secret_provider,
             affinity_owner_recorder,
             auth_gate,
@@ -476,7 +462,7 @@ impl LoopbackRouterRuntime {
             audit_sink,
             weighted_selectors: Default::default(),
             account_holds: Default::default(),
-            credential_refresh_leases: Default::default(),
+            credential_factory,
             fixed_now_unix_seconds: config.fixed_now_unix_seconds,
             connection_error_reporter: Arc::new(StderrLoopbackConnectionErrorReporter),
         })
@@ -661,7 +647,7 @@ impl LoopbackRouterRuntime {
     ) -> LoopbackProtocolConnectionHandler {
         LoopbackProtocolConnectionHandler {
             state_database_path: self.state_database_path.clone(),
-            secret_store: self.secret_store.clone(),
+            credential_factory: self.credential_factory.clone(),
             affinity_secret_provider: self.affinity_secret_provider.clone(),
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
             affinity_record_tasks,
@@ -672,7 +658,6 @@ impl LoopbackRouterRuntime {
             audit_sink: self.audit_sink.clone(),
             weighted_selectors: Arc::clone(&self.weighted_selectors),
             account_holds: Arc::clone(&self.account_holds),
-            credential_refresh_leases: self.credential_refresh_leases.clone(),
             fixed_now_unix_seconds: self.fixed_now_unix_seconds,
             session_shutdown,
         }
@@ -734,7 +719,7 @@ fn supervise_detached_connection_handler(
 #[derive(Clone)]
 struct LoopbackProtocolConnectionHandler {
     state_database_path: PathBuf,
-    secret_store: ProxyRuntimeSecretStore,
+    credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     affinity_record_tasks: TaskTracker,
@@ -745,7 +730,6 @@ struct LoopbackProtocolConnectionHandler {
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
-    credential_refresh_leases: AsyncCredentialRefreshLeases,
     fixed_now_unix_seconds: Option<u64>,
     session_shutdown: CancellationToken,
 }
@@ -864,12 +848,9 @@ impl LoopbackProtocolConnectionHandler {
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         );
-        let credential_resolver = AsyncProxyCredentialResolver::new(
-            state_store.clone(),
-            self.secret_store.clone(),
-            self.credential_refresh_leases.clone(),
-            self.fixed_now_unix_seconds,
-        );
+        let credential_resolver = self
+            .credential_factory
+            .resolver_for_state(state_store.clone());
         let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
         let tunnel = if let Some(audit_sink) = &self.audit_sink {
             AsyncWebSocketTunnel::new_with_audit_sink(
@@ -929,12 +910,9 @@ impl LoopbackProtocolConnectionHandler {
             .map_err(|_error| HttpProxyError::Selection {
                 reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
-        let credential_resolver = AsyncProxyCredentialResolver::new(
-            state_store.clone(),
-            self.secret_store.clone(),
-            self.credential_refresh_leases.clone(),
-            self.fixed_now_unix_seconds,
-        );
+        let credential_resolver = self
+            .credential_factory
+            .resolver_for_state(state_store.clone());
         let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
             &state_store,
             Arc::clone(&self.weighted_selectors),
@@ -1231,218 +1209,6 @@ fn empty_body() -> BoxBody<Bytes, AsyncHttpBodyError> {
         .boxed()
 }
 
-#[derive(Clone, Debug, Default)]
-struct AsyncCredentialRefreshLeases {
-    leases: Arc<Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>>,
-}
-
-impl AsyncCredentialRefreshLeases {
-    fn lease_for(&self, account_id: &AccountId) -> Arc<tokio::sync::Mutex<()>> {
-        let mut leases = self
-            .leases
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(
-            leases
-                .entry(account_id.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        )
-    }
-}
-
-#[derive(Clone, Debug)]
-struct AsyncProxyCredentialResolver {
-    state_store: AsyncSqliteStateStore,
-    secret_store: ProxyRuntimeSecretStore,
-    refresh_leases: AsyncCredentialRefreshLeases,
-    refresh_client: OpenAiOAuthRefreshClient,
-    fixed_now_unix_seconds: Option<u64>,
-}
-
-impl AsyncProxyCredentialResolver {
-    fn new(
-        state_store: AsyncSqliteStateStore,
-        secret_store: ProxyRuntimeSecretStore,
-        refresh_leases: AsyncCredentialRefreshLeases,
-        fixed_now_unix_seconds: Option<u64>,
-    ) -> Self {
-        Self {
-            state_store,
-            secret_store,
-            refresh_leases,
-            refresh_client: OpenAiOAuthRefreshClient::new(),
-            fixed_now_unix_seconds,
-        }
-    }
-
-    async fn resolve_provider_credentials_async(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        let now_unix_seconds = match self.fixed_now_unix_seconds {
-            Some(now_unix_seconds) => now_unix_seconds,
-            None => current_unix_seconds()
-                .map_err(|_error| CredentialResolverError::RefreshUnavailable)?,
-        };
-        let (active_generation, bundle) = self.read_active_bundle(account_id).await?;
-        if self.bundle_is_expired(&bundle, now_unix_seconds) {
-            let lease = self.refresh_leases.lease_for(account_id);
-            let _guard = lease.lock().await;
-            let (current_generation, current_bundle) = self.read_active_bundle(account_id).await?;
-            let (resolved_generation, refreshed) =
-                if self.bundle_is_expired(&current_bundle, now_unix_seconds) {
-                    self.refresh_expired_bundle(account_id, current_generation, &current_bundle)
-                        .await?
-                } else {
-                    (current_generation, current_bundle)
-                };
-            return Ok(ResolvedProviderCredential::new(
-                account_id.clone(),
-                refreshed.access_token().clone(),
-                resolved_generation,
-            )
-            .with_chatgpt_account_id(refreshed.chatgpt_account_id()));
-        }
-
-        Ok(ResolvedProviderCredential::new(
-            account_id.clone(),
-            bundle.access_token().clone(),
-            active_generation,
-        )
-        .with_chatgpt_account_id(bundle.chatgpt_account_id()))
-    }
-
-    async fn read_active_bundle(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
-        let account = self
-            .state_store
-            .load_account(account_id)
-            .await
-            .map_err(map_state_error)?
-            .ok_or(CredentialResolverError::AccountUnavailable)?;
-        if account.status() != AccountStatus::Enabled {
-            return Err(CredentialResolverError::AccountIneligible);
-        }
-        let active_generation = account
-            .active_credential_generation()
-            .ok_or(CredentialResolverError::AccountIneligible)?;
-        let bundle_key = account_credential_bundle_key(account_id, active_generation)
-            .map_err(map_secret_error)?;
-        let secret_store = self.secret_store.clone();
-        let bundle = tokio::task::spawn_blocking(move || {
-            let secret = secret_store
-                .read_secret(&bundle_key)
-                .map_err(map_secret_error)?;
-            AccountCredentialBundle::from_secret_string(secret).map_err(map_secret_error)
-        })
-        .await
-        .map_err(|_error| CredentialResolverError::SecretUnavailable)??;
-
-        Ok((active_generation, bundle))
-    }
-
-    fn bundle_is_expired(&self, bundle: &AccountCredentialBundle, now_unix_seconds: u64) -> bool {
-        bundle
-            .expires_unix_seconds()
-            .is_some_and(|expires| expires <= now_unix_seconds)
-    }
-
-    async fn refresh_expired_bundle(
-        &self,
-        account_id: &AccountId,
-        current_generation: u64,
-        bundle: &AccountCredentialBundle,
-    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
-        let refresh_token = bundle
-            .refresh_token()
-            .ok_or(CredentialResolverError::RefreshUnavailable)?
-            .clone();
-        let refresh_client = self.refresh_client.clone();
-        let account_id_for_refresh = account_id.clone();
-        let mut refreshed = tokio::task::spawn_blocking(move || {
-            refresh_client.refresh_credentials(&account_id_for_refresh, &refresh_token)
-        })
-        .await
-        .map_err(|_error| CredentialResolverError::RefreshUnavailable)??;
-        if refreshed.chatgpt_account_id().is_none()
-            && let Some(chatgpt_account_id) = bundle.chatgpt_account_id()
-        {
-            refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
-        }
-        let refreshed_generation = current_generation
-            .checked_add(1)
-            .ok_or(CredentialResolverError::RefreshUnavailable)?;
-        let refreshed_key = account_credential_bundle_key(account_id, refreshed_generation)
-            .map_err(map_secret_error)?;
-        let refreshed_secret = refreshed.to_secret_string().map_err(map_secret_error)?;
-        let secret_store = self.secret_store.clone();
-        tokio::task::spawn_blocking(move || {
-            secret_store
-                .write_secret(&refreshed_key, &refreshed_secret)
-                .map_err(map_secret_error)
-        })
-        .await
-        .map_err(|_error| CredentialResolverError::SecretUnavailable)??;
-        self.state_store
-            .activate_account_credential_generation_if_current_and_invalidate_quota(
-                account_id,
-                current_generation,
-                refreshed_generation,
-                AccountStatus::Enabled,
-            )
-            .await
-            .map_err(map_state_error)?;
-
-        Ok((refreshed_generation, refreshed))
-    }
-}
-
-impl AsyncProviderCredentialResolver for AsyncProxyCredentialResolver {
-    fn resolve_provider_credentials<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
-        Box::pin(async move { self.resolve_provider_credentials_async(account_id).await })
-    }
-}
-
-fn map_state_error(_error: StateStoreError) -> CredentialResolverError {
-    CredentialResolverError::AccountUnavailable
-}
-
-fn map_secret_error(_error: SecretStoreError) -> CredentialResolverError {
-    CredentialResolverError::SecretUnavailable
-}
-
-impl HttpAffinitySecretProvider for ProxyRuntimeSecretStore {
-    fn load_or_create_affinity_secret(&self) -> Result<RouterAffinityHashSecret, HttpProxyError> {
-        load_or_create_router_affinity_hash_secret(self)
-            .map(|loaded| loaded.secret().clone())
-            .map_err(|_error| HttpProxyError::Selection {
-                reason: crate::account_selection::QuotaAwareAccountSelectorError::SecretUnavailable,
-            })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RuntimeAffinitySecretProvider {
-    secret: RouterAffinityHashSecret,
-}
-
-impl RuntimeAffinitySecretProvider {
-    const fn new(secret: RouterAffinityHashSecret) -> Self {
-        Self { secret }
-    }
-}
-
-impl HttpAffinitySecretProvider for RuntimeAffinitySecretProvider {
-    fn load_or_create_affinity_secret(&self) -> Result<RouterAffinityHashSecret, HttpProxyError> {
-        Ok(self.secret.clone())
-    }
-}
-
 #[derive(Clone, Debug)]
 struct AsyncSqliteAffinityOwnerRecorder {
     state_store: AsyncSqliteStateStore,
@@ -1483,9 +1249,9 @@ pub enum LoopbackRouterRuntimeError {
     /// Opening or reading SQLite state failed.
     #[error(transparent)]
     State(#[from] StateStoreError),
-    /// Opening or reading the router secret store failed.
+    /// Opening runtime credential resources failed.
     #[error(transparent)]
-    SecretStore(#[from] SecretStoreError),
+    CredentialResources(#[from] ProxyRuntimeCredentialResourcesOpenError),
     /// Runtime system clock is before Unix epoch.
     #[error("system clock is before Unix epoch")]
     SystemClock(#[source] std::time::SystemTimeError),

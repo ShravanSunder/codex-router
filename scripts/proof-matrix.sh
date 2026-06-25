@@ -44,7 +44,7 @@ row_owner() {
     I-17b) printf 'T5/T6' ;;
     S-01|S-02|S-03|S-04) printf 'T7' ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) printf 'T8' ;;
-    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-27|G-28) printf 'T6' ;;
+    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-27|G-28|G-29) printf 'T6' ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-09) printf 'T0/T6' ;;
     P-07|P-08|P-10) printf 'final' ;;
     *) printf 'pending-owner' ;;
@@ -191,6 +191,9 @@ expected_observation() {
     G-28)
       printf 'release serve path has no WebSocket message-count truncation, first-frame timeout, provider-event-aware termination, or router-created retry/fallback policy'
       ;;
+    G-29)
+      printf 'release serve request-time auth/state boundary hides secret-store, refresh client, raw SQL, and credential generation commit internals from proxy serve paths'
+      ;;
     *)
       printf 'row harness has not been implemented yet'
       ;;
@@ -257,7 +260,7 @@ known_row() {
     I-01|I-02|I-03|I-04|I-05a|I-05b|I-06|I-07|I-08|I-09|I-10|I-11|I-12|I-13|I-14|I-15|I-16|I-17a|I-17b|I-18|I-19|I-20|I-21) return 0 ;;
     S-01|S-02|S-03|S-04) return 0 ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) return 0 ;;
-    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-27|G-28) return 0 ;;
+    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-27|G-28|G-29) return 0 ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-07|P-08|P-09|P-10) return 0 ;;
     *) return 1 ;;
   esac
@@ -1272,7 +1275,7 @@ PY
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
-    G-06|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-22)
+    G-06|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-22|G-29)
       if ! ensure_guarded_source_paths_clean "$row_id"; then
         receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
         printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
@@ -1468,6 +1471,68 @@ elif row_id == "G-22":
             errors.append(f"WebSocket pump contains unbounded channel marker: {marker}")
     require_contains("WebSocket pump", websocket, "tokio::select!")
     require_contains("WebSocket pump", websocket, "forward_duplex_until_complete")
+elif row_id == "G-29":
+    request_time_paths = [
+        "crates/codex-router-proxy/src/server.rs",
+        "crates/codex-router-proxy/src/http_sse.rs",
+        "crates/codex-router-proxy/src/websocket.rs",
+        "crates/codex-router-proxy/src/upstream.rs",
+    ]
+    request_time_forbidden = [
+        "codex_router_secret_store::",
+        "SecretStore",
+        "OpenAiOAuthRefreshClient",
+        "CredentialRefreshClient",
+        "RouterCredentialResolver",
+        "AsyncRouterCredentialResolver",
+        "RefreshLeaseRegistry",
+        "AsyncRefreshLeaseRegistry",
+        "refresh_credentials",
+        "write_secret",
+        "read_secret",
+        "account_credential_bundle_key",
+        "activate_account_credential_generation_if_current_and_invalidate_quota",
+        "rusqlite",
+        "sqlx::",
+    ]
+    for relative_path in request_time_paths:
+        source = read(relative_path)
+        for marker in request_time_forbidden:
+            if marker in source:
+                errors.append(f"{relative_path} contains request-time auth/state boundary marker: {marker}")
+    proxy_production_forbidden = [
+        "refresh_credentials",
+        "write_secret",
+        "read_secret",
+        "account_credential_bundle_key",
+        "activate_account_credential_generation_if_current_and_invalidate_quota",
+        "rusqlite",
+        "sqlx::",
+    ]
+    for source_path in sorted((repo / "crates/codex-router-proxy/src").glob("*.rs")):
+        relative_path = source_path.relative_to(repo).as_posix()
+        if relative_path == "crates/codex-router-proxy/src/lib.rs":
+            continue
+        source = source_path.read_text(encoding="utf-8")
+        for marker in proxy_production_forbidden:
+            if marker in source:
+                errors.append(f"{relative_path} contains request-time auth/state boundary marker: {marker}")
+    server = read("crates/codex-router-proxy/src/server.rs")
+    for marker in [
+        "ProxyRuntimeCredentialResources::open",
+        "AsyncProxyCredentialResolverFactory",
+        ".resolver_for_state(",
+    ]:
+        require_contains("release serve auth/state boundary", server, marker)
+    auth_resolver = read("crates/codex-router-auth/src/resolver.rs")
+    for marker in [
+        "pub struct AsyncRouterCredentialResolver",
+        "pub struct AsyncRefreshLeaseRegistry",
+        "refresh_client.refresh_credentials",
+        ".write_secret(",
+        ".activate_account_credential_generation_if_current_and_invalidate_quota(",
+    ]:
+        require_contains("auth-owned credential resolver", auth_resolver, marker)
 
 payload = json.loads(receipt_path.read_text())
 payload["status_after"] = "[x] passed" if not errors else "[ ] pending"
@@ -1478,6 +1543,7 @@ payload["touched_targets"] = [
     "scripts/check-release-runtime-guardrails.py",
     "crates/codex-router-proxy/src/websocket.rs",
     "crates/codex-router-proxy/src/server.rs",
+    "crates/codex-router-proxy/src/credential_runtime.rs",
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",
 ]
@@ -1522,7 +1588,7 @@ PY
         ! -name 'G-21.json' -print0 2>/dev/null \
         | sort -z \
         | xargs -0 shasum -a 256 > "$structural_hashes_before" || true
-      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23 G-26 G-27 G-28; do
+      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23 G-26 G-27 G-28 G-29; do
         CODEX_ROUTER_PROOF_VERIFY_ONLY=1 "$0" "$guardrail_row" >/dev/null
       done
       find "$EVIDENCE_ROOT/structural" -maxdepth 1 -type f -name 'G-*.json' \
@@ -1575,6 +1641,7 @@ payload["artifact_paths"] = [
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-26.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-27.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-28.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-29.json",
 ]
 payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
 payload["notes"] = "T6 aggregate guardrail row passed through proof-matrix."

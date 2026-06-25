@@ -14,6 +14,7 @@ use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::account_credential_bundle_key;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
+use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use serde::Deserialize;
@@ -324,6 +325,32 @@ impl RefreshLeaseRegistry {
     }
 }
 
+/// Shared per-account async refresh leases for resolver single-flight behavior.
+#[derive(Clone, Debug, Default)]
+pub struct AsyncRefreshLeaseRegistry {
+    leases: Arc<Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl AsyncRefreshLeaseRegistry {
+    /// Creates an empty async refresh lease registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lease_for(&self, account_id: &AccountId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut leases = self
+            .leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            leases
+                .entry(account_id.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+}
+
 /// Resolves provider credentials through router-owned state and secret stores.
 #[derive(Debug)]
 pub struct RouterCredentialResolver<'a, S, C>
@@ -510,6 +537,211 @@ where
             active_generation,
         )
         .with_chatgpt_account_id(bundle.chatgpt_account_id()))
+    }
+}
+
+/// Async resolver for provider credentials through router-owned state and secret stores.
+#[derive(Clone, Debug)]
+pub struct AsyncRouterCredentialResolver<S, C>
+where
+    S: SecretStore + Clone,
+    C: CredentialRefreshClient + Clone,
+{
+    state_store: AsyncSqliteStateStore,
+    secret_store: S,
+    refresh_client: C,
+    fixed_now_unix_seconds: Option<u64>,
+    refresh_leases: AsyncRefreshLeaseRegistry,
+}
+
+/// Default async router credential resolver for OpenAI OAuth account tokens.
+pub type DefaultAsyncRouterCredentialResolver<S> =
+    AsyncRouterCredentialResolver<S, OpenAiOAuthRefreshClient>;
+
+impl<S> AsyncRouterCredentialResolver<S, OpenAiOAuthRefreshClient>
+where
+    S: SecretStore + Clone + Send + 'static,
+{
+    /// Creates a default OpenAI OAuth async resolver with shared refresh leases.
+    #[must_use]
+    pub fn new_default_oauth_with_refresh_leases(
+        state_store: AsyncSqliteStateStore,
+        secret_store: S,
+        fixed_now_unix_seconds: Option<u64>,
+        refresh_leases: AsyncRefreshLeaseRegistry,
+    ) -> Self {
+        Self::new_with_refresh_leases(
+            state_store,
+            secret_store,
+            OpenAiOAuthRefreshClient::new(),
+            fixed_now_unix_seconds,
+            refresh_leases,
+        )
+    }
+}
+
+impl<S, C> AsyncRouterCredentialResolver<S, C>
+where
+    S: SecretStore + Clone + Send + 'static,
+    C: CredentialRefreshClient + Clone + Send + 'static,
+{
+    /// Creates an async credential resolver.
+    #[must_use]
+    pub fn new(
+        state_store: AsyncSqliteStateStore,
+        secret_store: S,
+        refresh_client: C,
+        fixed_now_unix_seconds: Option<u64>,
+    ) -> Self {
+        Self {
+            state_store,
+            secret_store,
+            refresh_client,
+            fixed_now_unix_seconds,
+            refresh_leases: AsyncRefreshLeaseRegistry::new(),
+        }
+    }
+
+    /// Creates an async credential resolver with shared refresh leases.
+    #[must_use]
+    pub fn new_with_refresh_leases(
+        state_store: AsyncSqliteStateStore,
+        secret_store: S,
+        refresh_client: C,
+        fixed_now_unix_seconds: Option<u64>,
+        refresh_leases: AsyncRefreshLeaseRegistry,
+    ) -> Self {
+        Self {
+            state_store,
+            secret_store,
+            refresh_client,
+            fixed_now_unix_seconds,
+            refresh_leases,
+        }
+    }
+
+    /// Resolves credentials immediately before provider egress.
+    pub async fn resolve_provider_credentials(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+        let now_unix_seconds = match self.fixed_now_unix_seconds {
+            Some(now_unix_seconds) => now_unix_seconds,
+            None => current_unix_seconds()
+                .map_err(|_error| CredentialResolverError::RefreshUnavailable)?,
+        };
+        let (active_generation, bundle) = self.read_active_bundle(account_id).await?;
+        if self.bundle_is_expired(&bundle, now_unix_seconds) {
+            let lease = self.refresh_leases.lease_for(account_id);
+            let _guard = lease.lock().await;
+            let (current_generation, current_bundle) = self.read_active_bundle(account_id).await?;
+            let (resolved_generation, refreshed) =
+                if self.bundle_is_expired(&current_bundle, now_unix_seconds) {
+                    self.refresh_expired_bundle(account_id, current_generation, &current_bundle)
+                        .await?
+                } else {
+                    (current_generation, current_bundle)
+                };
+            return Ok(ResolvedProviderCredential::new(
+                account_id.clone(),
+                refreshed.access_token().clone(),
+                resolved_generation,
+            )
+            .with_chatgpt_account_id(refreshed.chatgpt_account_id()));
+        }
+
+        Ok(ResolvedProviderCredential::new(
+            account_id.clone(),
+            bundle.access_token().clone(),
+            active_generation,
+        )
+        .with_chatgpt_account_id(bundle.chatgpt_account_id()))
+    }
+
+    async fn read_active_bundle(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
+        let account = self
+            .state_store
+            .load_account(account_id)
+            .await
+            .map_err(map_state_error)?
+            .ok_or(CredentialResolverError::AccountUnavailable)?;
+        if account.status() != AccountStatus::Enabled {
+            return Err(CredentialResolverError::AccountIneligible);
+        }
+        let active_generation = account
+            .active_credential_generation()
+            .ok_or(CredentialResolverError::AccountIneligible)?;
+        let bundle_key = account_credential_bundle_key(account_id, active_generation)
+            .map_err(map_secret_error)?;
+        let secret_store = self.secret_store.clone();
+        let bundle = tokio::task::spawn_blocking(move || {
+            let secret = secret_store
+                .read_secret(&bundle_key)
+                .map_err(map_secret_error)?;
+            AccountCredentialBundle::from_secret_string(secret).map_err(map_secret_error)
+        })
+        .await
+        .map_err(|_error| CredentialResolverError::SecretUnavailable)??;
+
+        Ok((active_generation, bundle))
+    }
+
+    fn bundle_is_expired(&self, bundle: &AccountCredentialBundle, now_unix_seconds: u64) -> bool {
+        bundle
+            .expires_unix_seconds()
+            .is_some_and(|expires| expires <= now_unix_seconds)
+    }
+
+    async fn refresh_expired_bundle(
+        &self,
+        account_id: &AccountId,
+        current_generation: u64,
+        bundle: &AccountCredentialBundle,
+    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
+        let refresh_token = bundle
+            .refresh_token()
+            .ok_or(CredentialResolverError::RefreshUnavailable)?
+            .clone();
+        let refresh_client = self.refresh_client.clone();
+        let account_id_for_refresh = account_id.clone();
+        let mut refreshed = tokio::task::spawn_blocking(move || {
+            refresh_client.refresh_credentials(&account_id_for_refresh, &refresh_token)
+        })
+        .await
+        .map_err(|_error| CredentialResolverError::RefreshUnavailable)??;
+        if refreshed.chatgpt_account_id().is_none()
+            && let Some(chatgpt_account_id) = bundle.chatgpt_account_id()
+        {
+            refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
+        }
+        let refreshed_generation = current_generation
+            .checked_add(1)
+            .ok_or(CredentialResolverError::RefreshUnavailable)?;
+        let refreshed_key = account_credential_bundle_key(account_id, refreshed_generation)
+            .map_err(map_secret_error)?;
+        let refreshed_secret = refreshed.to_secret_string().map_err(map_secret_error)?;
+        let secret_store = self.secret_store.clone();
+        tokio::task::spawn_blocking(move || {
+            secret_store
+                .write_secret(&refreshed_key, &refreshed_secret)
+                .map_err(map_secret_error)
+        })
+        .await
+        .map_err(|_error| CredentialResolverError::SecretUnavailable)??;
+        self.state_store
+            .activate_account_credential_generation_if_current_and_invalidate_quota(
+                account_id,
+                current_generation,
+                refreshed_generation,
+                AccountStatus::Enabled,
+            )
+            .await
+            .map_err(map_state_error)?;
+
+        Ok((refreshed_generation, refreshed))
     }
 }
 

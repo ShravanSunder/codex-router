@@ -1,7 +1,6 @@
 //! Loopback proxy boundary for codex-router.
 
 pub mod account_selection;
-#[cfg(test)]
 mod credential_runtime;
 pub mod headers;
 pub mod http_sse;
