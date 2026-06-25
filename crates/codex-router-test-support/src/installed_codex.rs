@@ -191,6 +191,17 @@ struct CodexChildRun {
     output: Output,
 }
 
+struct CodexExecRequest<'a> {
+    transport_mode: CodexTransportMode,
+    codex_home: &'a Path,
+    workdir: &'a Path,
+    last_message_path: &'a Path,
+    child_environment: CodexChildEnvironment,
+    timeout: Duration,
+    prompt: &'a str,
+    pid_observer: Option<(usize, mpsc::Sender<ClientPidObservation>)>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ClientPidObservation {
     client_index: usize,
@@ -496,16 +507,16 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
                     let prompt = format!(
                         "{SMOKE_PROMPT}\n\nHarness marker: codex-router-client-{client_index}"
                     );
-                    let output = run_codex_exec_with_timeout_observed(
-                        CodexTransportMode::WebSocket,
-                        &codex_home,
-                        &workdir,
-                        &last_message_path,
+                    let output = run_codex_exec_with_timeout_observed(CodexExecRequest {
+                        transport_mode: CodexTransportMode::WebSocket,
+                        codex_home: &codex_home,
+                        workdir: &workdir,
+                        last_message_path: &last_message_path,
                         child_environment,
-                        config.codex_command_timeout,
-                        &prompt,
-                        Some((client_index, pid_sender)),
-                    )?;
+                        timeout: config.codex_command_timeout,
+                        prompt: &prompt,
+                        pid_observer: Some((client_index, pid_sender)),
+                    })?;
                     assert_codex_visible_output(
                         &format!("WebSocket client {client_index}"),
                         &output.output,
@@ -1391,29 +1402,32 @@ fn run_codex_exec_with_timeout(
     child_environment: CodexChildEnvironment,
     timeout: Duration,
 ) -> Result<Output, String> {
-    run_codex_exec_with_timeout_observed(
+    run_codex_exec_with_timeout_observed(CodexExecRequest {
         transport_mode,
         codex_home,
         workdir,
         last_message_path,
         child_environment,
         timeout,
-        SMOKE_PROMPT,
-        None,
-    )
+        prompt: SMOKE_PROMPT,
+        pid_observer: None,
+    })
     .map(|run| run.output)
 }
 
 fn run_codex_exec_with_timeout_observed(
-    transport_mode: CodexTransportMode,
-    codex_home: &Path,
-    workdir: &Path,
-    last_message_path: &Path,
-    child_environment: CodexChildEnvironment,
-    timeout: Duration,
-    prompt: &str,
-    pid_observer: Option<(usize, mpsc::Sender<ClientPidObservation>)>,
+    request: CodexExecRequest<'_>,
 ) -> Result<CodexChildRun, String> {
+    let CodexExecRequest {
+        transport_mode,
+        codex_home,
+        workdir,
+        last_message_path,
+        child_environment,
+        timeout,
+        prompt,
+        pid_observer,
+    } = request;
     let CodexChildEnvironment {
         home,
         xdg_config_home,
