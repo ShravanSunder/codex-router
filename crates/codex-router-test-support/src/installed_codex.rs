@@ -67,6 +67,8 @@ use tungstenite::handshake::server::Response;
 
 const SMOKE_EXPECTED_TEXT: &str = "codex-router smoke ok";
 const SMOKE_PROMPT: &str = "Reply with exactly: codex-router smoke ok";
+const SMOKE_TARGET_MODEL: &str = "gpt-5.4-mini";
+const SMOKE_TARGET_MODEL_OVERRIDE: &str = "model=\"gpt-5.4-mini\"";
 const CODEX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(300);
@@ -688,6 +690,18 @@ fn assert_concurrent_websocket_contract(
         return Err(format!(
             "concurrent upstream high-water was {}, expected at least {}",
             upstream.active_high_water, config.upstream.expected_sessions
+        ));
+    }
+    if upstream.target_model_session_count != config.upstream.expected_sessions {
+        return Err(format!(
+            "concurrent upstream observed {} target-model sessions, expected {} with {SMOKE_TARGET_MODEL}",
+            upstream.target_model_session_count, config.upstream.expected_sessions
+        ));
+    }
+    if !upstream.unexpected_response_create_models.is_empty() {
+        return Err(format!(
+            "concurrent upstream observed unexpected response.create models: {:?}",
+            upstream.unexpected_response_create_models
         ));
     }
     if config.upstream.hold_duration > Duration::ZERO {
@@ -1447,6 +1461,8 @@ fn run_codex_exec_with_timeout_observed(
         .arg("read-only")
         .arg("-c")
         .arg("approval_policy=\"never\"")
+        .arg("-c")
+        .arg(SMOKE_TARGET_MODEL_OVERRIDE)
         .arg("--ephemeral")
         .arg("--output-last-message")
         .arg(last_message_path);
@@ -2211,6 +2227,7 @@ fn write_redacted_three_websocket_transcript(
         })),
         "clients": {
             "count": input.outputs.len(),
+            "target_model": SMOKE_TARGET_MODEL,
             "all_success": input.outputs.iter().all(|run| run.output.status.success()),
             "statuses": statuses,
         },
@@ -2229,6 +2246,9 @@ fn write_redacted_three_websocket_transcript(
             "real_overlap_duration_ms": input.upstream.real_overlap_duration_ms,
             "hold_duration_ms": input.upstream.hold_duration.as_millis(),
             "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
+            "target_model": SMOKE_TARGET_MODEL,
+            "target_model_session_count": input.upstream.target_model_session_count,
+            "unexpected_response_create_models": input.upstream.unexpected_response_create_models,
             "upstream_session_ids": input.upstream.upstream_session_ids,
             "upstream_client_sessions": input.upstream.upstream_client_sessions.iter().map(|session| serde_json::json!({
                 "client_index": session.client_index,
@@ -2682,6 +2702,8 @@ struct ConcurrentWebSocketTranscript {
     normal_close_sessions: usize,
     abnormal_close_sessions: usize,
     session_close_outcomes: Vec<String>,
+    target_model_session_count: usize,
+    unexpected_response_create_models: Vec<String>,
     multi_step_interleave_completed: bool,
     multi_step_followup_frame_count: usize,
     multi_step_followup_active_session_count: usize,
@@ -2717,6 +2739,8 @@ struct ConcurrentUpstreamState {
     normal_close_sessions: usize,
     abnormal_close_sessions: usize,
     session_close_outcomes: Vec<String>,
+    target_model_session_count: usize,
+    unexpected_response_create_models: Vec<String>,
     multi_step_interleave_claimed: bool,
     multi_step_interleave_completed: bool,
     multi_step_followup_frame_count: usize,
@@ -3004,6 +3028,8 @@ impl MockConcurrentWebSocketUpstream {
                 normal_close_sessions: 0,
                 abnormal_close_sessions: 0,
                 session_close_outcomes: Vec::new(),
+                target_model_session_count: 0,
+                unexpected_response_create_models: Vec::new(),
                 multi_step_interleave_claimed: false,
                 multi_step_interleave_completed: false,
                 multi_step_followup_frame_count: 0,
@@ -3083,6 +3109,8 @@ impl MockConcurrentWebSocketUpstream {
             normal_close_sessions: state.normal_close_sessions,
             abnormal_close_sessions: state.abnormal_close_sessions,
             session_close_outcomes: state.session_close_outcomes,
+            target_model_session_count: state.target_model_session_count,
+            unexpected_response_create_models: state.unexpected_response_create_models,
             multi_step_interleave_completed: state.multi_step_interleave_completed,
             multi_step_followup_frame_count: state.multi_step_followup_frame_count,
             multi_step_followup_active_session_count: state
@@ -3299,7 +3327,12 @@ fn run_concurrent_mock_websocket_session(
             continue;
         }
         let client_index = extract_harness_client_index(&frame);
-        let _upstream_session_id = register_concurrent_non_prewarm_session(&state, client_index)?;
+        let observed_model = response_create_frame_model(&frame);
+        let _upstream_session_id = register_concurrent_non_prewarm_session(
+            &state,
+            client_index,
+            observed_model.as_deref(),
+        )?;
         let overlap_started_at = wait_for_concurrent_session_barrier(&state)?;
         let run_multi_step_interleave = claim_multi_step_interleave(&state)?;
         let (event_count, in_overlap_event_count) = if run_multi_step_interleave {
@@ -3371,6 +3404,7 @@ fn complete_multi_step_interleave(
 fn register_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
     client_index: Option<usize>,
+    observed_model: Option<&str>,
 ) -> Result<u64, String> {
     let mut state = shared
         .state
@@ -3388,6 +3422,17 @@ fn register_concurrent_non_prewarm_session(
                 client_index,
                 upstream_session_id,
             });
+    }
+    match observed_model {
+        Some(SMOKE_TARGET_MODEL) => {
+            state.target_model_session_count = state.target_model_session_count.saturating_add(1);
+        }
+        Some(other) => state
+            .unexpected_response_create_models
+            .push(other.to_owned()),
+        None => state
+            .unexpected_response_create_models
+            .push("<missing>".to_owned()),
     }
     state.active_high_water = state
         .active_high_water
@@ -3408,6 +3453,19 @@ fn extract_harness_client_index(frame: &str) -> Option<usize> {
         .take_while(|character| character.is_ascii_digit())
         .collect::<String>();
     digits.parse::<usize>().ok()
+}
+
+fn response_create_frame_model(frame: &str) -> Option<String> {
+    serde_json::from_str::<Value>(frame).ok().and_then(|value| {
+        is_non_prewarm_response_create_frame(&value)
+            .then(|| {
+                value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten()
+    })
 }
 
 fn wait_for_concurrent_session_barrier(

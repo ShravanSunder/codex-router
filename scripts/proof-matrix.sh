@@ -630,10 +630,22 @@ if not artifact.get("clients", {}).get("all_success"):
     errors.append("clients did not all succeed")
 if artifact.get("clients", {}).get("count") != 3:
     errors.append("client count is not 3")
+if artifact.get("clients", {}).get("target_model") != "gpt-5.4-mini":
+    errors.append("target client model is not gpt-5.4-mini")
 
 upstream = artifact.get("upstream", {})
 registry = artifact.get("router_websocket_registry", {})
 socket_cleanup = artifact.get("socket_cleanup", {})
+
+if upstream.get("target_model") != "gpt-5.4-mini":
+    errors.append("upstream target_model is not gpt-5.4-mini")
+if upstream.get("target_model_session_count") != 3:
+    errors.append("upstream target_model_session_count is not 3")
+unexpected_models = upstream.get("unexpected_response_create_models")
+if not isinstance(unexpected_models, list):
+    errors.append("unexpected_response_create_models is not a list")
+elif unexpected_models:
+    errors.append(f"unexpected response.create models observed: {unexpected_models}")
 
 if row_id == "E-01":
     router_process = artifact.get("router_process", {})
