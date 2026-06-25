@@ -132,6 +132,36 @@ CHECKS: dict[str, Check] = {
             ("crates/codex-router-proxy/src/server.rs", "handle_upgraded_connection"),
         ),
     ),
+    "G-28": Check(
+        row_id="G-28",
+        description=(
+            "release WebSocket path has no message-count truncation, first-frame timeout, "
+            "or provider-event-aware termination policy"
+        ),
+        forbidden=(
+            ("crates/codex-router-cli/src/lib.rs", "--max-websocket-upstream-messages"),
+            ("crates/codex-router-proxy/src/server.rs", "max_websocket_upstream_messages"),
+            ("crates/codex-router-proxy/src/websocket.rs", "FirstFrameTimeout"),
+            ("crates/codex-router-proxy/src/websocket.rs", "max_upstream_messages"),
+            ("crates/codex-router-proxy/src/websocket.rs", "response_outstanding"),
+            ("crates/codex-router-proxy/src/websocket.rs", "let mut upstream_message_count"),
+            ("crates/codex-router-proxy/src/websocket.rs", "upstream_message_count = upstream_message_count.saturating_add"),
+            ("crates/codex-router-proxy/src/websocket.rs", "upstream_message_count >="),
+            ("crates/codex-router-proxy/src/websocket.rs", "is_close || is_completed"),
+            ("crates/codex-router-proxy/src/websocket.rs", "tokio::time::timeout(Duration::from_millis(250)"),
+        ),
+        release_scan_forbidden=(
+            "--max-websocket-upstream-messages",
+            "max_websocket_upstream_messages",
+            "FirstFrameTimeout",
+            "response_outstanding",
+        ),
+        required=(
+            ("crates/codex-router-proxy/src/websocket.rs", "next_data_message_before_upstream"),
+            ("crates/codex-router-proxy/src/websocket.rs", "note_response_completed"),
+            ("crates/codex-router-proxy/src/websocket.rs", "if is_close {\n                    return Ok(());"),
+        ),
+    ),
 }
 
 

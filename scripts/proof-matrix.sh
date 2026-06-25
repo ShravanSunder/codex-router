@@ -44,7 +44,7 @@ row_owner() {
     I-17b) printf 'T5/T6' ;;
     S-01|S-02|S-03|S-04) printf 'T7' ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) printf 'T8' ;;
-    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23) printf 'T6' ;;
+    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-28) printf 'T6' ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-09) printf 'T0/T6' ;;
     P-07|P-08|P-10) printf 'final' ;;
     *) printf 'pending-owner' ;;
@@ -182,6 +182,9 @@ expected_observation() {
     G-23)
       printf 'local Hyper websocket upgrade handoff has no double handshake'
       ;;
+    G-28)
+      printf 'release serve path has no WebSocket message-count truncation, first-frame timeout, provider-event-aware termination, or router-created retry/fallback policy'
+      ;;
     *)
       printf 'row harness has not been implemented yet'
       ;;
@@ -248,7 +251,7 @@ known_row() {
     I-01|I-02|I-03|I-04|I-05a|I-05b|I-06|I-07|I-08|I-09|I-10|I-11|I-12|I-13|I-14|I-15|I-16|I-17a|I-17b|I-18|I-19|I-20|I-21) return 0 ;;
     S-01|S-02|S-03|S-04) return 0 ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) return 0 ;;
-    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23) return 0 ;;
+    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-28) return 0 ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-07|P-08|P-09|P-10) return 0 ;;
     *) return 1 ;;
   esac
@@ -1487,7 +1490,7 @@ PY
       printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
       exit 1
       ;;
-    G-01|G-02|G-03|G-04|G-05|G-07|G-23)
+    G-01|G-02|G-03|G-04|G-05|G-07|G-23|G-28)
       CODEX_ROUTER_PROOF_COMMAND="scripts/proof-matrix.sh $row_id" \
         scripts/check-release-runtime-guardrails.py "$row_id"
       exit $?
@@ -1499,7 +1502,7 @@ PY
         ! -name 'G-21.json' -print0 2>/dev/null \
         | sort -z \
         | xargs -0 shasum -a 256 > "$structural_hashes_before" || true
-      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23; do
+      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23 G-28; do
         CODEX_ROUTER_PROOF_VERIFY_ONLY=1 "$0" "$guardrail_row" >/dev/null
       done
       find "$EVIDENCE_ROOT/structural" -maxdepth 1 -type f -name 'G-*.json' \
@@ -1549,6 +1552,7 @@ payload["artifact_paths"] = [
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-20.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-22.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-23.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-28.json",
 ]
 payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
 payload["notes"] = "T6 aggregate guardrail row passed through proof-matrix."
