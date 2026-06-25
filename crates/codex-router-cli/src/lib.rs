@@ -4284,6 +4284,103 @@ exit 42
     }
 
     #[test]
+    fn sessions_provider_current_resolves_codex_router_profile_config() {
+        const PROMPT_CANARY: &str = "CURRENT_PROVIDER_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-current-provider");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        must_ok(fs::write(
+            codex_home.join("codex-router.config.toml"),
+            "model_provider = \"codex-router\"\n",
+        ));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            PROMPT_CANARY,
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-router",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-openai",
+                    &project,
+                    "openai",
+                    "cli",
+                    "cli",
+                    "main",
+                    1000,
+                ),
+            ],
+        );
+
+        let output = run_cli(
+            [
+                "sessions",
+                "--scope",
+                "any",
+                "--provider",
+                "current",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(project),
+        );
+
+        assert_session_ids(&output.stdout, &["thread-router"]);
+    }
+
+    #[test]
+    fn sessions_provider_current_errors_when_codex_profile_is_missing() {
+        let test_root = TestRoot::new("sessions-current-provider-missing");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        must_ok(fs::create_dir(&codex_home));
+        create_codex_state_db_with_threads(&codex_home.join("state_5.sqlite"), "unused-canary");
+
+        let error = match run_with_io(
+            [
+                "sessions",
+                "--scope",
+                "any",
+                "--provider",
+                "current",
+                "--list",
+                "--format",
+                "json",
+            ]
+            .into_iter()
+            .map(Into::into),
+            &CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ]),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        ) {
+            Ok(()) => panic!("provider=current should fail without Codex provider config"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("model_provider"));
+        assert!(error.to_string().contains("codex-router.config.toml"));
+    }
+
+    #[test]
     fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
         let test_root = TestRoot::new("serve-command");
         must_ok(fs::create_dir(test_root.path()));

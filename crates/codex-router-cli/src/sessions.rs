@@ -183,11 +183,10 @@ async fn load_session_records(
         return Err(SessionsCommandError::LastNotImplemented);
     }
     let scope_filter = ScopeFilter::from_command(command.scope, context);
-    if matches!(command.provider, SessionsProvider::Current) {
-        return Err(SessionsCommandError::CurrentProviderNotImplemented);
-    }
+    let codex_home_path = codex_home(context)?;
+    let provider_filter = ProviderFilter::from_command(&command.provider, &codex_home_path)?;
 
-    let state_database_path = codex_home(context)?.join("state_5.sqlite");
+    let state_database_path = codex_home_path.join("state_5.sqlite");
     let options = SqliteConnectOptions::new()
         .filename(&state_database_path)
         .read_only(true)
@@ -223,10 +222,7 @@ async fn load_session_records(
         if !source_matches(command.source, source.as_deref(), thread_source.as_deref()) {
             continue;
         }
-        if !provider_matches(
-            &command.provider,
-            row.get::<Option<String>, _>("model_provider").as_deref(),
-        ) {
+        if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
             continue;
         }
         if !scope_filter.matches(cwd.as_deref()) {
@@ -248,6 +244,32 @@ async fn load_session_records(
     pool.close().await;
 
     Ok(records)
+}
+
+#[derive(Debug)]
+enum ProviderFilter {
+    Any,
+    Id(String),
+}
+
+impl ProviderFilter {
+    fn from_command(
+        provider: &SessionsProvider,
+        codex_home: &Path,
+    ) -> Result<Self, SessionsCommandError> {
+        match provider {
+            SessionsProvider::Any => Ok(Self::Any),
+            SessionsProvider::Id(provider_id) => Ok(Self::Id(provider_id.clone())),
+            SessionsProvider::Current => Ok(Self::Id(resolve_current_provider(codex_home)?)),
+        }
+    }
+
+    fn matches(&self, provider: Option<&str>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Id(expected_provider) => provider == Some(expected_provider.as_str()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -301,12 +323,48 @@ fn sort_key(sort: SessionsSort) -> &'static str {
     }
 }
 
-fn provider_matches(provider_filter: &SessionsProvider, provider: Option<&str>) -> bool {
-    match provider_filter {
-        SessionsProvider::Any => true,
-        SessionsProvider::Id(expected_provider) => provider == Some(expected_provider.as_str()),
-        SessionsProvider::Current => false,
+fn resolve_current_provider(codex_home: &Path) -> Result<String, SessionsCommandError> {
+    for config_path in [
+        codex_home.join("codex-router.config.toml"),
+        codex_home.join("config.toml"),
+    ] {
+        match fs::read_to_string(&config_path) {
+            Ok(content) => {
+                if let Some(provider) = parse_model_provider(&content) {
+                    return Ok(provider);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(SessionsCommandError::ConfigRead {
+                    path: config_path,
+                    source,
+                });
+            }
+        }
     }
+    Err(SessionsCommandError::CurrentProviderUnavailable)
+}
+
+fn parse_model_provider(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "model_provider" {
+            continue;
+        }
+        let value = value.trim();
+        if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
+            continue;
+        }
+        return Some(value[1..value.len() - 1].to_owned());
+    }
+    None
 }
 
 fn source_matches(
@@ -378,11 +436,20 @@ pub enum SessionsCommandError {
     /// Latest-session launch has not landed yet.
     #[error("sessions --last is not implemented yet")]
     LastNotImplemented,
-    /// Current-provider filtering has not landed yet.
+    /// Current provider could not be resolved.
     #[error(
-        "sessions --provider current is not implemented yet; use --provider any or an exact provider id"
+        "sessions --provider current could not find model_provider in CODEX_HOME/codex-router.config.toml or CODEX_HOME/config.toml"
     )]
-    CurrentProviderNotImplemented,
+    CurrentProviderUnavailable,
+    /// Config read failed.
+    #[error("failed to read Codex config {path}: {source}")]
+    ConfigRead {
+        /// Config path.
+        path: PathBuf,
+        /// Source error.
+        #[source]
+        source: std::io::Error,
+    },
     /// CODEX_HOME and HOME were both unavailable.
     #[error("could not locate Codex home; set CODEX_HOME or HOME")]
     CodexHomeUnavailable,
