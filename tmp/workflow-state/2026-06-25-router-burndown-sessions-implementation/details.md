@@ -25,6 +25,13 @@ Implement the reviewed quota burndown, Codex-safe quota exhaustion, quota proof,
 
 ## Current Workflow
 
-Current workflow: shravan-dev-workflow:implementation-execute-plan
-Next workflow: shravan-dev-workflow:implementation-review-swarm
+Current workflow: shravan-dev-workflow:implementation-pr-wrapup
+Next workflow: terminal after PR checks are green, comments/review threads remain clear, mergeability is clean, and final quiet-poll re-fetch passes
 
+## Latest PR Wrap-up State
+
+- Branch pushed: impl-burndown-sessions at 47b238b1762eca8224d966ab05325997845dbafa
+- PR: https://github.com/ShravanSunder/codex-router/pull/3
+- Local proof: fmt, clippy, workspace nextest, build, quota smoke, installed-Codex serial, concurrent WebSocket, and soak passed.
+- GitHub state: PR head matches local HEAD; no PR comments, reviews, or review threads; Workflow lint check succeeded; Rust check remains in progress as of 2026-06-25T11:44:09-04:00.
+- Completion status: not complete until Rust check finishes green and a quiet-poll/final re-fetch confirms readiness.
