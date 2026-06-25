@@ -6161,9 +6161,9 @@ mod tests {
             router.route_first_frame(
                 WebSocketHandshakeRequest::new()
                     .with_header(Header::new("X-Codex-Router-Token", "current-token")),
-                WebSocketFrame::Text(br#"{"type":"not.response.create"}"#.to_vec()),
+                WebSocketFrame::Text(br#"{"type":"#.to_vec()),
             ),
-            Err(WebSocketCloseReason::UnexpectedFirstFrame)
+            Err(WebSocketCloseReason::MalformedFirstFrame)
         );
         assert!(selector.take_recorded().is_empty());
         assert!(resolver.take_recorded().is_empty());
