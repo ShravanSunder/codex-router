@@ -9,7 +9,7 @@
   "expected_observation": "one installed Codex runtime completes function-call-style multi-step WebSocket interleave during overlap",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "2231d77a1e0f22c5b7d3ab11a68d18cecb0db03b",
+  "git_head": "047e8bf1b8a553147f1eb6de802128a5b074f9ba",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -177,7 +177,7 @@
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-25T11:46:27Z",
+  "timestamp_utc": "2026-06-25T11:50:44Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",

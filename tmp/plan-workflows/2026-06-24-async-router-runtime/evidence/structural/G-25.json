@@ -6,7 +6,7 @@
   "expected_observation": "HTTP/SSE affinity extraction is bounded and WebSocket metadata side effects do not gate upstream frame forwarding",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "e8077a8afd8dc7bc21e1b1cf5dd3d067652568fd",
+  "git_head": "047e8bf1b8a553147f1eb6de802128a5b074f9ba",
   "layer": "structural",
   "notes": "Structural guard and metadata behavior passed: HTTP/SSE affinity extraction is bounded, and WebSocket routing metadata is observed after frame forwarding without gating pass-through.",
   "owner": "T6",
@@ -16,6 +16,6 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-25T11:50:11Z",
+  "timestamp_utc": "2026-06-25T11:50:28Z",
   "touched_targets": []
 }
