@@ -51,6 +51,7 @@ impl ReservationHandle {
 struct Reservation {
     account_id: AccountId,
     headroom_cost: u32,
+    reserved_unix_seconds: u64,
 }
 
 /// Tracks transient reservations before upstream commit/finalization.
@@ -63,10 +64,25 @@ pub struct ReservationBook {
 impl ReservationBook {
     /// Reserves headroom for an account and returns a release handle.
     pub fn reserve_next(&mut self, account_id: AccountId, headroom_cost: u32) -> ReservationHandle {
+        self.reserve_next_at(account_id, headroom_cost, 0)
+    }
+
+    /// Reserves headroom at an observed time and returns a release handle.
+    pub fn reserve_next_at(
+        &mut self,
+        account_id: AccountId,
+        headroom_cost: u32,
+        reserved_unix_seconds: u64,
+    ) -> ReservationHandle {
         self.next_reservation_number = self.next_reservation_number.saturating_add(1);
         let reservation_id =
             ReservationId::new(format!("reservation_{}", self.next_reservation_number));
-        self.reserve(reservation_id.clone(), account_id.clone(), headroom_cost);
+        self.reserve_at(
+            reservation_id.clone(),
+            account_id.clone(),
+            headroom_cost,
+            reserved_unix_seconds,
+        );
         ReservationHandle::new(reservation_id, account_id, headroom_cost)
     }
 
@@ -77,11 +93,23 @@ impl ReservationBook {
         account_id: AccountId,
         headroom_cost: u32,
     ) {
+        self.reserve_at(reservation_id, account_id, headroom_cost, 0);
+    }
+
+    /// Reserves headroom for an account at a known timestamp.
+    pub fn reserve_at(
+        &mut self,
+        reservation_id: ReservationId,
+        account_id: AccountId,
+        headroom_cost: u32,
+        reserved_unix_seconds: u64,
+    ) {
         self.reservations.insert(
             reservation_id,
             Reservation {
                 account_id,
                 headroom_cost,
+                reserved_unix_seconds,
             },
         );
     }
@@ -106,6 +134,15 @@ impl ReservationBook {
                 total.saturating_add(reservation.headroom_cost)
             })
             .min(100)
+    }
+
+    /// Removes reservations older than `max_age_seconds`.
+    pub fn purge_stale(&mut self, now_unix_seconds: u64, max_age_seconds: u64) -> usize {
+        let before_count = self.reservations.len();
+        self.reservations.retain(|_reservation_id, reservation| {
+            now_unix_seconds.saturating_sub(reservation.reserved_unix_seconds) <= max_age_seconds
+        });
+        before_count.saturating_sub(self.reservations.len())
     }
 
     /// Returns available headroom after active reservations.

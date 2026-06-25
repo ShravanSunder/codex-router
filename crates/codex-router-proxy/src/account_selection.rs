@@ -60,6 +60,7 @@ pub type RouteBandReservationBooks = Arc<Mutex<HashMap<String, ReservationBook>>
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 const HTTP_ACTIVE_LOAD_PRESSURE: u32 = 2;
 const WEBSOCKET_ACTIVE_LOAD_PRESSURE: u32 = 8;
+const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 604_800;
 const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
@@ -576,6 +577,7 @@ where
             let active_reservation_book = active_reservation_book_for_route_band(
                 &self.active_reservations,
                 route_band.as_str(),
+                now_unix_seconds,
             )?;
             let selector_accounts = account_inputs_from_selector_inputs_with_history(
                 self.state_repository,
@@ -657,6 +659,7 @@ where
                     &self.active_reservations,
                     route_band.as_str(),
                     active_load_pressure_for_request(request),
+                    now_unix_seconds,
                 );
             }
 
@@ -673,6 +676,7 @@ where
                 &self.active_reservations,
                 route_band.as_str(),
                 active_load_pressure_for_request(request),
+                now_unix_seconds,
             )
         })
     }
@@ -915,13 +919,17 @@ where
 fn active_reservation_book_for_route_band(
     active_reservations: &RouteBandReservationBooks,
     route_band: &str,
+    now_unix_seconds: u64,
 ) -> Result<Option<ReservationBook>, HttpProxyError> {
-    let active_reservations =
+    let mut active_reservations =
         active_reservations
             .lock()
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
             })?;
+    if let Some(book) = active_reservations.get_mut(route_band) {
+        book.purge_stale(now_unix_seconds, ACTIVE_RESERVATION_MAX_AGE_SECONDS);
+    }
     Ok(active_reservations.get(route_band).cloned())
 }
 
@@ -930,6 +938,7 @@ fn reserve_selected_account(
     active_reservations: &RouteBandReservationBooks,
     route_band: &str,
     headroom_cost: u32,
+    now_unix_seconds: u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
     if headroom_cost == 0 {
         return Ok(selected);
@@ -944,7 +953,11 @@ fn reserve_selected_account(
     let reservation_handle = active_reservations
         .entry(route_band.to_owned())
         .or_insert_with(ReservationBook::default)
-        .reserve_next(selected.account_id().clone(), headroom_cost);
+        .reserve_next_at(
+            selected.account_id().clone(),
+            headroom_cost,
+            now_unix_seconds,
+        );
     Ok(
         selected.with_active_reservation_guard(ActiveReservationGuard::new(
             active_reservations_guard_source,

@@ -101,6 +101,7 @@ mod tests {
     use codex_router_core::audit::TransportKind;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::RequestId;
+    use codex_router_core::ids::ReservationId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::local_auth::LocalAuthError;
     use codex_router_core::local_auth::LocalRouterAuth;
@@ -113,6 +114,8 @@ mod tests {
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
     use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_selection::reservation::ReservationBook;
+    use codex_router_selection::reservation::ReservationHandle;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::affinity_owner::AffinitySourceTransport;
@@ -1470,35 +1473,43 @@ mod tests {
             "slow-burn",
             AccountStatus::Enabled,
         );
-        persist_account_with_selector_window_specs(
+        persist_account_with_selector_window_reset_specs(
             &state,
             &fast_burn,
             "responses",
-            &[(18_000, 70, true), (604_800, 70, false)],
+            &[
+                (18_000, 70, true, 9_900 + 18_000),
+                (604_800, 70, false, 9_900 + 604_800),
+            ],
         );
-        persist_account_with_selector_window_specs(
+        persist_account_with_selector_window_reset_specs(
             &state,
             &slow_burn,
             "responses",
-            &[(18_000, 70, true), (604_800, 70, false)],
+            &[
+                (18_000, 70, true, 9_900 + 18_000),
+                (604_800, 70, false, 9_900 + 604_800),
+            ],
         );
         let async_state = match AsyncSqliteStateStore::open(&database_path).await {
             Ok(state) => state,
             Err(error) => panic!("async state store should open: {error}"),
         };
-        append_history_series(
+        append_history_series_with_reset(
             &async_state,
             fast_burn.account_id(),
             "responses",
             18_000,
+            9_900 + 18_000,
             &[(9_000, 90), (9_450, 80), (9_900, 70)],
         )
         .await;
-        append_history_series(
+        append_history_series_with_reset(
             &async_state,
             slow_burn.account_id(),
             "responses",
             18_000,
+            9_900 + 18_000,
             &[(9_000, 72), (9_450, 71), (9_900, 70)],
         )
         .await;
@@ -1607,6 +1618,140 @@ mod tests {
         assert_eq!(second.account_id(), beta.account_id());
         assert!(second.reservation_handle().is_some());
         assert_eq!(third.account_id(), alpha.account_id());
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_uses_distinct_http_and_websocket_reservation_weights()
+    {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_distinct_load_weights");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let account = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &account,
+            "responses",
+            &[(18_000, 90, true), (604_800, 90, false)],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            RouteBandReservationBooks::default(),
+            0,
+            Arc::new(test_unix_seconds),
+        );
+
+        let http_selection = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("HTTP request should reserve account load: {error}"),
+        };
+        let websocket_selection = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("WebSocket request should reserve account load: {error}"),
+        };
+
+        assert_eq!(
+            http_selection
+                .reservation_handle()
+                .map(ReservationHandle::headroom_cost),
+            Some(2)
+        );
+        assert_eq!(
+            websocket_selection
+                .reservation_handle()
+                .map(ReservationHandle::headroom_cost),
+            Some(8)
+        );
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_ignores_stale_active_load_reservations() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_stale_active_load");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 70, true), (604_800, 70, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 70, true), (604_800, 70, false)],
+        );
+        let active_reservations = RouteBandReservationBooks::default();
+        {
+            let mut reservations = lock_test_mutex(&active_reservations, "active reservations");
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_at(
+                    ReservationId::new("stale_alpha_load"),
+                    alpha.account_id().clone(),
+                    80,
+                    test_unix_seconds() - 10_000,
+                );
+        }
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            active_reservations.clone(),
+            0,
+            Arc::new(test_unix_seconds),
+        );
+
+        let selected = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("stale active load should be purged before selection: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), alpha.account_id());
+        let reservations = lock_test_mutex(&active_reservations, "active reservations");
+        let active_pressure = reservations
+            .get("responses")
+            .map_or(0, |book| book.active_load_pressure(alpha.account_id()));
+        assert_eq!(active_pressure, 8);
     }
 
     #[test]
@@ -5636,11 +5781,12 @@ mod tests {
         }
     }
 
-    async fn append_history_series(
+    async fn append_history_series_with_reset(
         state: &AsyncSqliteStateStore,
         account_id: &AccountId,
         route_band: &str,
         limit_window_seconds: u64,
+        reset_unix_seconds: u64,
         samples: &[(u64, u32)],
     ) {
         for (observed_unix_seconds, remaining_headroom) in samples {
@@ -5655,12 +5801,42 @@ mod tests {
             .with_window_status(SelectorQuotaWindowStatus::Eligible)
             .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
             .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success)
-            .with_reset_unix_seconds(selector_reset_seconds(limit_window_seconds));
+            .with_reset_unix_seconds(reset_unix_seconds);
             if let Err(error) =
                 AsyncQuotaHistoryRepository::append_quota_history_observation(state, &observation)
                     .await
             {
                 panic!("quota history should append: {error}");
+            }
+        }
+    }
+
+    fn persist_account_with_selector_window_reset_specs(
+        state: &SqliteStateStore,
+        account: &AccountRecord,
+        route_band: &str,
+        windows: &[(u64, u32, bool, u64)],
+    ) {
+        let account_with_generation = account.clone().with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(state, &account_with_generation)
+        {
+            panic!("account should persist: {error}");
+        }
+        for (limit_window_seconds, remaining_headroom, effective, reset_unix_seconds) in windows {
+            let selector_window = PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                route_band,
+                *limit_window_seconds,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(*remaining_headroom)
+            .with_effective(*effective)
+            .with_observed_unix_seconds(test_unix_seconds())
+            .with_reset_unix_seconds(*reset_unix_seconds);
+            if let Err(error) =
+                SelectorQuotaRepository::upsert_selector_window(state, &selector_window)
+            {
+                panic!("selector quota window should persist: {error}");
             }
         }
     }

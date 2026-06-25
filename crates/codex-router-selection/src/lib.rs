@@ -123,6 +123,29 @@ mod tests {
     }
 
     #[test]
+    fn reservations_purge_stale_entries_without_releasing_fresh_load() {
+        let mut reservations = ReservationBook::default();
+        let account = account_id("acct_primary");
+
+        reservations.reserve_at(
+            ReservationId::new("reservation_stale"),
+            account.clone(),
+            25,
+            NOW - 1_000,
+        );
+        reservations.reserve_at(
+            ReservationId::new("reservation_fresh"),
+            account.clone(),
+            15,
+            NOW - 100,
+        );
+
+        assert_eq!(reservations.active_load_pressure(&account), 40);
+        assert_eq!(reservations.purge_stale(NOW, /*max_age_seconds*/ 300), 1);
+        assert_eq!(reservations.active_load_pressure(&account), 15);
+    }
+
+    #[test]
     fn affinity_overrides_balance_only_when_pinned_account_is_eligible() {
         let mut affinity = AffinityTable::default();
         let key = AffinityKey::new("previous_response_1");
