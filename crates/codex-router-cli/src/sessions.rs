@@ -1,6 +1,7 @@
 //! Router-owned Codex session picker command contract.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -12,6 +13,8 @@ use clap::Parser;
 use clap::ValueEnum;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
+use inquire::Select;
+use inquire::error::InquireError;
 use serde::Serialize;
 use sqlx::Row;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -160,21 +163,23 @@ pub fn run_sessions_command<W: Write>(
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
     let mut runner = ProcessSessionsCommandRunner;
-    run_sessions_command_with_runner(stdout, command, context, &mut runner)
+    let mut picker = InquireSessionsPicker;
+    run_sessions_command_with_dependencies(stdout, command, context, &mut runner, &mut picker)
 }
 
-/// Runs the sessions command with an injectable Codex runner.
-pub(crate) fn run_sessions_command_with_runner<W: Write>(
+/// Runs the sessions command with injectable launch and picker dependencies.
+pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     stdout: &mut W,
     command: SessionsCommand,
     context: &CliContext,
     runner: &mut impl SessionsCommandRunner,
+    picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
     if command.last {
         return run_last_session(stdout, command, context, runner);
     }
     if !command.list {
-        return Err(SessionsCommandError::InteractivePickerNotImplemented);
+        return run_interactive_session(command, context, runner, picker);
     }
     match command.format {
         SessionsFormat::Json => write_sessions_json(stdout, command, context),
@@ -295,6 +300,30 @@ async fn load_session_records(
     Ok(records)
 }
 
+fn run_interactive_session(
+    command: SessionsCommand,
+    context: &CliContext,
+    runner: &mut impl SessionsCommandRunner,
+    picker: &mut impl SessionsPicker,
+) -> Result<(), SessionsCommandError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(SessionsCommandError::Runtime)?;
+    let records = runtime.block_on(load_session_records(command, context))?;
+    if records.is_empty() {
+        return Err(SessionsCommandError::NoSessionsMatch);
+    }
+    let choices = records
+        .into_iter()
+        .map(SessionPickerChoice::from_record)
+        .collect::<Vec<_>>();
+    let Some(session_id) = picker.select_session(choices)? else {
+        return Err(SessionsCommandError::PickerCanceled);
+    };
+    runner.run_codex_resume(&session_id)
+}
+
 fn run_last_session<W: Write>(
     stdout: &mut W,
     command: SessionsCommand,
@@ -322,6 +351,29 @@ fn run_last_session<W: Write>(
     }
 
     runner.run_codex_resume(&record.session_id)
+}
+
+/// Interactive session picker.
+pub(crate) trait SessionsPicker {
+    /// Selects one session id, or `None` when the picker was canceled.
+    fn select_session(
+        &mut self,
+        choices: Vec<SessionPickerChoice>,
+    ) -> Result<Option<String>, SessionsCommandError>;
+}
+
+struct InquireSessionsPicker;
+
+impl SessionsPicker for InquireSessionsPicker {
+    fn select_session(
+        &mut self,
+        choices: Vec<SessionPickerChoice>,
+    ) -> Result<Option<String>, SessionsCommandError> {
+        Select::new("Resume Codex session", choices)
+            .prompt_skippable()
+            .map(|choice| choice.map(|choice| choice.session_id().to_owned()))
+            .map_err(SessionsCommandError::Picker)
+    }
 }
 
 /// Runs a selected Codex session.
@@ -529,6 +581,41 @@ struct SessionRecord {
     recency_at_ms: Option<i64>,
 }
 
+/// Picker display row for one session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionPickerChoice {
+    session_id: String,
+    label: String,
+}
+
+impl SessionPickerChoice {
+    fn from_record(record: SessionRecord) -> Self {
+        let provider = record.provider.unwrap_or_else(|| "-".to_owned());
+        let source = record.source.unwrap_or_else(|| "-".to_owned());
+        let branch = record.git_branch.unwrap_or_else(|| "-".to_owned());
+        let cwd = record.cwd.unwrap_or_else(|| "-".to_owned());
+        Self {
+            session_id: record.session_id.clone(),
+            label: format!(
+                "{}  provider={} source={} branch={} cwd={}",
+                record.session_id, provider, source, branch, cwd
+            ),
+        }
+    }
+
+    /// Returns the session id represented by this picker row.
+    #[must_use]
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+impl fmt::Display for SessionPickerChoice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.label)
+    }
+}
+
 /// Sessions command failures.
 #[derive(Debug, Error)]
 pub enum SessionsCommandError {
@@ -538,6 +625,12 @@ pub enum SessionsCommandError {
     /// No matching session was found.
     #[error("no Codex sessions matched the requested filters")]
     NoSessionsMatch,
+    /// Interactive picker was canceled.
+    #[error("sessions picker canceled")]
+    PickerCanceled,
+    /// Interactive picker failed.
+    #[error("sessions picker failed: {0}")]
+    Picker(InquireError),
     /// Codex failed to launch.
     #[error("failed to launch codex resume command: {0}")]
     CodexLaunch(std::io::Error),

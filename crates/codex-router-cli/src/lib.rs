@@ -4530,17 +4530,84 @@ exit 42
         ])
         .with_current_dir(project);
         let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new("unused");
         let mut stdout = Vec::new();
 
-        must_ok(crate::sessions::run_sessions_command_with_runner(
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
             &mut stdout,
             command,
             &context,
             &mut runner,
+            &mut picker,
         ));
 
         assert!(stdout.is_empty());
         assert_eq!(runner.resumed_session_ids, ["thread-new"]);
+    }
+
+    #[test]
+    fn sessions_interactive_picker_launches_selected_session_with_injected_dependencies() {
+        let test_root = TestRoot::new("sessions-picker-runner");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "PICKER_CANARY_SHOULD_NOT_LEAK",
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-old",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    1000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-new",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2000,
+                ),
+            ],
+        );
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--scope"),
+            OsString::from("any"),
+            OsString::from("--provider"),
+            OsString::from("codex-router"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new("thread-old");
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
+        assert_eq!(runner.resumed_session_ids, ["thread-old"]);
     }
 
     #[test]
@@ -5721,6 +5788,33 @@ exit 42
         ) -> Result<(), crate::sessions::SessionsCommandError> {
             self.resumed_session_ids.push(session_id.to_owned());
             Ok(())
+        }
+    }
+
+    struct FakeSessionsPicker {
+        selected_session_id: String,
+        offered_session_ids: Vec<String>,
+    }
+
+    impl FakeSessionsPicker {
+        fn new(selected_session_id: &str) -> Self {
+            Self {
+                selected_session_id: selected_session_id.to_owned(),
+                offered_session_ids: Vec::new(),
+            }
+        }
+    }
+
+    impl crate::sessions::SessionsPicker for FakeSessionsPicker {
+        fn select_session(
+            &mut self,
+            choices: Vec<crate::sessions::SessionPickerChoice>,
+        ) -> Result<Option<String>, crate::sessions::SessionsCommandError> {
+            self.offered_session_ids = choices
+                .iter()
+                .map(|choice| choice.session_id().to_owned())
+                .collect();
+            Ok(Some(self.selected_session_id.clone()))
         }
     }
 
