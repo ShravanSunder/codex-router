@@ -3,4 +3,4 @@
 {"ts":"2026-06-25T00:00:00-04:00","event":"spec_review_cycle_1_complete","detail":"Ran spec-review-swarm lane review; accepted findings applied to spec and plan."}
 {"ts":"2026-06-25T00:00:00-04:00","event":"plan_review_cycle_1_complete","detail":"Ran plan-review-swarm lane review; accepted findings applied to plan."}
 {"ts":"2026-06-25T00:00:00-04:00","event":"ready_for_implementation","detail":"Implementation may begin after reviewed spec/plan checkpoint commit."}
-
+{"ts":"2026-06-25T10:01:34-04:00","event":"sessions_json_list_checkpoint_complete","detail":"Added clap-backed sessions command contract and SQLx read-only sessions --list --format json slice. Proof: cargo test -p codex-router-cli sessions_command; cargo test -p codex-router-cli sessions_list_json_reads_codex_state_metadata_without_prompt_leak; cargo fmt --all -- --check; cargo clippy -p codex-router-cli --lib --tests -- -D warnings."}

@@ -29,6 +29,7 @@ mod live;
 pub mod profile;
 pub mod quota;
 mod secret_store_factory;
+pub mod sessions;
 pub mod token;
 
 use account::AccountCommand;
@@ -39,6 +40,8 @@ use profile::CodexRouterProfileWriter;
 use profile::ProfileWriteError;
 use quota::QuotaCommand;
 use quota::QuotaCommandError;
+use sessions::SessionsCommand;
+use sessions::SessionsCommandError;
 use thiserror::Error;
 use token::LocalRouterTokenService;
 use token::Shell;
@@ -199,6 +202,7 @@ where
         CliCommand::Account(command) => account::run_account_command(stdout, command)?,
         CliCommand::Quota(command) => quota::run_quota_command(stdout, command)?,
         CliCommand::Live(command) => live::run_live_command(stdout, command)?,
+        CliCommand::Sessions(command) => sessions::run_sessions_command(stdout, command, context)?,
         CliCommand::Help => {
             stdout
                 .write_all(HELP_TEXT.as_bytes())
@@ -441,6 +445,7 @@ enum CliCommand {
     Account(AccountCommand),
     Quota(QuotaCommand),
     Live(LiveCommand),
+    Sessions(SessionsCommand),
     Help,
 }
 
@@ -471,6 +476,10 @@ impl CliCommand {
             "account" => Ok(Self::Account(AccountCommand::parse(parser)?)),
             "quota" => Ok(Self::Quota(QuotaCommand::parse(parser)?)),
             "live" => Ok(Self::Live(LiveCommand::parse(parser)?)),
+            "sessions" => Ok(Self::Sessions(
+                SessionsCommand::parse(parser.remaining_arguments())
+                    .map_err(|message| CliError::SessionsParse { message })?,
+            )),
             "--help" | "-h" | "help" => Ok(Self::Help),
             unknown => Err(CliError::UnknownCommand {
                 command: unknown.to_owned(),
@@ -899,6 +908,12 @@ impl ArgumentParser {
         }
         Ok(())
     }
+
+    pub(crate) fn remaining_arguments(&mut self) -> Vec<OsString> {
+        let remaining = self.arguments[self.index..].to_vec();
+        self.index = self.arguments.len();
+        remaining
+    }
 }
 
 fn parse_port(value: &str) -> Result<u16, CliError> {
@@ -1042,6 +1057,17 @@ pub enum CliError {
     #[error(transparent)]
     LiveQuota(#[from] codex_router_auth::live_quota::LiveQuotaError),
 
+    /// Sessions command failed to parse.
+    #[error("{message}")]
+    SessionsParse {
+        /// Clap-rendered parse error.
+        message: String,
+    },
+
+    /// Sessions command failed.
+    #[error(transparent)]
+    Sessions(#[from] SessionsCommandError),
+
     /// Loopback bind failed.
     #[error(transparent)]
     Bind(#[from] ServerBindError),
@@ -1088,6 +1114,7 @@ commands:
   account list [--router-root <path>]
   quota refresh [--router-root <path>] [--base-url <url>]
   quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]
+  sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -3999,6 +4026,111 @@ exit 42
     }
 
     #[test]
+    fn sessions_command_defaults_to_worktree_scope_provider_any_interactive_source() {
+        let command = match CliCommand::parse([OsString::from("sessions")]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+
+        assert_eq!(command.scope, crate::sessions::SessionsScope::Worktree);
+        assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
+        assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
+        assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);
+        assert!(!command.list);
+        assert_eq!(command.format, crate::sessions::SessionsFormat::Table);
+        assert!(!command.last);
+    }
+
+    #[test]
+    fn sessions_command_parses_explicit_filters_for_list_json_last() {
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--scope"),
+            OsString::from("any"),
+            OsString::from("--provider"),
+            OsString::from("current"),
+            OsString::from("--source"),
+            OsString::from("subagents"),
+            OsString::from("--sort"),
+            OsString::from("created"),
+            OsString::from("--list"),
+            OsString::from("--format"),
+            OsString::from("json"),
+            OsString::from("--last"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+
+        assert_eq!(command.scope, crate::sessions::SessionsScope::Any);
+        assert_eq!(command.provider, crate::sessions::SessionsProvider::Current);
+        assert_eq!(command.source, crate::sessions::SessionsSource::Subagents);
+        assert_eq!(command.sort, crate::sessions::SessionsSort::Created);
+        assert!(command.list);
+        assert_eq!(command.format, crate::sessions::SessionsFormat::Json);
+        assert!(command.last);
+    }
+
+    #[test]
+    fn sessions_command_rejects_invalid_scope() {
+        let error = must_err(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--scope"),
+            OsString::from("repo"),
+        ]));
+
+        assert!(
+            error.to_string().contains("invalid value")
+                || error.to_string().contains("invalid sessions scope"),
+            "unexpected sessions scope error: {error}"
+        );
+    }
+
+    #[test]
+    fn sessions_list_json_reads_codex_state_metadata_without_prompt_leak() {
+        const PROMPT_CANARY: &str = "SECRET_PROMPT_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-list-json");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        must_ok(fs::create_dir(&codex_home));
+        create_codex_state_db_with_threads(&codex_home.join("state_5.sqlite"), PROMPT_CANARY);
+
+        let output = run_cli(
+            [
+                "sessions", "--scope", "any", "--source", "all", "--list", "--format", "json",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ]),
+        );
+
+        assert!(
+            !output.stdout.contains(PROMPT_CANARY),
+            "sessions JSON must not leak prompt-derived title, preview, or first message"
+        );
+        let sessions: serde_json::Value = must_ok(serde_json::from_str(&output.stdout));
+        let sessions = match sessions.as_array() {
+            Some(sessions) => sessions,
+            None => panic!("sessions output should be array"),
+        };
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0]["session_id"], "thread-newer");
+        assert_eq!(sessions[0]["provider"], "codex-router");
+        assert_eq!(sessions[0]["model"], "gpt-5.4-mini");
+        assert_eq!(sessions[0]["source"], "cli");
+        assert_eq!(sessions[0]["thread_source"], "cli");
+        assert_eq!(sessions[0]["git_branch"], "main");
+        assert_eq!(
+            sessions[0]["cwd"],
+            test_root.path().join("project-a").display().to_string()
+        );
+        assert_eq!(sessions[1]["session_id"], "thread-older");
+    }
+
+    #[test]
     fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
         let test_root = TestRoot::new("serve-command");
         must_ok(fs::create_dir(test_root.path()));
@@ -5112,6 +5244,136 @@ exit 42
             stdout: must_ok(String::from_utf8(stdout)),
             stderr: must_ok(String::from_utf8(stderr)),
         }
+    }
+
+    fn create_codex_state_db_with_threads(state_database_path: &Path, prompt_canary: &str) {
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        runtime.block_on(async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(state_database_path)
+                .create_if_missing(true);
+            let pool = must_ok(
+                sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(options)
+                    .await,
+            );
+            must_ok(
+                sqlx::query(
+                    r#"
+                CREATE TABLE threads (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    rollout_path TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    source TEXT,
+                    model_provider TEXT,
+                    cwd TEXT,
+                    title TEXT,
+                    sandbox_policy TEXT,
+                    approval_mode TEXT,
+                    tokens_used INTEGER,
+                    has_user_event INTEGER,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    archived_at TEXT,
+                    git_sha TEXT,
+                    git_branch TEXT,
+                    git_origin_url TEXT,
+                    cli_version TEXT,
+                    first_user_message TEXT,
+                    agent_nickname TEXT,
+                    agent_role TEXT,
+                    memory_mode TEXT,
+                    model TEXT,
+                    reasoning_effort TEXT,
+                    agent_path TEXT,
+                    created_at_ms INTEGER,
+                    updated_at_ms INTEGER,
+                    thread_source TEXT,
+                    preview TEXT,
+                    recency_at TEXT,
+                    recency_at_ms INTEGER
+                )
+                "#,
+                )
+                .execute(&pool)
+                .await,
+            );
+            for (id, recency_at_ms, cwd, provider, model, source, thread_source, git_branch) in [
+                (
+                    "thread-older",
+                    1000_i64,
+                    "project-b",
+                    "openai",
+                    "gpt-5.4-mini",
+                    "cli",
+                    "cli",
+                    "feature",
+                ),
+                (
+                    "thread-newer",
+                    2000_i64,
+                    "project-a",
+                    "codex-router",
+                    "gpt-5.4-mini",
+                    "cli",
+                    "cli",
+                    "main",
+                ),
+            ] {
+                must_ok(
+                    sqlx::query(
+                        r#"
+                    INSERT INTO threads (
+                        id, rollout_path, created_at, updated_at, source, model_provider, cwd,
+                        title, sandbox_policy, approval_mode, tokens_used, has_user_event,
+                        archived, archived_at, git_sha, git_branch, git_origin_url, cli_version,
+                        first_user_message, agent_nickname, agent_role, memory_mode, model,
+                        reasoning_effort, agent_path, created_at_ms, updated_at_ms,
+                        thread_source, preview, recency_at, recency_at_ms
+                    ) VALUES (
+                        ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, 0, 1,
+                        0, NULL, NULL, ?, NULL, NULL,
+                        ?, NULL, NULL, NULL, ?, NULL, NULL,
+                        ?, ?, ?, ?, NULL, ?
+                    )
+                    "#,
+                    )
+                    .bind(id)
+                    .bind(source)
+                    .bind(provider)
+                    .bind(test_root_relative_path(state_database_path, cwd))
+                    .bind(prompt_canary)
+                    .bind(git_branch)
+                    .bind(prompt_canary)
+                    .bind(model)
+                    .bind(recency_at_ms - 100)
+                    .bind(recency_at_ms)
+                    .bind(thread_source)
+                    .bind(prompt_canary)
+                    .bind(recency_at_ms)
+                    .execute(&pool)
+                    .await,
+                );
+            }
+            pool.close().await;
+        });
+    }
+
+    fn test_root_relative_path(state_database_path: &Path, child_name: &str) -> String {
+        let codex_home = match state_database_path.parent() {
+            Some(codex_home) => codex_home,
+            None => panic!("state database should have codex home parent"),
+        };
+        let test_root = match codex_home.parent() {
+            Some(test_root) => test_root,
+            None => panic!("codex home should have test root parent"),
+        };
+        test_root.join(child_name).display().to_string()
     }
 
     fn path_to_str(path: &Path) -> &str {
