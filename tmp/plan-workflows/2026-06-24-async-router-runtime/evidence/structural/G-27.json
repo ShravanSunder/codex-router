@@ -6,7 +6,7 @@
   "expected_observation": "WebSocket pre-upstream parsing is metadata-only and does not require prompt-bearing payload shape",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "43f8082f58889f203f28c80617f9ea5be9d08afa",
+  "git_head": "b8f253c27be371f5d347fcd0204699edf119efdc",
   "layer": "structural",
   "notes": "Structural guard and first-frame regression passed: WebSocket pre-upstream parsing does not require prompt-bearing input/stream payload shape.",
   "owner": "T6",
@@ -16,6 +16,6 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-25T00:54:56Z",
+  "timestamp_utc": "2026-06-25T00:56:47Z",
   "touched_targets": []
 }
