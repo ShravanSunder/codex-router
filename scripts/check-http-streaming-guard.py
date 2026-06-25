@@ -101,10 +101,17 @@ def check_g25() -> None:
     require_contains("WebSocket pump", websocket_pump, "websocket_metadata_text_handle")
     require_contains("WebSocket pump", websocket_pump, "local_write.send(upstream_message).await?")
     require_contains("WebSocket pump", websocket_pump, "record_forwarded_websocket_metadata")
-    if websocket_pump.find("local_write.send(upstream_message).await?") > websocket_pump.find(
-        "record_forwarded_websocket_metadata"
-    ):
+    send_index = websocket_pump.find("local_write.send(upstream_message).await?")
+    recorder_index = websocket_pump.find("record_forwarded_websocket_metadata")
+    if send_index > recorder_index:
         raise AssertionError("WebSocket pump records metadata before forwarding local frame")
+    pre_send_pump = websocket_pump[:send_index]
+    for forbidden_marker in [
+        "serde_json::from_str",
+        "is_response_completed_text",
+        "websocket_affinity_owner_record_from_text",
+    ]:
+        forbid_contains("WebSocket pre-send pump", pre_send_pump, forbidden_marker)
     websocket_metadata = function_body(websocket, "websocket_metadata_text_handle")
     require_contains("WebSocket metadata helper", websocket_metadata, "Message::Text")
     require_contains("WebSocket metadata helper", websocket_metadata, "text.clone()")
