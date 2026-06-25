@@ -6,7 +6,7 @@
   "expected_observation": "HTTP/SSE affinity extraction has explicit byte/event bounds and late metadata cannot grow an unbounded buffer",
   "freshness_check": "guarded_source_paths_clean_at_git_head",
   "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
-  "git_head": "8eb79e22f3d1836e395eecf7f9d27e3792688d5d",
+  "git_head": "db6dd8df9be997c1395f70425cdc4fec9bfcbd63",
   "layer": "structural",
   "notes": "Structural guard and metadata behavior passed: HTTP/SSE affinity extraction is bounded, and WebSocket routing metadata is observed after frame forwarding without gating pass-through.",
   "owner": "T6",
@@ -16,6 +16,6 @@
   "schema_version": 1,
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-25T11:31:11Z",
+  "timestamp_utc": "2026-06-25T11:32:28Z",
   "touched_targets": []
 }
