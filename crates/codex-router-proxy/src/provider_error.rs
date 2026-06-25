@@ -1,5 +1,9 @@
 use serde_json::Value;
 
+use codex_router_core::ids::AccountId;
+use codex_router_state::sqlite::AsyncQuotaExhaustionRepository;
+use codex_router_state::sqlite::StateStoreError;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderErrorClassification {
     Unknown,
@@ -27,6 +31,26 @@ pub fn classify_provider_error_envelope(body: &[u8]) -> ProviderErrorClassificat
     }
 
     ProviderErrorClassification::Unknown
+}
+
+pub async fn record_provider_error_observation<R>(
+    repository: &R,
+    account_id: &AccountId,
+    route_band: &str,
+    body: &[u8],
+    observed_unix_seconds: u64,
+) -> Result<ProviderErrorClassification, StateStoreError>
+where
+    R: AsyncQuotaExhaustionRepository + Sync,
+{
+    let classification = classify_provider_error_envelope(body);
+    if classification == ProviderErrorClassification::AccountQuotaExhausted {
+        repository
+            .mark_route_band_quota_exhausted(account_id, route_band, observed_unix_seconds)
+            .await?;
+    }
+
+    Ok(classification)
 }
 
 fn is_provider_error_envelope(value: &Value) -> bool {

@@ -255,6 +255,72 @@ impl AsyncSqliteStateStore {
         Ok(inputs)
     }
 
+    /// Marks an account's route-band quota as exhausted for future selector reads.
+    pub async fn mark_route_band_quota_exhausted(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+        observed_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        let observed_unix_seconds = u64_to_i64(observed_unix_seconds)?;
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query(
+            "INSERT INTO quota_snapshots (
+               account_id, source, observed_unix_seconds, route_band,
+               remaining_headroom, reset_unix_seconds, stale_penalty
+             )
+             VALUES (?1, ?2, ?3, ?4, 0, NULL, 0)
+             ON CONFLICT(account_id, route_band) DO UPDATE SET
+               source = excluded.source,
+               observed_unix_seconds = excluded.observed_unix_seconds,
+               remaining_headroom = excluded.remaining_headroom,
+               reset_unix_seconds = excluded.reset_unix_seconds,
+               stale_penalty = excluded.stale_penalty",
+        )
+        .bind(account_id.as_str())
+        .bind(QuotaSnapshotSource::OpenAiEndpoint.as_str())
+        .bind(observed_unix_seconds)
+        .bind(route_band)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        let update = sqlx::query(
+            "UPDATE selector_quota_windows
+                SET status = ?3,
+                    remaining_headroom = 0,
+                    observed_unix_seconds = ?4
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .bind(SelectorQuotaWindowStatus::Ineligible.as_str())
+        .bind(observed_unix_seconds)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        if update.rows_affected() == 0 && selector_route_band(route_band) {
+            sqlx::query(
+                "INSERT INTO selector_quota_windows (
+                   account_id, route_band, limit_window_seconds, status,
+                   remaining_headroom, reset_unix_seconds, effective,
+                   observed_unix_seconds
+                 )
+                 VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, ?5)",
+            )
+            .bind(account_id.as_str())
+            .bind(route_band)
+            .bind(u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?)
+            .bind(SelectorQuotaWindowStatus::Ineligible.as_str())
+            .bind(observed_unix_seconds)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        }
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
     async fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
         let rows = sqlx::query(
             "SELECT account_id, label, status, active_credential_generation
@@ -838,6 +904,31 @@ impl AsyncSelectorQuotaRepository for AsyncSqliteStateStore {
     ) -> BoxFuture<'a, Result<Vec<SelectorQuotaInput>, StateStoreError>> {
         Box::pin(async move {
             self.selector_inputs_for_route_band(route_band, now_unix_seconds)
+                .await
+        })
+    }
+}
+
+/// Async quota exhaustion writer for Tokio runtime callers.
+pub trait AsyncQuotaExhaustionRepository {
+    /// Marks an account exhausted for one route band.
+    fn mark_route_band_quota_exhausted<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        route_band: &'a str,
+        observed_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>>;
+}
+
+impl AsyncQuotaExhaustionRepository for AsyncSqliteStateStore {
+    fn mark_route_band_quota_exhausted<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        route_band: &'a str,
+        observed_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+        Box::pin(async move {
+            self.mark_route_band_quota_exhausted(account_id, route_band, observed_unix_seconds)
                 .await
         })
     }

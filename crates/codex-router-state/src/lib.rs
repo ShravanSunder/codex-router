@@ -46,6 +46,7 @@ mod tests {
     use crate::repositories::QuotaSnapshotRepository;
     use crate::repositories::SelectorQuotaRepository;
     use crate::sqlite::AsyncAffinityRepository;
+    use crate::sqlite::AsyncQuotaExhaustionRepository;
     use crate::sqlite::AsyncQuotaHistoryRepository;
     use crate::sqlite::AsyncSelectorQuotaRepository;
     use crate::sqlite::AsyncSqliteStateStore;
@@ -350,6 +351,90 @@ mod tests {
         };
 
         assert_eq!(observations, vec![first_observation, second_observation]);
+    }
+
+    #[tokio::test]
+    async fn async_quota_exhaustion_marks_route_band_windows_ineligible() {
+        let temp_dir = TestTempDir::new("async_quota_exhaustion");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_quota_exhausted");
+        let account = AccountRecord::new(account_id.clone(), "exhausted", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("account should persist: {error}");
+        }
+        for (limit_window_seconds, remaining_headroom, effective) in
+            [(18_000, 70, true), (604_800, 55, false)]
+        {
+            let window = PersistedSelectorQuotaWindow::new(
+                account_id.clone(),
+                "responses",
+                limit_window_seconds,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(remaining_headroom)
+            .with_effective(effective)
+            .with_observed_unix_seconds(1_000)
+            .with_reset_unix_seconds(10_000 + limit_window_seconds);
+            if let Err(error) =
+                SelectorQuotaRepository::upsert_selector_window(&sync_store, &window)
+            {
+                panic!("selector window should persist: {error}");
+            }
+        }
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+
+        if let Err(error) = AsyncQuotaExhaustionRepository::mark_route_band_quota_exhausted(
+            &async_store,
+            &account_id,
+            "responses",
+            2_000,
+        )
+        .await
+        {
+            panic!("quota exhaustion should persist: {error}");
+        }
+
+        let inputs = match AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+            &async_store,
+            "responses",
+            2_000,
+        )
+        .await
+        {
+            Ok(inputs) => inputs,
+            Err(error) => panic!("selector input should load: {error}"),
+        };
+        let input = inputs
+            .iter()
+            .find(|input| input.account_id() == &account_id)
+            .unwrap_or_else(|| panic!("exhausted account selector input should exist"));
+        assert_eq!(input.windows().len(), 2);
+        assert!(
+            input
+                .windows()
+                .iter()
+                .all(|window| window.status() == SelectorQuotaWindowStatus::Ineligible)
+        );
+        assert!(
+            input
+                .windows()
+                .iter()
+                .all(|window| window.remaining_headroom() == 0)
+        );
+        assert!(
+            input
+                .windows()
+                .iter()
+                .all(|window| window.observed_unix_seconds() == 2_000)
+        );
     }
 
     #[test]
