@@ -14,7 +14,10 @@ use std::net::TcpListener;
 #[cfg(test)]
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -29,7 +32,10 @@ use http::Uri;
 use http_body_util::BodyExt;
 use http_body_util::Empty;
 use http_body_util::combinators::BoxBody;
+use hyper::body::Body as HyperBody;
+use hyper::body::Frame;
 use hyper::body::Incoming;
+use hyper::body::SizeHint;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -73,7 +79,7 @@ use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::HttpProxyResponse;
 #[cfg(test)]
 use crate::http_sse::HttpRequestHandler;
-use crate::http_sse::PreparedStreamingHttpProxyRequest;
+use crate::http_sse::PreparedAsyncStreamingHttpProxyRequest;
 use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::StreamingHttpProxyCompletion;
 #[cfg(test)]
@@ -884,11 +890,14 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
-        let request = match hyper_request_to_proxy_request(request).await {
+        let (request, body) = match hyper_request_to_streaming_proxy_request(request).await {
             Ok(request) => request,
             Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
         };
-        let prepared = match self.prepare_streaming_http_request_async(request).await {
+        let prepared = match self
+            .prepare_async_streaming_http_request_async(request, body)
+            .await
+        {
             Ok(prepared) => prepared,
             Err(error) => return http_error_response(error),
         };
@@ -901,10 +910,11 @@ impl LoopbackProtocolConnectionHandler {
         self.async_streaming_http_response_to_hyper(response, completion)
     }
 
-    async fn prepare_streaming_http_request_async(
+    async fn prepare_async_streaming_http_request_async(
         &self,
         request: HttpProxyRequest,
-    ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
+        body: BoxBody<Bytes, AsyncHttpBodyError>,
+    ) -> Result<PreparedAsyncStreamingHttpProxyRequest, HttpProxyError> {
         let state_store = AsyncSqliteStateStore::open(&self.state_database_path)
             .await
             .map_err(|_error| HttpProxyError::Selection {
@@ -932,7 +942,9 @@ impl LoopbackProtocolConnectionHandler {
         } else {
             service
         };
-        service.prepare_streaming_request_async(request).await
+        service
+            .prepare_async_streaming_request_async(request, body)
+            .await
     }
 
     fn async_streaming_http_response_to_hyper(
@@ -1083,29 +1095,79 @@ fn path_without_query(path: &str) -> &str {
     path.split_once('?').map_or(path, |(path, _query)| path)
 }
 
-async fn hyper_request_to_proxy_request(
+const HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES: usize = 16 * 1024;
+const HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES: usize = 64 * 1024;
+const HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS: usize = 64;
+
+async fn hyper_request_to_streaming_proxy_request(
     request: HttpRequest<Incoming>,
-) -> Result<HttpProxyRequest, LoopbackRouterRuntimeError> {
-    let (parts, body) = request.into_parts();
+) -> Result<(HttpProxyRequest, BoxBody<Bytes, AsyncHttpBodyError>), LoopbackRouterRuntimeError> {
+    let (parts, mut body) = request.into_parts();
     let path = parts
         .uri
         .path_and_query()
         .map_or("/", http::uri::PathAndQuery::as_str)
         .to_owned();
-    let body = body
-        .collect()
+    let first_frame = body
+        .frame()
         .await
-        .map_err(LoopbackRouterRuntimeError::HyperBody)?
-        .to_bytes()
-        .to_vec();
+        .transpose()
+        .map_err(LoopbackRouterRuntimeError::HyperBody)?;
+    let metadata_prefix = first_frame
+        .as_ref()
+        .and_then(Frame::data_ref)
+        .map_or_else(Vec::new, bounded_request_metadata_prefix);
     let mut proxy_request = HttpProxyRequest::new(method_from_hyper(&parts.method), path);
     for (name, value) in &parts.headers {
         if let Ok(value) = value.to_str() {
             proxy_request = proxy_request.with_header(Header::new(name.as_str(), value));
         }
     }
+    let streaming_body = FirstFrameThenIncomingBody::new(first_frame, body)
+        .map_err(incoming_body_error)
+        .boxed();
 
-    Ok(proxy_request.with_body(body))
+    Ok((proxy_request.with_body(metadata_prefix), streaming_body))
+}
+
+fn bounded_request_metadata_prefix(data: &Bytes) -> Vec<u8> {
+    let prefix_length = data.len().min(HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES);
+    data[..prefix_length].to_vec()
+}
+
+struct FirstFrameThenIncomingBody {
+    first_frame: Option<Frame<Bytes>>,
+    inner: Incoming,
+}
+
+impl FirstFrameThenIncomingBody {
+    fn new(first_frame: Option<Frame<Bytes>>, inner: Incoming) -> Self {
+        Self { first_frame, inner }
+    }
+}
+
+impl HyperBody for FirstFrameThenIncomingBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if let Some(frame) = self.first_frame.take() {
+            return Poll::Ready(Some(Ok(frame)));
+        }
+
+        Pin::new(&mut self.inner).poll_frame(context)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.first_frame.is_none() && self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 fn method_from_hyper(method: &HttpMethod) -> Method {
@@ -1152,37 +1214,65 @@ fn record_affinity_owner_from_async_body(
     let credential_generation = completion.credential_generation();
     let mut buffered = Vec::new();
     let mut recorded = false;
+    let mut scanned_bytes = 0_usize;
+    let mut scanned_events = 0_usize;
 
     body.map_frame(move |frame| {
-        if !recorded && let Some(data) = frame.data_ref() {
-            buffered.extend_from_slice(data);
+        if !recorded
+            && scanned_bytes < HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES
+            && scanned_events < HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS
+            && let Some(data) = frame.data_ref()
+        {
+            scanned_events += 1;
+            let remaining_bytes = HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES - scanned_bytes;
+            let bytes_to_scan = data.len().min(remaining_bytes);
+            buffered.extend_from_slice(&data[..bytes_to_scan]);
+            scanned_bytes += bytes_to_scan;
             if let Ok(Some(response_id)) = extract_response_id_from_body(&buffered) {
                 recorded = true;
-                let recorder = Arc::clone(&affinity_owner_recorder);
-                let account_id = account_id.clone();
-                let affinity_secret = affinity_secret.clone();
-                affinity_record_tasks.spawn(async move {
-                    let Ok(affinity_key_hash) =
-                        hash_previous_response_id(&affinity_secret, &response_id)
-                    else {
-                        return;
-                    };
-                    let owner = PreviousResponseAffinityOwnerRecord::new(
-                        affinity_key_hash,
-                        account_id,
-                        credential_generation,
-                        RouteBand::Responses,
-                        AffinitySourceTransport::HttpSse,
-                        current_unix_seconds().map_or(0, |seconds| seconds),
-                    );
-                    let _record_result = recorder.record_affinity_owner(owner).await;
-                });
+                spawn_async_affinity_owner_record(
+                    Arc::clone(&affinity_owner_recorder),
+                    affinity_secret.clone(),
+                    account_id.clone(),
+                    credential_generation,
+                    response_id,
+                    affinity_record_tasks.clone(),
+                );
             }
         }
 
         frame
     })
     .boxed()
+}
+
+fn spawn_async_affinity_owner_record(
+    recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    affinity_secret: codex_router_core::affinity::RouterAffinityHashSecret,
+    account_id: codex_router_core::ids::AccountId,
+    credential_generation: u64,
+    response_id: codex_router_core::affinity::PreviousResponseId,
+    affinity_record_tasks: TaskTracker,
+) {
+    affinity_record_tasks.spawn(async move {
+        let Ok(affinity_key_hash) = hash_previous_response_id(&affinity_secret, &response_id)
+        else {
+            return;
+        };
+        let owner = PreviousResponseAffinityOwnerRecord::new(
+            affinity_key_hash,
+            account_id,
+            credential_generation,
+            RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            current_unix_seconds().map_or(0, |seconds| seconds),
+        );
+        let _record_result = recorder.record_affinity_owner(owner).await;
+    });
+}
+
+fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
+    Box::new(error)
 }
 
 fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
@@ -1234,6 +1324,99 @@ impl AsyncHttpAffinityOwnerRecorder for AsyncSqliteAffinityOwnerRecorder {
                         crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
                 })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use http_body_util::BodyExt;
+    use http_body_util::StreamBody;
+    use hyper::body::Frame;
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingAsyncAffinityOwnerRecorder {
+        records: Arc<Mutex<Vec<PreviousResponseAffinityOwnerRecord>>>,
+    }
+
+    impl RecordingAsyncAffinityOwnerRecorder {
+        fn records(&self) -> Vec<PreviousResponseAffinityOwnerRecord> {
+            match self.records.lock() {
+                Ok(records) => records.clone(),
+                Err(error) => panic!("test recorder lock should be available: {error}"),
+            }
+        }
+    }
+
+    impl AsyncHttpAffinityOwnerRecorder for RecordingAsyncAffinityOwnerRecorder {
+        fn record_affinity_owner<'a>(
+            &'a self,
+            owner: PreviousResponseAffinityOwnerRecord,
+        ) -> BoxFuture<'a, Result<(), HttpProxyError>> {
+            Box::pin(async move {
+                match self.records.lock() {
+                    Ok(mut records) => records.push(owner),
+                    Err(error) => panic!("test recorder lock should be available: {error}"),
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn async_http_affinity_scan_stops_at_explicit_bounds_without_gating_body() {
+        let recorder = RecordingAsyncAffinityOwnerRecorder::default();
+        let account_id = match codex_router_core::ids::AccountId::new("acct_selected") {
+            Ok(account_id) => account_id,
+            Err(error) => panic!("test account id should validate: {error}"),
+        };
+        let affinity_secret = match codex_router_core::affinity::RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ) {
+            Ok(secret) => secret,
+            Err(error) => panic!("test affinity secret should validate: {error}"),
+        };
+        let completion = StreamingHttpProxyCompletion::new_for_test(
+            Some(affinity_secret),
+            account_id,
+            7,
+            crate::http_sse::allowed_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::Responses,
+                "acct_hash".to_owned(),
+            ),
+        );
+        let late_response_id =
+            Bytes::from_static(br#"data: {"id":"resp_after_bound_should_not_record"}\n\n"#);
+        let chunks = vec![
+            Bytes::from(vec![b'a'; HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES]),
+            late_response_id.clone(),
+        ];
+        let body_stream = futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| Ok::<_, AsyncHttpBodyError>(Frame::data(chunk))),
+        );
+        let body = BodyExt::boxed(StreamBody::new(body_stream));
+        let affinity_record_tasks = TaskTracker::new();
+        let forwarded_body = record_affinity_owner_from_async_body(
+            body,
+            completion,
+            Arc::new(recorder.clone()),
+            affinity_record_tasks.clone(),
+        );
+        let forwarded_bytes = match forwarded_body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(error) => panic!("forwarded body should collect: {error}"),
+        };
+        affinity_record_tasks.close();
+        affinity_record_tasks.wait().await;
+
+        assert!(forwarded_bytes.ends_with(&late_response_id));
+        assert_eq!(recorder.records(), Vec::new());
     }
 }
 

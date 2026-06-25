@@ -228,6 +228,81 @@ impl UpstreamHttpRequest {
     pub fn body(&self) -> &[u8] {
         &self.body
     }
+
+    /// Combines this sanitized request head with a Hyper-owned streaming body.
+    #[must_use]
+    pub fn into_streaming_body(
+        self,
+        body: BoxBody<Bytes, AsyncHttpBodyError>,
+    ) -> StreamingUpstreamHttpRequest {
+        StreamingUpstreamHttpRequest {
+            method: self.method,
+            path: self.path,
+            route_kind: self.route_kind,
+            headers: self.headers,
+            body,
+        }
+    }
+}
+
+/// Upstream HTTP request whose body remains an async Hyper stream.
+pub struct StreamingUpstreamHttpRequest {
+    method: Method,
+    path: String,
+    route_kind: RouteKind,
+    headers: HeaderCollection,
+    body: BoxBody<Bytes, AsyncHttpBodyError>,
+}
+
+impl StreamingUpstreamHttpRequest {
+    /// Creates a sanitized streaming upstream request for transport-boundary tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn new_for_test(
+        method: Method,
+        path: String,
+        route_kind: RouteKind,
+        headers: HeaderCollection,
+        body: BoxBody<Bytes, AsyncHttpBodyError>,
+    ) -> Self {
+        Self {
+            method,
+            path,
+            route_kind,
+            headers,
+            body,
+        }
+    }
+
+    /// Returns request method.
+    #[must_use]
+    pub const fn method(&self) -> Method {
+        self.method
+    }
+
+    /// Returns request path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns route kind.
+    #[must_use]
+    pub const fn route_kind(&self) -> RouteKind {
+        self.route_kind
+    }
+
+    /// Returns headers.
+    #[must_use]
+    pub const fn headers(&self) -> &HeaderCollection {
+        &self.headers
+    }
+
+    /// Consumes the request body stream.
+    #[must_use]
+    pub fn into_body(self) -> BoxBody<Bytes, AsyncHttpBodyError> {
+        self.body
+    }
 }
 
 /// HTTP proxy response.
@@ -390,7 +465,7 @@ pub trait AsyncStreamingUpstreamHttpTransport: Send + Sync {
     /// Sends a sanitized upstream request and streams the response body.
     fn send_streaming<'a>(
         &'a self,
-        request: UpstreamHttpRequest,
+        request: StreamingUpstreamHttpRequest,
     ) -> BoxFuture<'a, Result<AsyncStreamingHttpProxyResponse, HttpProxyError>>;
 }
 
@@ -461,6 +536,20 @@ impl PreparedStreamingHttpProxyRequest {
     }
 }
 
+/// Sanitized streaming upstream HTTP/SSE request plus completion metadata.
+pub struct PreparedAsyncStreamingHttpProxyRequest {
+    upstream_request: StreamingUpstreamHttpRequest,
+    completion: StreamingHttpProxyCompletion,
+}
+
+impl PreparedAsyncStreamingHttpProxyRequest {
+    /// Consumes the prepared request into the upstream request and completion data.
+    #[must_use]
+    pub fn into_parts(self) -> (StreamingUpstreamHttpRequest, StreamingHttpProxyCompletion) {
+        (self.upstream_request, self.completion)
+    }
+}
+
 /// Metadata needed after an upstream response is committed.
 pub struct StreamingHttpProxyCompletion {
     affinity_secret: Option<RouterAffinityHashSecret>,
@@ -470,6 +559,23 @@ pub struct StreamingHttpProxyCompletion {
 }
 
 impl StreamingHttpProxyCompletion {
+    /// Creates completion metadata for internal runtime tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn new_for_test(
+        affinity_secret: Option<RouterAffinityHashSecret>,
+        account_id: AccountId,
+        credential_generation: u64,
+        allowed_audit_event: AuditEvent,
+    ) -> Self {
+        Self {
+            affinity_secret,
+            account_id,
+            credential_generation,
+            allowed_audit_event,
+        }
+    }
+
     /// Returns the affinity secret for response-owner recording.
     #[must_use]
     pub const fn affinity_secret(&self) -> Option<&RouterAffinityHashSecret> {
@@ -842,6 +948,22 @@ where
 
         Ok(PreparedStreamingHttpProxyRequest {
             upstream_request,
+            completion,
+        })
+    }
+
+    /// Prepares one sanitized upstream HTTP/SSE request with a Hyper-owned body
+    /// stream. The request DTO carries only bounded routing/affinity metadata.
+    pub async fn prepare_async_streaming_request_async(
+        &self,
+        request: HttpProxyRequest,
+        body: BoxBody<Bytes, AsyncHttpBodyError>,
+    ) -> Result<PreparedAsyncStreamingHttpProxyRequest, HttpProxyError> {
+        let prepared = self.prepare_streaming_request_async(request).await?;
+        let (upstream_request, completion) = prepared.into_parts();
+
+        Ok(PreparedAsyncStreamingHttpProxyRequest {
+            upstream_request: upstream_request.into_streaming_body(body),
             completion,
         })
     }
