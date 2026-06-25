@@ -225,21 +225,10 @@ impl WebSocketProtocolRouter {
         if first_frame_bytes.len() > self.first_frame_policy.max_first_frame_bytes {
             return Err(WebSocketCloseReason::FirstFrameTooLarge);
         }
-        let payload = serde_json::from_slice::<serde_json::Value>(first_frame_bytes)
+        let _payload = serde_json::from_slice::<serde_json::Value>(first_frame_bytes)
             .map_err(|_| WebSocketCloseReason::MalformedFirstFrame)?;
-        let Some(payload_object) = payload.as_object() else {
-            return Err(WebSocketCloseReason::UnexpectedFirstFrame);
-        };
         if has_forbidden_top_level_json_auth_carrier(first_frame_bytes) {
             return Err(WebSocketCloseReason::UnexpectedFirstFrame);
-        }
-        if let Some(frame_type) = payload_object
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-        {
-            if frame_type != "response.create" {
-                return Err(WebSocketCloseReason::UnexpectedFirstFrame);
-            }
         }
 
         Ok(first_frame_bytes)

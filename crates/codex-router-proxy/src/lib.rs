@@ -6536,28 +6536,6 @@ mod tests {
             router
                 .route_first_frame(
                     WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Text(br#"[]"#.to_vec()),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::UnexpectedFirstFrame)
-        );
-        assert_eq!(
-            router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Text(br#"{"type":"not.response.create"}"#.to_vec()),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::UnexpectedFirstFrame)
-        );
-        assert_eq!(
-            router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Text(
                         br#"{"type":"response.create","padding":"too-large"}"#.to_vec()
                     ),
