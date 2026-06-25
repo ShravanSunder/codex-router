@@ -2,14 +2,14 @@
   "artifact_paths": [
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/e2e/three-websocket-soak-transcript.json"
   ],
-  "artifact_source": "tmp/smoke/installed-codex-three-websocket-soak-artifact.txt",
+  "artifact_source": "CODEX_ROUTER_THREE_WEBSOCKET_ARTIFACT",
   "command": "scripts/proof-matrix.sh E-07",
   "cwd": ".",
   "exit_code": 0,
   "expected_observation": "three client processes share one router PID with aggregate unique router/upstream WebSocket session continuity and clean client transports",
   "freshness_check": "explicit_artifact_pointer_and_git_head_match_current_head_or_relevant_source_unchanged",
   "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-cli/src/* crates/codex-router-proxy/src/* scripts/proof-matrix.sh",
-  "git_head": "79818fab53793ab68db5cd27a621688d6dec3e1d",
+  "git_head": "1f0c333230c5065f5e3e5a55d5be8cb0770a94a8",
   "layer": "e2e",
   "notes": "Validated explicit installed-Codex three-WebSocket soak artifact.",
   "owner": "T8",
@@ -23,23 +23,23 @@
       "count": 3,
       "statuses": [
         {
-          "pid": 61255,
+          "pid": 92938,
           "status": "exit status: 0",
-          "stderr_line_count": 28,
+          "stderr_line_count": 30,
           "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         },
         {
-          "pid": 61256,
+          "pid": 92936,
           "status": "exit status: 0",
-          "stderr_line_count": 32,
+          "stderr_line_count": 30,
           "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         },
         {
-          "pid": 61254,
+          "pid": 92937,
           "status": "exit status: 0",
-          "stderr_line_count": 28,
+          "stderr_line_count": 34,
           "stderr_transport_error_markers": [],
           "stdout_contains_smoke_text": true
         }
@@ -49,9 +49,9 @@
     "router_websocket_registry": {
       "active_sessions": 0,
       "closed_session_ids": [
+        1,
         3,
-        2,
-        1
+        2
       ],
       "closed_sessions": 3,
       "completed_response_sessions": 7,
@@ -60,23 +60,23 @@
         2,
         2,
         5,
+        18,
         15,
-        15,
-        18
+        15
       ],
       "completed_session_ids": [
-        1,
-        2,
         3,
         1,
-        3,
         2,
-        1
+        1,
+        1,
+        3,
+        2
       ],
       "final_session_forwarded_upstream_message_counts": [
+        19,
         16,
-        16,
-        19
+        16
       ],
       "forwarded_upstream_messages": 51,
       "handled_connections": 3,
@@ -86,7 +86,21 @@
         2,
         3
       ],
-      "registered_sessions": 3
+      "registered_sessions": 3,
+      "session_peer_addrs": [
+        {
+          "local_port": 63785,
+          "session_id": 1
+        },
+        {
+          "local_port": 63786,
+          "session_id": 2
+        },
+        {
+          "local_port": 63784,
+          "session_id": 3
+        }
+      ]
     },
     "socket_cleanup": {
       "close_wait_count": 0,
@@ -104,37 +118,51 @@
       "hold_duration_ms": 300000,
       "http_probe_count": 0,
       "in_overlap_session_event_counts": [
+        16,
         13,
-        13,
-        16
+        13
       ],
       "multi_step_completed_before_overlap_end": true,
       "multi_step_followup_active_session_count": 3,
       "multi_step_followup_frame_count": 1,
-      "multi_step_followup_unix_ms": 1782382264913,
+      "multi_step_followup_unix_ms": 1782384350595,
       "multi_step_interleave_completed": true,
       "non_prewarm_session_count": 3,
       "normal_close_sessions": 3,
-      "overlap_completed_unix_ms": 1782382565895,
-      "overlap_duration_ms": 301004,
+      "overlap_completed_unix_ms": 1782384651581,
+      "overlap_duration_ms": 301008,
       "overlap_proven": true,
-      "overlap_started_unix_ms": 1782382264891,
-      "real_overlap_completed_unix_ms": 1782382565895,
-      "real_overlap_duration_ms": 301004,
+      "overlap_started_unix_ms": 1782384350573,
+      "real_overlap_completed_unix_ms": 1782384651581,
+      "real_overlap_duration_ms": 301008,
       "session_close_outcomes": [
         "normal",
         "normal",
         "normal"
       ],
       "session_event_counts": [
+        16,
         13,
-        13,
-        16
+        13
       ],
       "session_frame_counts": [
+        3,
         2,
-        2,
-        3
+        2
+      ],
+      "upstream_client_sessions": [
+        {
+          "client_index": 0,
+          "upstream_session_id": 1
+        },
+        {
+          "client_index": 1,
+          "upstream_session_id": 2
+        },
+        {
+          "client_index": 2,
+          "upstream_session_id": 3
+        }
       ],
       "upstream_session_ids": [
         1,
@@ -145,7 +173,7 @@
   },
   "status_after": "[x] passed",
   "status_before": "[ ] pending",
-  "timestamp_utc": "2026-06-25T10:16:15Z",
+  "timestamp_utc": "2026-06-25T10:50:59Z",
   "touched_targets": [
     "crates/codex-router-test-support/src/installed_codex.rs",
     "tests/smoke/installed_codex_mock.sh",
