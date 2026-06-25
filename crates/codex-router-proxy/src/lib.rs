@@ -5979,11 +5979,10 @@ mod tests {
     }
 
     #[test]
-    fn websocket_first_direct_response_create_payload_selects_and_forwards_unchanged() {
+    fn websocket_first_future_json_payload_selects_and_forwards_unchanged() {
         let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
         let frame = WebSocketFrame::Text(
-            br#"{"model":"gpt-5.5","input":[],"stream":true,"unknown_codex_field":{"kept":true}}"#
-                .to_vec(),
+            br#"{"future_codex_shape":{"kept":true},"unknown_codex_field":{"kept":true}}"#.to_vec(),
         );
 
         let decision = match router.route_first_frame(
@@ -5995,7 +5994,7 @@ mod tests {
             Some("chatgpt-account-id-canary"),
         ) {
             Ok(decision) => decision,
-            Err(error) => panic!("valid direct first frame should route: {error:?}"),
+            Err(error) => panic!("future JSON first frame should route: {error:?}"),
         };
 
         let WebSocketFirstFrameDecision::OpenUpstream {
@@ -6520,6 +6519,7 @@ mod tests {
     #[test]
     fn websocket_first_frame_rejects_hostile_preselection_cases() {
         let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(32));
+        let metadata_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
 
         assert_eq!(
             router
@@ -6536,28 +6536,6 @@ mod tests {
             router
                 .route_first_frame(
                     WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Text(br#"{"type":"not.response.create"}"#.to_vec()),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::UnexpectedFirstFrame)
-        );
-        assert_eq!(
-            router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Text(br#"{}"#.to_vec()),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::UnexpectedFirstFrame)
-        );
-        assert_eq!(
-            router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
                     WebSocketFrame::Text(
                         br#"{"type":"response.create","padding":"too-large"}"#.to_vec()
                     ),
@@ -6566,6 +6544,17 @@ mod tests {
                 )
                 .err(),
             Some(WebSocketCloseReason::FirstFrameTooLarge)
+        );
+        assert_eq!(
+            metadata_router
+                .route_first_frame(
+                    WebSocketHandshakeRequest::new(),
+                    WebSocketFrame::Text(br#"{"x-codex-router-token":"smuggled"}"#.to_vec()),
+                    SecretString::new("selected-upstream-token"),
+                    None,
+                )
+                .err(),
+            Some(WebSocketCloseReason::UnexpectedFirstFrame)
         );
         assert_eq!(
             router
@@ -6578,6 +6567,36 @@ mod tests {
                 .err(),
             Some(WebSocketCloseReason::MalformedFirstFrame)
         );
+    }
+
+    #[test]
+    fn websocket_first_frame_accepts_future_request_shape_without_prompt_policy() {
+        let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let first_frame = br#"{"model":"gpt-5.5","future_codex_shape":{"kept":true}}"#.to_vec();
+
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("Authorization", "Bearer local-token")),
+            WebSocketFrame::Text(first_frame.clone()),
+            SecretString::new("selected-upstream-token"),
+            None,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                panic!("future request shape should route without prompt policy: {error:?}")
+            }
+        };
+
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            headers,
+            first_frame: routed_first_frame,
+            ..
+        } = decision;
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer selected-upstream-token"]
+        );
+        assert_eq!(routed_first_frame, WebSocketFrame::Text(first_frame));
     }
 
     #[test]

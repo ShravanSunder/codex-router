@@ -152,6 +152,25 @@ CHECKS: dict[str, Check] = {
             ("crates/codex-router-proxy/src/upstream.rs", ".url_for_path(request.path())"),
         ),
     ),
+    "G-27": Check(
+        row_id="G-27",
+        description="WebSocket first request parsing does not require prompt-bearing payload shape",
+        forbidden=(
+            ("crates/codex-router-proxy/src/websocket.rs", "is_direct_response_create_payload"),
+            ("crates/codex-router-proxy/src/websocket.rs", "payload.as_object()"),
+            ("crates/codex-router-proxy/src/websocket.rs", 'frame_type != "response.create"'),
+            ("crates/codex-router-proxy/src/websocket.rs", '.get("model")'),
+            ("crates/codex-router-proxy/src/websocket.rs", '.get("input")'),
+            ("crates/codex-router-proxy/src/websocket.rs", '.get("stream")'),
+        ),
+        release_scan_forbidden=(
+            "is_direct_response_create_payload",
+        ),
+        required=(
+            ("crates/codex-router-proxy/src/websocket.rs", "validate_first_frame"),
+            ("crates/codex-router-proxy/src/websocket.rs", "has_forbidden_top_level_json_auth_carrier"),
+        ),
+    ),
     "G-28": Check(
         row_id="G-28",
         description=(

@@ -197,7 +197,7 @@ pub enum WebSocketCloseReason {
     UnsupportedFirstFrameType,
     /// First frame text was not valid JSON.
     MalformedFirstFrame,
-    /// First frame was not a Responses WebSocket create request.
+    /// First frame failed local auth-safety or routing metadata constraints.
     UnexpectedFirstFrame,
 }
 
@@ -225,19 +225,9 @@ impl WebSocketProtocolRouter {
         if first_frame_bytes.len() > self.first_frame_policy.max_first_frame_bytes {
             return Err(WebSocketCloseReason::FirstFrameTooLarge);
         }
-        let payload = serde_json::from_slice::<serde_json::Value>(first_frame_bytes)
+        let _payload = serde_json::from_slice::<serde_json::Value>(first_frame_bytes)
             .map_err(|_| WebSocketCloseReason::MalformedFirstFrame)?;
         if has_forbidden_top_level_json_auth_carrier(first_frame_bytes) {
-            return Err(WebSocketCloseReason::UnexpectedFirstFrame);
-        }
-        if let Some(frame_type) = payload.get("type").and_then(serde_json::Value::as_str) {
-            if frame_type != "response.create" {
-                return Err(WebSocketCloseReason::UnexpectedFirstFrame);
-            }
-            return Ok(first_frame_bytes);
-        }
-
-        if !is_direct_response_create_payload(&payload) {
             return Err(WebSocketCloseReason::UnexpectedFirstFrame);
         }
 
@@ -265,18 +255,6 @@ impl WebSocketProtocolRouter {
             affinity_owner_context: None,
         })
     }
-}
-
-fn is_direct_response_create_payload(payload: &serde_json::Value) -> bool {
-    payload
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|model| !model.is_empty())
-        && payload
-            .get("input")
-            .and_then(serde_json::Value::as_array)
-            .is_some()
-        && payload.get("stream").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 /// WebSocket router that composes local auth, account selection, and first-frame routing.

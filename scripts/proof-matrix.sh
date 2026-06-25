@@ -44,7 +44,7 @@ row_owner() {
     I-17b) printf 'T5/T6' ;;
     S-01|S-02|S-03|S-04) printf 'T7' ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) printf 'T8' ;;
-    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-28) printf 'T6' ;;
+    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-27|G-28) printf 'T6' ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-09) printf 'T0/T6' ;;
     P-07|P-08|P-10) printf 'final' ;;
     *) printf 'pending-owner' ;;
@@ -185,6 +185,9 @@ expected_observation() {
     G-26)
       printf 'supported application routes are upstream pass-through and /v1/models is not synthesized'
       ;;
+    G-27)
+      printf 'WebSocket pre-upstream parsing is metadata-only and does not require prompt-bearing payload shape'
+      ;;
     G-28)
       printf 'release serve path has no WebSocket message-count truncation, first-frame timeout, provider-event-aware termination, or router-created retry/fallback policy'
       ;;
@@ -254,7 +257,7 @@ known_row() {
     I-01|I-02|I-03|I-04|I-05a|I-05b|I-06|I-07|I-08|I-09|I-10|I-11|I-12|I-13|I-14|I-15|I-16|I-17a|I-17b|I-18|I-19|I-20|I-21) return 0 ;;
     S-01|S-02|S-03|S-04) return 0 ;;
     E-01|E-02|E-03|E-04|E-05|E-06|E-07|E-08|E-09) return 0 ;;
-    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-28) return 0 ;;
+    G-01|G-02|G-03|G-04|G-05|G-06|G-07|G-08|G-09|G-10|G-11|G-12|G-13|G-14|G-15|G-16|G-17|G-18|G-19|G-20|G-21|G-22|G-23|G-26|G-27|G-28) return 0 ;;
     P-01|P-02|P-03|P-04|P-05|P-06|P-07|P-08|P-09|P-10) return 0 ;;
     *) return 1 ;;
   esac
@@ -1504,6 +1507,14 @@ PY
         "CODEX_ROUTER_PROOF_VERIFY_ONLY=1 scripts/check-release-runtime-guardrails.py G-26" \
         "cargo test -p codex-router-proxy hyper_http_upstream_transport_passes_backend_api_models_upstream -- --nocapture"
       ;;
+    G-27)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Structural guard and first-frame regression passed: WebSocket pre-upstream parsing does not require prompt-bearing input/stream payload shape." \
+        "CODEX_ROUTER_PROOF_VERIFY_ONLY=1 scripts/check-release-runtime-guardrails.py G-27" \
+        "cargo test -p codex-router-proxy websocket_first_future_json_payload_selects_and_forwards_unchanged -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket_first_frame_accepts_future_request_shape_without_prompt_policy -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket_first_frame_rejects_hostile_preselection_cases -- --nocapture"
+      ;;
     G-21)
       structural_hashes_before=$(mktemp "${TMPDIR:-/tmp}/codex-router-structural-before.XXXXXX")
       structural_hashes_after=$(mktemp "${TMPDIR:-/tmp}/codex-router-structural-after.XXXXXX")
@@ -1511,7 +1522,7 @@ PY
         ! -name 'G-21.json' -print0 2>/dev/null \
         | sort -z \
         | xargs -0 shasum -a 256 > "$structural_hashes_before" || true
-      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23 G-26 G-28; do
+      for guardrail_row in G-01 G-02 G-03 G-04 G-05 G-06 G-07 G-08 G-09 G-10 G-11 G-12 G-13 G-14 G-15 G-16 G-17 G-18 G-19 G-20 G-22 G-23 G-26 G-27 G-28; do
         CODEX_ROUTER_PROOF_VERIFY_ONLY=1 "$0" "$guardrail_row" >/dev/null
       done
       find "$EVIDENCE_ROOT/structural" -maxdepth 1 -type f -name 'G-*.json' \
@@ -1562,6 +1573,7 @@ payload["artifact_paths"] = [
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-22.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-23.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-26.json",
+    "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-27.json",
     "tmp/plan-workflows/2026-06-24-async-router-runtime/evidence/structural/G-28.json",
 ]
 payload["freshness_check"] = "guarded_source_paths_clean_at_git_head"
