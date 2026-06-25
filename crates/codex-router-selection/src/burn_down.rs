@@ -64,6 +64,7 @@ pub struct BurnDownAccountInput {
     windows: Vec<QuotaWindowFact>,
     account_enabled: bool,
     has_active_credential: bool,
+    active_load_pressure: u32,
 }
 
 impl BurnDownAccountInput {
@@ -80,6 +81,7 @@ impl BurnDownAccountInput {
             windows,
             account_enabled: true,
             has_active_credential: true,
+            active_load_pressure: 0,
         }
     }
 
@@ -94,6 +96,13 @@ impl BurnDownAccountInput {
     #[must_use]
     pub const fn with_active_credential(mut self, has_active_credential: bool) -> Self {
         self.has_active_credential = has_active_credential;
+        self
+    }
+
+    /// Sets additional projected pressure from active in-flight load.
+    #[must_use]
+    pub const fn with_active_load_pressure(mut self, active_load_pressure: u32) -> Self {
+        self.active_load_pressure = clamp_u32(active_load_pressure, 0, 100);
         self
     }
 
@@ -363,6 +372,12 @@ impl BurnDownAccountAssessment {
     #[must_use]
     pub const fn long_salvage(&self) -> u32 {
         self.long_salvage
+    }
+
+    /// Returns projected burn pressure including active load.
+    #[must_use]
+    pub const fn projected_burn_pressure(&self) -> u32 {
+        self.projected_burn_pressure
     }
 
     /// Returns routing weight.
@@ -824,13 +839,16 @@ fn assess_account(
         policy
             .long_pressure_multiplier
             .saturating_mul(long_pressure)
-            .saturating_add(short_pressure),
+            .saturating_add(short_pressure)
+            .saturating_add(input.active_load_pressure),
     );
     let projected_burn_pressure = windows
         .iter()
         .map(|window| window.projected_pressure)
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .saturating_add(input.active_load_pressure)
+        .min(100);
     let risk_adjusted_weight = i64::from(usable_headroom) - i64::from(risk_penalty)
         + i64::from(short_salvage)
         + i64::from(long_salvage);
@@ -1124,7 +1142,8 @@ fn routing_reason_for_account(
         return RoutingReason::PreferredShortResetSoon;
     }
     if account.projected_burn_pressure == context.preferred_projected_burn_pressure
-        && context.has_worse_known_selected_pool_projected_burn_pressure
+        && (context.has_worse_known_selected_pool_projected_burn_pressure
+            || context.has_held_reserve_account)
     {
         return RoutingReason::PreferredProjectedBurn;
     }
@@ -1531,6 +1550,40 @@ mod tests {
         assert_eq!(
             assessment.preferred_next().map(AccountId::as_str),
             Some("acct_a")
+        );
+    }
+
+    #[test]
+    fn active_load_pressure_shifts_selection_away_from_loaded_account() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 70, 4 * 3_600),
+                    window(WEEKLY, 70, 5 * 86_400),
+                ],
+            )
+            .with_active_load_pressure(30),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 70, 4 * 3_600),
+                    window(WEEKLY, 70, 5 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_b")
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_b").routing_reason(),
+            RoutingReason::PreferredProjectedBurn
+        );
+        assert!(
+            account_assessment(&assessment, "acct_a").projected_burn_pressure()
+                > account_assessment(&assessment, "acct_b").projected_burn_pressure()
         );
     }
 

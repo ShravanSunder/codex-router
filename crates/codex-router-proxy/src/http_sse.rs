@@ -38,6 +38,7 @@ use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
 use crate::account_selection::AccountDecisionSelector;
+use crate::account_selection::ActiveReservationGuard;
 use crate::account_selection::AsyncAccountDecisionSelector;
 use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::headers::Header;
@@ -556,6 +557,7 @@ pub struct StreamingHttpProxyCompletion {
     account_id: AccountId,
     credential_generation: u64,
     allowed_audit_event: AuditEvent,
+    active_reservation_guard: Option<ActiveReservationGuard>,
 }
 
 impl StreamingHttpProxyCompletion {
@@ -573,6 +575,7 @@ impl StreamingHttpProxyCompletion {
             account_id,
             credential_generation,
             allowed_audit_event,
+            active_reservation_guard: None,
         }
     }
 
@@ -598,6 +601,12 @@ impl StreamingHttpProxyCompletion {
     #[must_use]
     pub const fn allowed_audit_event(&self) -> &AuditEvent {
         &self.allowed_audit_event
+    }
+
+    /// Returns the active reservation guard for response lifetime ownership.
+    #[must_use]
+    pub const fn active_reservation_guard(&self) -> Option<&ActiveReservationGuard> {
+        self.active_reservation_guard.as_ref()
     }
 }
 
@@ -860,6 +869,7 @@ where
                 audit_route_kind,
                 account_hash,
             ),
+            active_reservation_guard: selected.active_reservation_guard().cloned(),
         };
 
         Ok(PreparedStreamingHttpProxyRequest {
@@ -944,6 +954,7 @@ where
                 audit_route_kind,
                 account_hash,
             ),
+            active_reservation_guard: selected.active_reservation_guard().cloned(),
         };
 
         Ok(PreparedStreamingHttpProxyRequest {

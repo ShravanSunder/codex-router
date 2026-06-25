@@ -65,6 +65,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::account_selection::AccountDecisionSelector;
+use crate::account_selection::ActiveReservationGuard;
 use crate::account_selection::AsyncAccountDecisionSelector;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
@@ -165,6 +166,7 @@ pub struct WebSocketAffinityOwnerContext {
     affinity_secret: RouterAffinityHashSecret,
     account_id: AccountId,
     credential_generation: u64,
+    active_reservation_guard: Option<ActiveReservationGuard>,
 }
 
 impl WebSocketAffinityOwnerContext {
@@ -177,7 +179,16 @@ impl WebSocketAffinityOwnerContext {
             affinity_secret,
             account_id,
             credential_generation,
+            active_reservation_guard: None,
         }
+    }
+
+    fn with_active_reservation_guard(
+        mut self,
+        active_reservation_guard: Option<ActiveReservationGuard>,
+    ) -> Self {
+        self.active_reservation_guard = active_reservation_guard;
+        self
     }
 }
 
@@ -432,11 +443,14 @@ where
                 token_generation,
                 headers,
                 first_frame,
-                affinity_owner_context: Some(WebSocketAffinityOwnerContext::new(
-                    affinity_secret,
-                    selected.account_id().clone(),
-                    resolved.credential_generation(),
-                )),
+                affinity_owner_context: Some(
+                    WebSocketAffinityOwnerContext::new(
+                        affinity_secret,
+                        selected.account_id().clone(),
+                        resolved.credential_generation(),
+                    )
+                    .with_active_reservation_guard(selected.active_reservation_guard().cloned()),
+                ),
             },
         })
     }
@@ -596,11 +610,14 @@ where
                 token_generation,
                 headers,
                 first_frame,
-                affinity_owner_context: Some(WebSocketAffinityOwnerContext::new(
-                    affinity_secret,
-                    selected.account_id().clone(),
-                    resolved.credential_generation(),
-                )),
+                affinity_owner_context: Some(
+                    WebSocketAffinityOwnerContext::new(
+                        affinity_secret,
+                        selected.account_id().clone(),
+                        resolved.credential_generation(),
+                    )
+                    .with_active_reservation_guard(selected.active_reservation_guard().cloned()),
+                ),
             },
         })
     }
@@ -1247,6 +1264,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id,
             credential_generation: 7,
+            active_reservation_guard: None,
         };
         let oversized_padding = "a".repeat(65 * 1024);
         let message = Message::text(format!(

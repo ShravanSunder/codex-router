@@ -62,6 +62,7 @@ use codex_router_state::sqlite::StateStoreError;
 use crate::account_selection::AsyncRepositoryBackedAccountSelector;
 use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RouteBandAccountHolds;
+use crate::account_selection::RouteBandReservationBooks;
 use crate::account_selection::RouteBandWeightedSelectors;
 use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
 use crate::credential_runtime::ProxyRuntimeCredentialResources;
@@ -422,6 +423,7 @@ pub struct LoopbackRouterRuntime {
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
+    active_reservations: RouteBandReservationBooks,
     fixed_now_unix_seconds: Option<u64>,
     connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
 }
@@ -469,6 +471,7 @@ impl LoopbackRouterRuntime {
             audit_sink,
             weighted_selectors: Default::default(),
             account_holds: Default::default(),
+            active_reservations: Default::default(),
             credential_factory,
             fixed_now_unix_seconds: config.fixed_now_unix_seconds,
             connection_error_reporter: Arc::new(StderrLoopbackConnectionErrorReporter),
@@ -665,6 +668,7 @@ impl LoopbackRouterRuntime {
             audit_sink: self.audit_sink.clone(),
             weighted_selectors: Arc::clone(&self.weighted_selectors),
             account_holds: Arc::clone(&self.account_holds),
+            active_reservations: Arc::clone(&self.active_reservations),
             fixed_now_unix_seconds: self.fixed_now_unix_seconds,
             session_shutdown,
         }
@@ -737,6 +741,7 @@ struct LoopbackProtocolConnectionHandler {
     audit_sink: Option<AuditFileSink>,
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
+    active_reservations: RouteBandReservationBooks,
     fixed_now_unix_seconds: Option<u64>,
     session_shutdown: CancellationToken,
 }
@@ -857,10 +862,11 @@ impl LoopbackProtocolConnectionHandler {
         local_peer_addr: Option<SocketAddr>,
     ) -> Result<(), LoopbackRouterRuntimeError> {
         let state_store = AsyncSqliteStateStore::open(&self.state_database_path).await?;
-        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
             &state_store,
             Arc::clone(&self.weighted_selectors),
             Arc::clone(&self.account_holds),
+            Arc::clone(&self.active_reservations),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         );
@@ -934,10 +940,11 @@ impl LoopbackProtocolConnectionHandler {
         let credential_resolver = self
             .credential_factory
             .resolver_for_state(state_store.clone());
-        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
             &state_store,
             Arc::clone(&self.weighted_selectors),
             Arc::clone(&self.account_holds),
+            Arc::clone(&self.active_reservations),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         );
@@ -1239,8 +1246,9 @@ fn record_affinity_owner_from_async_body(
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     affinity_record_tasks: TaskTracker,
 ) -> BoxBody<Bytes, AsyncHttpBodyError> {
+    let active_reservation_guard = completion.active_reservation_guard().cloned();
     let Some(affinity_secret) = completion.affinity_secret().cloned() else {
-        return body;
+        return hold_active_reservation_until_body_drop(body, active_reservation_guard);
     };
     let account_id = completion.account_id().clone();
     let credential_generation = completion.credential_generation();
@@ -1250,6 +1258,7 @@ fn record_affinity_owner_from_async_body(
     let mut scanned_events = 0_usize;
 
     body.map_frame(move |frame| {
+        let _active_reservation_guard = &active_reservation_guard;
         if !recorded
             && scanned_bytes < HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES
             && scanned_events < HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS
@@ -1273,6 +1282,21 @@ fn record_affinity_owner_from_async_body(
             }
         }
 
+        frame
+    })
+    .boxed()
+}
+
+fn hold_active_reservation_until_body_drop(
+    body: BoxBody<Bytes, AsyncHttpBodyError>,
+    active_reservation_guard: Option<crate::account_selection::ActiveReservationGuard>,
+) -> BoxBody<Bytes, AsyncHttpBodyError> {
+    if active_reservation_guard.is_none() {
+        return body;
+    }
+
+    body.map_frame(move |frame| {
+        let _active_reservation_guard = &active_reservation_guard;
         frame
     })
     .boxed()

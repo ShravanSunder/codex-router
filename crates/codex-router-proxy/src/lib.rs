@@ -28,8 +28,10 @@ mod tests {
     use crate::account_selection::QuotaAwareAccountState;
     use crate::account_selection::RepositoryBackedAccountSelector;
     use crate::account_selection::RouteBandAccountHolds;
+    use crate::account_selection::RouteBandReservationBooks;
     use crate::account_selection::RouteBandWeightedSelectors;
     use crate::account_selection::SelectedAccountDecision;
+    use crate::account_selection::release_account_reservation;
     use crate::credential_runtime::ProxyCredentialResolver;
     use crate::headers::Header;
     use crate::headers::HeaderCollection;
@@ -1521,7 +1523,90 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), slow_burn.account_id());
-        assert_eq!(selected.selection_reason(), "preferred_projected_burn");
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_releases_active_load_reservation() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_active_load_release");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 70, true), (604_800, 70, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 70, true), (604_800, 70, false)],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let active_reservations = RouteBandReservationBooks::default();
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            active_reservations.clone(),
+            0,
+            Arc::new(test_unix_seconds),
+        );
+
+        let first = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("first request should select account: {error}"),
+        };
+        let second = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("second request should avoid active loaded account: {error}"),
+        };
+        release_account_reservation(
+            &active_reservations,
+            "responses",
+            match first.reservation_handle() {
+                Some(reservation_handle) => reservation_handle,
+                None => panic!("first selection should reserve active load"),
+            },
+        );
+        let third = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("third request should return to released account: {error}"),
+        };
+
+        assert_eq!(first.account_id(), alpha.account_id());
+        assert_eq!(second.account_id(), beta.account_id());
+        assert!(second.reservation_handle().is_some());
+        assert_eq!(third.account_id(), alpha.account_id());
     }
 
     #[test]

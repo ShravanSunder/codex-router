@@ -24,6 +24,8 @@ use codex_router_selection::burn_down::SelectedPool;
 use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
 use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::burn_down::assess_route_band;
+use codex_router_selection::reservation::ReservationBook;
+use codex_router_selection::reservation::ReservationHandle;
 use codex_router_selection::run_rate::QuotaRunRateConfidence;
 use codex_router_selection::run_rate::QuotaRunRateEstimator;
 use codex_router_selection::run_rate::QuotaRunRateObservation;
@@ -51,13 +53,80 @@ use crate::routes::classify_route;
 pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitSelector>>>;
 /// Process-lifetime account-hold state partitioned by route band.
 pub type RouteBandAccountHolds = Arc<Mutex<HashMap<String, AccountHold>>>;
+/// Process-lifetime active reservation state partitioned by route band.
+pub type RouteBandReservationBooks = Arc<Mutex<HashMap<String, ReservationBook>>>;
 
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
+const HTTP_ACTIVE_LOAD_PRESSURE: u32 = 2;
+const WEBSOCKET_ACTIVE_LOAD_PRESSURE: u32 = 8;
 const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 604_800;
 const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// RAII guard that releases active-load accounting when the stream lifecycle ends.
+#[derive(Clone)]
+pub struct ActiveReservationGuard {
+    inner: Arc<ActiveReservationGuardInner>,
+}
+
+impl ActiveReservationGuard {
+    fn new(
+        active_reservations: RouteBandReservationBooks,
+        route_band: String,
+        reservation_handle: ReservationHandle,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ActiveReservationGuardInner {
+                active_reservations,
+                route_band,
+                reservation_handle,
+            }),
+        }
+    }
+
+    /// Returns the reservation handle.
+    #[must_use]
+    pub fn reservation_handle(&self) -> &ReservationHandle {
+        &self.inner.reservation_handle
+    }
+}
+
+impl std::fmt::Debug for ActiveReservationGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActiveReservationGuard")
+            .field("route_band", &self.inner.route_band)
+            .field("reservation_handle", &self.inner.reservation_handle)
+            .finish()
+    }
+}
+
+impl PartialEq for ActiveReservationGuard {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.route_band == other.inner.route_band
+            && self.inner.reservation_handle == other.inner.reservation_handle
+    }
+}
+
+impl Eq for ActiveReservationGuard {}
+
+struct ActiveReservationGuardInner {
+    active_reservations: RouteBandReservationBooks,
+    route_band: String,
+    reservation_handle: ReservationHandle,
+}
+
+impl Drop for ActiveReservationGuardInner {
+    fn drop(&mut self) {
+        release_account_reservation(
+            &self.active_reservations,
+            &self.route_band,
+            &self.reservation_handle,
+        );
+    }
+}
 
 /// Process-local account hold for one route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +149,7 @@ impl AccountHold {
 pub struct SelectedAccountDecision {
     account_id: AccountId,
     selection_reason: String,
+    active_reservation_guard: Option<ActiveReservationGuard>,
 }
 
 impl SelectedAccountDecision {
@@ -89,7 +159,18 @@ impl SelectedAccountDecision {
         Self {
             account_id,
             selection_reason: selection_reason.into(),
+            active_reservation_guard: None,
         }
+    }
+
+    /// Attaches an active-load reservation handle.
+    #[must_use]
+    pub fn with_active_reservation_guard(
+        mut self,
+        active_reservation_guard: ActiveReservationGuard,
+    ) -> Self {
+        self.active_reservation_guard = Some(active_reservation_guard);
+        self
     }
 
     /// Returns selected account id.
@@ -102,6 +183,21 @@ impl SelectedAccountDecision {
     #[must_use]
     pub fn selection_reason(&self) -> &str {
         &self.selection_reason
+    }
+
+    /// Returns the active-load reservation handle, if one was created.
+    #[must_use]
+    pub fn reservation_handle(&self) -> Option<&ReservationHandle> {
+        match &self.active_reservation_guard {
+            Some(active_reservation_guard) => Some(active_reservation_guard.reservation_handle()),
+            None => None,
+        }
+    }
+
+    /// Returns the active reservation guard, if one was created.
+    #[must_use]
+    pub const fn active_reservation_guard(&self) -> Option<&ActiveReservationGuard> {
+        self.active_reservation_guard.as_ref()
     }
 }
 
@@ -226,6 +322,7 @@ where
     state_repository: &'a R,
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
+    active_reservations: RouteBandReservationBooks,
     minimum_account_hold_cooldown_seconds: u64,
     clock: UnixClock,
 }
@@ -292,6 +389,7 @@ where
             state_repository,
             weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
             account_holds: Arc::new(Mutex::new(HashMap::new())),
+            active_reservations: Arc::new(Mutex::new(HashMap::new())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
         }
@@ -308,6 +406,7 @@ where
             state_repository,
             weighted_selectors,
             account_holds,
+            active_reservations: Arc::new(Mutex::new(HashMap::new())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
         }
@@ -326,6 +425,27 @@ where
             state_repository,
             weighted_selectors,
             account_holds,
+            active_reservations: Arc::new(Mutex::new(HashMap::new())),
+            minimum_account_hold_cooldown_seconds,
+            clock,
+        }
+    }
+
+    /// Creates an async selector with explicit active reservation state.
+    #[must_use]
+    pub fn new_with_runtime_and_reservations(
+        state_repository: &'a R,
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        active_reservations: RouteBandReservationBooks,
+        minimum_account_hold_cooldown_seconds: u64,
+        clock: UnixClock,
+    ) -> Self {
+        Self {
+            state_repository,
+            weighted_selectors,
+            account_holds,
+            active_reservations,
             minimum_account_hold_cooldown_seconds,
             clock,
         }
@@ -453,11 +573,16 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
+            let active_reservation_book = active_reservation_book_for_route_band(
+                &self.active_reservations,
+                route_band.as_str(),
+            )?;
             let selector_accounts = account_inputs_from_selector_inputs_with_history(
                 self.state_repository,
                 route_band.as_str(),
                 now_unix_seconds,
                 &selector_inputs,
+                active_reservation_book.as_ref(),
             )
             .await
             .map_err(|_error| HttpProxyError::Selection {
@@ -520,22 +645,34 @@ where
                     })?;
 
             if let Some(owner_account_id) = affinity_owner_account_id {
-                return select_affinity_owner(
+                let selected = select_affinity_owner(
                     route_band,
                     &owner_account_id,
                     &assessment,
                     &mut account_holds,
                     now_unix_seconds,
+                )?;
+                return reserve_selected_account(
+                    selected,
+                    &self.active_reservations,
+                    route_band.as_str(),
+                    active_load_pressure_for_request(request),
                 );
             }
 
-            select_from_burn_down_assessment(
+            let selected = select_from_burn_down_assessment(
                 route_band.as_str(),
                 &assessment,
                 weighted_selector,
                 &mut account_holds,
                 self.minimum_account_hold_cooldown_seconds,
                 now_unix_seconds,
+            )?;
+            reserve_selected_account(
+                selected,
+                &self.active_reservations,
+                route_band.as_str(),
+                active_load_pressure_for_request(request),
             )
         })
     }
@@ -737,6 +874,7 @@ async fn account_inputs_from_selector_inputs_with_history<R>(
     route_band: &str,
     now_unix_seconds: u64,
     selector_inputs: &[SelectorQuotaInput],
+    active_reservation_book: Option<&ReservationBook>,
 ) -> Result<Vec<BurnDownAccountInput>, StateStoreError>
 where
     R: AsyncQuotaHistoryRepository + Sync,
@@ -760,14 +898,74 @@ where
             }
             windows.push(fact);
         }
+        let active_load_pressure = active_reservation_book
+            .map(|book| book.active_load_pressure(input.account_id()))
+            .unwrap_or(0);
         account_inputs.push(
             BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
                 .with_account_enabled(input.account_status() == AccountStatus::Enabled)
-                .with_active_credential(input.active_credential_generation().is_some()),
+                .with_active_credential(input.active_credential_generation().is_some())
+                .with_active_load_pressure(active_load_pressure),
         );
     }
 
     Ok(account_inputs)
+}
+
+fn active_reservation_book_for_route_band(
+    active_reservations: &RouteBandReservationBooks,
+    route_band: &str,
+) -> Result<Option<ReservationBook>, HttpProxyError> {
+    let active_reservations =
+        active_reservations
+            .lock()
+            .map_err(|_error| HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+            })?;
+    Ok(active_reservations.get(route_band).cloned())
+}
+
+fn reserve_selected_account(
+    selected: SelectedAccountDecision,
+    active_reservations: &RouteBandReservationBooks,
+    route_band: &str,
+    headroom_cost: u32,
+) -> Result<SelectedAccountDecision, HttpProxyError> {
+    if headroom_cost == 0 {
+        return Ok(selected);
+    }
+    let active_reservations_guard_source = Arc::clone(active_reservations);
+    let mut active_reservations =
+        active_reservations
+            .lock()
+            .map_err(|_error| HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+            })?;
+    let reservation_handle = active_reservations
+        .entry(route_band.to_owned())
+        .or_insert_with(ReservationBook::default)
+        .reserve_next(selected.account_id().clone(), headroom_cost);
+    Ok(
+        selected.with_active_reservation_guard(ActiveReservationGuard::new(
+            active_reservations_guard_source,
+            route_band.to_owned(),
+            reservation_handle,
+        )),
+    )
+}
+
+/// Releases a selection reservation from route-band active load accounting.
+pub fn release_account_reservation(
+    active_reservations: &RouteBandReservationBooks,
+    route_band: &str,
+    reservation_handle: &ReservationHandle,
+) {
+    let Ok(mut active_reservations) = active_reservations.lock() else {
+        return;
+    };
+    if let Some(book) = active_reservations.get_mut(route_band) {
+        book.release_handle(reservation_handle);
+    }
 }
 
 fn quota_window_fact_from_selector_window(
@@ -849,6 +1047,14 @@ fn route_kind_for_request(
     ) {
         RouteClass::Supported(route_kind) => Ok(route_kind),
         RouteClass::Rejected { reason } => Err(HttpProxyError::Rejected { reason }),
+    }
+}
+
+const fn active_load_pressure_for_request(request: &HttpProxyRequest) -> u32 {
+    if request.websocket_upgrade() {
+        WEBSOCKET_ACTIVE_LOAD_PRESSURE
+    } else {
+        HTTP_ACTIVE_LOAD_PRESSURE
     }
 }
 

@@ -57,9 +57,19 @@ struct Reservation {
 #[derive(Clone, Debug, Default)]
 pub struct ReservationBook {
     reservations: HashMap<ReservationId, Reservation>,
+    next_reservation_number: u64,
 }
 
 impl ReservationBook {
+    /// Reserves headroom for an account and returns a release handle.
+    pub fn reserve_next(&mut self, account_id: AccountId, headroom_cost: u32) -> ReservationHandle {
+        self.next_reservation_number = self.next_reservation_number.saturating_add(1);
+        let reservation_id =
+            ReservationId::new(format!("reservation_{}", self.next_reservation_number));
+        self.reserve(reservation_id.clone(), account_id.clone(), headroom_cost);
+        ReservationHandle::new(reservation_id, account_id, headroom_cost)
+    }
+
     /// Reserves headroom for an account.
     pub fn reserve(
         &mut self,
@@ -81,17 +91,26 @@ impl ReservationBook {
         self.reservations.remove(reservation_id);
     }
 
-    /// Returns available headroom after active reservations.
+    /// Releases a reservation handle.
+    pub fn release_handle(&mut self, reservation_handle: &ReservationHandle) {
+        self.release(reservation_handle.reservation_id());
+    }
+
+    /// Returns total active load pressure for an account.
     #[must_use]
-    pub fn available_headroom(&self, account_id: &AccountId, raw_headroom: u32) -> u32 {
-        let reserved = self
-            .reservations
+    pub fn active_load_pressure(&self, account_id: &AccountId) -> u32 {
+        self.reservations
             .values()
             .filter(|reservation| &reservation.account_id == account_id)
             .fold(0_u32, |total, reservation| {
                 total.saturating_add(reservation.headroom_cost)
-            });
+            })
+            .min(100)
+    }
 
-        raw_headroom.saturating_sub(reserved)
+    /// Returns available headroom after active reservations.
+    #[must_use]
+    pub fn available_headroom(&self, account_id: &AccountId, raw_headroom: u32) -> u32 {
+        raw_headroom.saturating_sub(self.active_load_pressure(account_id))
     }
 }
