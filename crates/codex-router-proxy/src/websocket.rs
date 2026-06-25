@@ -1253,8 +1253,9 @@ mod async_forwarding_tests {
             r#"{{"padding":"{oversized_padding}","type":"response.completed","response":{{"id":"resp_late"}}}}"#
         ));
 
-        let owner = websocket_affinity_owner_record(&message, Some(&context))
-            .expect("oversized completion frame should still record affinity after forwarding");
+        let Some(owner) = websocket_affinity_owner_record(&message, Some(&context)) else {
+            panic!("oversized completion frame should still record affinity after forwarding");
+        };
         assert_eq!(
             owner.account_id(),
             &AccountId::new("acct_selected")
