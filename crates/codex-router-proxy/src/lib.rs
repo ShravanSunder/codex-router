@@ -5,6 +5,7 @@ mod credential_runtime;
 pub mod headers;
 pub mod http_sse;
 pub mod local_auth;
+pub mod provider_error;
 pub mod routes;
 mod secret_store_factory;
 pub mod server;
