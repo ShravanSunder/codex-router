@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 transport="all"
 scenario="serial"
+smoke_target_model="gpt-5.4-mini"
+smoke_concurrent_clients="3"
+smoke_prompt_contract="bounded explicit exact-reply prompt"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,6 +29,12 @@ while [[ $# -gt 0 ]]; do
     --help|-h)
       cat <<'USAGE'
 Usage: tests/smoke/installed_codex_mock.sh [--transport http-sse|websocket|all] [--scenario serial|concurrent|soak|all]
+
+Installed Codex smoke contract:
+  - uses the existing codex CLI from PATH; it does not install Codex
+  - targets the cheap mini model gpt-5.4-mini
+  - concurrent and soak scenarios run three Codex client jobs at once
+  - prompts are bounded exact-reply instructions, with harness markers only
 USAGE
       exit 0
       ;;
@@ -70,6 +79,11 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 
 cd "${repo_root}"
 three_websocket_soak_artifact_pointer="${repo_root}/tmp/smoke/installed-codex-three-websocket-soak-artifact.txt"
+
+printf 'installed Codex smoke contract: model=%s concurrent_clients=%s prompt=%s\n' \
+  "${smoke_target_model}" \
+  "${smoke_concurrent_clients}" \
+  "${smoke_prompt_contract}" >&2
 
 if command -v cargo >/dev/null 2>&1 && cargo --version >/dev/null 2>&1; then
   cargo_command=(cargo)

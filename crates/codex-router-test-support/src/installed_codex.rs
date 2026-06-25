@@ -4633,6 +4633,12 @@ mod tests {
         assert!(
             script.contains(r#"run_three_websocket_soak_filter "three_codex_websocket_soak_""#)
         );
+        assert!(script.contains(r#"smoke_target_model="gpt-5.4-mini""#));
+        assert!(script.contains(r#"smoke_concurrent_clients="3""#));
+        assert!(script.contains("bounded explicit exact-reply prompt"));
+        assert!(
+            script.contains("uses the existing codex CLI from PATH; it does not install Codex")
+        );
         Ok(())
     }
 
