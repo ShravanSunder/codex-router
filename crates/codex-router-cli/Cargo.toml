@@ -20,11 +20,15 @@ codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.0" }
 codex-router-selection = { path = "../codex-router-selection", version = "0.1.0" }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.0" }
 codex-router-state = { path = "../codex-router-state", version = "0.1.0" }
+clap.workspace = true
 comfy-table.workspace = true
+inquire.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tungstenite = "0.28.0"

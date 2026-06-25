@@ -1,0 +1,6 @@
+{"ts":"2026-06-25T00:00:00-04:00","event":"goal_created","detail":"Created follow-up design goal for quota burndown, Codex-safe quota exhaustion, sessions picker, and live quota E2E proof."}
+{"ts":"2026-06-25T00:00:00-04:00","event":"worktree_created","detail":"Created branch/worktree followup-burndown-sessions-spec from main using wt."}
+{"ts":"2026-06-25T00:00:00-04:00","event":"research_lanes_completed","detail":"Completed quota-history, Codex WS quota lifecycle, and sessions picker schema lanes."}
+{"ts":"2026-06-25T00:00:00-04:00","event":"spec_written","detail":"Wrote primary spec with explicit proof gates and non-goals."}
+{"ts":"2026-06-25T00:00:00-04:00","event":"plan_written","detail":"Wrote implementation plan with TDD matrix, E2E gates, and worktree-ready sequencing."}
+

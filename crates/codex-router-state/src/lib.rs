@@ -33,8 +33,10 @@ mod tests {
     use crate::affinity_owner::AffinitySourceTransport;
     use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
     use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
+    use crate::quota_snapshot::PersistedQuotaHistoryObservation;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
     use crate::quota_snapshot::PersistedSelectorQuotaWindow;
+    use crate::quota_snapshot::QuotaHistoryRefreshOutcome;
     use crate::quota_snapshot::QuotaRefreshErrorClass;
     use crate::quota_snapshot::QuotaRefreshStatusSource;
     use crate::quota_snapshot::QuotaSnapshotSource;
@@ -44,6 +46,8 @@ mod tests {
     use crate::repositories::QuotaSnapshotRepository;
     use crate::repositories::SelectorQuotaRepository;
     use crate::sqlite::AsyncAffinityRepository;
+    use crate::sqlite::AsyncQuotaExhaustionRepository;
+    use crate::sqlite::AsyncQuotaHistoryRepository;
     use crate::sqlite::AsyncSelectorQuotaRepository;
     use crate::sqlite::AsyncSqliteStateStore;
     use crate::sqlite::SqliteStateStore;
@@ -264,6 +268,173 @@ mod tests {
         };
 
         assert_eq!(async_inputs, sync_inputs);
+    }
+
+    #[tokio::test]
+    async fn async_quota_history_appends_queries_and_purges_old_observations() {
+        let temp_dir = TestTempDir::new("async_quota_history");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_history");
+        let old_observation = quota_history_observation(
+            account_id.clone(),
+            "responses",
+            18_000,
+            100,
+            91,
+            Some(18_100),
+        );
+        let first_observation = quota_history_observation(
+            account_id.clone(),
+            "responses",
+            18_000,
+            10_000,
+            88,
+            Some(28_000),
+        )
+        .with_effective(true)
+        .with_reset_credits_available(1);
+        let second_observation = quota_history_observation(
+            account_id.clone(),
+            "responses",
+            18_000,
+            10_900,
+            76,
+            Some(28_000),
+        )
+        .with_refresh_outcome(QuotaHistoryRefreshOutcome::Failure {
+            error_class: QuotaRefreshErrorClass::RateLimited,
+        });
+        let other_window = quota_history_observation(
+            account_id.clone(),
+            "responses",
+            604_800,
+            10_900,
+            50,
+            Some(615_700),
+        );
+
+        for observation in [
+            old_observation,
+            first_observation.clone(),
+            second_observation.clone(),
+            other_window,
+        ] {
+            if let Err(error) =
+                AsyncQuotaHistoryRepository::append_quota_history_observation(&store, &observation)
+                    .await
+            {
+                panic!("quota history observation should append: {error}");
+            }
+        }
+        if let Err(error) =
+            AsyncQuotaHistoryRepository::purge_quota_history_before(&store, 1_000).await
+        {
+            panic!("old quota history should purge: {error}");
+        }
+
+        let observations = match AsyncQuotaHistoryRepository::quota_history_observations_for_window(
+            &store,
+            &account_id,
+            "responses",
+            18_000,
+            1_000,
+            11_000,
+        )
+        .await
+        {
+            Ok(observations) => observations,
+            Err(error) => panic!("quota history observations should load: {error}"),
+        };
+
+        assert_eq!(observations, vec![first_observation, second_observation]);
+    }
+
+    #[tokio::test]
+    async fn async_quota_exhaustion_marks_route_band_windows_ineligible() {
+        let temp_dir = TestTempDir::new("async_quota_exhaustion");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_quota_exhausted");
+        let account = AccountRecord::new(account_id.clone(), "exhausted", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("account should persist: {error}");
+        }
+        for (limit_window_seconds, remaining_headroom, effective) in
+            [(18_000, 70, true), (604_800, 55, false)]
+        {
+            let window = PersistedSelectorQuotaWindow::new(
+                account_id.clone(),
+                "responses",
+                limit_window_seconds,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(remaining_headroom)
+            .with_effective(effective)
+            .with_observed_unix_seconds(1_000)
+            .with_reset_unix_seconds(10_000 + limit_window_seconds);
+            if let Err(error) =
+                SelectorQuotaRepository::upsert_selector_window(&sync_store, &window)
+            {
+                panic!("selector window should persist: {error}");
+            }
+        }
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+
+        if let Err(error) = AsyncQuotaExhaustionRepository::mark_route_band_quota_exhausted(
+            &async_store,
+            &account_id,
+            "responses",
+            2_000,
+        )
+        .await
+        {
+            panic!("quota exhaustion should persist: {error}");
+        }
+
+        let inputs = match AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+            &async_store,
+            "responses",
+            2_000,
+        )
+        .await
+        {
+            Ok(inputs) => inputs,
+            Err(error) => panic!("selector input should load: {error}"),
+        };
+        let input = inputs
+            .iter()
+            .find(|input| input.account_id() == &account_id)
+            .unwrap_or_else(|| panic!("exhausted account selector input should exist"));
+        assert_eq!(input.windows().len(), 2);
+        assert!(
+            input
+                .windows()
+                .iter()
+                .all(|window| window.status() == SelectorQuotaWindowStatus::Ineligible)
+        );
+        assert!(
+            input
+                .windows()
+                .iter()
+                .all(|window| window.remaining_headroom() == 0)
+        );
+        assert!(
+            input
+                .windows()
+                .iter()
+                .all(|window| window.observed_unix_seconds() == 2_000)
+        );
     }
 
     #[test]
@@ -1323,6 +1494,32 @@ mod tests {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
         }
+    }
+
+    fn quota_history_observation(
+        account_id: AccountId,
+        route_band: &str,
+        limit_window_seconds: u64,
+        observed_unix_seconds: u64,
+        remaining_headroom: u32,
+        reset_unix_seconds: Option<u64>,
+    ) -> PersistedQuotaHistoryObservation {
+        let mut observation = PersistedQuotaHistoryObservation::new(
+            account_id,
+            "safe-label",
+            route_band,
+            limit_window_seconds,
+            observed_unix_seconds,
+            remaining_headroom,
+        )
+        .with_window_status(SelectorQuotaWindowStatus::Eligible)
+        .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
+        .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success);
+        if let Some(reset_unix_seconds) = reset_unix_seconds {
+            observation = observation.with_reset_unix_seconds(reset_unix_seconds);
+        }
+
+        observation
     }
 
     fn affinity_hash(character: char) -> AffinityKeyHash {

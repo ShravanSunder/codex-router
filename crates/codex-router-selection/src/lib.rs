@@ -5,6 +5,7 @@ pub mod burn_down;
 pub mod eligibility;
 pub mod precommit;
 pub mod reservation;
+pub mod run_rate;
 pub mod turn_state;
 pub mod weighted_deficit;
 
@@ -32,6 +33,10 @@ mod tests {
     use crate::precommit::classify_precommit_failure;
     use crate::reservation::ReservationBook;
     use crate::reservation::ReservationHandle;
+    use crate::run_rate::QuotaRunRateConfidence;
+    use crate::run_rate::QuotaRunRateEstimate;
+    use crate::run_rate::QuotaRunRateEstimator;
+    use crate::run_rate::QuotaRunRateObservation;
     use crate::turn_state::TurnStateEnvelopeCodec;
     use crate::weighted_deficit::SelectionDecision;
     use crate::weighted_deficit::WeightedDeficitSelector;
@@ -118,6 +123,29 @@ mod tests {
     }
 
     #[test]
+    fn reservations_purge_stale_entries_without_releasing_fresh_load() {
+        let mut reservations = ReservationBook::default();
+        let account = account_id("acct_primary");
+
+        reservations.reserve_at(
+            ReservationId::new("reservation_stale"),
+            account.clone(),
+            25,
+            NOW - 1_000,
+        );
+        reservations.reserve_at(
+            ReservationId::new("reservation_fresh"),
+            account.clone(),
+            15,
+            NOW - 100,
+        );
+
+        assert_eq!(reservations.active_load_pressure(&account), 40);
+        assert_eq!(reservations.purge_stale(NOW, /*max_age_seconds*/ 300), 1);
+        assert_eq!(reservations.active_load_pressure(&account), 15);
+    }
+
+    #[test]
     fn affinity_overrides_balance_only_when_pinned_account_is_eligible() {
         let mut affinity = AffinityTable::default();
         let key = AffinityKey::new("previous_response_1");
@@ -196,6 +224,92 @@ mod tests {
     }
 
     #[test]
+    fn quota_run_rate_estimator_uses_spec_confidence_thresholds() {
+        let estimator = QuotaRunRateEstimator::new(/*freshness_window_seconds*/ 1_800);
+        let reset_segment = 1_700_018_000;
+
+        assert_eq!(
+            estimator.estimate(NOW, reset_segment, &[]),
+            QuotaRunRateEstimate::unknown()
+        );
+        assert_eq!(
+            estimator.estimate(
+                NOW,
+                reset_segment,
+                &[quota_observation(NOW - 120, reset_segment, 90)]
+            ),
+            QuotaRunRateEstimate::insufficient()
+        );
+        assert_eq!(
+            estimator.estimate(
+                NOW,
+                reset_segment,
+                &[
+                    quota_observation(NOW - 240, reset_segment, 90),
+                    quota_observation(NOW, reset_segment, 84),
+                ],
+            ),
+            QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Low, 90, 84)
+        );
+        assert_eq!(
+            estimator.estimate(
+                NOW,
+                reset_segment,
+                &[
+                    quota_observation(NOW - 1_000, reset_segment, 90),
+                    quota_observation(NOW - 500, reset_segment, 84),
+                    quota_observation(NOW, reset_segment, 78),
+                ],
+            ),
+            QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 43, 78)
+        );
+        assert_eq!(
+            estimator.estimate(
+                NOW,
+                reset_segment,
+                &[
+                    quota_observation(NOW - 1_000, reset_segment - 1, 20),
+                    quota_observation(NOW - 900, reset_segment, 90),
+                    quota_observation(NOW - 450, reset_segment, 84),
+                    quota_observation(NOW, reset_segment, 78),
+                ],
+            ),
+            QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 48, 78)
+        );
+        assert_eq!(
+            estimator.estimate(
+                NOW + 10_000,
+                reset_segment,
+                &[
+                    quota_observation(NOW - 1_000, reset_segment, 90),
+                    quota_observation(NOW - 500, reset_segment, 84),
+                    quota_observation(NOW, reset_segment, 78),
+                ],
+            ),
+            QuotaRunRateEstimate::stale()
+        );
+    }
+
+    #[test]
+    fn quota_run_rate_estimate_projects_exhaustion_from_latest_headroom() {
+        let estimate = QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 43, 78);
+
+        assert_eq!(
+            estimate.projected_exhaustion_unix_seconds(NOW),
+            Some(NOW + 6_530)
+        );
+        assert_eq!(
+            QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 0, 78)
+                .projected_exhaustion_unix_seconds(NOW),
+            None
+        );
+        assert_eq!(
+            QuotaRunRateEstimate::insufficient().projected_exhaustion_unix_seconds(NOW),
+            None
+        );
+    }
+
+    #[test]
     fn named_precommit_classifier_matches_free_function() {
         let classifier = PrecommitFailureClassifier;
 
@@ -222,5 +336,19 @@ mod tests {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
         }
+    }
+
+    const NOW: u64 = 1_700_000_000;
+
+    const fn quota_observation(
+        observed_unix_seconds: u64,
+        reset_unix_seconds: u64,
+        remaining_headroom_percent: u32,
+    ) -> QuotaRunRateObservation {
+        QuotaRunRateObservation::new(
+            observed_unix_seconds,
+            reset_unix_seconds,
+            remaining_headroom_percent,
+        )
     }
 }

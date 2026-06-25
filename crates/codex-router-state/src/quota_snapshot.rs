@@ -106,6 +106,18 @@ impl QuotaRefreshErrorClass {
     }
 }
 
+/// Refresh outcome recorded with a quota history observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuotaHistoryRefreshOutcome {
+    /// Refresh succeeded.
+    Success,
+    /// Refresh failed with a redacted error class.
+    Failure {
+        /// Redacted failure class.
+        error_class: QuotaRefreshErrorClass,
+    },
+}
+
 /// Source of a refresh status view row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuotaRefreshStatusSource {
@@ -206,6 +218,168 @@ impl QuotaRefreshStatusView {
     #[must_use]
     pub const fn stale_after_unix_seconds(&self) -> Option<u64> {
         self.stale_after_unix_seconds
+    }
+}
+
+/// Append-only quota observation used for historical burn-rate estimation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedQuotaHistoryObservation {
+    account_id: AccountId,
+    account_label: String,
+    route_band: String,
+    limit_window_seconds: u64,
+    observed_unix_seconds: u64,
+    remaining_headroom: u32,
+    reset_unix_seconds: Option<u64>,
+    window_status: SelectorQuotaWindowStatus,
+    effective: bool,
+    refresh_source: QuotaSnapshotSource,
+    refresh_outcome: QuotaHistoryRefreshOutcome,
+    reset_credits_available: Option<u32>,
+}
+
+impl PersistedQuotaHistoryObservation {
+    /// Creates a quota history observation.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        account_label: impl Into<String>,
+        route_band: impl Into<String>,
+        limit_window_seconds: u64,
+        observed_unix_seconds: u64,
+        remaining_headroom: u32,
+    ) -> Self {
+        Self {
+            account_id,
+            account_label: account_label.into(),
+            route_band: route_band.into(),
+            limit_window_seconds,
+            observed_unix_seconds,
+            remaining_headroom,
+            reset_unix_seconds: None,
+            window_status: SelectorQuotaWindowStatus::Eligible,
+            effective: false,
+            refresh_source: QuotaSnapshotSource::OpenAiEndpoint,
+            refresh_outcome: QuotaHistoryRefreshOutcome::Success,
+            reset_credits_available: None,
+        }
+    }
+
+    /// Sets reset time.
+    #[must_use]
+    pub const fn with_reset_unix_seconds(mut self, reset_unix_seconds: u64) -> Self {
+        self.reset_unix_seconds = Some(reset_unix_seconds);
+        self
+    }
+
+    /// Marks this observation as effective.
+    #[must_use]
+    pub const fn with_effective(mut self, effective: bool) -> Self {
+        self.effective = effective;
+        self
+    }
+
+    /// Sets selector window status.
+    #[must_use]
+    pub const fn with_window_status(mut self, window_status: SelectorQuotaWindowStatus) -> Self {
+        self.window_status = window_status;
+        self
+    }
+
+    /// Sets refresh source.
+    #[must_use]
+    pub const fn with_refresh_source(mut self, refresh_source: QuotaSnapshotSource) -> Self {
+        self.refresh_source = refresh_source;
+        self
+    }
+
+    /// Sets provider reset credits available.
+    #[must_use]
+    pub const fn with_reset_credits_available(mut self, reset_credits_available: u32) -> Self {
+        self.reset_credits_available = Some(reset_credits_available);
+        self
+    }
+
+    /// Sets refresh outcome.
+    #[must_use]
+    pub const fn with_refresh_outcome(
+        mut self,
+        refresh_outcome: QuotaHistoryRefreshOutcome,
+    ) -> Self {
+        self.refresh_outcome = refresh_outcome;
+        self
+    }
+
+    /// Returns account id.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns safe account label.
+    #[must_use]
+    pub fn account_label(&self) -> &str {
+        &self.account_label
+    }
+
+    /// Returns route band.
+    #[must_use]
+    pub fn route_band(&self) -> &str {
+        &self.route_band
+    }
+
+    /// Returns provider limit window seconds.
+    #[must_use]
+    pub const fn limit_window_seconds(&self) -> u64 {
+        self.limit_window_seconds
+    }
+
+    /// Returns observed time.
+    #[must_use]
+    pub const fn observed_unix_seconds(&self) -> u64 {
+        self.observed_unix_seconds
+    }
+
+    /// Returns remaining headroom.
+    #[must_use]
+    pub const fn remaining_headroom(&self) -> u32 {
+        self.remaining_headroom
+    }
+
+    /// Returns reset time.
+    #[must_use]
+    pub const fn reset_unix_seconds(&self) -> Option<u64> {
+        self.reset_unix_seconds
+    }
+
+    /// Returns selector window status.
+    #[must_use]
+    pub const fn window_status(&self) -> SelectorQuotaWindowStatus {
+        self.window_status
+    }
+
+    /// Returns whether this observation is effective.
+    #[must_use]
+    pub const fn effective(&self) -> bool {
+        self.effective
+    }
+
+    /// Returns refresh source.
+    #[must_use]
+    pub const fn refresh_source(&self) -> QuotaSnapshotSource {
+        self.refresh_source
+    }
+
+    /// Returns refresh outcome.
+    #[must_use]
+    pub const fn refresh_outcome(&self) -> QuotaHistoryRefreshOutcome {
+        self.refresh_outcome
+    }
+
+    /// Returns provider reset credits available.
+    #[must_use]
+    pub const fn reset_credits_available(&self) -> Option<u32> {
+        self.reset_credits_available
     }
 }
 

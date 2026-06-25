@@ -23,6 +23,7 @@ codex-router-core = { path = "crates/codex-router-core", version = "0.1.0" }
 codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.0" }
 base64 = "0.22.1"
 bytes = "1.11.0"
+clap = { version = "4.5.53", features = ["derive", "env", "wrap_help"] }
 comfy-table = "7.2.2"
 futures-util = { version = "0.3.31", default-features = false, features = ["sink", "std"] }
 hmac = "0.12.1"
@@ -33,6 +34,7 @@ hyper = { version = "1.8.1", features = ["http1", "http2", "client", "server"] }
 hyper-tungstenite = "0.20.0"
 hyper-rustls = { version = "0.27.7", default-features = false, features = ["http1", "http2", "tls12", "webpki-roots"] }
 hyper-util = { version = "0.1.19", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
+inquire = "0.9.1"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
 rusqlite = { version = "0.37.0", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
