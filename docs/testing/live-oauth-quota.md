@@ -54,8 +54,10 @@ provider I/O.
 Read-only diagnostic live quota:
 
 ```shell
-cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label>
-cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
+cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --dry-run
+cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --dry-run
+cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --approve-network-account-use
+cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --approve-network-account-use
 ```
 
 The diagnostic command reads Codex/Prodex-style OAuth `auth.json` as a
@@ -63,6 +65,9 @@ compatibility input, calls the ChatGPT usage endpoint, and prints only redacted
 quota window summaries. It does not copy the file into router state, does not
 make `auth.json` the router runtime source of truth, and rejects API-key auth
 for quota because the ChatGPT quota endpoint requires Codex OAuth access tokens.
+It refuses real network/account use unless `--approve-network-account-use` is
+passed. `--dry-run` discovers only local profile labels and prints that network
+and generation were not run.
 
 The implemented CLI surface for local router proof is:
 
@@ -76,8 +81,10 @@ cargo run -p codex-router-cli -- profile print --port 8787
 cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
 cargo run -p codex-router-cli -- serve [--state-db <state.sqlite>] [--secret-root <secret-root>] [--upstream-base-url <url>]
-cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label>
-cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root>
+cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --dry-run
+cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --dry-run
+cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --approve-network-account-use
+cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --approve-network-account-use
 ```
 
 The account, quota, profile, token, and serve commands prove router-owned local
@@ -111,7 +118,8 @@ cargo run -p codex-router-cli -- account login --label <label> --device-auth --a
 cargo run -p codex-router-cli -- account login --label <label> --auth-json <path> --allow-plaintext-file-secrets
 cargo run -p codex-router-cli -- quota refresh
 cargo run -p codex-router-cli -- quota status --all-limits
-cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root>
+cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root> --dry-run
+cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root> --approve-network-account-use
 ```
 
 Required properties:

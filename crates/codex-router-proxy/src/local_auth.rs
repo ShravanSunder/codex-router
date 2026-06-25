@@ -191,7 +191,7 @@ fn body_mentions_forbidden_auth_carrier_key(body: &[u8]) -> bool {
         {
             return true;
         }
-        cursor = token_end.saturating_add(1);
+        cursor = token_end;
     }
 
     false
@@ -484,6 +484,21 @@ mod tests {
                 None,
                 "/v1/responses",
                 br#"["bearer"]"#,
+                true,
+            ),
+            Ok(Some("router-token"))
+        );
+    }
+
+    #[test]
+    fn request_local_auth_fallback_scanner_stays_on_utf8_boundaries() {
+        assert_eq!(
+            extract_presented_local_token_from_request(
+                Some("router-token"),
+                None,
+                None,
+                "/v1/responses",
+                "not-json token‑boundary bearer‑boundary".as_bytes(),
                 true,
             ),
             Ok(Some("router-token"))

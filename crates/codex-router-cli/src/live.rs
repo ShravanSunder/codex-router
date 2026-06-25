@@ -49,6 +49,8 @@ pub(crate) struct LiveQuotaCommand {
     profiles_root: Option<PathBuf>,
     profile_label: Option<String>,
     base_url: String,
+    dry_run: bool,
+    approve_network_account_use: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +66,8 @@ impl LiveQuotaCommand {
             profiles_root: None,
             profile_label: None,
             base_url: DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+            dry_run: false,
+            approve_network_account_use: false,
         };
 
         while let Some(argument) = parser.next_string()? {
@@ -82,6 +86,16 @@ impl LiveQuotaCommand {
                 }
                 "--base-url" => {
                     command.base_url = parser.next_required_value("--base-url")?;
+                }
+                "--dry-run" => {
+                    command.dry_run = true;
+                }
+                "--approve-network-account-use" => {
+                    command.approve_network_account_use = true;
+                }
+                "--approve-live-generation" => {
+                    // Accepted as a forward-compatible explicit gate; this
+                    // diagnostic command never performs live generation.
                 }
                 unknown => {
                     return Err(CliError::UnknownOption {
@@ -153,17 +167,37 @@ fn run_live_quota_command(
     stdout: &mut impl Write,
     command: LiveQuotaCommand,
 ) -> Result<(), CliError> {
-    let client = LiveQuotaClient::new(command.base_url.as_str())?;
     let profiles = command.profiles()?;
     if profiles.is_empty() {
         return Err(CliError::NoLiveQuotaProfiles);
     }
+    if command.dry_run {
+        for profile in profiles {
+            write_live_quota_dry_run_profile(stdout, &profile.label).map_err(CliError::Stdout)?;
+        }
+        return Ok(());
+    }
+    if !command.approve_network_account_use {
+        return Err(CliError::LiveQuotaApprovalRequired);
+    }
+    let client = LiveQuotaClient::new(command.base_url.as_str())?;
     for profile in profiles {
         let result = client.fetch_from_auth_json(&profile.auth_json_path);
         write_live_quota_profile(stdout, &profile.label, result.as_ref())
             .map_err(CliError::Stdout)?;
     }
     Ok(())
+}
+
+fn write_live_quota_dry_run_profile(
+    stdout: &mut impl Write,
+    label: &str,
+) -> Result<(), std::io::Error> {
+    writeln!(stdout, "profile: {label}")?;
+    writeln!(stdout, "status: dry-run")?;
+    writeln!(stdout, "network: not-run")?;
+    writeln!(stdout, "generation: not-run")?;
+    writeln!(stdout)
 }
 
 fn write_live_quota_profile(

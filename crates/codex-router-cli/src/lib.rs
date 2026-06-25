@@ -1073,6 +1073,9 @@ pub enum CliError {
     /// Live quota command found no profiles.
     #[error("no live quota profiles found")]
     NoLiveQuotaProfiles,
+    /// Live quota command needs explicit approval before network/account use.
+    #[error("live quota requires --approve-network-account-use or --dry-run")]
+    LiveQuotaApprovalRequired,
     /// Live quota request failed.
     #[error(transparent)]
     LiveQuota(#[from] codex_router_auth::live_quota::LiveQuotaError),
@@ -1139,8 +1142,8 @@ commands:
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
   profile write --codex-home <path> --approve-codex-home-write --preview-token <token>
-  live quota --auth-json <path> [--profile-label <label>] [--base-url <url>]
-  live quota --profiles-root <path> [--base-url <url>]
+  live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]
+  live quota --profiles-root <path> [--base-url <url>] [--dry-run|--approve-network-account-use]
 ";
 
 #[cfg(test)]
@@ -1346,7 +1349,7 @@ mod tests {
             "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
             "quota refresh [--router-root <path>] [--base-url <url>]",
             "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]",
-            "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>]",
+            "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]",
         ] {
             assert!(
                 output.stdout.contains(expected_line),
@@ -3794,6 +3797,7 @@ exit 42
                 path_to_str(&auth_json),
                 "--profile-label",
                 "api-key-profile",
+                "--approve-network-account-use",
             ],
             CliContext::new(Vec::new()),
         );
@@ -3806,6 +3810,76 @@ exit 42
                 .contains("error: api_key_auth_not_quota_compatible\n")
         );
         assert!(!output.stdout.contains("sk-local-secret-canary"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn live_quota_refuses_network_account_use_without_explicit_approval() {
+        let test_root = TestRoot::new("live-quota-approval-required");
+        must_ok(fs::create_dir(test_root.path()));
+        let auth_json = test_root.path().join("auth.json");
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"oauth-secret-canary"}}"#,
+        ));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = match run_with_io(
+            vec![
+                "codex-router".into(),
+                "live".into(),
+                "quota".into(),
+                "--auth-json".into(),
+                auth_json.as_os_str().to_owned(),
+                "--profile-label".into(),
+                "main".into(),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("live quota without approval must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "live quota requires --approve-network-account-use or --dry-run"
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn live_quota_dry_run_discovers_profiles_without_provider_io_or_token_output() {
+        let test_root = TestRoot::new("live-quota-dry-run");
+        must_ok(fs::create_dir(test_root.path()));
+        let profiles_root = test_root.path().join("profiles");
+        let profile_root = profiles_root.join("main");
+        must_ok(fs::create_dir_all(&profile_root));
+        must_ok(fs::write(
+            profile_root.join("auth.json"),
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"dry-run-secret-canary"}}"#,
+        ));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "live",
+                "quota",
+                "--profiles-root",
+                path_to_str(&profiles_root),
+                "--dry-run",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("profile: main\n"));
+        assert!(output.stdout.contains("status: dry-run\n"));
+        assert!(output.stdout.contains("network: not-run\n"));
+        assert!(output.stdout.contains("generation: not-run\n"));
+        assert!(!output.stdout.contains("dry-run-secret-canary"));
         assert!(output.stderr.is_empty());
     }
 
@@ -3866,6 +3940,7 @@ exit 42
                 path_to_str(&profiles_root),
                 "--base-url",
                 base_url.as_str(),
+                "--approve-network-account-use",
             ],
             CliContext::new(Vec::new()),
         );
@@ -6134,21 +6209,28 @@ exit 42
     }
 
     fn connect_with_retry(port: u16) -> TcpStream {
-        for _attempt in 0..1_000 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut last_error = None;
+        while std::time::Instant::now() < deadline {
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => return stream,
-                Err(_error) => thread::yield_now(),
+                Err(error) => {
+                    last_error = Some(error);
+                    thread::sleep(Duration::from_millis(5));
+                }
             }
         }
 
-        panic!("client should connect to CLI serve listener");
+        panic!("client should connect to CLI serve listener: {last_error:?}");
     }
 
     fn connect_websocket_with_retry(
         port: u16,
         local_token: &str,
     ) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
-        for _attempt in 0..1_000 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut last_error = None;
+        while std::time::Instant::now() < deadline {
             let mut request =
                 match format!("ws://127.0.0.1:{port}/v1/responses").into_client_request() {
                     Ok(request) => request,
@@ -6163,17 +6245,22 @@ exit 42
                 .insert("X-Codex-Router-Token", header_value);
             match connect(request) {
                 Ok((client, _response)) => return client,
-                Err(_error) => thread::yield_now(),
+                Err(error) => {
+                    last_error = Some(error);
+                    thread::sleep(Duration::from_millis(5));
+                }
             }
         }
 
-        panic!("local websocket client should connect to CLI serve listener");
+        panic!("local websocket client should connect to CLI serve listener: {last_error:?}");
     }
 
     fn connect_tokenless_websocket_with_retry(
         port: u16,
     ) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
-        for _attempt in 0..1_000 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut last_error = None;
+        while std::time::Instant::now() < deadline {
             let request = match format!("ws://127.0.0.1:{port}/v1/responses").into_client_request()
             {
                 Ok(request) => request,
@@ -6181,10 +6268,13 @@ exit 42
             };
             match connect(request) {
                 Ok((client, _response)) => return client,
-                Err(_error) => thread::yield_now(),
+                Err(error) => {
+                    last_error = Some(error);
+                    thread::sleep(Duration::from_millis(5));
+                }
             }
         }
 
-        panic!("local websocket client should connect to CLI serve listener");
+        panic!("local websocket client should connect to CLI serve listener: {last_error:?}");
     }
 }

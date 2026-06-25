@@ -75,6 +75,7 @@ const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(300);
 const SOAK_COMMAND_TIMEOUT_SLACK: Duration = Duration::from_secs(90);
 const SOAK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SOAK_PROOF_MARGIN: Duration = Duration::from_secs(1);
+const QUICK_CONCURRENT_HOLD_DURATION: Duration = Duration::from_secs(2);
 const ROUTER_REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,8 +128,8 @@ impl ConcurrentUpstreamConfig {
     const fn quick(expected_sessions: usize) -> Self {
         Self {
             expected_sessions,
-            hold_duration: Duration::ZERO,
-            heartbeat_interval: SOAK_HEARTBEAT_INTERVAL,
+            hold_duration: QUICK_CONCURRENT_HOLD_DURATION,
+            heartbeat_interval: Duration::from_millis(250),
         }
     }
 
@@ -337,7 +338,23 @@ fn run_installed_codex_mock_smoke_with_mode(
                 &xdg_cache_home,
             ),
         )?;
-        assert_codex_visible_output("HTTP/SSE", &output, &http_sse_last_message_path)?;
+        if let Err(error) =
+            assert_codex_visible_output("HTTP/SSE", &output, &http_sse_last_message_path)
+        {
+            let router_stop = router_process
+                .wait("router process after HTTP/SSE failure", Duration::ZERO)
+                .map(|observation| observation.cleanup_result)
+                .unwrap_or_else(|stop_error| {
+                    stop_error.lines().take(12).collect::<Vec<_>>().join(" | ")
+                });
+            let upstream_summary = upstream
+                .join()
+                .map(|transcript| http_sse_transcript_summary(&transcript))
+                .unwrap_or_else(|join_error| format!("upstream-join-error:{join_error}"));
+            return Err(format!(
+                "{error}; router_stop={router_stop}; upstream_summary={upstream_summary}"
+            ));
+        }
         Some(output)
     } else {
         None
@@ -1701,8 +1718,19 @@ fn assert_http_sse_contract(assertion: &SmokeContractAssertion<'_>) -> Result<St
     if http_sse.body.contains(assertion.local_token) {
         return Err("HTTP/SSE request body leaked local router token upstream".to_owned());
     }
-    if !http_sse.body.contains("\"stream\":true") {
-        return Err("HTTP/SSE request did not ask for a streaming response".to_owned());
+    if !http_sse_request_asks_streaming(http_sse) {
+        return Err(format!(
+            "HTTP/SSE request did not ask for a streaming response; body_shape={}; transfer_encoding={}; content_length={}",
+            http_sse_body_shape_summary(&http_sse.body),
+            http_sse
+                .header("transfer-encoding")
+                .as_deref()
+                .unwrap_or("<none>"),
+            http_sse
+                .header("content-length")
+                .as_deref()
+                .unwrap_or("<none>")
+        ));
     }
     let authorization = http_sse
         .header("authorization")
@@ -1726,6 +1754,50 @@ fn assert_http_sse_contract(assertion: &SmokeContractAssertion<'_>) -> Result<St
     }
 
     Ok(authorization)
+}
+
+fn http_sse_request_asks_streaming(request: &MockHttpSseTranscript) -> bool {
+    request.request_line.contains("stream=true")
+        || request
+            .header("accept")
+            .as_deref()
+            .is_some_and(|accept| accept.contains("text/event-stream"))
+        || http_sse_body_requests_streaming(&request.body)
+}
+
+fn http_sse_body_requests_streaming(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("stream").and_then(Value::as_bool))
+        == Some(true)
+}
+
+fn http_sse_body_shape_summary(body: &str) -> String {
+    let value = match serde_json::from_str::<Value>(body) {
+        Ok(value) => value,
+        Err(error) => {
+            let hex_prefix = body
+                .as_bytes()
+                .iter()
+                .take(16)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("");
+            return format!(
+                "invalid-json-len-{}-hex-{hex_prefix}-error-{:?}",
+                body.len(),
+                error.classify()
+            );
+        }
+    };
+    let Some(object) = value.as_object() else {
+        return value.as_array().map_or("non-object".to_owned(), |array| {
+            format!("array-len-{}", array.len())
+        });
+    };
+    let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    format!("keys={}", keys.join(","))
 }
 
 fn assert_websocket_contract(assertion: &SmokeContractAssertion<'_>) -> Result<String, String> {
@@ -2118,7 +2190,7 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
             "selected_expected_account": input.upstream.http_sse.as_ref().and_then(|request| authorization_header_matches_expected(request.header("authorization"), input.expected_upstream_token)),
             "actual_safe_label": input.upstream.http_sse.as_ref().and_then(|request| upstream_label_from_authorization_header(request.header("authorization"))),
             "request_line": input.upstream.http_sse.as_ref().map(|request| request.request_line.as_str()),
-            "stream_requested": input.upstream.http_sse.as_ref().map(|request| request.body.contains("\"stream\":true")),
+            "stream_requested": input.upstream.http_sse.as_ref().map(http_sse_request_asks_streaming),
             "local_router_token_in_body": false,
         },
         "websocket": {
@@ -3866,6 +3938,19 @@ fn output_status_text(output: Option<&Output>) -> String {
         .unwrap_or_else(|| "not-run".to_owned())
 }
 
+fn http_sse_transcript_summary(transcript: &MockWebSocketTranscript) -> String {
+    let http_sse = transcript.http_sse.as_ref();
+    let request_line = http_sse
+        .map(|request| request.request_line.as_str())
+        .unwrap_or("<none>");
+    let body_len = http_sse.map_or(0, |request| request.body.len());
+    let stream_flag = http_sse.is_some_and(|request| request.body.contains("\"stream\":true"));
+    format!(
+        "http_request_line={request_line}; http_body_len={body_len}; stream_flag={stream_flag}; http_probe_count={}; websocket_frame_count={}",
+        transcript.http_probe_count, transcript.websocket_request_frame_count
+    )
+}
+
 fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, String> {
     let mut buffer = [0_u8; 1024];
     let byte_count = stream
@@ -3922,21 +4007,90 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Result<MockHttpSseTran
         bytes.extend_from_slice(&buffer[..byte_count]);
         if let Some(header_end) = find_header_end(&bytes) {
             let header_text = String::from_utf8_lossy(&bytes[..header_end]).to_string();
-            let content_length = parse_content_length(&header_text);
             let body_start = header_end + 4;
-            if bytes.len() >= body_start + content_length {
-                let body = String::from_utf8_lossy(&bytes[body_start..body_start + content_length])
-                    .to_string();
-                let (request_line, headers) = parse_http_head(&header_text)?;
-                return Ok(MockHttpSseTranscript {
-                    request_line,
-                    headers,
-                    body,
-                });
+            if header_uses_chunked_transfer(&header_text) {
+                if let Some(body) = decode_complete_chunked_body(&bytes[body_start..])? {
+                    let (request_line, headers) = parse_http_head(&header_text)?;
+                    return Ok(MockHttpSseTranscript {
+                        request_line,
+                        headers,
+                        body,
+                    });
+                }
+            } else {
+                let content_length = parse_content_length(&header_text);
+                if bytes.len() >= body_start + content_length {
+                    let body =
+                        String::from_utf8_lossy(&bytes[body_start..body_start + content_length])
+                            .to_string();
+                    let (request_line, headers) = parse_http_head(&header_text)?;
+                    return Ok(MockHttpSseTranscript {
+                        request_line,
+                        headers,
+                        body,
+                    });
+                }
             }
         }
     }
     Err("mock upstream received incomplete HTTP request".to_owned())
+}
+
+fn header_uses_chunked_transfer(header_text: &str) -> bool {
+    header_text.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    })
+}
+
+fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> {
+    let mut position = 0_usize;
+    let mut body = Vec::new();
+    loop {
+        let Some(size_line_end) = find_crlf(&bytes[position..]) else {
+            return Ok(None);
+        };
+        let size_line = std::str::from_utf8(&bytes[position..position + size_line_end])
+            .map_err(|error| format!("chunk size line was not UTF-8: {error}"))?;
+        let size_text = size_line
+            .split_once(';')
+            .map_or(size_line, |(size, _)| size);
+        let chunk_size = usize::from_str_radix(size_text.trim(), 16)
+            .map_err(|error| format!("chunk size was invalid: {error}"))?;
+        position = position.saturating_add(size_line_end + 2);
+        if chunk_size == 0 {
+            if bytes.get(position..position + 2) == Some(b"\r\n") {
+                return String::from_utf8(body)
+                    .map(Some)
+                    .map_err(|error| format!("chunked body was not UTF-8: {error}"));
+            }
+            let Some(trailer_end) = find_header_end(&bytes[position..]) else {
+                return Ok(None);
+            };
+            let _consumed = position.saturating_add(trailer_end + 4);
+            return String::from_utf8(body)
+                .map(Some)
+                .map_err(|error| format!("chunked body was not UTF-8: {error}"));
+        }
+        if bytes.len() < position.saturating_add(chunk_size).saturating_add(2) {
+            return Ok(None);
+        }
+        body.extend_from_slice(&bytes[position..position + chunk_size]);
+        position = position.saturating_add(chunk_size);
+        if bytes.get(position..position + 2) != Some(b"\r\n") {
+            return Err("chunk data was not followed by CRLF".to_owned());
+        }
+        position = position.saturating_add(2);
+    }
+}
+
+fn find_crlf(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(2).position(|window| window == b"\r\n")
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
@@ -4561,6 +4715,36 @@ mod tests {
         };
 
         assert!(error.contains("last-message file did not contain expected response text"));
+    }
+
+    #[test]
+    fn mock_http_reader_consumes_chunked_request_body_before_responding() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("failed to bind chunked request fixture: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("failed to read chunked fixture address: {error}"));
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(address)
+                .unwrap_or_else(|error| panic!("failed to connect chunked fixture: {error}"));
+            std::io::Write::write_all(
+                &mut stream,
+                b"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+            )
+            .unwrap_or_else(|error| panic!("failed to write chunked fixture: {error}"));
+        });
+        let (mut stream, _peer) = listener
+            .accept()
+            .unwrap_or_else(|error| panic!("failed to accept chunked fixture: {error}"));
+
+        let request = super::read_http_request(&mut stream)
+            .unwrap_or_else(|error| panic!("failed to read chunked request: {error}"));
+
+        assert_eq!(request.request_line, "POST /v1/responses HTTP/1.1");
+        assert_eq!(request.body, "hello world");
+        client
+            .join()
+            .unwrap_or_else(|error| panic!("chunked request client panicked: {error:?}"));
     }
 
     #[test]
