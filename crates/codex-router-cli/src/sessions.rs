@@ -159,8 +159,19 @@ pub fn run_sessions_command<W: Write>(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
+    let mut runner = ProcessSessionsCommandRunner;
+    run_sessions_command_with_runner(stdout, command, context, &mut runner)
+}
+
+/// Runs the sessions command with an injectable Codex runner.
+pub(crate) fn run_sessions_command_with_runner<W: Write>(
+    stdout: &mut W,
+    command: SessionsCommand,
+    context: &CliContext,
+    runner: &mut impl SessionsCommandRunner,
+) -> Result<(), SessionsCommandError> {
     if command.last {
-        return run_last_session(stdout, command, context);
+        return run_last_session(stdout, command, context, runner);
     }
     if !command.list {
         return Err(SessionsCommandError::InteractivePickerNotImplemented);
@@ -288,6 +299,7 @@ fn run_last_session<W: Write>(
     stdout: &mut W,
     command: SessionsCommand,
     context: &CliContext,
+    runner: &mut impl SessionsCommandRunner,
 ) -> Result<(), SessionsCommandError> {
     let dry_run = command.dry_run;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -309,20 +321,34 @@ fn run_last_session<W: Write>(
         return Ok(());
     }
 
-    let status = Command::new("codex")
-        .arg("--profile")
-        .arg("codex-router")
-        .arg("resume")
-        .arg(&record.session_id)
-        .status()
-        .map_err(SessionsCommandError::CodexLaunch)?;
-    if !status.success() {
-        return Err(SessionsCommandError::CodexExit {
-            status: status.to_string(),
-        });
-    }
+    runner.run_codex_resume(&record.session_id)
+}
 
-    Ok(())
+/// Runs a selected Codex session.
+pub(crate) trait SessionsCommandRunner {
+    /// Launches `codex --profile codex-router resume <session_id>`.
+    fn run_codex_resume(&mut self, session_id: &str) -> Result<(), SessionsCommandError>;
+}
+
+struct ProcessSessionsCommandRunner;
+
+impl SessionsCommandRunner for ProcessSessionsCommandRunner {
+    fn run_codex_resume(&mut self, session_id: &str) -> Result<(), SessionsCommandError> {
+        let status = Command::new("codex")
+            .arg("--profile")
+            .arg("codex-router")
+            .arg("resume")
+            .arg(session_id)
+            .status()
+            .map_err(SessionsCommandError::CodexLaunch)?;
+        if !status.success() {
+            return Err(SessionsCommandError::CodexExit {
+                status: status.to_string(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

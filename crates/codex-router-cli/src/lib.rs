@@ -4481,6 +4481,69 @@ exit 42
     }
 
     #[test]
+    fn sessions_last_launch_uses_injected_runner_for_latest_match() {
+        let test_root = TestRoot::new("sessions-last-runner");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "RUNNER_CANARY_SHOULD_NOT_LEAK",
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-old",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    1000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-new",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2000,
+                ),
+            ],
+        );
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--scope"),
+            OsString::from("any"),
+            OsString::from("--provider"),
+            OsString::from("codex-router"),
+            OsString::from("--last"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_runner(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(runner.resumed_session_ids, ["thread-new"]);
+    }
+
+    #[test]
     fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
         let test_root = TestRoot::new("serve-command");
         must_ok(fs::create_dir(test_root.path()));
@@ -5643,6 +5706,21 @@ exit 42
                 git_branch: git_branch.to_owned(),
                 recency_at_ms,
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSessionsCommandRunner {
+        resumed_session_ids: Vec<String>,
+    }
+
+    impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
+        fn run_codex_resume(
+            &mut self,
+            session_id: &str,
+        ) -> Result<(), crate::sessions::SessionsCommandError> {
+            self.resumed_session_ids.push(session_id.to_owned());
+            Ok(())
         }
     }
 
