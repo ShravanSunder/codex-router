@@ -1,0 +1,21 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh G-27",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "WebSocket pre-upstream parsing is metadata-only and does not require prompt-bearing payload shape",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
+  "git_head": "48b0cc8597e5a8cc215eb87dd185214be240452e",
+  "layer": "structural",
+  "notes": "Structural guard and first-frame regression passed: WebSocket pre-upstream parsing does not require prompt-bearing input/stream payload shape.",
+  "owner": "T6",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "G-27",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-25T00:53:37Z",
+  "touched_targets": []
+}
