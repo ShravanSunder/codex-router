@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 #[cfg(test)]
 use std::net::Shutdown;
+use std::net::SocketAddr;
 #[cfg(test)]
 use std::net::TcpStream;
 use std::str::FromStr;
@@ -670,6 +671,7 @@ pub struct WebSocketRevocationRegistry {
     registered_session_ids: Arc<Mutex<Vec<u64>>>,
     completed_session_ids: Arc<Mutex<Vec<u64>>>,
     closed_session_ids: Arc<Mutex<Vec<u64>>>,
+    session_peer_addrs: Arc<Mutex<Vec<WebSocketSessionPeerAddr>>>,
     forwarded_upstream_messages_by_session: Arc<Mutex<HashMap<u64, usize>>>,
     completed_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
     final_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
@@ -690,6 +692,15 @@ struct WebSocketRegistryStats {
     closed_sessions: usize,
     completed_response_sessions: usize,
     forwarded_upstream_messages: usize,
+}
+
+/// Redacted local peer socket observed for a WebSocket session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebSocketSessionPeerAddr {
+    /// Redacted numeric router-local session id.
+    pub session_id: u64,
+    /// Loopback client socket address as observed by the router.
+    pub peer_addr: String,
 }
 
 /// Redacted snapshot of WebSocket session registry counters.
@@ -713,6 +724,8 @@ pub struct WebSocketRegistrySnapshot {
     pub completed_session_ids: Vec<u64>,
     /// Redacted numeric session ids closed by the router registry.
     pub closed_session_ids: Vec<u64>,
+    /// Redacted local peer socket addresses associated with opened sessions.
+    pub session_peer_addrs: Vec<WebSocketSessionPeerAddr>,
     /// Upstream-to-local write counts captured when each response.completed event is observed.
     pub completed_session_forwarded_upstream_message_counts: Vec<usize>,
     /// Final upstream-to-local write counts captured once per closed async WebSocket session.
@@ -750,9 +763,29 @@ impl WebSocketRevocationRegistry {
         Ok(())
     }
 
+    #[cfg(test)]
     fn register_cancellation(&self, generation: TokenGeneration) -> WebSocketSessionRegistration {
+        self.register_cancellation_with_peer_addr(generation, None)
+    }
+
+    fn register_cancellation_with_peer_addr(
+        &self,
+        generation: TokenGeneration,
+        peer_addr: Option<SocketAddr>,
+    ) -> WebSocketSessionRegistration {
         let cancellation = CancellationToken::new();
         let session_id = self.note_session_opened();
+        if let Some(peer_addr) = peer_addr
+            && let Ok(mut session_peer_addrs) = self.session_peer_addrs.lock()
+        {
+            push_bounded_peer_addr(
+                &mut session_peer_addrs,
+                WebSocketSessionPeerAddr {
+                    session_id,
+                    peer_addr: peer_addr.to_string(),
+                },
+            );
+        }
         if let Ok(mut cancellations) = self.cancellations.lock() {
             cancellations
                 .entry(generation)
@@ -795,6 +828,10 @@ impl WebSocketRevocationRegistry {
                     .closed_session_ids
                     .lock()
                     .map_or_else(|_| Vec::new(), |ids| ids.clone()),
+                session_peer_addrs: self
+                    .session_peer_addrs
+                    .lock()
+                    .map_or_else(|_| Vec::new(), |peers| peers.clone()),
                 completed_session_forwarded_upstream_message_counts: self
                     .completed_session_forwarded_upstream_message_counts
                     .lock()
@@ -929,6 +966,17 @@ fn push_bounded_count(counts: &mut Vec<usize>, count: usize) {
 }
 
 fn push_bounded_u64(values: &mut Vec<u64>, value: u64) {
+    values.push(value);
+    if values.len() > MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS {
+        let excess = values.len() - MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS;
+        values.drain(0..excess);
+    }
+}
+
+fn push_bounded_peer_addr(
+    values: &mut Vec<WebSocketSessionPeerAddr>,
+    value: WebSocketSessionPeerAddr,
+) {
     values.push(value);
     if values.len() > MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS {
         let excess = values.len() - MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS;
@@ -1532,6 +1580,7 @@ where
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
     session_shutdown: CancellationToken,
+    local_peer_addr: Option<SocketAddr>,
 }
 
 #[cfg(test)]
@@ -1734,6 +1783,7 @@ where
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
             session_shutdown: CancellationToken::new(),
+            local_peer_addr: None,
         }
     }
 
@@ -1759,6 +1809,7 @@ where
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
             session_shutdown: CancellationToken::new(),
+            local_peer_addr: None,
         }
     }
 
@@ -1815,6 +1866,13 @@ where
         self
     }
 
+    /// Adds the local peer socket address observed by the Hyper accept path.
+    #[must_use]
+    pub fn with_local_peer_addr(mut self, local_peer_addr: Option<SocketAddr>) -> Self {
+        self.local_peer_addr = local_peer_addr;
+        self
+    }
+
     /// Handles one already-upgraded local WebSocket stream.
     pub async fn handle_upgraded_connection<LocalStream>(
         &self,
@@ -1846,7 +1904,9 @@ where
             first_frame,
             affinity_owner_context,
         } = decision;
-        let session_registration = self.revocations.register_cancellation(token_generation);
+        let session_registration = self
+            .revocations
+            .register_cancellation_with_peer_addr(token_generation, self.local_peer_addr);
         let revocation = session_registration.cancellation().clone();
 
         let mut upstream_request = upstream_url.into_client_request()?;
@@ -2189,6 +2249,7 @@ fn record_websocket_affinity_owner(
     let _result = recorder.record_affinity_owner(&owner);
 }
 
+#[cfg(test)]
 fn websocket_affinity_owner_record(
     upstream_message: &Message,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
@@ -2231,6 +2292,7 @@ fn extract_websocket_response_id_from_text(text: &str) -> Option<PreviousRespons
     PreviousResponseId::new(response_id.to_owned()).ok()
 }
 
+#[cfg(test)]
 fn is_response_completed(message: &Message) -> bool {
     let Some(text) = bounded_websocket_metadata_text(message) else {
         return false;

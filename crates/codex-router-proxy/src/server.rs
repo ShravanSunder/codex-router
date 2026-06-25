@@ -750,6 +750,7 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         stream: tokio::net::TcpStream,
     ) -> Result<(), LoopbackRouterRuntimeError> {
+        let local_peer_addr = stream.peer_addr().ok();
         let io = TokioIo::new(stream);
         let service_context = Arc::clone(&self);
         let upgrade_tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -760,7 +761,7 @@ impl LoopbackProtocolConnectionHandler {
             async move {
                 Ok::<_, Infallible>(
                     request_context
-                        .handle_hyper_request(request, request_upgrade_tasks)
+                        .handle_hyper_request(request, request_upgrade_tasks, local_peer_addr)
                         .await,
                 )
             }
@@ -791,11 +792,12 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
         upgrade_tasks: SharedUpgradeTasks,
+        local_peer_addr: Option<SocketAddr>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         match HyperProtocolSwitchpoint::classify(request.method(), request.uri(), request.headers())
         {
             HyperProtocolDispatch::WebSocketUpgrade => {
-                self.handle_hyper_websocket_request(request, upgrade_tasks)
+                self.handle_hyper_websocket_request(request, upgrade_tasks, local_peer_addr)
                     .await
             }
             HyperProtocolDispatch::Http => self.handle_hyper_http_request(request).await,
@@ -806,6 +808,7 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         mut request: HttpRequest<Incoming>,
         upgrade_tasks: SharedUpgradeTasks,
+        local_peer_addr: Option<SocketAddr>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         let path = request
             .uri()
@@ -825,7 +828,12 @@ impl LoopbackProtocolConnectionHandler {
             match websocket.await {
                 Ok(local_websocket) => {
                     task_context
-                        .handle_hyper_websocket_upgraded(local_websocket, handshake, path)
+                        .handle_hyper_websocket_upgraded(
+                            local_websocket,
+                            handshake,
+                            path,
+                            local_peer_addr,
+                        )
                         .await
                 }
                 Err(error) => Err(LoopbackRouterRuntimeError::WebSocket(
@@ -846,6 +854,7 @@ impl LoopbackProtocolConnectionHandler {
         local_websocket: hyper_tungstenite::HyperWebsocketStream,
         handshake: WebSocketHandshakeRequest,
         path: String,
+        local_peer_addr: Option<SocketAddr>,
     ) -> Result<(), LoopbackRouterRuntimeError> {
         let state_store = AsyncSqliteStateStore::open(&self.state_database_path).await?;
         let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
@@ -879,7 +888,8 @@ impl LoopbackProtocolConnectionHandler {
         .with_session_shutdown(self.session_shutdown.clone())
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))
-        .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone());
+        .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone())
+        .with_local_peer_addr(local_peer_addr);
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
         tunnel
             .handle_upgraded_connection(local_websocket, handshake, upstream_url.as_str())

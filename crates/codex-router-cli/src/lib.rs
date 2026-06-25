@@ -259,6 +259,10 @@ fn write_websocket_registry_report_file(
             "registered_session_ids": snapshot.registered_session_ids,
             "completed_session_ids": snapshot.completed_session_ids,
             "closed_session_ids": snapshot.closed_session_ids,
+            "session_peer_addrs": snapshot.session_peer_addrs.iter().map(|peer| serde_json::json!({
+                "session_id": peer.session_id,
+                "peer_addr": peer.peer_addr,
+            })).collect::<Vec<_>>(),
             "completed_session_forwarded_upstream_message_counts": snapshot.completed_session_forwarded_upstream_message_counts,
             "final_session_forwarded_upstream_message_counts": snapshot.final_session_forwarded_upstream_message_counts,
         },

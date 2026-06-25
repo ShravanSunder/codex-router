@@ -719,10 +719,27 @@ elif row_id == "E-07":
     if not isinstance(continuity, dict):
         errors.append("session_continuity object is missing")
         continuity = {}
-    if continuity.get("per_client_session_join_key_observed") is not False:
-        errors.append("session_continuity must not claim a per-client session join key")
-    if continuity.get("correlation_level") != "aggregate_unique_sessions":
-        errors.append("session_continuity correlation_level is not aggregate_unique_sessions")
+    if continuity.get("per_client_session_join_key_observed") is not True:
+        errors.append("session_continuity did not prove per-client session join keys")
+    if continuity.get("correlation_level") != "per_client_socket_and_marker_join":
+        errors.append("session_continuity correlation_level is not per_client_socket_and_marker_join")
+    per_client_join_keys = continuity.get("per_client_join_keys")
+    if not isinstance(per_client_join_keys, list) or len(per_client_join_keys) != 3:
+        errors.append("session_continuity per_client_join_keys must contain exactly three entries")
+        per_client_join_keys = []
+    observed_client_indexes = set()
+    for index, join_key in enumerate(per_client_join_keys):
+        if not isinstance(join_key, dict):
+            errors.append(f"per_client_join_keys[{index}] is not an object")
+            continue
+        observed_client_indexes.add(join_key.get("client_index"))
+        for field in ["client_pid", "router_session_id", "upstream_session_id", "handshake_count"]:
+            if join_key.get(field) in (None, ""):
+                errors.append(f"per_client_join_keys[{index}] missing {field}")
+        if join_key.get("handshake_count") != 1:
+            errors.append(f"per_client_join_keys[{index}] handshake_count is not 1")
+    if observed_client_indexes != {0, 1, 2}:
+        errors.append(f"per_client_join_keys client indexes are wrong: {sorted(observed_client_indexes)}")
     registered_ids = registry.get("registered_session_ids") if isinstance(registry.get("registered_session_ids"), list) else []
     closed_ids = registry.get("closed_session_ids") if isinstance(registry.get("closed_session_ids"), list) else []
     if len(set(registered_ids)) < 3:
@@ -748,6 +765,9 @@ elif row_id == "E-07":
         required_fields = [
             "client_pid",
             "router_pid",
+            "router_session_id",
+            "upstream_session_id",
+            "websocket_handshake_count",
             "transport",
             "transport_observed_from_client_stderr",
             "stderr_transport_error_markers",
@@ -766,6 +786,8 @@ elif row_id == "E-07":
             errors.append(f"runtime correlation {index} stdout did not contain smoke text")
         if correlation.get("router_pid") != router_process.get("pid"):
             errors.append(f"runtime correlation {index} router_pid does not match router process")
+        if correlation.get("websocket_handshake_count") != 1:
+            errors.append(f"runtime correlation {index} websocket_handshake_count is not 1")
 elif row_id == "E-08":
     if upstream.get("normal_close_sessions", 0) < 3:
         errors.append("upstream normal_close_sessions is below 3")

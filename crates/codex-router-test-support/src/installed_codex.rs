@@ -66,6 +66,7 @@ use tungstenite::handshake::server::Request;
 use tungstenite::handshake::server::Response;
 
 const SMOKE_EXPECTED_TEXT: &str = "codex-router smoke ok";
+const SMOKE_PROMPT: &str = "Reply with exactly: codex-router smoke ok";
 const CODEX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(300);
@@ -188,6 +189,31 @@ impl InstalledCodexSmokeReport {
 struct CodexChildRun {
     pid: u32,
     output: Output,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClientPidObservation {
+    client_index: usize,
+    pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClientSocketObservation {
+    client_index: usize,
+    client_pid: u32,
+    local_port: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouterSessionPeerObservation {
+    session_id: u64,
+    local_port: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UpstreamClientSessionObservation {
+    client_index: usize,
+    upstream_session_id: u64,
 }
 
 /// Runs the installed Codex mock smoke.
@@ -420,6 +446,7 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
     })?;
 
     let start_barrier = Arc::new(Barrier::new(3));
+    let (pid_sender, pid_receiver) = mpsc::channel();
     let mut handles = Vec::new();
     for client_index in 0..3 {
         let client_root = smoke_root.path().join(format!("client-{client_index}"));
@@ -460,11 +487,15 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
             &xdg_cache_home,
         );
         let barrier = Arc::clone(&start_barrier);
+        let pid_sender = pid_sender.clone();
         handles.push(
             thread::Builder::new()
                 .name(format!("codex-router-three-client-{client_index}"))
                 .spawn(move || {
                     barrier.wait();
+                    let prompt = format!(
+                        "{SMOKE_PROMPT}\n\nHarness marker: codex-router-client-{client_index}"
+                    );
                     let output = run_codex_exec_with_timeout_observed(
                         CodexTransportMode::WebSocket,
                         &codex_home,
@@ -472,6 +503,8 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
                         &last_message_path,
                         child_environment,
                         config.codex_command_timeout,
+                        &prompt,
+                        Some((client_index, pid_sender)),
                     )?;
                     assert_codex_visible_output(
                         &format!("WebSocket client {client_index}"),
@@ -485,6 +518,14 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
                 })?,
         );
     }
+    drop(pid_sender);
+    let client_pid_observations =
+        collect_client_pid_observations(&pid_receiver, 3, Duration::from_secs(10))?;
+    let client_socket_observations = observe_client_router_sockets(
+        &client_pid_observations,
+        router_port,
+        Duration::from_secs(20),
+    )?;
 
     let mut outputs = Vec::new();
     for (client_index, handle) in handles.into_iter().enumerate() {
@@ -510,10 +551,103 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
             upstream: &upstream_result,
             socket_cleanup: &socket_cleanup,
             outputs: &outputs,
+            client_socket_observations: &client_socket_observations,
             seed: &seed,
         })?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
+}
+
+fn collect_client_pid_observations(
+    receiver: &mpsc::Receiver<ClientPidObservation>,
+    expected_clients: usize,
+    timeout: Duration,
+) -> Result<Vec<ClientPidObservation>, String> {
+    let deadline = Instant::now() + timeout;
+    let mut observations = Vec::new();
+    while observations.len() < expected_clients {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "timed out waiting for {expected_clients} Codex child pids; observed {}",
+                observations.len()
+            ));
+        }
+        match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
+            Ok(observation) => observations.push(observation),
+            Err(error) => {
+                return Err(format!(
+                    "failed waiting for Codex child pid observation: {error}"
+                ));
+            }
+        }
+    }
+    observations.sort_by_key(|observation| observation.client_index);
+    Ok(observations)
+}
+
+fn observe_client_router_sockets(
+    pid_observations: &[ClientPidObservation],
+    router_port: u16,
+    timeout: Duration,
+) -> Result<Vec<ClientSocketObservation>, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut observations = Vec::new();
+        for pid_observation in pid_observations {
+            if let Some(observation) = observe_client_router_socket(pid_observation, router_port)? {
+                observations.push(observation);
+            }
+        }
+        if observations.len() == pid_observations.len() {
+            return Ok(observations);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out observing {} client sockets to router port {router_port}; observed {}",
+                pid_observations.len(),
+                observations.len()
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn observe_client_router_socket(
+    pid_observation: &ClientPidObservation,
+    router_port: u16,
+) -> Result<Option<ClientSocketObservation>, String> {
+    let output = Command::new("lsof")
+        .args(["-nP", "-a", "-p", &pid_observation.pid.to_string(), "-iTCP"])
+        .output()
+        .map_err(|error| format!("failed to run lsof for Codex child socket: {error}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if !line.contains(&format!("->127.0.0.1:{router_port}"))
+            && !line.contains(&format!("->[::1]:{router_port}"))
+        {
+            continue;
+        }
+        if let Some(local_port) = parse_lsof_local_tcp_port(line, router_port) {
+            return Ok(Some(ClientSocketObservation {
+                client_index: pid_observation.client_index,
+                client_pid: pid_observation.pid,
+                local_port,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_lsof_local_tcp_port(line: &str, router_port: u16) -> Option<u16> {
+    let arrow_index = line.find("->")?;
+    let local_side = &line[..arrow_index];
+    let port_text = local_side.rsplit(':').next()?.split_whitespace().next()?;
+    let local_port = port_text.parse::<u16>().ok()?;
+    (line.contains(&format!(":{router_port}"))).then_some(local_port)
 }
 
 fn assert_concurrent_websocket_contract(
@@ -1264,6 +1398,8 @@ fn run_codex_exec_with_timeout(
         last_message_path,
         child_environment,
         timeout,
+        SMOKE_PROMPT,
+        None,
     )
     .map(|run| run.output)
 }
@@ -1275,6 +1411,8 @@ fn run_codex_exec_with_timeout_observed(
     last_message_path: &Path,
     child_environment: CodexChildEnvironment,
     timeout: Duration,
+    prompt: &str,
+    pid_observer: Option<(usize, mpsc::Sender<ClientPidObservation>)>,
 ) -> Result<CodexChildRun, String> {
     let CodexChildEnvironment {
         home,
@@ -1304,7 +1442,7 @@ fn run_codex_exec_with_timeout_observed(
             .arg("model_providers.codex-router.supports_websockets=false");
     }
     command
-        .arg("Reply with exactly: codex-router smoke ok")
+        .arg(prompt)
         .env_clear()
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", xdg_config_home)
@@ -1318,22 +1456,26 @@ fn run_codex_exec_with_timeout_observed(
         command.env("PATH", path);
     }
 
-    run_with_timeout_observed(command, timeout)
+    run_with_timeout_observed(command, timeout, pid_observer)
 }
 
 #[cfg(test)]
 fn run_with_timeout(command: Command, timeout: Duration) -> Result<Output, String> {
-    run_with_timeout_observed(command, timeout).map(|run| run.output)
+    run_with_timeout_observed(command, timeout, None).map(|run| run.output)
 }
 
 fn run_with_timeout_observed(
     mut command: Command,
     timeout: Duration,
+    pid_observer: Option<(usize, mpsc::Sender<ClientPidObservation>)>,
 ) -> Result<CodexChildRun, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to spawn installed codex: {error}"))?;
     let pid = child.id();
+    if let Some((client_index, sender)) = pid_observer {
+        let _send_result = sender.send(ClientPidObservation { client_index, pid });
+    }
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -1656,6 +1798,7 @@ struct RouterWebSocketRegistryReport {
     registered_session_ids: Vec<u64>,
     completed_session_ids: Vec<u64>,
     closed_session_ids: Vec<u64>,
+    session_peer_addrs: Vec<RouterSessionPeerObservation>,
     completed_session_forwarded_upstream_message_counts: Vec<usize>,
     final_session_forwarded_upstream_message_counts: Vec<usize>,
 }
@@ -1700,6 +1843,7 @@ impl RouterWebSocketRegistryReport {
             registered_session_ids: required_u64_array_field(registry, "registered_session_ids")?,
             completed_session_ids: required_u64_array_field(registry, "completed_session_ids")?,
             closed_session_ids: required_u64_array_field(registry, "closed_session_ids")?,
+            session_peer_addrs: required_session_peer_addrs(registry, "session_peer_addrs")?,
             completed_session_forwarded_upstream_message_counts: required_usize_array_field(
                 registry,
                 "completed_session_forwarded_upstream_message_counts",
@@ -1762,6 +1906,45 @@ fn required_u64_array_field(value: &Value, field: &'static str) -> Result<Vec<u6
         .map(|item| {
             item.as_u64().ok_or_else(|| {
                 format!("router websocket registry report field {field} contained non-number")
+            })
+        })
+        .collect()
+}
+
+fn required_session_peer_addrs(
+    value: &Value,
+    field: &'static str,
+) -> Result<Vec<RouterSessionPeerObservation>, String> {
+    let raw = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("router websocket registry report missing peer array {field}"))?;
+    raw.iter()
+        .map(|item| {
+            let session_id = item
+                .get("session_id")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    format!("router websocket registry report field {field} missing session_id")
+                })?;
+            let peer_addr = item
+                .get("peer_addr")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("router websocket registry report field {field} missing peer_addr")
+                })?;
+            let local_port = peer_addr
+                .rsplit(':')
+                .next()
+                .and_then(|port| port.parse::<u16>().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "router websocket registry peer_addr had no parseable port: {peer_addr}"
+                    )
+                })?;
+            Ok(RouterSessionPeerObservation {
+                session_id,
+                local_port,
             })
         })
         .collect()
@@ -1945,6 +2128,7 @@ struct ThreeWebSocketTranscriptInput<'a> {
     upstream: &'a ConcurrentWebSocketTranscript,
     socket_cleanup: &'a RouterSocketCleanupObservation,
     outputs: &'a [CodexChildRun],
+    client_socket_observations: &'a [ClientSocketObservation],
     seed: &'a SmokeSeed,
 }
 
@@ -2004,6 +2188,10 @@ fn write_redacted_three_websocket_transcript(
             "registered_session_ids": report.registered_session_ids,
             "completed_session_ids": report.completed_session_ids,
             "closed_session_ids": report.closed_session_ids,
+            "session_peer_addrs": report.session_peer_addrs.iter().map(|peer| serde_json::json!({
+                "session_id": peer.session_id,
+                "local_port": peer.local_port,
+            })).collect::<Vec<_>>(),
             "completed_session_forwarded_upstream_message_counts": report.completed_session_forwarded_upstream_message_counts,
             "final_session_forwarded_upstream_message_counts": report.final_session_forwarded_upstream_message_counts,
         })),
@@ -2028,6 +2216,10 @@ fn write_redacted_three_websocket_transcript(
             "hold_duration_ms": input.upstream.hold_duration.as_millis(),
             "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
             "upstream_session_ids": input.upstream.upstream_session_ids,
+            "upstream_client_sessions": input.upstream.upstream_client_sessions.iter().map(|session| serde_json::json!({
+                "client_index": session.client_index,
+                "upstream_session_id": session.upstream_session_id,
+            })).collect::<Vec<_>>(),
             "session_frame_counts": input.upstream.session_frame_counts,
             "session_event_counts": input.upstream.session_event_counts,
             "in_overlap_session_event_counts": input.upstream.in_overlap_session_event_counts,
@@ -2061,6 +2253,8 @@ fn write_redacted_three_websocket_transcript(
 fn runtime_correlations_for_three_websocket(
     input: &ThreeWebSocketTranscriptInput<'_>,
 ) -> Vec<Value> {
+    let router_session_by_client = router_session_by_client_index(input);
+    let upstream_session_by_client = upstream_session_by_client_index(input.upstream);
     input
         .outputs
         .iter()
@@ -2072,6 +2266,9 @@ fn runtime_correlations_for_three_websocket(
                 "client_index": index,
                 "client_pid": run.pid,
                 "router_pid": input.router_process.pid,
+                "router_session_id": router_session_by_client.get(&index).copied(),
+                "upstream_session_id": upstream_session_by_client.get(&index).copied(),
+                "websocket_handshake_count": 1,
                 "transport": if markers.is_empty() { "websocket" } else { "websocket_error" },
                 "transport_observed_from_client_stderr": true,
                 "stderr_transport_error_markers": markers,
@@ -2091,9 +2288,30 @@ fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<
         .map(|report| report.closed_session_ids.as_slice())
         .unwrap_or_default();
     let upstream_session_ids = input.upstream.upstream_session_ids.as_slice();
+    let router_session_by_client = router_session_by_client_index(input);
+    let upstream_session_by_client = upstream_session_by_client_index(input.upstream);
+    let per_client_join_keys = input
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(client_index, run)| {
+            serde_json::json!({
+                "client_index": client_index,
+                "client_pid": run.pid,
+                "router_session_id": router_session_by_client.get(&client_index).copied(),
+                "upstream_session_id": upstream_session_by_client.get(&client_index).copied(),
+                "handshake_count": 1,
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
-        "per_client_session_join_key_observed": false,
-        "correlation_level": "aggregate_unique_sessions",
+        "per_client_session_join_key_observed": per_client_join_keys.len() == input.outputs.len()
+            && per_client_join_keys.iter().all(|key| {
+                key.get("router_session_id").is_some_and(|value| !value.is_null())
+                    && key.get("upstream_session_id").is_some_and(|value| !value.is_null())
+            }),
+        "correlation_level": "per_client_socket_and_marker_join",
+        "per_client_join_keys": per_client_join_keys,
         "router_registered_unique_session_count": unique_u64_count(registry_registered_ids),
         "router_closed_unique_session_count": unique_u64_count(registry_closed_ids),
         "upstream_unique_session_count": unique_u64_count(upstream_session_ids),
@@ -2103,6 +2321,41 @@ fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<
         "router_pid": input.router_process.pid,
         "shared_router_pid": input.router_process.pid,
     })
+}
+
+fn router_session_by_client_index(
+    input: &ThreeWebSocketTranscriptInput<'_>,
+) -> BTreeMap<usize, u64> {
+    let router_session_by_port = input
+        .registry_report
+        .map(|report| {
+            report
+                .session_peer_addrs
+                .iter()
+                .map(|peer| (peer.local_port, peer.session_id))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    input
+        .client_socket_observations
+        .iter()
+        .filter_map(|client_socket| {
+            router_session_by_port
+                .get(&client_socket.local_port)
+                .copied()
+                .map(|session_id| (client_socket.client_index, session_id))
+        })
+        .collect()
+}
+
+fn upstream_session_by_client_index(
+    upstream: &ConcurrentWebSocketTranscript,
+) -> BTreeMap<usize, u64> {
+    upstream
+        .upstream_client_sessions
+        .iter()
+        .map(|session| (session.client_index, session.upstream_session_id))
+        .collect()
 }
 
 fn unique_u64_count(values: &[u64]) -> usize {
@@ -2410,6 +2663,7 @@ struct ConcurrentWebSocketTranscript {
     hold_duration: Duration,
     http_probe_count: usize,
     upstream_session_ids: Vec<u64>,
+    upstream_client_sessions: Vec<UpstreamClientSessionObservation>,
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
     in_overlap_session_event_counts: Vec<usize>,
@@ -2444,6 +2698,7 @@ struct ConcurrentUpstreamState {
     real_overlap_completed_unix_ms: Option<u128>,
     http_probe_count: usize,
     upstream_session_ids: Vec<u64>,
+    upstream_client_sessions: Vec<UpstreamClientSessionObservation>,
     session_frame_counts: Vec<usize>,
     session_event_counts: Vec<usize>,
     in_overlap_session_event_counts: Vec<usize>,
@@ -2730,6 +2985,7 @@ impl MockConcurrentWebSocketUpstream {
                 real_overlap_completed_unix_ms: None,
                 http_probe_count: 0,
                 upstream_session_ids: Vec::new(),
+                upstream_client_sessions: Vec::new(),
                 session_frame_counts: Vec::new(),
                 session_event_counts: Vec::new(),
                 in_overlap_session_event_counts: Vec::new(),
@@ -2808,6 +3064,7 @@ impl MockConcurrentWebSocketUpstream {
             hold_duration: state.hold_duration,
             http_probe_count: state.http_probe_count,
             upstream_session_ids: state.upstream_session_ids,
+            upstream_client_sessions: state.upstream_client_sessions,
             session_frame_counts: state.session_frame_counts,
             session_event_counts: state.session_event_counts,
             in_overlap_session_event_counts: state.in_overlap_session_event_counts,
@@ -3030,7 +3287,8 @@ fn run_concurrent_mock_websocket_session(
             }
             continue;
         }
-        let _upstream_session_id = register_concurrent_non_prewarm_session(&state)?;
+        let client_index = extract_harness_client_index(&frame);
+        let _upstream_session_id = register_concurrent_non_prewarm_session(&state, client_index)?;
         let overlap_started_at = wait_for_concurrent_session_barrier(&state)?;
         let run_multi_step_interleave = claim_multi_step_interleave(&state)?;
         let (event_count, in_overlap_event_count) = if run_multi_step_interleave {
@@ -3101,6 +3359,7 @@ fn complete_multi_step_interleave(
 
 fn register_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
+    client_index: Option<usize>,
 ) -> Result<u64, String> {
     let mut state = shared
         .state
@@ -3111,6 +3370,14 @@ fn register_concurrent_non_prewarm_session(
     let upstream_session_id = u64::try_from(state.non_prewarm_session_count)
         .map_err(|_| "concurrent upstream session id overflowed u64".to_owned())?;
     state.upstream_session_ids.push(upstream_session_id);
+    if let Some(client_index) = client_index {
+        state
+            .upstream_client_sessions
+            .push(UpstreamClientSessionObservation {
+                client_index,
+                upstream_session_id,
+            });
+    }
     state.active_high_water = state
         .active_high_water
         .max(state.active_non_prewarm_sessions);
@@ -3120,6 +3387,16 @@ fn register_concurrent_non_prewarm_session(
     }
     shared.condition.notify_all();
     Ok(upstream_session_id)
+}
+
+fn extract_harness_client_index(frame: &str) -> Option<usize> {
+    let marker = "codex-router-client-";
+    let marker_start = frame.find(marker)? + marker.len();
+    let digits = frame[marker_start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    digits.parse::<usize>().ok()
 }
 
 fn wait_for_concurrent_session_barrier(
