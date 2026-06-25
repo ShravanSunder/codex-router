@@ -1,0 +1,21 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh G-24",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "HTTP/SSE release path streams request bodies without full collection before upstream egress",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
+  "git_head": "cc3037333b5b46b3ae130f76e17b863b9402e092",
+  "layer": "structural",
+  "notes": "Structural guard and streaming behavior passed: release HTTP/SSE request bodies are forwarded as Hyper bodies without full collection before upstream egress.",
+  "owner": "T6",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "G-24",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-25T10:09:25Z",
+  "touched_targets": []
+}

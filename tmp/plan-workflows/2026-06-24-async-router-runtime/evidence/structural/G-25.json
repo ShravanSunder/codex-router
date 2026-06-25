@@ -1,0 +1,21 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh G-25",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "HTTP/SSE affinity extraction has explicit byte/event bounds and late metadata cannot grow an unbounded buffer",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "Cargo.toml crates/*/Cargo.toml crates/codex-router-proxy/src/* scripts/* .github/workflows/*",
+  "git_head": "cc3037333b5b46b3ae130f76e17b863b9402e092",
+  "layer": "structural",
+  "notes": "Structural guard and bounded-scan behavior passed: HTTP/SSE affinity extraction stops at explicit byte/event bounds without gating body forwarding.",
+  "owner": "T6",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "G-25",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-25T10:09:25Z",
+  "touched_targets": []
+}
