@@ -1076,6 +1076,12 @@ pub enum CliError {
     /// Live quota command needs explicit approval before network/account use.
     #[error("live quota requires --approve-network-account-use or --dry-run")]
     LiveQuotaApprovalRequired,
+    /// Live quota base URL is not one of the allowlisted provider URLs.
+    #[error("live quota base URL is not allowed: {base_url}")]
+    LiveQuotaDisallowedBaseUrl {
+        /// Rejected base URL.
+        base_url: String,
+    },
     /// Live quota request failed.
     #[error(transparent)]
     LiveQuota(#[from] codex_router_auth::live_quota::LiveQuotaError),
@@ -1159,6 +1165,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::process::Command as ProcessCommand;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::MutexGuard;
@@ -1198,6 +1205,7 @@ mod tests {
     use codex_router_secret_store::model::SecretStoreError;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
+    use codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation;
     use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
     use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
     use codex_router_state::quota_snapshot::QuotaSnapshotSource;
@@ -1205,6 +1213,7 @@ mod tests {
     use codex_router_state::repositories::AccountStateRepository;
     use codex_router_state::repositories::QuotaSnapshotRepository;
     use codex_router_state::repositories::SelectorQuotaRepository;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
     use codex_router_state::sqlite::SqliteStateStore;
 
     use super::CliCommand;
@@ -1349,6 +1358,7 @@ mod tests {
             "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
             "quota refresh [--router-root <path>] [--base-url <url>]",
             "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]",
+            "sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]",
             "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]",
         ] {
             assert!(
@@ -2615,7 +2625,7 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind weekly 20% behind\tscore 1 risk 5h 25% / weekly 20%\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
         );
         assert_eq!(
             lines[2],
@@ -2736,6 +2746,10 @@ exit 42
             25
         );
         assert_eq!(
+            parsed["accounts"][0]["window_slots"]["5h"]["run_rate"]["confidence"],
+            "unknown"
+        );
+        assert_eq!(
             parsed["accounts"][0]["window_slots"]["weekly"]["remaining_headroom"],
             80
         );
@@ -2747,11 +2761,112 @@ exit 42
             parsed["accounts"][0]["windows"][1]["remaining_headroom"],
             80
         );
+        assert_eq!(
+            parsed["accounts"][0]["windows"][1]["run_rate"]["confidence"],
+            "unknown"
+        );
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));
         assert!(!output.stdout.contains("authorization"));
         assert!(!output.stdout.contains("bottleneck"));
         assert!(!output.stdout.contains("pp"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_plain_uses_persisted_history_for_run_rate() {
+        let test_root = TestRoot::new("quota-status-history");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state_path = router_root.join("state.sqlite");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let primary_account = AccountRecord::new(
+            account_id("acct_primary_history"),
+            "primary",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        let five_hour_reset = 20_000;
+        let five_hour_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary_history"),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(five_hour_reset)
+        .with_effective(true)
+        .with_observed_unix_seconds(11_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary_history"),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(90)
+        .with_reset_unix_seconds(614_800)
+        .with_observed_unix_seconds(11_000);
+        must_ok(
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                primary_account.account_id(),
+                "responses",
+                &[five_hour_window, weekly_window],
+                11_000,
+                five_hour_reset,
+            ),
+        );
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        let async_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+        for (observed_unix_seconds, remaining_headroom) in [
+            (10_000_u64, 90_u32),
+            (10_500_u64, 85_u32),
+            (11_000_u64, 80_u32),
+        ] {
+            let observation = PersistedQuotaHistoryObservation::new(
+                account_id("acct_primary_history"),
+                "primary",
+                "responses",
+                18_000,
+                observed_unix_seconds,
+                remaining_headroom,
+            )
+            .with_reset_unix_seconds(five_hour_reset)
+            .with_effective(true);
+            must_ok(runtime.block_on(async_state.append_quota_history_observation(&observation)));
+        }
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "plain",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("5h 30% ahead; normal burn 36%/h"));
+        assert!(output.stdout.contains("runout in 2h 13m"));
+        assert!(
+            output.stdout.contains("weekly 10% behind; history unknown"),
+            "{}",
+            output.stdout
+        );
         assert!(output.stderr.is_empty());
     }
 
@@ -2782,7 +2897,7 @@ exit 42
                 "--router-root".into(),
                 router_root.as_os_str().to_owned(),
                 "--base-url".into(),
-                "http://127.0.0.1:9".into(),
+                "http://attacker.example".into(),
             ],
             &CliContext::new(Vec::new()),
             &mut stdout,
@@ -2841,7 +2956,7 @@ exit 42
 
         must_ok(refresh_quota_with_dependencies(
             &mut stdout,
-            router_root,
+            router_root.clone(),
             "https://chatgpt.com/backend-api".to_owned(),
             &resolver,
             &provider,
@@ -2881,6 +2996,31 @@ exit 42
             QuotaSnapshotSource::OpenAiEndpoint
         );
         assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        runtime.block_on(async {
+            let async_state =
+                must_ok(AsyncSqliteStateStore::open(&router_root.join("state.sqlite")).await);
+            let history = must_ok(
+                async_state
+                    .quota_history_observations_for_window(
+                        &account_id,
+                        "responses",
+                        18_000,
+                        0,
+                        2_000,
+                    )
+                    .await,
+            );
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].account_label(), "refresh");
+            assert_eq!(history[0].remaining_headroom(), 33);
+            assert_eq!(history[0].reset_credits_available(), None);
+            assert_eq!(history[0].observed_unix_seconds(), 1_100);
+        });
     }
 
     #[test]
@@ -3852,6 +3992,46 @@ exit 42
     }
 
     #[test]
+    fn live_quota_rejects_non_provider_base_url_before_token_egress() {
+        let test_root = TestRoot::new("live-quota-disallowed-base-url");
+        must_ok(fs::create_dir(test_root.path()));
+        let auth_json = test_root.path().join("auth.json");
+        must_ok(fs::write(
+            &auth_json,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"oauth-egress-canary"}}"#,
+        ));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = match run_with_io(
+            vec![
+                "codex-router".into(),
+                "live".into(),
+                "quota".into(),
+                "--auth-json".into(),
+                auth_json.as_os_str().to_owned(),
+                "--profile-label".into(),
+                "main".into(),
+                "--base-url".into(),
+                "http://attacker.example".into(),
+                "--approve-network-account-use".into(),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("disallowed live quota base URL must fail before token egress"),
+            Err(error) => error,
+        };
+        let rendered_error = error.to_string();
+
+        assert!(rendered_error.contains("live quota base URL is not allowed"));
+        assert!(!rendered_error.contains("oauth-egress-canary"));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
     fn live_quota_dry_run_discovers_profiles_without_provider_io_or_token_output() {
         let test_root = TestRoot::new("live-quota-dry-run");
         must_ok(fs::create_dir(test_root.path()));
@@ -4292,6 +4472,16 @@ exit 42
                     1000,
                 ),
                 CodexStateThreadFixture::new(
+                    "thread-a-json-subagent",
+                    &project_a_src,
+                    "codex-router",
+                    r#"{"kind":"subagent","parent_thread_id":"thread-a-src"}"#,
+                    "cli",
+                    "main",
+                    1500,
+                )
+                .with_thread_source(None),
+                CodexStateThreadFixture::new(
                     "thread-b-src",
                     &project_b_src,
                     "codex-router",
@@ -4357,7 +4547,10 @@ exit 42
             ],
             context,
         );
-        assert_session_ids(&subagent_output.stdout, &["thread-a-subagent"]);
+        assert_session_ids(
+            &subagent_output.stdout,
+            &["thread-a-json-subagent", "thread-a-subagent"],
+        );
     }
 
     #[test]
@@ -4551,8 +4744,65 @@ exit 42
 
         assert_eq!(
             output.stdout,
-            "codex --profile codex-router resume thread-new\n"
+            "codex --profile codex-router resume -- thread-new\n"
         );
+    }
+
+    #[test]
+    fn sessions_last_rejects_state_session_id_option_injection() {
+        let test_root = TestRoot::new("sessions-last-option-injection");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "UNSAFE_SESSION_CANARY_SHOULD_NOT_LEAK",
+            &[CodexStateThreadFixture::new(
+                "--dangerously-bypass-approvals-and-sandbox",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                1000,
+            )],
+        );
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = match run_with_io(
+            vec![
+                "codex-router".into(),
+                "sessions".into(),
+                "--scope".into(),
+                "any".into(),
+                "--source".into(),
+                "interactive".into(),
+                "--provider".into(),
+                "codex-router".into(),
+                "--last".into(),
+                "--dry-run".into(),
+            ],
+            &CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(project),
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("unsafe session id must not be rendered or launched"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "unsafe Codex session id in state database"
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -4719,6 +4969,34 @@ exit 42
         assert!(sessions_source.contains("use sqlx::"));
         assert!(sessions_source.contains("SqliteConnectOptions"));
         assert!(!sessions_source.contains("rusqlite"));
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| panic!("cli crate should have workspace root parent"));
+        let diff = match ProcessCommand::new("git")
+            .args(["diff", "--unified=0", "origin/main...HEAD", "--", "crates"])
+            .current_dir(workspace_root)
+            .output()
+        {
+            Ok(diff) if diff.status.success() => diff,
+            _ => return,
+        };
+        let diff_text = String::from_utf8_lossy(&diff.stdout);
+        let added_rusqlite_lines = diff_text
+            .lines()
+            .filter(|line| {
+                line.starts_with('+')
+                    && !line.starts_with("+++")
+                    && (line.contains("rusqlite::")
+                        || line.contains("use rusqlite")
+                        || line.contains(" rusqlite "))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            added_rusqlite_lines.is_empty(),
+            "new or extended SQL in this implementation must be SQLx-only; added rusqlite lines: {added_rusqlite_lines:?}"
+        );
     }
 
     #[test]
@@ -5859,7 +6137,7 @@ exit 42
         provider: String,
         model: String,
         source: String,
-        thread_source: String,
+        thread_source: Option<String>,
         git_branch: String,
         recency_at_ms: i64,
     }
@@ -5880,10 +6158,15 @@ exit 42
                 provider: provider.to_owned(),
                 model: "gpt-5.4-mini".to_owned(),
                 source: source.to_owned(),
-                thread_source: thread_source.to_owned(),
+                thread_source: Some(thread_source.to_owned()),
                 git_branch: git_branch.to_owned(),
                 recency_at_ms,
             }
+        }
+
+        fn with_thread_source(mut self, thread_source: Option<&str>) -> Self {
+            self.thread_source = thread_source.map(str::to_owned);
+            self
         }
     }
 

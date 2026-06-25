@@ -1108,7 +1108,9 @@ mod async_forwarding_tests {
     use tokio_util::sync::CancellationToken;
     use tokio_util::task::TaskTracker;
 
+    use crate::account_selection::ActiveReservationGuard;
     use crate::account_selection::AsyncAccountDecisionSelector;
+    use crate::account_selection::RouteBandReservationBooks;
     use crate::account_selection::SelectedAccountDecision;
     use crate::http_sse::AsyncProviderCredentialResolver;
     use crate::http_sse::HttpAffinitySecretProvider;
@@ -1116,6 +1118,7 @@ mod async_forwarding_tests {
     use crate::http_sse::HttpProxyRequest;
     use crate::local_auth::ProxyLocalAuthGate;
     use crate::provider_error::AsyncProviderErrorObserver;
+    use codex_router_selection::reservation::ReservationBook;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedProviderError {
@@ -1569,6 +1572,130 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
+    async fn response_completed_releases_active_reservation_before_socket_closes() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let active_reservations = RouteBandReservationBooks::default();
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_next_at(selected_account.clone(), 8, 1)
+        };
+        let active_reservation_guard = ActiveReservationGuard::new(
+            active_reservations.clone(),
+            "responses".to_owned(),
+            reservation_handle,
+        );
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: Some(active_reservation_guard),
+        };
+
+        let active_pressure = || {
+            let reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .get("responses")
+                .map_or(0, |book| book.active_load_pressure(&selected_account))
+        };
+        assert_eq!(active_pressure(), 8);
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: None,
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(r#"{"type":"response.completed","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("completion should send: {error}"));
+            match client_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("client should receive completion: {error}"),
+                None => panic!("client should receive completion"),
+            }
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while active_pressure() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_elapsed| panic!("response.completed should release active load"));
+
+            client_websocket
+                .send(Message::Ping(Bytes::from_static(b"still-open")))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("socket should remain open after completion: {error}")
+                });
+            match upstream_websocket.next().await {
+                Some(Ok(Message::Ping(_))) => {}
+                Some(Ok(message)) => {
+                    panic!("upstream should receive post-completion ping, got {message:?}")
+                }
+                Some(Err(error)) => panic!("post-completion ping should be valid: {error}"),
+                None => panic!("upstream should receive post-completion ping"),
+            }
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "completion release should not close the websocket by itself, got {router_result:?}"
+        );
+        assert_eq!(active_pressure(), 0);
+    }
+
+    #[tokio::test]
     async fn upstream_usage_limit_frame_is_forwarded_unchanged_and_observed() {
         let (router_local_stream, client_stream) = duplex(4096);
         let (router_upstream_stream, upstream_stream) = duplex(4096);
@@ -1656,6 +1783,98 @@ mod async_forwarding_tests {
                 account_id: selected_account,
                 route_band: codex_router_core::routes::RouteBand::Responses,
                 body: usage_limit_frame.as_bytes().to_vec(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_websocket_connection_limit_frame_is_forwarded_unchanged_and_observed() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let provider_error_observer = Arc::new(RecordingAsyncProviderErrorObserver::default());
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let connection_limit_frame = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached"}}"#;
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: Some(provider_error_observer.clone()),
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(connection_limit_frame))
+                .await
+                .unwrap_or_else(|error| panic!("connection-limit should send: {error}"));
+            let client_message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive connection-limit frame: {error}"),
+                None => panic!("client should receive connection-limit frame"),
+            };
+            assert_eq!(client_message.to_string(), connection_limit_frame);
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should keep connection-limit as pass-through frame, got {router_result:?}"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            provider_error_observer.observed.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("connection-limit should be observed"));
+        assert_eq!(
+            provider_error_observer.records(),
+            vec![RecordedProviderError {
+                account_id: selected_account,
+                route_band: codex_router_core::routes::RouteBand::Responses,
+                body: connection_limit_frame.as_bytes().to_vec(),
             }]
         );
     }
@@ -2407,6 +2626,11 @@ async fn record_forwarded_websocket_metadata(
         }
     }
     if is_completed {
+        if let Some(context) = affinity_owner_context
+            && let Some(active_reservation_guard) = context.active_reservation_guard.as_ref()
+        {
+            active_reservation_guard.release();
+        }
         session_registry.note_response_completed(session_id);
     }
 }

@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -73,7 +75,7 @@ pub struct ActiveReservationGuard {
 }
 
 impl ActiveReservationGuard {
-    fn new(
+    pub(crate) fn new(
         active_reservations: RouteBandReservationBooks,
         route_band: String,
         reservation_handle: ReservationHandle,
@@ -83,6 +85,7 @@ impl ActiveReservationGuard {
                 active_reservations,
                 route_band,
                 reservation_handle,
+                released: AtomicBool::new(false),
             }),
         }
     }
@@ -91,6 +94,11 @@ impl ActiveReservationGuard {
     #[must_use]
     pub fn reservation_handle(&self) -> &ReservationHandle {
         &self.inner.reservation_handle
+    }
+
+    /// Releases the reservation before the stream object itself closes.
+    pub fn release(&self) {
+        self.inner.release_once();
     }
 }
 
@@ -117,15 +125,28 @@ struct ActiveReservationGuardInner {
     active_reservations: RouteBandReservationBooks,
     route_band: String,
     reservation_handle: ReservationHandle,
+    released: AtomicBool,
+}
+
+impl ActiveReservationGuardInner {
+    fn release_once(&self) {
+        if self
+            .released
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            release_account_reservation(
+                &self.active_reservations,
+                &self.route_band,
+                &self.reservation_handle,
+            );
+        }
+    }
 }
 
 impl Drop for ActiveReservationGuardInner {
     fn drop(&mut self) {
-        release_account_reservation(
-            &self.active_reservations,
-            &self.route_band,
-            &self.reservation_handle,
-        );
+        self.release_once();
     }
 }
 
@@ -808,6 +829,10 @@ fn select_from_burn_down_assessment(
         weighted_candidates,
         minimum_account_hold_cooldown_seconds,
         now_unix_seconds,
+    ) && held_account_allowed_by_weighted_choice(
+        weighted_selector,
+        weighted_candidates,
+        &held_account_id,
     ) && weighted_selector.record_selection(weighted_candidates, &held_account_id)
     {
         return Ok(SelectedAccountDecision::new(
@@ -838,6 +863,31 @@ fn select_from_burn_down_assessment(
         selected_account_id,
         selection_reason_for_assessment(selected_assessment),
     ))
+}
+
+fn held_account_allowed_by_weighted_choice(
+    weighted_selector: &WeightedDeficitSelector,
+    weighted_candidates: &[(AccountId, u32)],
+    held_account_id: &AccountId,
+) -> bool {
+    let mut projected_selector = weighted_selector.clone();
+    if projected_selector.select(weighted_candidates, 1).as_ref() == Some(held_account_id) {
+        return true;
+    }
+
+    let held_weight = weighted_candidates
+        .iter()
+        .find_map(|(account_id, weight)| (account_id == held_account_id).then_some(*weight));
+    let Some(held_weight) = held_weight else {
+        return false;
+    };
+    let best_weight = weighted_candidates
+        .iter()
+        .map(|(_account_id, weight)| *weight)
+        .max()
+        .unwrap_or(0);
+
+    best_weight.saturating_sub(held_weight) < WEBSOCKET_ACTIVE_LOAD_PRESSURE
 }
 
 fn reusable_held_account_id(

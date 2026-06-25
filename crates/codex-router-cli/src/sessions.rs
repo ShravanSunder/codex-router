@@ -16,6 +16,7 @@ use comfy_table::presets::UTF8_FULL;
 use inquire::Select;
 use inquire::error::InquireError;
 use serde::Serialize;
+use serde_json::Value;
 use sqlx::Row;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -321,6 +322,7 @@ fn run_interactive_session(
     let Some(session_id) = picker.select_session(choices)? else {
         return Err(SessionsCommandError::PickerCanceled);
     };
+    validate_resume_session_id(&session_id)?;
     runner.run_codex_resume(&session_id)
 }
 
@@ -339,11 +341,12 @@ fn run_last_session<W: Write>(
     let Some(record) = records.drain(..).next() else {
         return Err(SessionsCommandError::NoSessionsMatch);
     };
+    validate_resume_session_id(&record.session_id)?;
 
     if dry_run {
         writeln!(
             stdout,
-            "codex --profile codex-router resume {}",
+            "codex --profile codex-router resume -- {}",
             record.session_id
         )
         .map_err(SessionsCommandError::Stdout)?;
@@ -390,6 +393,7 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
             .arg("--profile")
             .arg("codex-router")
             .arg("resume")
+            .arg("--")
             .arg(session_id)
             .status()
             .map_err(SessionsCommandError::CodexLaunch)?;
@@ -536,8 +540,52 @@ fn source_matches(
                 && !matches!(thread_source, Some("exec" | "app_server" | "subagent"))
         }
         SessionsSource::Subagents => {
-            matches!(source, Some("subagent")) || matches!(thread_source, Some("subagent"))
+            source_indicates_subagent(source) || matches!(thread_source, Some("subagent"))
         }
+    }
+}
+
+fn validate_resume_session_id(session_id: &str) -> Result<(), SessionsCommandError> {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty()
+        || trimmed != session_id
+        || trimmed.starts_with('-')
+        || trimmed
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(SessionsCommandError::UnsafeSessionId);
+    }
+    Ok(())
+}
+
+fn source_indicates_subagent(source: Option<&str>) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
+    if source == "subagent" {
+        return true;
+    }
+    let trimmed = source.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return false;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .is_some_and(json_mentions_subagent_source)
+}
+
+fn json_mentions_subagent_source(value: Value) -> bool {
+    match value {
+        Value::String(value) => value == "subagent",
+        Value::Array(values) => values.into_iter().any(json_mentions_subagent_source),
+        Value::Object(object) => object.into_iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "subagent" | "parent_agent_id" | "parent_session_id" | "parent_thread_id"
+            ) || json_mentions_subagent_source(value)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
@@ -663,6 +711,9 @@ pub enum SessionsCommandError {
     /// SQLite access failed.
     #[error("failed to read Codex sessions state: {0}")]
     Sqlx(sqlx::Error),
+    /// Session id from Codex state is unsafe to pass to resume.
+    #[error("unsafe Codex session id in state database")]
+    UnsafeSessionId,
     /// JSON rendering failed.
     #[error("failed to render sessions JSON: {0}")]
     Json(serde_json::Error),

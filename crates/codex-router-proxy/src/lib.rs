@@ -2530,6 +2530,69 @@ mod tests {
         assert_eq!(second.selection_reason(), "account_hold_cooldown");
     }
 
+    #[tokio::test]
+    async fn async_repository_backed_selector_breaks_hold_when_active_load_changes_next_choice() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_hold_active_load_break");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &beta,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            RouteBandReservationBooks::default(),
+            120,
+            Arc::new(test_unix_seconds),
+        );
+
+        let first = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("first request should select held account: {error}"),
+        };
+        let second = match selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => panic!("second request should break hold under active load: {error}"),
+        };
+
+        assert_eq!(first.account_id(), alpha.account_id());
+        assert_eq!(second.account_id(), beta.account_id());
+        assert_ne!(second.selection_reason(), "account_hold_cooldown");
+    }
+
     #[test]
     fn repository_backed_selector_rebalances_after_cooldown_expires() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_hold_expired");

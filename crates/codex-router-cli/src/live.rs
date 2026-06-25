@@ -12,6 +12,7 @@ use codex_router_auth::live_quota::UsageWindow;
 
 use crate::ArgumentParser;
 use crate::CliError;
+use crate::quota::is_allowed_quota_refresh_base_url;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LiveCommand {
@@ -180,6 +181,13 @@ fn run_live_quota_command(
     if !command.approve_network_account_use {
         return Err(CliError::LiveQuotaApprovalRequired);
     }
+    if !is_allowed_quota_refresh_base_url(&command.base_url)
+        && !test_allowed_live_quota_base_url(&command.base_url)
+    {
+        return Err(CliError::LiveQuotaDisallowedBaseUrl {
+            base_url: command.base_url,
+        });
+    }
     let client = LiveQuotaClient::new(command.base_url.as_str())?;
     for profile in profiles {
         let result = client.fetch_from_auth_json(&profile.auth_json_path);
@@ -187,6 +195,16 @@ fn run_live_quota_command(
             .map_err(CliError::Stdout)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn test_allowed_live_quota_base_url(base_url: &str) -> bool {
+    base_url.starts_with("http://127.0.0.1:") || base_url.starts_with("http://[::1]:")
+}
+
+#[cfg(not(test))]
+const fn test_allowed_live_quota_base_url(_base_url: &str) -> bool {
+    false
 }
 
 fn write_live_quota_dry_run_profile(

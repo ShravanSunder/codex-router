@@ -36,10 +36,16 @@ use codex_router_selection::burn_down::SelectedPool;
 use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
 use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::burn_down::assess_route_band;
+use codex_router_selection::run_rate::QuotaRunRateConfidence;
+use codex_router_selection::run_rate::QuotaRunRateEstimate;
+use codex_router_selection::run_rate::QuotaRunRateEstimator;
+use codex_router_selection::run_rate::QuotaRunRateObservation;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
+use codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
 use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
+use codex_router_state::quota_snapshot::QuotaHistoryRefreshOutcome;
 use codex_router_state::quota_snapshot::QuotaRefreshErrorClass;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
@@ -47,6 +53,7 @@ use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::repositories::QuotaSnapshotRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
+use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
@@ -176,6 +183,9 @@ pub enum QuotaCommandError {
     /// State-store operation failed.
     #[error(transparent)]
     StateStore(#[from] StateStoreError),
+    /// Failed to initialize quota history async runtime.
+    #[error("failed to initialize quota history runtime: {0}")]
+    Runtime(std::io::Error),
     /// Stdout write failed.
     #[error("failed to write stdout: {0}")]
     Stdout(std::io::Error),
@@ -224,7 +234,7 @@ fn refresh_quota(
     )
 }
 
-fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {
+pub(crate) fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {
     let trimmed = base_url.trim_end_matches('/');
     trimmed == DEFAULT_CHATGPT_BACKEND_BASE_URL
         || trimmed == "https://chatgpt.com"
@@ -427,6 +437,12 @@ where
     P: QuotaRefreshProvider,
 {
     let state = SqliteStateStore::open(state_db)?;
+    let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(QuotaCommandError::Runtime)?;
+    let quota_history_state =
+        quota_history_runtime.block_on(AsyncSqliteStateStore::open(state_db))?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
     let mut refreshed_count = 0_u64;
     let mut failed_count = 0_u64;
@@ -444,6 +460,14 @@ where
                     SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
                         &state,
                         account.account_id(),
+                        route_band,
+                        observed_unix_seconds,
+                        QuotaRefreshErrorClass::AuthError,
+                    )?;
+                    append_failure_quota_history_observations(
+                        &quota_history_runtime,
+                        &quota_history_state,
+                        account,
                         route_band,
                         observed_unix_seconds,
                         QuotaRefreshErrorClass::AuthError,
@@ -476,6 +500,14 @@ where
                         observed_unix_seconds,
                         quota_refresh_error_class(&error),
                     )?;
+                    append_failure_quota_history_observations(
+                        &quota_history_runtime,
+                        &quota_history_state,
+                        account,
+                        route_band,
+                        observed_unix_seconds,
+                        quota_refresh_error_class(&error),
+                    )?;
                     writeln!(
                         stdout,
                         "refresh failed: account={} route_band={} error={error}",
@@ -493,6 +525,14 @@ where
                     SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
                         &state,
                         account.account_id(),
+                        route_band,
+                        observed_unix_seconds,
+                        QuotaRefreshErrorClass::ParseError,
+                    )?;
+                    append_failure_quota_history_observations(
+                        &quota_history_runtime,
+                        &quota_history_state,
+                        account,
                         route_band,
                         observed_unix_seconds,
                         QuotaRefreshErrorClass::ParseError,
@@ -547,6 +587,15 @@ where
                     selector_window
                 };
                 selector_windows.push(selector_window);
+                append_success_quota_history_observation(
+                    &quota_history_runtime,
+                    &quota_history_state,
+                    account,
+                    route_band,
+                    window,
+                    observed_unix_seconds,
+                    response.reset_credits_available,
+                )?;
             }
             SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
                 &state,
@@ -559,6 +608,11 @@ where
             refreshed_count = refreshed_count.saturating_add(1);
         }
     }
+    purge_old_quota_history(
+        &quota_history_runtime,
+        &quota_history_state,
+        observed_unix_seconds,
+    )?;
 
     writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)?;
     if failed_count > 0 {
@@ -571,6 +625,81 @@ where
     }
 
     Ok(())
+}
+
+fn append_success_quota_history_observation(
+    runtime: &tokio::runtime::Runtime,
+    state: &AsyncSqliteStateStore,
+    account: &AccountRecord,
+    route_band: &str,
+    window: &QuotaRefreshProviderWindow,
+    observed_unix_seconds: u64,
+    reset_credits_available: Option<u32>,
+) -> Result<(), QuotaCommandError> {
+    let status = if window.remaining_headroom == 0 {
+        SelectorQuotaWindowStatus::Ineligible
+    } else {
+        SelectorQuotaWindowStatus::Eligible
+    };
+    let mut observation = PersistedQuotaHistoryObservation::new(
+        account.account_id().clone(),
+        account.label(),
+        route_band,
+        window.limit_window_seconds,
+        observed_unix_seconds,
+        window.remaining_headroom,
+    )
+    .with_effective(window.effective)
+    .with_window_status(status)
+    .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
+    .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success);
+    if let Some(reset_unix_seconds) = window.reset_unix_seconds {
+        observation = observation.with_reset_unix_seconds(reset_unix_seconds);
+    }
+    if let Some(reset_credits_available) = reset_credits_available {
+        observation = observation.with_reset_credits_available(reset_credits_available);
+    }
+    runtime
+        .block_on(state.append_quota_history_observation(&observation))
+        .map_err(QuotaCommandError::StateStore)
+}
+
+fn append_failure_quota_history_observations(
+    runtime: &tokio::runtime::Runtime,
+    state: &AsyncSqliteStateStore,
+    account: &AccountRecord,
+    route_band: &str,
+    observed_unix_seconds: u64,
+    error_class: QuotaRefreshErrorClass,
+) -> Result<(), QuotaCommandError> {
+    for limit_window_seconds in [V1_SHORT_WINDOW_SECONDS, V1_WEEKLY_WINDOW_SECONDS] {
+        let observation = PersistedQuotaHistoryObservation::new(
+            account.account_id().clone(),
+            account.label(),
+            route_band,
+            limit_window_seconds,
+            observed_unix_seconds,
+            0,
+        )
+        .with_window_status(SelectorQuotaWindowStatus::Unknown)
+        .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
+        .with_refresh_outcome(QuotaHistoryRefreshOutcome::Failure { error_class });
+        runtime
+            .block_on(state.append_quota_history_observation(&observation))
+            .map_err(QuotaCommandError::StateStore)?;
+    }
+    Ok(())
+}
+
+fn purge_old_quota_history(
+    runtime: &tokio::runtime::Runtime,
+    state: &AsyncSqliteStateStore,
+    observed_unix_seconds: u64,
+) -> Result<(), QuotaCommandError> {
+    let retention_floor = observed_unix_seconds.saturating_sub(V1_WEEKLY_WINDOW_SECONDS);
+    runtime
+        .block_on(state.purge_quota_history_before(retention_floor))
+        .map_err(QuotaCommandError::StateStore)
 }
 
 /// Stoppable background quota refresh worker.
@@ -780,6 +909,7 @@ fn quota_refresh_error_class(error: &QuotaCommandError) -> QuotaRefreshErrorClas
         | QuotaCommandError::RefreshNotImplemented
         | QuotaCommandError::CredentialResolverOpen(_)
         | QuotaCommandError::StateStore(_)
+        | QuotaCommandError::Runtime(_)
         | QuotaCommandError::Stdout(_) => QuotaRefreshErrorClass::ProviderError,
     }
 }
@@ -921,11 +1051,20 @@ fn render_quota_status(
     all_limits: bool,
     now_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
-    let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
+    let state_db_path = router_root.join("state.sqlite");
+    let state = SqliteStateStore::open(&state_db_path)?;
+    let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(QuotaCommandError::Runtime)?;
+    let quota_history_state =
+        quota_history_runtime.block_on(AsyncSqliteStateStore::open(&state_db_path))?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
     let unicode_bars = format != QuotaStatusFormat::Plain;
     let report = quota_status_report(
         &state,
+        &quota_history_runtime,
+        &quota_history_state,
         &accounts,
         all_limits,
         now_unix_seconds,
@@ -940,6 +1079,8 @@ fn render_quota_status(
 
 fn quota_status_report(
     state: &SqliteStateStore,
+    quota_history_runtime: &tokio::runtime::Runtime,
+    quota_history_state: &AsyncSqliteStateStore,
     accounts: &[AccountRecord],
     _all_limits: bool,
     now_unix_seconds: u64,
@@ -964,13 +1105,21 @@ fn quota_status_report(
         let reset_credits_available = snapshot
             .as_ref()
             .and_then(PersistedQuotaSnapshot::reset_credits_available);
-        let display_windows = if let Some(selector_input) = selector_input {
+        let mut display_windows = if let Some(selector_input) = selector_input {
             display_windows_from_selector_input(selector_input)
         } else {
             snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
                 vec![DisplayQuotaWindow::from_snapshot(snapshot)]
             })
         };
+        attach_history_estimates_to_display_windows(
+            quota_history_runtime,
+            quota_history_state,
+            account.account_id(),
+            USER_QUOTA_ROUTE_BAND,
+            now_unix_seconds,
+            &mut display_windows,
+        )?;
         burn_down_inputs.push(burn_down_input_from_display_windows(
             account,
             &display_windows,
@@ -1244,6 +1393,7 @@ struct DisplayQuotaWindow {
     reset_unix_seconds: Option<u64>,
     observed_unix_seconds: u64,
     effective: bool,
+    run_rate_estimate: QuotaRunRateEstimate,
 }
 
 impl DisplayQuotaWindow {
@@ -1255,6 +1405,7 @@ impl DisplayQuotaWindow {
             reset_unix_seconds: window.reset_unix_seconds(),
             observed_unix_seconds: window.observed_unix_seconds(),
             effective: window.effective(),
+            run_rate_estimate: QuotaRunRateEstimate::unknown(),
         }
     }
 
@@ -1270,6 +1421,7 @@ impl DisplayQuotaWindow {
             reset_unix_seconds: snapshot.reset_unix_seconds(),
             observed_unix_seconds: snapshot.observed_unix_seconds(),
             effective: true,
+            run_rate_estimate: QuotaRunRateEstimate::unknown(),
         }
     }
 }
@@ -1280,6 +1432,54 @@ fn display_windows_from_selector_input(input: &SelectorQuotaInput) -> Vec<Displa
         .iter()
         .map(DisplayQuotaWindow::from_selector_window)
         .collect()
+}
+
+fn attach_history_estimates_to_display_windows(
+    quota_history_runtime: &tokio::runtime::Runtime,
+    quota_history_state: &AsyncSqliteStateStore,
+    account_id: &AccountId,
+    route_band: &str,
+    now_unix_seconds: u64,
+    windows: &mut [DisplayQuotaWindow],
+) -> Result<(), QuotaCommandError> {
+    let estimator = QuotaRunRateEstimator::new(DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS);
+    let observed_from_unix_seconds = now_unix_seconds.saturating_sub(V1_WEEKLY_WINDOW_SECONDS);
+    for window in windows {
+        let Some(reset_unix_seconds) = window.reset_unix_seconds else {
+            continue;
+        };
+        let observations = quota_history_runtime.block_on(
+            quota_history_state.quota_history_observations_for_window(
+                account_id,
+                route_band,
+                window.window_seconds,
+                observed_from_unix_seconds,
+                now_unix_seconds,
+            ),
+        )?;
+        let observations = observations
+            .iter()
+            .filter_map(quota_run_rate_observation_from_history)
+            .collect::<Vec<_>>();
+        window.run_rate_estimate =
+            estimator.estimate(now_unix_seconds, reset_unix_seconds, &observations);
+    }
+
+    Ok(())
+}
+
+fn quota_run_rate_observation_from_history(
+    observation: &PersistedQuotaHistoryObservation,
+) -> Option<QuotaRunRateObservation> {
+    if observation.refresh_outcome() != QuotaHistoryRefreshOutcome::Success {
+        return None;
+    }
+    let reset_unix_seconds = observation.reset_unix_seconds()?;
+    Some(QuotaRunRateObservation::new(
+        observation.observed_unix_seconds(),
+        reset_unix_seconds,
+        observation.remaining_headroom(),
+    ))
 }
 
 fn burn_down_input_from_display_windows(
@@ -1414,13 +1614,48 @@ fn format_window_pace(
         QuotaWindowStatus::Ineligible => format!("{label} ineligible"),
         QuotaWindowStatus::Eligible | QuotaWindowStatus::Stale => {
             let (pressure, surplus) = window_pressure_and_surplus(window, now_unix_seconds);
-            match (pressure.unwrap_or(0), surplus.unwrap_or(0)) {
+            let pace = match (pressure.unwrap_or(0), surplus.unwrap_or(0)) {
                 (0, 0) => format!("{label} on pace"),
                 (behind, 0) => format!("{label} {behind}% behind"),
                 (0, ahead) => format!("{label} {ahead}% ahead"),
                 _ => format!("{label} needs refresh"),
+            };
+            format!(
+                "{pace}; {}",
+                format_run_rate_estimate(window.run_rate_estimate, now_unix_seconds)
+            )
+        }
+    }
+}
+
+fn format_run_rate_estimate(estimate: QuotaRunRateEstimate, now_unix_seconds: u64) -> String {
+    match estimate.confidence() {
+        QuotaRunRateConfidence::Unknown => "history unknown".to_owned(),
+        QuotaRunRateConfidence::Insufficient => "history insufficient".to_owned(),
+        QuotaRunRateConfidence::Stale => "history stale".to_owned(),
+        QuotaRunRateConfidence::Low | QuotaRunRateConfidence::Normal => {
+            let confidence = run_rate_confidence_label(estimate.confidence());
+            let burn_rate = estimate.burn_rate_percent_per_hour().unwrap_or(0);
+            match estimate.projected_exhaustion_unix_seconds(now_unix_seconds) {
+                Some(runout) => {
+                    format!(
+                        "{confidence} burn {burn_rate}%/h; runout {}",
+                        format_relative_time(runout, now_unix_seconds)
+                    )
+                }
+                None => format!("{confidence} burn {burn_rate}%/h; no runout"),
             }
         }
+    }
+}
+
+const fn run_rate_confidence_label(confidence: QuotaRunRateConfidence) -> &'static str {
+    match confidence {
+        QuotaRunRateConfidence::Unknown => "unknown",
+        QuotaRunRateConfidence::Insufficient => "insufficient",
+        QuotaRunRateConfidence::Low => "low",
+        QuotaRunRateConfidence::Normal => "normal",
+        QuotaRunRateConfidence::Stale => "stale",
     }
 }
 
@@ -1594,6 +1829,7 @@ struct JsonWindowSlot {
     reset_unix_seconds: Option<u64>,
     reset_duration_seconds: Option<u64>,
     display_note: String,
+    run_rate: JsonRunRateEstimate,
 }
 
 impl JsonWindowSlot {
@@ -1613,6 +1849,7 @@ impl JsonWindowSlot {
                 reset_unix_seconds: None,
                 reset_duration_seconds: None,
                 display_note: "needs refresh".to_owned(),
+                run_rate: JsonRunRateEstimate::unknown(),
             };
         };
         let reset_duration_seconds = window
@@ -1626,6 +1863,36 @@ impl JsonWindowSlot {
             reset_unix_seconds: window.reset_unix_seconds,
             reset_duration_seconds,
             display_note,
+            run_rate: JsonRunRateEstimate::from_estimate(
+                window.run_rate_estimate,
+                now_unix_seconds,
+            ),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonRunRateEstimate {
+    confidence: &'static str,
+    burn_rate_percent_per_hour: Option<u32>,
+    projected_exhaustion_unix_seconds: Option<u64>,
+}
+
+impl JsonRunRateEstimate {
+    fn unknown() -> Self {
+        Self {
+            confidence: "unknown",
+            burn_rate_percent_per_hour: None,
+            projected_exhaustion_unix_seconds: None,
+        }
+    }
+
+    fn from_estimate(estimate: QuotaRunRateEstimate, now_unix_seconds: u64) -> Self {
+        Self {
+            confidence: run_rate_confidence_label(estimate.confidence()),
+            burn_rate_percent_per_hour: estimate.burn_rate_percent_per_hour(),
+            projected_exhaustion_unix_seconds: estimate
+                .projected_exhaustion_unix_seconds(now_unix_seconds),
         }
     }
 }
@@ -1641,6 +1908,7 @@ struct JsonQuotaWindow {
     pressure_percent: Option<u32>,
     surplus_percent: Option<u32>,
     contributed_to_salvage: bool,
+    run_rate: JsonRunRateEstimate,
 }
 
 impl JsonQuotaWindow {
@@ -1657,6 +1925,10 @@ impl JsonQuotaWindow {
             pressure_percent,
             surplus_percent,
             contributed_to_salvage: surplus_percent.is_some_and(|surplus| surplus > 0),
+            run_rate: JsonRunRateEstimate::from_estimate(
+                window.run_rate_estimate,
+                now_unix_seconds,
+            ),
         }
     }
 }
