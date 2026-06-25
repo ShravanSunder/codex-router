@@ -83,7 +83,6 @@ use crate::local_auth::ProxyLocalAuthGate;
 use crate::local_auth::extract_presented_local_token_from_request;
 use crate::local_auth::has_forbidden_top_level_json_auth_carrier;
 
-const WEBSOCKET_METADATA_SCAN_MAX_BYTES: usize = 64 * 1024;
 use crate::routes::Method;
 
 /// WebSocket frame subset needed before upstream connection opens.
@@ -1237,7 +1236,7 @@ mod async_forwarding_tests {
     }
 
     #[test]
-    fn websocket_metadata_scan_ignores_oversized_late_affinity_and_completion_fields() {
+    fn websocket_metadata_scan_extracts_oversized_late_affinity_and_completion_fields() {
         let affinity_secret = RouterAffinityHashSecret::new(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -1254,11 +1253,14 @@ mod async_forwarding_tests {
             r#"{{"padding":"{oversized_padding}","type":"response.completed","response":{{"id":"resp_late"}}}}"#
         ));
 
+        let owner = websocket_affinity_owner_record(&message, Some(&context))
+            .expect("oversized completion frame should still record affinity after forwarding");
         assert_eq!(
-            websocket_affinity_owner_record(&message, Some(&context)),
-            None
+            owner.account_id(),
+            &AccountId::new("acct_selected")
+                .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
         );
-        assert!(!is_response_completed(&message));
+        assert!(is_response_completed(&message));
     }
 
     #[tokio::test]
@@ -2156,7 +2158,7 @@ where
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
                 };
                 let is_close = matches!(upstream_message, Message::Close(_));
-                let metadata_text = bounded_websocket_metadata_text(&upstream_message);
+                let metadata_text = websocket_metadata_text(&upstream_message);
                 local_write.send(upstream_message).await?;
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
                 let is_completed = metadata_text
@@ -2254,7 +2256,7 @@ fn websocket_affinity_owner_record(
     upstream_message: &Message,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
 ) -> Option<PreviousResponseAffinityOwnerRecord> {
-    let text = bounded_websocket_metadata_text(upstream_message)?;
+    let text = websocket_metadata_text(upstream_message)?;
     websocket_affinity_owner_record_from_text(&text, affinity_owner_context)
 }
 
@@ -2294,7 +2296,7 @@ fn extract_websocket_response_id_from_text(text: &str) -> Option<PreviousRespons
 
 #[cfg(test)]
 fn is_response_completed(message: &Message) -> bool {
-    let Some(text) = bounded_websocket_metadata_text(message) else {
+    let Some(text) = websocket_metadata_text(message) else {
         return false;
     };
     is_response_completed_text(&text)
@@ -2313,11 +2315,11 @@ fn is_response_completed_text(text: &str) -> bool {
         == Some("response.completed")
 }
 
-fn bounded_websocket_metadata_text(message: &Message) -> Option<String> {
+fn websocket_metadata_text(message: &Message) -> Option<String> {
     let Message::Text(text) = message else {
         return None;
     };
-    (text.len() <= WEBSOCKET_METADATA_SCAN_MAX_BYTES).then(|| text.to_string())
+    Some(text.to_string())
 }
 
 fn current_unix_seconds() -> u64 {

@@ -102,7 +102,11 @@ run_three_websocket_soak_filter() {
 
   local output_file
   output_file="$(mktemp "${TMPDIR:-/tmp}/codex-router-three-websocket-soak.XXXXXX")"
-  if run_test_filter "${filter}" | tee "${output_file}"; then
+  set +e
+  run_test_filter "${filter}" | tee "${output_file}"
+  local status=${PIPESTATUS[0]}
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
     local artifact_path
     artifact_path="$(
       awk '/codex_router_three_websocket_artifact=/{sub(/^.*codex_router_three_websocket_artifact=/, ""); value=$0} END{print value}' "${output_file}"
@@ -116,7 +120,6 @@ run_three_websocket_soak_filter() {
     return 0
   fi
 
-  local status=$?
   rm -f "${output_file}"
   return "${status}"
 }

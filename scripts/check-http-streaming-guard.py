@@ -89,12 +89,6 @@ def check_g25() -> None:
 
     require_contains("HTTP/SSE affinity constants", server, "HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES")
     require_contains("HTTP/SSE affinity constants", server, "HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS")
-    require_contains(
-        "WebSocket affinity constants",
-        websocket,
-        "WEBSOCKET_METADATA_SCAN_MAX_BYTES",
-    )
-
     affinity_tap = function_body(server, "record_affinity_owner_from_async_body")
     require_contains("HTTP/SSE affinity tap", affinity_tap, "scanned_bytes")
     require_contains("HTTP/SSE affinity tap", affinity_tap, "scanned_events")
@@ -104,7 +98,7 @@ def check_g25() -> None:
     forbid_contains("HTTP/SSE affinity tap", affinity_tap, "buffered.extend_from_slice(data)")
 
     websocket_pump = function_body(websocket, "pump_upstream_to_local")
-    require_contains("WebSocket pump", websocket_pump, "bounded_websocket_metadata_text")
+    require_contains("WebSocket pump", websocket_pump, "websocket_metadata_text")
     require_contains("WebSocket pump", websocket_pump, "local_write.send(upstream_message).await?")
     require_contains("WebSocket pump", websocket_pump, "is_response_completed_text")
     require_contains("WebSocket pump", websocket_pump, "websocket_affinity_owner_record_from_text")
@@ -116,13 +110,8 @@ def check_g25() -> None:
         "websocket_affinity_owner_record_from_text"
     ):
         raise AssertionError("WebSocket pump parses affinity before forwarding local frame")
-    websocket_metadata = function_body(websocket, "bounded_websocket_metadata_text")
-    require_contains(
-        "WebSocket metadata helper",
-        websocket_metadata,
-        "WEBSOCKET_METADATA_SCAN_MAX_BYTES",
-    )
-    require_contains("WebSocket metadata helper", websocket_metadata, "text.len() <=")
+    websocket_metadata = function_body(websocket, "websocket_metadata_text")
+    require_contains("WebSocket metadata helper", websocket_metadata, "Message::Text")
 
 
 def main() -> int:

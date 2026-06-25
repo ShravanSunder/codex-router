@@ -609,6 +609,21 @@ if artifact.get("git_head") != receipt.get("git_head"):
         errors.append(
             f"artifact git_head {artifact.get('git_head')} does not match current proof git_head {receipt.get('git_head')} and relevant source paths changed"
         )
+codex_version_result = subprocess.run(
+    ["codex", "--version"],
+    check=False,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+if codex_version_result.returncode != 0:
+    errors.append("failed to read installed Codex version for E-row freshness")
+else:
+    current_codex_version = codex_version_result.stdout.strip()
+    if artifact.get("codex_version") != current_codex_version:
+        errors.append(
+            f"artifact codex_version {artifact.get('codex_version')} does not match installed Codex {current_codex_version}"
+        )
 if artifact.get("mode") != "three-websocket-soak":
     errors.append("artifact mode is not three-websocket-soak")
 if not artifact.get("clients", {}).get("all_success"):
@@ -728,16 +743,20 @@ elif row_id == "E-07":
         errors.append("session_continuity per_client_join_keys must contain exactly three entries")
         per_client_join_keys = []
     observed_client_indexes = set()
+    joined_router_session_ids = set()
+    joined_upstream_session_ids = set()
     for index, join_key in enumerate(per_client_join_keys):
         if not isinstance(join_key, dict):
             errors.append(f"per_client_join_keys[{index}] is not an object")
             continue
         observed_client_indexes.add(join_key.get("client_index"))
-        for field in ["client_pid", "router_session_id", "upstream_session_id", "handshake_count"]:
+        for field in ["client_pid", "router_session_id", "upstream_session_id"]:
             if join_key.get(field) in (None, ""):
                 errors.append(f"per_client_join_keys[{index}] missing {field}")
-        if join_key.get("handshake_count") != 1:
-            errors.append(f"per_client_join_keys[{index}] handshake_count is not 1")
+        if isinstance(join_key.get("router_session_id"), int):
+            joined_router_session_ids.add(join_key.get("router_session_id"))
+        if isinstance(join_key.get("upstream_session_id"), int):
+            joined_upstream_session_ids.add(join_key.get("upstream_session_id"))
     if observed_client_indexes != {0, 1, 2}:
         errors.append(f"per_client_join_keys client indexes are wrong: {sorted(observed_client_indexes)}")
     registered_ids = registry.get("registered_session_ids") if isinstance(registry.get("registered_session_ids"), list) else []
@@ -748,6 +767,10 @@ elif row_id == "E-07":
         errors.append(f"router closed_session_ids do not contain three unique ids: {closed_ids}")
     if len(set(upstream_session_ids)) < 3:
         errors.append(f"upstream_session_ids do not contain three unique ids: {upstream_session_ids}")
+    if joined_router_session_ids != set(registered_ids):
+        errors.append(f"joined router session ids {sorted(joined_router_session_ids)} do not match registered ids {sorted(set(registered_ids))}")
+    if joined_upstream_session_ids != set(upstream_session_ids):
+        errors.append(f"joined upstream session ids {sorted(joined_upstream_session_ids)} do not match upstream ids {sorted(set(upstream_session_ids))}")
     if continuity.get("router_registered_unique_session_count") != len(set(registered_ids)):
         errors.append("session_continuity router_registered_unique_session_count does not match registry")
     if continuity.get("router_closed_unique_session_count") != len(set(closed_ids)):
@@ -767,9 +790,7 @@ elif row_id == "E-07":
             "router_pid",
             "router_session_id",
             "upstream_session_id",
-            "websocket_handshake_count",
             "transport",
-            "transport_observed_from_client_stderr",
             "stderr_transport_error_markers",
             "stdout_contains_smoke_text",
         ]
@@ -780,14 +801,10 @@ elif row_id == "E-07":
             errors.append(f"runtime correlation {index} transport is not websocket")
         if correlation.get("stderr_transport_error_markers") != []:
             errors.append(f"runtime correlation {index} has transport error markers")
-        if correlation.get("transport_observed_from_client_stderr") is not True:
-            errors.append(f"runtime correlation {index} transport was not derived from client stderr")
         if correlation.get("stdout_contains_smoke_text") is not True:
             errors.append(f"runtime correlation {index} stdout did not contain smoke text")
         if correlation.get("router_pid") != router_process.get("pid"):
             errors.append(f"runtime correlation {index} router_pid does not match router process")
-        if correlation.get("websocket_handshake_count") != 1:
-            errors.append(f"runtime correlation {index} websocket_handshake_count is not 1")
 elif row_id == "E-08":
     if upstream.get("normal_close_sessions", 0) < 3:
         errors.append("upstream normal_close_sessions is below 3")
@@ -1486,6 +1503,7 @@ elif row_id in {"G-17", "G-18"}:
         "G-18": [
             "three_codex_websocket_soak_holds_overlap_and_records_activity",
             'run_three_websocket_soak_filter "three_codex_websocket_soak_"',
+            "PIPESTATUS[0]",
         ],
     }[row_id]
     combined = harness_tests + "\n" + script
@@ -1604,10 +1622,10 @@ PY
       ;;
     G-25)
       mark_row_pass "$row_id" "$layer" "$owner" \
-        "Structural guard and bounded-scan behavior passed: HTTP/SSE and WebSocket affinity extraction stop at explicit bounds without gating body/frame forwarding." \
+        "Structural guard and metadata behavior passed: HTTP/SSE affinity extraction is bounded, and WebSocket routing metadata is observed after frame forwarding without gating pass-through." \
         "scripts/check-http-streaming-guard.py G-25" \
         "cargo test -p codex-router-proxy async_http_affinity_scan_stops_at_explicit_bounds_without_gating_body -- --nocapture" \
-        "cargo test -p codex-router-proxy websocket_metadata_scan_ignores_oversized_late_affinity_and_completion_fields -- --nocapture"
+        "cargo test -p codex-router-proxy websocket_metadata_scan_extracts_oversized_late_affinity_and_completion_fields -- --nocapture"
       ;;
     G-26)
       mark_row_pass "$row_id" "$layer" "$owner" \

@@ -2282,9 +2282,7 @@ fn runtime_correlations_for_three_websocket(
                 "router_pid": input.router_process.pid,
                 "router_session_id": router_session_by_client.get(&index).copied(),
                 "upstream_session_id": upstream_session_by_client.get(&index).copied(),
-                "websocket_handshake_count": 1,
                 "transport": if markers.is_empty() { "websocket" } else { "websocket_error" },
-                "transport_observed_from_client_stderr": true,
                 "stderr_transport_error_markers": markers,
                 "stdout_contains_smoke_text": String::from_utf8_lossy(&run.output.stdout).contains(SMOKE_EXPECTED_TEXT),
             })
@@ -2314,7 +2312,6 @@ fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<
                 "client_pid": run.pid,
                 "router_session_id": router_session_by_client.get(&client_index).copied(),
                 "upstream_session_id": upstream_session_by_client.get(&client_index).copied(),
-                "handshake_count": 1,
             })
         })
         .collect::<Vec<_>>();
