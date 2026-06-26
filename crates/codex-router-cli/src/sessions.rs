@@ -716,7 +716,7 @@ impl SessionPickerChoice {
             .unwrap_or_else(|| "Untitled Codex session".to_owned());
         let short_session_id = short_session_id(&record.session_id);
         Self {
-            session_id: record.session_id.clone(),
+            session_id: record.session_id,
             label: format!("{title}\n{recency}  {branch}  {provider}  id={short_session_id}"),
         }
     }

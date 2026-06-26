@@ -1,0 +1,97 @@
+{
+  "codex_version": "codex-cli 0.142.2",
+  "expected_account_label": "ssdev",
+  "http_sse": {
+    "actual_safe_label": null,
+    "local_auth_audit_observed": null,
+    "local_auth_carrier": null,
+    "local_auth_stripped_before_upstream": null,
+    "local_auth_validated": null,
+    "local_router_token_in_body": false,
+    "ran": false,
+    "request_line": null,
+    "selected_expected_account": null,
+    "stream_requested": null,
+    "upstream_auth_redacted_present": null
+  },
+  "http_sse_codex_status": null,
+  "http_sse_codex_stderr_line_count": null,
+  "http_sse_codex_stdout_contains_smoke_text": null,
+  "http_sse_last_message_written": false,
+  "mode": "websocket",
+  "profile_env_key": null,
+  "profile_uses_codex_router_token": false,
+  "profile_written": true,
+  "quota_status": {
+    "json_selected_account_label": "ssdev",
+    "plain_contains_expected_account": true,
+    "plain_marks_next": true,
+    "selected_account_tag": "acct-a22505bc0460",
+    "table_contains_expected_account": true
+  },
+  "router_completed": true,
+  "router_process": {
+    "argv": [
+      "serve",
+      "--port",
+      "51201",
+      "--listen-host",
+      "127.0.0.1",
+      "--state-db",
+      "<state-db-path>",
+      "--secret-root",
+      "<secret-root-path>",
+      "--upstream-base-url",
+      "http://127.0.0.1:51200/v1",
+      "--now-unix-seconds",
+      "1030",
+      "--max-snapshot-age-seconds",
+      "60",
+      "--disable-background-quota-refresh",
+      "--max-connections",
+      "64",
+      "--audit-file",
+      "<audit-file-path>"
+    ],
+    "binary_path": "<repo>/target/debug/codex-router",
+    "cleanup_result": "terminated:signal: 9 (SIGKILL)",
+    "listener": "127.0.0.1:51201",
+    "pid": 86132,
+    "readiness_line": "listening: 127.0.0.1:51201",
+    "spawned_real_serve_child": true
+  },
+  "selected_account": {
+    "routing_reason": "preferred_next",
+    "safe_label": "ssdev",
+    "safe_tag": "acct-a22505bc0460"
+  },
+  "upstream": {
+    "handshake_count": 1,
+    "http_probe_count": 0
+  },
+  "websocket": {
+    "actual_safe_label": "ssdev",
+    "first_frame_shape": {
+      "json_object": true,
+      "non_prewarm_response_create": false
+    },
+    "local_auth_audit_observed": true,
+    "local_auth_carrier": "authorization_bearer",
+    "local_auth_stripped_before_upstream": true,
+    "local_auth_validated": true,
+    "local_router_token_in_first_frame": false,
+    "non_prewarm_request_frame_count": 1,
+    "ran": true,
+    "request_frame_count": 2,
+    "routed_response_create_shape": {
+      "non_prewarm_response_create": true,
+      "present": true
+    },
+    "selected_expected_account": true,
+    "upstream_auth_redacted_present": true
+  },
+  "websocket_codex_status": "exit status: 0",
+  "websocket_codex_stderr_line_count": 18,
+  "websocket_codex_stdout_contains_smoke_text": true,
+  "websocket_last_message_written": true
+}
