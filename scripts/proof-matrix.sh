@@ -463,6 +463,7 @@ main() {
     AR-WS-PASSTHROUGH)
       mark_row_pass "$row_id" "$layer" "$owner" \
         "WebSocket first-frame pass-through tests prove large/malformed/future Codex-owned frames are forwarded without router payload policy." \
+        "cargo test -p codex-router-proxy loopback_router_runtime_passes_large_malformed_websocket_first_frame_unchanged -- --nocapture" \
         "cargo test -p codex-router-proxy websocket_first_frame_forwards_large_malformed_payload_without_router_policy -- --nocapture" \
         "cargo test -p codex-router-proxy websocket_first_response_create_frame_selects_and_forwards_unchanged -- --nocapture" \
         "cargo test -p codex-router-proxy websocket_first_future_json_payload_selects_and_forwards_unchanged -- --nocapture"
@@ -471,6 +472,7 @@ main() {
       mark_row_pass "$row_id" "$layer" "$owner" \
         "WebSocket active-turn reservation tests prove completion releases load and later same-socket request-like frames re-reserve the pinned account." \
         "cargo test -p codex-router-proxy websocket::async_forwarding_tests::response_completed_releases_active_reservation_before_socket_closes -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::completion_releases_before_blocked_affinity_recording -- --nocapture" \
         "cargo test -p codex-router-proxy websocket::async_forwarding_tests::same_socket_request_after_completion_reserves_pinned_account_again -- --nocapture"
       ;;
     AR-HTTP-PASSTHROUGH)
@@ -506,10 +508,99 @@ main() {
         "cargo test -p codex-router-cli quota_status_command_defaults_to_home_router_root -- --nocapture"
       ;;
     AR-E2E-ACCOUNTS)
-      mark_row_pass "$row_id" "$layer" "$owner" \
-        "Installed-Codex smoke proves WebSocket account-token selection and three concurrent WebSocket clients share one router without transport degradation." \
-        "tests/smoke/installed_codex_mock.sh --transport websocket --scenario serial" \
-        "tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent"
+      serial_output_file=$(mktemp "${TMPDIR:-/tmp}/codex-router-${row_id}-serial.XXXXXX")
+      concurrent_output_file=$(mktemp "${TMPDIR:-/tmp}/codex-router-${row_id}-concurrent.XXXXXX")
+      if ! tests/smoke/installed_codex_mock.sh --transport websocket --scenario serial 2>&1 | tee "$serial_output_file"; then
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        printf 'proof row %s failed; serial installed-Codex smoke failed; receipt: %s\n' "$row_id" "$receipt" >&2
+        exit 1
+      fi
+      if ! tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent 2>&1 | tee "$concurrent_output_file"; then
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        printf 'proof row %s failed; concurrent installed-Codex smoke failed; receipt: %s\n' "$row_id" "$receipt" >&2
+        exit 1
+      fi
+      serial_artifact=$(awk '/codex_router_installed_codex_artifact=/{sub(/^.*codex_router_installed_codex_artifact=/, ""); value=$0} END{print value}' "$serial_output_file")
+      concurrent_artifact=$(awk '/codex_router_three_websocket_artifact=/{sub(/^.*codex_router_three_websocket_artifact=/, ""); value=$0} END{print value}' "$concurrent_output_file")
+      if [[ -z "$serial_artifact" || ! -f "$serial_artifact" || -z "$concurrent_artifact" || ! -f "$concurrent_artifact" ]]; then
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        printf 'proof row %s failed; smoke did not emit durable transcript artifacts; receipt: %s\n' "$row_id" "$receipt" >&2
+        exit 1
+      fi
+      if ! ensure_guarded_source_paths_clean "$row_id"; then
+        receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
+        printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2
+        exit 1
+      fi
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "pass" 0)
+      if python3 - "$receipt" "$serial_artifact" "$concurrent_artifact" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+receipt_path = Path(sys.argv[1])
+serial_path = Path(sys.argv[2])
+concurrent_path = Path(sys.argv[3])
+receipt = json.loads(receipt_path.read_text())
+serial = json.loads(serial_path.read_text())
+concurrent = json.loads(concurrent_path.read_text())
+errors = []
+
+websocket = serial.get("websocket", {})
+if websocket.get("selected_expected_account") is not True:
+    errors.append("serial WebSocket artifact did not prove expected account selection")
+if not serial.get("selected_account", {}).get("safe_tag"):
+    errors.append("serial WebSocket artifact did not include selected account safe tag")
+
+clients = concurrent.get("clients", {})
+if clients.get("count") != 3:
+    errors.append("concurrent artifact did not run three clients")
+if clients.get("all_success") is not True:
+    errors.append("concurrent artifact did not report all clients successful")
+if concurrent.get("selected_account", {}).get("expected_upstream_account_selected") is not True:
+    errors.append("concurrent artifact did not prove selected upstream account evidence")
+if not concurrent.get("selected_account", {}).get("safe_tag"):
+    errors.append("concurrent artifact did not include selected account safe tag")
+upstream = concurrent.get("upstream", {})
+if len(upstream.get("upstream_client_sessions", [])) < 3:
+    errors.append("concurrent artifact did not record upstream client sessions")
+if upstream.get("active_high_water", 0) < 3:
+    errors.append("concurrent artifact did not prove overlapping WebSocket sessions")
+
+serial_copy = receipt_path.parent / "AR-E2E-ACCOUNTS-serial-transcript.json"
+concurrent_copy = receipt_path.parent / "AR-E2E-ACCOUNTS-concurrent-transcript.json"
+shutil.copyfile(serial_path, serial_copy)
+shutil.copyfile(concurrent_path, concurrent_copy)
+try:
+    artifact_paths = [
+        str(serial_copy.resolve().relative_to(Path.cwd().resolve())),
+        str(concurrent_copy.resolve().relative_to(Path.cwd().resolve())),
+    ]
+except ValueError:
+    artifact_paths = [str(serial_copy), str(concurrent_copy)]
+
+receipt["status_after"] = "[x] passed" if not errors else "[ ] pending"
+receipt["result"] = "pass" if not errors else "fail"
+receipt["exit_code"] = 0 if not errors else 1
+receipt["freshness_check"] = "guarded_source_paths_clean_at_git_head"
+receipt["artifact_paths"] = artifact_paths
+receipt["notes"] = (
+    "Serial and three-client concurrent installed-Codex WebSocket transcripts prove selected-account routing and transport continuity."
+    if not errors else "; ".join(errors)
+)
+receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    raise SystemExit(1)
+PY
+      then
+        printf 'proof row %s passed; receipt: %s\n' "$row_id" "$receipt"
+        exit 0
+      fi
+      printf 'proof row %s failed; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
       ;;
     U-01)
       mark_row_pass "$row_id" "$layer" "$owner" \

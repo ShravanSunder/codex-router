@@ -8,6 +8,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -274,7 +276,7 @@ async fn load_session_records(
         r#"
         SELECT
             id, cwd, model_provider, model, source, thread_source, git_branch,
-            created_at_ms, updated_at_ms, recency_at_ms
+            title, created_at_ms, updated_at_ms, recency_at_ms
         FROM threads
         WHERE archived = 0
         ORDER BY
@@ -309,6 +311,7 @@ async fn load_session_records(
             source,
             thread_source,
             git_branch: row.get::<Option<String>, _>("git_branch"),
+            title: row.get::<Option<String>, _>("title"),
             created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
             updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
             recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
@@ -680,6 +683,8 @@ struct SessionRecord {
     thread_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_branch: Option<String>,
+    #[serde(skip)]
+    title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -698,15 +703,21 @@ pub(crate) struct SessionPickerChoice {
 impl SessionPickerChoice {
     fn from_record(record: SessionRecord) -> Self {
         let provider = record.provider.unwrap_or_else(|| "-".to_owned());
-        let source = record.source.unwrap_or_else(|| "-".to_owned());
         let branch = record.git_branch.unwrap_or_else(|| "-".to_owned());
-        let cwd = record.cwd.unwrap_or_else(|| "-".to_owned());
+        let recency = record
+            .recency_at_ms
+            .map(format_recency)
+            .unwrap_or_else(|| "-".to_owned());
+        let title = record
+            .title
+            .as_deref()
+            .and_then(non_empty_trimmed)
+            .map(truncate_picker_title)
+            .unwrap_or_else(|| "Untitled Codex session".to_owned());
+        let short_session_id = short_session_id(&record.session_id);
         Self {
             session_id: record.session_id.clone(),
-            label: format!(
-                "{}  provider={} source={} branch={} cwd={}",
-                record.session_id, provider, source, branch, cwd
-            ),
+            label: format!("{title}\n{recency}  {branch}  {provider}  id={short_session_id}"),
         }
     }
 
@@ -714,6 +725,54 @@ impl SessionPickerChoice {
     #[must_use]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
+    }
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn short_session_id(session_id: &str) -> String {
+    let mut chars = session_id.chars();
+    let prefix: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
+fn truncate_picker_title(title: &str) -> String {
+    const MAX_TITLE_CHARS: usize = 92;
+    let mut chars = title.chars();
+    let prefix: String = chars.by_ref().take(MAX_TITLE_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
+fn format_recency(recency_at_ms: i64) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+    let Some(now_ms) = now_ms else {
+        return format!("updated={recency_at_ms}");
+    };
+    let elapsed_ms = now_ms.saturating_sub(recency_at_ms);
+    let elapsed_seconds = elapsed_ms / 1000;
+    match elapsed_seconds {
+        seconds if seconds < 60 => "now".to_owned(),
+        seconds if seconds < 60 * 60 => format!("{}m ago", seconds / 60),
+        seconds if seconds < 60 * 60 * 48 => format!("{}h ago", seconds / (60 * 60)),
+        seconds => format!("{}d ago", seconds / (60 * 60 * 24)),
     }
 }
 

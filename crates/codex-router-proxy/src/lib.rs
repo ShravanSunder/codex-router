@@ -2327,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_backed_selector_malformed_affinity_key_fails_closed() {
+    fn repository_backed_selector_ignores_malformed_affinity_key_and_selects_normally() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_malformed");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = match SqliteStateStore::open(&database_path) {
@@ -2344,17 +2344,16 @@ mod tests {
 
         let selector = RepositoryBackedAccountSelector::new(&state);
 
-        assert_eq!(
-            selector.select_upstream_account(
-                &HttpProxyRequest::new(Method::Post, "/v1/responses")
-                    .with_body(br#"{"previous_response_id":42}"#.to_vec()),
-                TokenGeneration::new(1),
-                None,
-            ),
-            Err(HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::MalformedAffinityKey
-            })
-        );
+        let decision = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_body(br#"{"previous_response_id":42}"#.to_vec()),
+            TokenGeneration::new(1),
+            None,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("malformed affinity metadata should be ignored: {error}"),
+        };
+        assert_eq!(decision.account_id(), alpha.account_id());
     }
 
     #[test]
@@ -4156,6 +4155,154 @@ mod tests {
         assert!(!audit_contents.contains("runtime-ws-upstream-token-canary"));
         assert!(!audit_contents.contains(r#"{"type":"response.create","runtime":true}"#));
         assert!(!audit_contents.contains("acct_ws_runtime"));
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn loopback_router_runtime_passes_large_malformed_websocket_first_frame_unchanged() {
+        let temp_dir = ProxyTestTempDir::new("runtime_websocket_large_first_frame");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_ws_runtime_large"),
+            "ws-large",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &account,
+            90,
+            "runtime-ws-large-token-canary",
+        );
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket = match accept_hdr(stream, |request: &Request, response: Response| {
+                let authorization = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                if let Err(error) = upstream_sender.send((authorization, String::new())) {
+                    panic!("mock websocket upstream headers should record: {error}");
+                }
+                Ok(response)
+            }) {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("mock websocket upstream handshake should accept: {error}"),
+            };
+            let first_frame = match websocket.read() {
+                Ok(message) => message.to_string(),
+                Err(error) => panic!("mock websocket upstream should read first frame: {error}"),
+            };
+            if let Err(error) = upstream_sender.send((String::new(), first_frame)) {
+                panic!("mock websocket upstream first frame should record: {error}");
+            }
+            if let Err(error) = websocket.send(Message::text(r#"{"type":"response.completed"}"#)) {
+                panic!("mock websocket upstream should send response: {error}");
+            }
+        });
+
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock endpoint should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let client_first_frame = {
+            let mut frame = String::from(r#"{"type":"response.create","input":""#);
+            frame.extend(std::iter::repeat_n('x', 1024 * 1024));
+            frame
+        };
+        let expected_first_frame = client_first_frame.clone();
+        let client_thread = thread::spawn(move || {
+            let mut request =
+                match format!("ws://{router_address}/v1/responses").into_client_request() {
+                    Ok(request) => request,
+                    Err(error) => panic!("local websocket request should build: {error}"),
+                };
+            request.headers_mut().insert(
+                "Authorization",
+                HeaderValue::from_static("Bearer current-token"),
+            );
+            let (mut client, _response) = match connect(request) {
+                Ok(connection) => connection,
+                Err(error) => panic!("local websocket client should connect: {error}"),
+            };
+            if let Err(error) = client.send(Message::text(client_first_frame)) {
+                panic!("local websocket client should send first frame: {error}");
+            }
+            match client.read() {
+                Ok(message) => message.to_string(),
+                Err(error) => panic!("local websocket client should read response: {error}"),
+            }
+        });
+
+        let handled = match runtime.serve_protocol_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve websocket connection: {error}"),
+        };
+        assert_eq!(handled, 1);
+        let client_response = match client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("client thread panicked: {error:?}"),
+        };
+        assert_eq!(client_response, r#"{"type":"response.completed"}"#);
+        let (authorization, _) = match upstream_receiver.recv() {
+            Ok(recorded) => recorded,
+            Err(error) => panic!("upstream handshake should record: {error}"),
+        };
+        assert_eq!(authorization, "Bearer runtime-ws-large-token-canary");
+        let (_, recorded_first_frame) = match upstream_receiver.recv() {
+            Ok(recorded) => recorded,
+            Err(error) => panic!("upstream first frame should record: {error}"),
+        };
+        assert_eq!(recorded_first_frame, expected_first_frame);
+
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
+        }
     }
 
     #[test]

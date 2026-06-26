@@ -188,6 +188,10 @@ CHECKS: dict[str, Check] = {
                 "crates/codex-router-proxy/src/websocket.rs",
                 "serde_json::from_slice::<serde_json::Value>(first_frame_bytes)",
             ),
+            (
+                "crates/codex-router-proxy/src/websocket.rs",
+                "has_forbidden_top_level_json_auth_carrier",
+            ),
         ),
         release_scan_forbidden=(
             "FirstFramePolicy",
@@ -199,6 +203,10 @@ CHECKS: dict[str, Check] = {
         required=(
             ("crates/codex-router-proxy/src/server.rs", "hyper_tungstenite::upgrade"),
             ("crates/codex-router-proxy/src/websocket.rs", "tokio_tungstenite::connect_async"),
+            (
+                "crates/codex-router-proxy/src/websocket.rs",
+                "has_forbidden_top_level_websocket_auth_carrier",
+            ),
         ),
     ),
     "G-28": Check(

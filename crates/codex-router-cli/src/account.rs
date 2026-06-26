@@ -32,6 +32,8 @@ use crate::router_root_or_default;
 /// Account CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccountCommand {
+    /// Prints account command help.
+    Help(&'static str),
     /// Logs in from an existing Codex OAuth auth.json into router-owned storage.
     LoginAuthJson {
         /// Router-owned root.
@@ -81,7 +83,15 @@ impl AccountCommand {
         };
 
         match command.as_str() {
+            "--help" | "-h" | "help" => {
+                parser.reject_remaining()?;
+                Ok(Self::Help(ACCOUNT_HELP_TEXT))
+            }
             "login" => {
+                if parser.next_if_help()? {
+                    parser.reject_remaining()?;
+                    return Ok(Self::Help(ACCOUNT_LOGIN_HELP_TEXT));
+                }
                 let options = AccountLoginOptions::parse(parser)?;
                 match options.method()? {
                     AccountLoginMethod::AuthJson(auth_json) => Ok(Self::LoginAuthJson {
@@ -108,6 +118,10 @@ impl AccountCommand {
                 })
             }
             "list" => {
+                if parser.next_if_help()? {
+                    parser.reject_remaining()?;
+                    return Ok(Self::Help(ACCOUNT_LIST_HELP_TEXT));
+                }
                 let options = AccountRootOptions::parse(parser)?;
                 Ok(Self::List {
                     router_root: options.router_root()?,
@@ -209,6 +223,9 @@ pub fn run_account_command(
     command: AccountCommand,
 ) -> Result<(), AccountCommandError> {
     match command {
+        AccountCommand::Help(text) => stdout
+            .write_all(text.as_bytes())
+            .map_err(AccountCommandError::Stdout),
         AccountCommand::LoginAuthJson {
             router_root,
             label,
@@ -250,6 +267,30 @@ pub fn run_account_command(
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
     }
 }
+
+const ACCOUNT_HELP_TEXT: &str = "\
+codex-router account
+
+commands:
+  login --label <name>  Add an OAuth account with device-code login
+  list                  Show configured router accounts
+";
+
+const ACCOUNT_LOGIN_HELP_TEXT: &str = "\
+codex-router account login --label <name>
+
+Adds an OAuth account to router-owned storage.
+
+options:
+  --label <name>         Friendly account name shown in quota and account list
+  --codex-bin <path>     Codex binary to use for device-code login [default: codex]
+";
+
+const ACCOUNT_LIST_HELP_TEXT: &str = "\
+codex-router account list
+
+Shows configured router accounts.
+";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AccountImportOutputMode {

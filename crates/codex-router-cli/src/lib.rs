@@ -908,6 +908,22 @@ impl ArgumentParser {
             .map_err(|value| CliError::NonUtf8Argument { value })
     }
 
+    pub(crate) fn next_if_help(&mut self) -> Result<bool, CliError> {
+        let Some(argument) = self.arguments.get(self.index) else {
+            return Ok(false);
+        };
+        let argument = argument
+            .clone()
+            .into_string()
+            .map_err(|value| CliError::NonUtf8Argument { value })?;
+        if matches!(argument.as_str(), "--help" | "-h" | "help") {
+            self.index += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub(crate) fn next_required_value(&mut self, option: &'static str) -> Result<String, CliError> {
         self.next_string()?
             .ok_or(CliError::MissingOptionValue { option })
@@ -1368,6 +1384,79 @@ mod tests {
             );
         }
         assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn nested_user_facing_help_does_not_leak_internal_commands() {
+        for (arguments, expected_lines) in [
+            (
+                &["codex-router", "account", "--help"][..],
+                &[
+                    "codex-router account",
+                    "login --label <name>  Add an OAuth account",
+                    "list                  Show configured router accounts",
+                ][..],
+            ),
+            (
+                &["codex-router", "account", "login", "--help"][..],
+                &[
+                    "codex-router account login --label <name>",
+                    "--label <name>",
+                    "--codex-bin <path>",
+                ][..],
+            ),
+            (
+                &["codex-router", "quota", "--help"][..],
+                &[
+                    "codex-router quota",
+                    "quota          Show quota, refresh state, and next account",
+                    "quota refresh  Refresh quota data now",
+                ][..],
+            ),
+            (
+                &["codex-router", "quota", "refresh", "--help"][..],
+                &[
+                    "codex-router quota refresh",
+                    "Refreshes persisted quota data from configured OAuth accounts.",
+                ][..],
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            must_ok(run_with_io(
+                arguments.iter().map(OsString::from),
+                &CliContext::new(Vec::new()),
+                &mut stdout,
+                &mut stderr,
+            ));
+            let output = CliRunOutput {
+                stdout: must_ok(String::from_utf8(stdout)),
+                stderr: must_ok(String::from_utf8(stderr)),
+            };
+
+            for expected_line in expected_lines {
+                assert!(
+                    output.stdout.contains(expected_line),
+                    "help output missing expected line: {expected_line}\n{}",
+                    output.stdout
+                );
+            }
+            for hidden_line in [
+                "--state-db",
+                "--secret-root",
+                "token",
+                "import-codex-auth",
+                "live quota",
+                "--allow-plaintext-file-secrets",
+            ] {
+                assert!(
+                    !output.stdout.contains(hidden_line),
+                    "help output leaked internal line: {hidden_line}\n{}",
+                    output.stdout
+                );
+            }
+            assert!(output.stderr.is_empty());
+        }
     }
 
     #[test]
@@ -2455,11 +2544,11 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
         );
         assert_eq!(
             lines[2],
-            "responses route\tnext: snapshot\twhy: fallback: needs refresh limiting window: 5h 75% left"
+            "responses route\tpreferred by quota: snapshot\twhy: fallback by quota: needs refresh limiting window: 5h 75% left"
         );
         assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
@@ -2547,11 +2636,11 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
         );
         assert_eq!(
             lines[2],
-            "responses route\tnext: primary\twhy: preferred next: safest quota limiting window: 5h 25% left"
+            "responses route\tpreferred by quota: primary\twhy: preferred by quota: safest quota limiting window: 5h 25% left"
         );
         assert_eq!(lines.len(), 3);
         assert!(!output.stdout.contains("acct_primary"));
@@ -2655,7 +2744,7 @@ exit 42
         );
         assert_eq!(parsed["accounts"][0]["preferred_next"], true);
         assert_eq!(parsed["accounts"][0]["reset_credits_available"], 1);
-        assert_eq!(parsed["accounts"][0]["next_use"], "preferred");
+        assert_eq!(parsed["accounts"][0]["next_use"], "preferred by quota");
         assert_eq!(parsed["accounts"][0]["short_pressure"], 25);
         assert_eq!(parsed["accounts"][0]["long_pressure"], 20);
         assert_eq!(parsed["accounts"][0]["limiting_window"], "5h");
@@ -3600,13 +3689,17 @@ exit 42
             status_output
                 .stdout
                 .lines()
-                .any(|line| line.ends_with("\tfallback"))
+                .any(|line| line.ends_with("\tfallback by quota"))
         );
-        assert!(status_output.stdout.contains("fallback: needs refresh"));
         assert!(
             status_output
                 .stdout
-                .contains("responses route\tnext: partial")
+                .contains("fallback by quota: needs refresh")
+        );
+        assert!(
+            status_output
+                .stdout
+                .contains("responses route\tpreferred by quota: partial")
         );
         assert!(!status_output.stdout.contains("partial-quota-token"));
         assert!(status_output.stderr.is_empty());
@@ -3686,13 +3779,17 @@ exit 42
             status_output
                 .stdout
                 .lines()
-                .any(|line| line.ends_with("\tfallback"))
+                .any(|line| line.ends_with("\tfallback by quota"))
         );
-        assert!(status_output.stdout.contains("fallback: needs refresh"));
         assert!(
             status_output
                 .stdout
-                .contains("responses route\tnext: missing-reset")
+                .contains("fallback by quota: needs refresh")
+        );
+        assert!(
+            status_output
+                .stdout
+                .contains("responses route\tpreferred by quota: missing-reset")
         );
         assert!(!status_output.stdout.contains("missing-reset-quota-token"));
         assert!(status_output.stderr.is_empty());
@@ -4967,6 +5064,17 @@ exit 42
 
         assert!(stdout.is_empty());
         assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
+        assert_eq!(picker.offered_labels.len(), 2);
+        assert!(
+            picker.offered_labels[0].starts_with("PICKER_CANARY_SHOULD_NOT_LEAK\n"),
+            "interactive picker should show the human title first, got {:?}",
+            picker.offered_labels[0]
+        );
+        assert!(
+            picker.offered_labels[0].contains("main  codex-router  id=thread-n..."),
+            "interactive picker should show compact metadata on the second line, got {:?}",
+            picker.offered_labels[0]
+        );
         assert_eq!(runner.resumed_session_ids, ["thread-old"]);
     }
 
@@ -6223,6 +6331,7 @@ exit 42
     struct FakeSessionsPicker {
         selected_session_id: String,
         offered_session_ids: Vec<String>,
+        offered_labels: Vec<String>,
     }
 
     impl FakeSessionsPicker {
@@ -6230,6 +6339,7 @@ exit 42
             Self {
                 selected_session_id: selected_session_id.to_owned(),
                 offered_session_ids: Vec::new(),
+                offered_labels: Vec::new(),
             }
         }
     }
@@ -6243,6 +6353,7 @@ exit 42
                 .iter()
                 .map(|choice| choice.session_id().to_owned())
                 .collect();
+            self.offered_labels = choices.iter().map(ToString::to_string).collect();
             Ok(Some(self.selected_session_id.clone()))
         }
     }

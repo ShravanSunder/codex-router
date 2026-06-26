@@ -78,6 +78,8 @@ const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 600;
 /// Quota CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QuotaCommand {
+    /// Prints quota command help.
+    Help(&'static str),
     /// Renders persisted quota status.
     Status {
         /// Router-owned root.
@@ -114,7 +116,15 @@ impl QuotaCommand {
         };
 
         match command.as_str() {
+            "--help" | "-h" | "help" => {
+                parser.reject_remaining()?;
+                Ok(Self::Help(QUOTA_HELP_TEXT))
+            }
             "status" => {
+                if parser.next_if_help()? {
+                    parser.reject_remaining()?;
+                    return Ok(Self::Help(QUOTA_STATUS_HELP_TEXT));
+                }
                 let options = QuotaStatusOptions::parse(parser)?;
                 Ok(Self::Status {
                     router_root: options.router_root()?,
@@ -125,6 +135,10 @@ impl QuotaCommand {
                 })
             }
             "refresh" => {
+                if parser.next_if_help()? {
+                    parser.reject_remaining()?;
+                    return Ok(Self::Help(QUOTA_REFRESH_HELP_TEXT));
+                }
                 let options = QuotaRefreshOptions::parse(parser)?;
                 Ok(Self::Refresh {
                     router_root: options.router_root()?,
@@ -221,6 +235,9 @@ pub fn run_quota_command(
     command: QuotaCommand,
 ) -> Result<(), QuotaCommandError> {
     match command {
+        QuotaCommand::Help(text) => stdout
+            .write_all(text.as_bytes())
+            .map_err(QuotaCommandError::Stdout),
         QuotaCommand::Status {
             router_root,
             format,
@@ -241,6 +258,36 @@ pub fn run_quota_command(
         } => refresh_quota(stdout, router_root, base_url),
     }
 }
+
+const QUOTA_HELP_TEXT: &str = "\
+codex-router quota
+
+Shows cached quota immediately, then refreshes quota best-effort and updates the view.
+
+commands:
+  quota          Show quota, refresh state, and next account
+  quota refresh  Refresh quota data now
+
+options:
+  --format table|plain|json
+  --all-limits
+";
+
+const QUOTA_STATUS_HELP_TEXT: &str = "\
+codex-router quota status
+
+Shows cached quota without the best-effort refresh step.
+
+options:
+  --format table|plain|json
+  --all-limits
+";
+
+const QUOTA_REFRESH_HELP_TEXT: &str = "\
+codex-router quota refresh
+
+Refreshes persisted quota data from configured OAuth accounts.
+";
 
 fn refresh_quota(
     stdout: &mut impl Write,
@@ -1331,7 +1378,7 @@ fn write_selector_summary_table(
 ) -> Result<(), QuotaCommandError> {
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(["route", "next", "why"]);
+    table.set_header(["route", "preferred by quota", "why"]);
     let next = selected_account_label(rows).to_owned();
     let summary = selector_summary(rows);
     table.add_row(["responses".to_owned(), next, summary]);
@@ -1345,7 +1392,7 @@ fn write_selector_summary_plain(
 ) -> Result<(), QuotaCommandError> {
     writeln!(
         stdout,
-        "responses route\tnext: {}\twhy: {}",
+        "responses route\tpreferred by quota: {}\twhy: {}",
         selected_account_label(rows),
         selector_summary(rows)
     )
@@ -1753,7 +1800,7 @@ const fn run_rate_confidence_label(confidence: QuotaRunRateConfidence) -> &'stat
 }
 
 fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
-    let first_line = assessment.routing_reason().human_phrase();
+    let first_line = format_routing_reason_for_quota(assessment.routing_reason());
     if let Some(limiting_window) = assessment.limiting_window() {
         format!(
             "{first_line}\nlimiting window: {} {} left",
@@ -1765,17 +1812,36 @@ fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
     }
 }
 
+fn format_routing_reason_for_quota(reason: RoutingReason) -> &'static str {
+    match reason {
+        RoutingReason::PreferredWeeklyHealthier => "preferred by quota: weekly healthier",
+        RoutingReason::PreferredWeeklyResetSoon => "preferred by quota: weekly reset soon",
+        RoutingReason::PreferredShortResetSoon => "preferred by quota: 5h reset soon",
+        RoutingReason::PreferredProjectedBurn => "preferred by quota: projected burn",
+        RoutingReason::PreferredHighestWeight => "preferred by quota: safest quota",
+        RoutingReason::AvailableSamePool => "available by quota: same pool",
+        RoutingReason::HeldReserve => "held by quota: reserve",
+        RoutingReason::HeldUnknown => "held by quota: needs refresh",
+        RoutingReason::UnknownFallbackPreferred => "fallback by quota: needs refresh",
+        RoutingReason::UnknownFallbackAvailable => "fallback by quota: same unknown pool",
+        RoutingReason::ExcludedDisabled => "blocked: disabled",
+        RoutingReason::ExcludedMissingCredential => "blocked: missing credential",
+        RoutingReason::BlockedWindowExhausted => "blocked: quota empty",
+        RoutingReason::BlockedWindowIneligible => "blocked: quota ineligible",
+    }
+}
+
 fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
     match assessment.routing_reason() {
         RoutingReason::PreferredWeeklyHealthier
         | RoutingReason::PreferredWeeklyResetSoon
         | RoutingReason::PreferredShortResetSoon
         | RoutingReason::PreferredProjectedBurn
-        | RoutingReason::PreferredHighestWeight => "preferred",
-        RoutingReason::AvailableSamePool => "available",
-        RoutingReason::HeldReserve | RoutingReason::HeldUnknown => "held",
+        | RoutingReason::PreferredHighestWeight => "preferred by quota",
+        RoutingReason::AvailableSamePool => "available by quota",
+        RoutingReason::HeldReserve | RoutingReason::HeldUnknown => "held by quota",
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
-            "fallback"
+            "fallback by quota"
         }
         RoutingReason::ExcludedDisabled
         | RoutingReason::ExcludedMissingCredential

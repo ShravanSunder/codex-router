@@ -82,12 +82,14 @@ use crate::http_sse::local_auth_rejection_audit_event;
 use crate::http_sse::redacted_account_hash;
 use crate::local_auth::ProxyLocalAuthGate;
 use crate::local_auth::extract_presented_local_token_from_request;
-use crate::local_auth::has_forbidden_top_level_json_auth_carrier;
 use crate::provider_error::AsyncProviderErrorObserver;
 use crate::provider_error::ProviderErrorClassification;
 use crate::provider_error::classify_provider_error_envelope;
 
 use crate::routes::Method;
+
+const WEBSOCKET_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
+const WEBSOCKET_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 
 /// WebSocket frame subset needed before upstream connection opens.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -220,7 +222,7 @@ impl WebSocketProtocolRouter {
         first_frame: &WebSocketFrame,
     ) -> Result<(), WebSocketCloseReason> {
         if let WebSocketFrame::Text(first_frame_bytes) = first_frame
-            && has_forbidden_top_level_json_auth_carrier(first_frame_bytes)
+            && has_forbidden_top_level_websocket_auth_carrier(first_frame_bytes)
         {
             return Err(WebSocketCloseReason::UnexpectedFirstFrame);
         }
@@ -1049,6 +1051,7 @@ mod registry_tests {
 
 #[cfg(test)]
 mod async_forwarding_tests {
+    use super::ActiveTurnReservationState;
     use super::AsyncWebSocketTunnel;
     use super::TokenGeneration;
     use super::WebSocketAffinityOwnerContext;
@@ -1058,6 +1061,8 @@ mod async_forwarding_tests {
     use super::WebSocketRevocationRegistry;
     use super::forward_duplex_until_complete;
     use super::is_response_completed;
+    use super::is_response_create;
+    use super::record_forwarded_websocket_metadata;
     use super::websocket_affinity_owner_record;
     use bytes::Bytes;
     use codex_router_auth::resolver::CredentialResolverError;
@@ -1085,6 +1090,7 @@ mod async_forwarding_tests {
     use crate::account_selection::AsyncAccountDecisionSelector;
     use crate::account_selection::RouteBandReservationBooks;
     use crate::account_selection::SelectedAccountDecision;
+    use crate::http_sse::AsyncHttpAffinityOwnerRecorder;
     use crate::http_sse::AsyncProviderCredentialResolver;
     use crate::http_sse::HttpAffinitySecretProvider;
     use crate::http_sse::HttpProxyError;
@@ -1092,6 +1098,7 @@ mod async_forwarding_tests {
     use crate::local_auth::ProxyLocalAuthGate;
     use crate::provider_error::AsyncProviderErrorObserver;
     use codex_router_selection::reservation::ReservationBook;
+    use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedProviderError {
@@ -1135,6 +1142,137 @@ mod async_forwarding_tests {
                 self.observed.notify_one();
             })
         }
+    }
+
+    #[derive(Debug)]
+    struct BlockingAsyncAffinityOwnerRecorder {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl BlockingAsyncAffinityOwnerRecorder {
+        fn new(entered: Arc<Notify>, release: Arc<Notify>) -> Self {
+            Self { entered, release }
+        }
+    }
+
+    impl AsyncHttpAffinityOwnerRecorder for BlockingAsyncAffinityOwnerRecorder {
+        fn record_affinity_owner<'a>(
+            &'a self,
+            _owner: PreviousResponseAffinityOwnerRecord,
+        ) -> BoxFuture<'a, Result<(), HttpProxyError>> {
+            Box::pin(async move {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(())
+            })
+        }
+    }
+
+    #[test]
+    fn response_create_detection_is_bounded_top_level_metadata_only() {
+        assert!(is_response_create(&Message::text(
+            r#"{"type":"response.create","turn":1}"#,
+        )));
+        assert!(!is_response_create(&Message::text(
+            r#"{"input":[{"content":"{\"type\":\"response.create\"}"}]}"#,
+        )));
+
+        let mut late_type = br#"{"input":""#.to_vec();
+        late_type.extend(std::iter::repeat_n(b'x', 70 * 1024));
+        late_type.extend(br#"","type":"response.create"}"#);
+        let late_type = String::from_utf8(late_type)
+            .unwrap_or_else(|error| panic!("test text should be utf-8: {error}"));
+        assert!(!is_response_create(&Message::text(late_type)));
+    }
+
+    #[tokio::test]
+    async fn completion_releases_before_blocked_affinity_recording() {
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let active_reservations = RouteBandReservationBooks::default();
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_next_at(selected_account.clone(), 8, 1)
+        };
+        let active_reservation_guard = ActiveReservationGuard::new(
+            active_reservations.clone(),
+            "responses".to_owned(),
+            reservation_handle,
+        );
+        let active_turn_reservation =
+            ActiveTurnReservationState::new(Some(active_reservation_guard));
+        let active_pressure = || {
+            let reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .get("responses")
+                .map_or(0, |book| book.active_load_pressure(&selected_account))
+        };
+        assert_eq!(active_pressure(), 8);
+
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let recorder_entered = Arc::new(Notify::new());
+        let recorder_release = Arc::new(Notify::new());
+        let recorder = Arc::new(BlockingAsyncAffinityOwnerRecorder::new(
+            Arc::clone(&recorder_entered),
+            Arc::clone(&recorder_release),
+        ));
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let session_id = session.session_id;
+        let active_turn_reservation_for_task = active_turn_reservation.clone();
+
+        let record_task = tokio::spawn(async move {
+            record_forwarded_websocket_metadata(
+                tokio_tungstenite::tungstenite::Utf8Bytes::from_static(
+                    r#"{"type":"response.completed","response":{"id":"resp_1"}}"#,
+                ),
+                registry,
+                session_id,
+                Some(&affinity_owner_context),
+                active_turn_reservation_for_task,
+                Some(recorder),
+                None,
+            )
+            .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), recorder_entered.notified())
+            .await
+            .unwrap_or_else(|_elapsed| panic!("recorder should be entered"));
+        assert_eq!(
+            active_pressure(),
+            0,
+            "completion must release active pressure before affinity persistence can block"
+        );
+
+        active_turn_reservation.reserve_if_idle(2);
+        assert_eq!(
+            active_pressure(),
+            8,
+            "a new same-socket turn must be able to reserve while affinity persistence is blocked"
+        );
+        recorder_release.notify_one();
+        record_task
+            .await
+            .unwrap_or_else(|error| panic!("record task should finish: {error}"));
+        assert_eq!(active_pressure(), 8);
     }
 
     #[derive(Clone, Debug)]
@@ -1278,7 +1416,7 @@ mod async_forwarding_tests {
     }
 
     #[test]
-    fn websocket_metadata_scan_extracts_oversized_late_affinity_and_completion_fields() {
+    fn websocket_metadata_scan_ignores_oversized_late_affinity_and_completion_fields() {
         let affinity_secret = RouterAffinityHashSecret::new(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -1296,15 +1434,14 @@ mod async_forwarding_tests {
             r#"{{"padding":"{oversized_padding}","type":"response.completed","response":{{"id":"resp_late"}}}}"#
         ));
 
-        let Some(owner) = websocket_affinity_owner_record(&message, Some(&context)) else {
-            panic!("oversized completion frame should still record affinity after forwarding");
-        };
-        assert_eq!(
-            owner.account_id(),
-            &AccountId::new("acct_selected")
-                .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
+        assert!(
+            websocket_affinity_owner_record(&message, Some(&context)).is_none(),
+            "late oversized affinity metadata should be forwarded but not classified"
         );
-        assert!(is_response_completed(&message));
+        assert!(
+            !is_response_completed(&message),
+            "late oversized completion metadata should be forwarded but not classified"
+        );
     }
 
     #[tokio::test]
@@ -2742,6 +2879,10 @@ async fn record_forwarded_websocket_metadata(
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
 ) {
     let is_completed = is_response_completed_text(&metadata_text);
+    if is_completed {
+        active_turn_reservation.release_current();
+        session_registry.note_response_completed(session_id);
+    }
     let affinity_owner =
         websocket_affinity_owner_record_from_text(&metadata_text, affinity_owner_context);
     if let Some(owner) = affinity_owner {
@@ -2753,10 +2894,6 @@ async fn record_forwarded_websocket_metadata(
             })
             .await;
         }
-    }
-    if is_completed {
-        active_turn_reservation.release_current();
-        session_registry.note_response_completed(session_id);
     }
 }
 
@@ -2887,6 +3024,9 @@ fn websocket_affinity_owner_record_from_text(
 }
 
 fn extract_websocket_response_id_from_text(text: &str) -> Option<PreviousResponseId> {
+    if text.len() > WEBSOCKET_METADATA_SCAN_LIMIT_BYTES {
+        return None;
+    }
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
     let response_id = value
         .get("response")
@@ -2911,30 +3051,105 @@ fn is_response_create(message: &Message) -> bool {
     let Some(text) = websocket_metadata_text_handle(message) else {
         return false;
     };
-    top_level_json_string_field_equals(text.as_str().as_bytes(), b"type", b"response.create")
+    bounded_top_level_json_string_field_equals(
+        text.as_str().as_bytes(),
+        b"type",
+        b"response.create",
+    )
 }
 
 fn is_response_completed_text(text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("response.completed")
+    bounded_top_level_json_string_field_equals(text.as_bytes(), b"type", b"response.completed")
 }
 
-fn top_level_json_string_field_equals(body: &[u8], field_name: &[u8], expected: &[u8]) -> bool {
+fn has_forbidden_top_level_websocket_auth_carrier(body: &[u8]) -> bool {
+    bounded_top_level_json_key_matches(body, |key| {
+        let canonical = canonical_websocket_auth_field_name(key);
+        matches!(
+            canonical.as_deref(),
+            Some("authorization" | "api-key" | "openai-api-key" | "x-codex-router-token")
+        )
+    })
+}
+
+fn bounded_top_level_json_string_field_equals(
+    body: &[u8],
+    field_name: &[u8],
+    expected: &[u8],
+) -> bool {
+    let Some(value) = bounded_top_level_json_string_field(body, field_name) else {
+        return false;
+    };
+    value.as_bytes() == expected
+}
+
+fn bounded_top_level_json_string_field(body: &[u8], field_name: &[u8]) -> Option<String> {
+    let mut cursor = skip_json_whitespace(body, 0);
+    if body.get(cursor) != Some(&b'{') {
+        return None;
+    }
+    cursor += 1;
+    let mut depth = 1_u32;
+    let scan_end = body.len().min(WEBSOCKET_METADATA_SCAN_LIMIT_BYTES);
+    let mut top_level_keys = 0_usize;
+    while cursor < scan_end {
+        cursor = skip_json_whitespace(body, cursor);
+        let byte = body.get(cursor).copied()?;
+        match byte {
+            b'"' => {
+                let (string_slice, after_string) = json_string_slice(body, cursor)?;
+                if after_string > scan_end {
+                    return None;
+                }
+                let after_key = skip_json_whitespace(body, after_string);
+                if depth == 1 && body.get(after_key) == Some(&b':') {
+                    top_level_keys += 1;
+                    if top_level_keys > WEBSOCKET_METADATA_SCAN_MAX_TOP_LEVEL_KEYS {
+                        return None;
+                    }
+                    let key = serde_json::from_slice::<String>(string_slice).ok()?;
+                    if key.as_bytes() == field_name {
+                        let value_start = skip_json_whitespace(body, after_key + 1);
+                        let (value_slice, _after_value) = json_string_slice(body, value_start)?;
+                        return serde_json::from_slice::<String>(value_slice).ok();
+                    }
+                    cursor = after_key + 1;
+                } else {
+                    cursor = after_string;
+                }
+            }
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+                if depth == 0 {
+                    return None;
+                }
+            }
+            _ => {
+                cursor += 1;
+            }
+        }
+    }
+    None
+}
+
+fn bounded_top_level_json_key_matches(
+    body: &[u8],
+    mut matches_key: impl FnMut(&str) -> bool,
+) -> bool {
     let mut cursor = skip_json_whitespace(body, 0);
     if body.get(cursor) != Some(&b'{') {
         return false;
     }
     cursor += 1;
+    let scan_end = body.len().min(WEBSOCKET_METADATA_SCAN_LIMIT_BYTES);
     let mut depth = 1_u32;
-    while cursor < body.len() {
+    let mut top_level_keys = 0_usize;
+    while cursor < scan_end {
         cursor = skip_json_whitespace(body, cursor);
         let Some(byte) = body.get(cursor).copied() else {
             return false;
@@ -2944,21 +3159,19 @@ fn top_level_json_string_field_equals(body: &[u8], field_name: &[u8], expected: 
                 let Some((string_slice, after_string)) = json_string_slice(body, cursor) else {
                     return false;
                 };
+                if after_string > scan_end {
+                    return false;
+                }
                 let after_key = skip_json_whitespace(body, after_string);
                 if depth == 1 && body.get(after_key) == Some(&b':') {
-                    let key_matches = serde_json::from_slice::<String>(string_slice)
-                        .ok()
-                        .is_some_and(|key| key.as_bytes() == field_name);
-                    if key_matches {
-                        let value_start = skip_json_whitespace(body, after_key + 1);
-                        let Some((value_slice, _after_value)) =
-                            json_string_slice(body, value_start)
-                        else {
-                            return false;
-                        };
-                        return serde_json::from_slice::<String>(value_slice)
-                            .ok()
-                            .is_some_and(|value| value.as_bytes() == expected);
+                    top_level_keys += 1;
+                    if top_level_keys > WEBSOCKET_METADATA_SCAN_MAX_TOP_LEVEL_KEYS {
+                        return false;
+                    }
+                    if let Ok(key) = serde_json::from_slice::<String>(string_slice)
+                        && matches_key(&key)
+                    {
+                        return true;
                     }
                     cursor = after_key + 1;
                 } else {
@@ -2976,12 +3189,55 @@ fn top_level_json_string_field_equals(body: &[u8], field_name: &[u8], expected: 
                     return false;
                 }
             }
-            _ => {
-                cursor += 1;
-            }
+            _ => cursor += 1,
         }
     }
     false
+}
+
+fn canonical_websocket_auth_field_name(value: &str) -> Option<String> {
+    let decoded = percent_decode_ascii(value);
+    let canonical: String = decoded
+        .chars()
+        .filter(|character| !matches!(character, '_' | '-' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect();
+    match canonical.as_str() {
+        "authorization" => Some("authorization".to_owned()),
+        "apikey" => Some("api-key".to_owned()),
+        "openaiapikey" => Some("openai-api-key".to_owned()),
+        "xcodexroutertoken" => Some("x-codex-router-token".to_owned()),
+        _ => None,
+    }
+}
+
+fn percent_decode_ascii(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn json_string_slice(body: &[u8], start: usize) -> Option<(&[u8], usize)> {

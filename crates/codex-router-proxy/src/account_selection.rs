@@ -58,6 +58,9 @@ pub type RouteBandAccountHolds = Arc<Mutex<HashMap<String, AccountHold>>>;
 /// Process-lifetime active reservation state partitioned by route band.
 pub type RouteBandReservationBooks = Arc<Mutex<HashMap<String, ReservationBook>>>;
 
+const ROUTING_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
+const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
+
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 const HTTP_ACTIVE_LOAD_PRESSURE: u32 = 2;
@@ -1153,12 +1156,10 @@ fn previous_response_id(
         return Ok(None);
     };
     if previous_response_id.is_empty() {
-        return Err(malformed_affinity_key_error());
+        return Ok(None);
     }
 
-    PreviousResponseId::new(previous_response_id)
-        .map(Some)
-        .map_err(|_error| malformed_affinity_key_error())
+    Ok(PreviousResponseId::new(previous_response_id).ok())
 }
 
 fn top_level_json_string_field(
@@ -1171,8 +1172,10 @@ fn top_level_json_string_field(
     }
     cursor += 1;
     let mut depth = 1_u32;
+    let scan_end = body.len().min(ROUTING_METADATA_SCAN_LIMIT_BYTES);
+    let mut top_level_keys = 0_usize;
 
-    while cursor < body.len() {
+    while cursor < scan_end {
         cursor = skip_json_whitespace(body, cursor);
         let Some(byte) = body.get(cursor).copied() else {
             return Ok(None);
@@ -1182,20 +1185,28 @@ fn top_level_json_string_field(
                 let Some((string_slice, after_string)) = json_string_slice(body, cursor) else {
                     return Ok(None);
                 };
+                if after_string > scan_end {
+                    return Ok(None);
+                }
                 let after_key = skip_json_whitespace(body, after_string);
                 if depth == 1 && body.get(after_key) == Some(&b':') {
-                    let key_matches = serde_json::from_slice::<String>(string_slice)
-                        .ok()
-                        .is_some_and(|key| key.as_bytes() == field_name);
-                    if key_matches {
+                    top_level_keys += 1;
+                    if top_level_keys > ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS {
+                        return Ok(None);
+                    }
+                    let Some(key) = serde_json::from_slice::<String>(string_slice).ok() else {
+                        return Ok(None);
+                    };
+                    if key.as_bytes() == field_name {
                         let value_start = skip_json_whitespace(body, after_key + 1);
                         let Some((value_slice, _after_value)) =
                             json_string_slice(body, value_start)
                         else {
-                            return Err(malformed_affinity_key_error());
+                            return Ok(None);
                         };
-                        let value = serde_json::from_slice::<String>(value_slice)
-                            .map_err(|_error| malformed_affinity_key_error())?;
+                        let Some(value) = serde_json::from_slice::<String>(value_slice).ok() else {
+                            return Ok(None);
+                        };
                         return Ok(Some(value));
                     }
                     cursor = after_key + 1;
@@ -1253,12 +1264,6 @@ fn skip_json_whitespace(body: &[u8], mut cursor: usize) -> usize {
         cursor += 1;
     }
     cursor
-}
-
-fn malformed_affinity_key_error() -> HttpProxyError {
-    HttpProxyError::Selection {
-        reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
-    }
 }
 
 fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownAccountInput {

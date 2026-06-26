@@ -902,6 +902,7 @@ struct SmokeSeed {
     local_token_assignment: String,
     local_token: String,
     expected_account_label: String,
+    expected_account_tag: String,
     expected_upstream_token: String,
     routable_upstream_tokens: Vec<String>,
     quota_status: SmokeQuotaStatus,
@@ -985,6 +986,7 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
         local_token_assignment,
         local_token: exported_token,
         expected_account_label: selected_fixture.label.to_owned(),
+        expected_account_tag: safe_account_tag(&selected_account_id),
         expected_upstream_token: selected_fixture.upstream_token.to_owned(),
         routable_upstream_tokens: SMOKE_ACCOUNT_FIXTURES
             .iter()
@@ -2292,6 +2294,10 @@ fn write_redacted_three_websocket_transcript(
             "target_model": SMOKE_TARGET_MODEL,
             "all_success": input.outputs.iter().all(|run| run.output.status.success()),
             "statuses": statuses,
+        },
+        "selected_account": {
+            "safe_tag": input.seed.expected_account_tag,
+            "expected_upstream_account_selected": input.upstream.upstream_client_sessions.len() >= input.outputs.len(),
         },
         "runtime_correlations": runtime_correlations,
         "session_continuity": session_continuity,
