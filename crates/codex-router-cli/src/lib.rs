@@ -3534,8 +3534,13 @@ exit 42
         let secret_root = test_root.path().join("secrets");
         let state = must_ok(SqliteStateStore::open(&state_path));
         let account_id = account_id("acct_background_refresh_diagnostics");
-        let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let unsafe_account_label = "person@example.com";
+        let account = AccountRecord::new(
+            account_id.clone(),
+            unsafe_account_label,
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let secrets = must_ok(FileSecretStore::open(&secret_root));
         let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -3557,7 +3562,7 @@ exit 42
             1_000,
             NoopCredentialRefreshClient,
         ));
-        let provider = AccountFailingQuotaRefreshProvider::new("background", 0);
+        let provider = AccountFailingQuotaRefreshProvider::new(unsafe_account_label, 0);
         let (diagnostic_sender, diagnostic_receiver) = mpsc::channel();
 
         let worker = start_background_quota_refresh_worker_with_reporter(
@@ -3587,9 +3592,8 @@ exit 42
         };
         drop(worker);
         let diagnostics = format!("{first_diagnostic}\n{second_diagnostic}");
-        assert!(diagnostics.contains(
-            "refresh failed: account=background route_band=responses error=quota refresh provider returned HTTP 429"
-        ));
+        assert!(diagnostics.contains("refresh failed: account=acct-"));
+        assert!(!diagnostics.contains(unsafe_account_label));
         assert!(diagnostics.contains("failed: 2"));
         assert!(diagnostics.contains(
             "background quota refresh failed: quota refresh provider response was unusable: quota refresh failed for all eligible route bands"

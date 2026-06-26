@@ -68,6 +68,8 @@ rendered = json.dumps(payload, sort_keys=True)
 for forbidden in [
     "acct_quota_primary",
     "acct_quota_fallback",
+    "quota-primary",
+    "quota-fallback",
     "primary-token",
     "fallback-token",
     "X-Codex-Router-Token",

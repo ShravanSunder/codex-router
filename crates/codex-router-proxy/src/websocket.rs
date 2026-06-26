@@ -11,6 +11,8 @@ use std::net::TcpStream;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::time::Duration;
 use std::time::SystemTime;
@@ -93,7 +95,7 @@ use crate::routes::Method;
 const WEBSOCKET_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
 const WEBSOCKET_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 const CODEX_WEBSOCKET_RECONNECT_SIGNAL: &str = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}"#;
-const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"codex_router_quota_exhausted","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
+pub(crate) const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"codex_router_quota_exhausted","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
 const ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL: &str = r#"{"type":"error","status":503,"error":{"type":"codex_router_quota_state_unavailable","code":"codex_router_quota_state_unavailable","message":"codex-router cannot safely rotate accounts because quota state is unavailable."}}"#;
 
 /// WebSocket frame subset needed before upstream connection opens.
@@ -1315,18 +1317,15 @@ mod async_forwarding_tests {
         ));
         let registry = WebSocketRevocationRegistry::new();
         let session = registry.register_cancellation(TokenGeneration::new(1));
-        let session_id = session.session_id;
-        let active_turn_reservation_for_task = active_turn_reservation.clone();
+        active_turn_reservation.release_current();
+        registry.note_response_completed(session.session_id);
 
         let record_task = tokio::spawn(async move {
             record_forwarded_websocket_metadata(
                 tokio_tungstenite::tungstenite::Utf8Bytes::from_static(
                     r#"{"type":"response.completed","response":{"id":"resp_1"}}"#,
                 ),
-                registry,
-                session_id,
                 Some(&affinity_owner_context),
-                active_turn_reservation_for_task,
                 Some(recorder),
                 None,
             )
@@ -2103,6 +2102,125 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
+    async fn same_socket_immediate_request_after_completion_has_fresh_active_load() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let active_reservations = RouteBandReservationBooks::default();
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_next_at(selected_account.clone(), 8, 1)
+        };
+        let active_reservation_guard = ActiveReservationGuard::new(
+            active_reservations.clone(),
+            "responses".to_owned(),
+            reservation_handle,
+        );
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: Some(active_reservation_guard),
+        };
+        let active_pressure = || {
+            let reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .get("responses")
+                .map_or(0, |book| book.active_load_pressure(&selected_account))
+        };
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: None,
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            assert_eq!(active_pressure(), 8);
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first request should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first request: {error}"),
+                None => panic!("upstream should receive first request"),
+            }
+            upstream_websocket
+                .send(Message::text(r#"{"type":"response.completed","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first completion should send: {error}"));
+            match client_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("client should receive first completion: {error}"),
+                None => panic!("client should receive first completion"),
+            }
+            assert_eq!(
+                active_pressure(),
+                0,
+                "completion must release active load synchronously before the next same-socket request"
+            );
+
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":2}"#))
+                .await
+                .unwrap_or_else(|error| panic!("second request should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive second request: {error}"),
+                None => panic!("upstream should receive second request"),
+            }
+            assert_eq!(
+                active_pressure(),
+                8,
+                "second same-socket request should acquire a fresh active reservation"
+            );
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "same-socket immediate re-reservation flow should complete: {router_result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn upstream_usage_limit_frame_is_hidden_behind_codex_reconnect_signal() {
         let (router_local_stream, client_stream) = duplex(4096);
         let (router_upstream_stream, upstream_stream) = duplex(4096);
@@ -2230,6 +2348,128 @@ mod async_forwarding_tests {
                 route_band: codex_router_core::routes::RouteBand::Responses,
                 body: usage_limit_frame.as_bytes().to_vec(),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_reconnect_signal_closes_old_socket_before_more_work() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let provider_error_observer = Arc::new(RecordingAsyncProviderErrorObserver::default());
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let active_reservations = RouteBandReservationBooks::default();
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_next_at(selected_account.clone(), 8, 1)
+        };
+        let active_reservation_guard = ActiveReservationGuard::new(
+            active_reservations.clone(),
+            "responses".to_owned(),
+            reservation_handle,
+        );
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: Some(active_reservation_guard),
+        };
+        let active_pressure = || {
+            let reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .get("responses")
+                .map_or(0, |book| book.active_load_pressure(&selected_account))
+        };
+        let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: Some(provider_error_observer.clone()),
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(usage_limit_frame))
+                .await
+                .unwrap_or_else(|error| panic!("usage limit should send: {error}"));
+            let client_message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive reconnect signal: {error}"),
+                None => panic!("client should receive reconnect signal"),
+            };
+            assert_eq!(
+                client_message.to_string(),
+                super::CODEX_WEBSOCKET_RECONNECT_SIGNAL
+            );
+
+            let second_write_result = client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":2}"#))
+                .await;
+            if second_write_result.is_ok() {
+                let forwarded_after_reconnect =
+                    tokio::time::timeout(Duration::from_millis(100), upstream_websocket.next())
+                        .await;
+                assert!(
+                    forwarded_after_reconnect.is_err(),
+                    "old exhausted tunnel must not forward another request after reconnect signal"
+                );
+            }
+            assert_eq!(
+                active_pressure(),
+                0,
+                "old exhausted tunnel must not reacquire active load after reconnect signal"
+            );
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should close/retire exhausted tunnel after reconnect signal, got {router_result:?}"
         );
     }
 
@@ -3081,6 +3321,9 @@ where
     let upstream_to_local_revocation = context.revocation.clone();
     let local_to_upstream_shutdown = context.session_shutdown.clone();
     let upstream_to_local_shutdown = context.session_shutdown.clone();
+    let tunnel_shutdown = CancellationToken::new();
+    let local_to_upstream_tunnel_shutdown = tunnel_shutdown.clone();
+    let upstream_to_local_tunnel_shutdown = tunnel_shutdown.clone();
     let session_registry = context.session_registration.registry.clone();
     let session_id = context.session_registration.session_id;
     let affinity_owner_context = context.affinity_owner_context.cloned();
@@ -3096,6 +3339,7 @@ where
             upstream_write,
             local_to_upstream_revocation,
             local_to_upstream_shutdown,
+            local_to_upstream_tunnel_shutdown,
             local_active_turn_reservation,
         )
         .await
@@ -3107,6 +3351,7 @@ where
             UpstreamToLocalPumpContext {
                 revocation: upstream_to_local_revocation,
                 session_shutdown: upstream_to_local_shutdown,
+                tunnel_shutdown: upstream_to_local_tunnel_shutdown,
                 session_registry,
                 session_id,
                 affinity_owner_recorder: context.affinity_owner_recorder,
@@ -3150,6 +3395,7 @@ async fn pump_local_to_upstream<LocalStream, UpstreamStream>(
     mut upstream_write: SplitSink<WebSocketStream<UpstreamStream>, Message>,
     revocation: CancellationToken,
     session_shutdown: CancellationToken,
+    tunnel_shutdown: CancellationToken,
     active_turn_reservation: ActiveTurnReservationState,
 ) -> Result<(), WebSocketTunnelError>
 where
@@ -3158,6 +3404,11 @@ where
 {
     loop {
         tokio::select! {
+            biased;
+            () = tunnel_shutdown.cancelled() => {
+                upstream_write.close().await?;
+                return Ok(());
+            }
             () = revocation.cancelled() => {
                 upstream_write.close().await?;
                 return Ok(());
@@ -3195,6 +3446,7 @@ where
 struct UpstreamToLocalPumpContext {
     revocation: CancellationToken,
     session_shutdown: CancellationToken,
+    tunnel_shutdown: CancellationToken,
     session_registry: WebSocketRevocationRegistry,
     session_id: u64,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
@@ -3249,23 +3501,24 @@ where
                         &context,
                     )
                     .await;
-                local_write.send(upstream_message).await?;
+                if upstream_message.close_after_send {
+                    context.tunnel_shutdown.cancel();
+                }
+                local_write.send(upstream_message.message).await?;
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
                 if let Some(metadata_text) = metadata_text {
-                    let session_registry = context.session_registry.clone();
-                    let session_id = context.session_id;
+                    if is_response_completed_text(&metadata_text) {
+                        context.active_turn_reservation.release_current();
+                        context.session_registry.note_response_completed(context.session_id);
+                    }
                     let affinity_owner_context = context.affinity_owner_context.clone();
-                    let active_turn_reservation = context.active_turn_reservation.clone();
                     let async_affinity_owner_recorder =
                         context.async_affinity_owner_recorder.clone();
                     let affinity_owner_recorder = context.affinity_owner_recorder.clone();
                     context.affinity_record_tasks.spawn(async move {
                         record_forwarded_websocket_metadata(
                             metadata_text,
-                            session_registry,
-                            session_id,
                             affinity_owner_context.as_ref(),
-                            active_turn_reservation,
                             async_affinity_owner_recorder,
                             affinity_owner_recorder,
                         )
@@ -3289,6 +3542,10 @@ where
                             .await;
                     });
                 }
+                if upstream_message.close_after_send {
+                    local_write.close().await?;
+                    return Ok(());
+                }
                 if is_close {
                     return Ok(());
                 }
@@ -3297,30 +3554,47 @@ where
     }
 }
 
+struct UpstreamMessageOutcome {
+    message: Message,
+    close_after_send: bool,
+}
+
 async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
     upstream_message: Message,
     classification: ProviderErrorClassification,
     provider_error_body: Option<&[u8]>,
     context: &UpstreamToLocalPumpContext,
-) -> Message {
+) -> UpstreamMessageOutcome {
     if classification != ProviderErrorClassification::AccountQuotaExhausted {
-        return upstream_message;
+        return UpstreamMessageOutcome {
+            message: upstream_message,
+            close_after_send: false,
+        };
     }
     let Some(provider_error_body) = provider_error_body else {
-        return upstream_message;
+        return UpstreamMessageOutcome {
+            message: upstream_message,
+            close_after_send: false,
+        };
     };
     let Some(provider_error_observer) = context.provider_error_observer.as_ref() else {
-        return upstream_message;
+        return UpstreamMessageOutcome {
+            message: upstream_message,
+            close_after_send: false,
+        };
     };
     let Some(affinity_owner_context) = context.affinity_owner_context.as_ref() else {
-        return upstream_message;
+        return UpstreamMessageOutcome {
+            message: upstream_message,
+            close_after_send: false,
+        };
     };
 
     let observed_unix_seconds = current_unix_seconds();
     let exhausted_account_id = affinity_owner_context.account_id.clone();
-    context.active_turn_reservation.release_current();
+    context.active_turn_reservation.retire();
 
-    match provider_error_observer
+    let message = match provider_error_observer
         .observe_provider_error(
             exhausted_account_id.clone(),
             RouteBand::Responses,
@@ -3366,23 +3640,19 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
             );
             Message::text(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL)
         }
+    };
+    UpstreamMessageOutcome {
+        message,
+        close_after_send: true,
     }
 }
 
 async fn record_forwarded_websocket_metadata(
     metadata_text: tungstenite::Utf8Bytes,
-    session_registry: WebSocketRevocationRegistry,
-    session_id: u64,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
-    active_turn_reservation: ActiveTurnReservationState,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
 ) {
-    let is_completed = is_response_completed_text(&metadata_text);
-    if is_completed {
-        active_turn_reservation.release_current();
-        session_registry.note_response_completed(session_id);
-    }
     let affinity_owner =
         websocket_affinity_owner_record_from_text(&metadata_text, affinity_owner_context);
     if let Some(owner) = affinity_owner {
@@ -3401,6 +3671,7 @@ async fn record_forwarded_websocket_metadata(
 struct ActiveTurnReservationState {
     reservation_template: Option<ActiveReservationGuard>,
     current_reservation: Arc<Mutex<Option<ActiveReservationGuard>>>,
+    retired: Arc<AtomicBool>,
 }
 
 impl ActiveTurnReservationState {
@@ -3408,6 +3679,7 @@ impl ActiveTurnReservationState {
         Self {
             reservation_template: initial_reservation.clone(),
             current_reservation: Arc::new(Mutex::new(initial_reservation)),
+            retired: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -3421,6 +3693,9 @@ impl ActiveTurnReservationState {
     }
 
     fn reserve_if_idle(&self, reserved_unix_seconds: u64) {
+        if self.retired.load(Ordering::Acquire) {
+            return;
+        }
         let Some(template) = self.reservation_template.as_ref() else {
             return;
         };
@@ -3431,6 +3706,11 @@ impl ActiveTurnReservationState {
             return;
         }
         *current_reservation = template.reserve_again_at(reserved_unix_seconds);
+    }
+
+    fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+        self.release_current();
     }
 }
 

@@ -48,6 +48,8 @@ use crate::repositories::SelectorQuotaRepository;
 
 const CURRENT_SCHEMA_VERSION: i64 = 8;
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
+const WEEKLY_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 604_800;
+const SUSPECT_EXHAUSTED_TTL_SECONDS: u64 = 300;
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
     "models",
@@ -151,6 +153,16 @@ const ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS: &[&str] = &[
             route_band, account_id, acquired_unix_seconds
         )",
 ];
+const ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS: &[&str] =
+    &["CREATE TABLE IF NOT EXISTS route_band_account_states (
+        account_id TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        state TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        observed_unix_seconds INTEGER NOT NULL,
+        expires_unix_seconds INTEGER,
+        PRIMARY KEY (account_id, route_band)
+    )"];
 
 /// Active client count for one account and route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -187,6 +199,27 @@ impl ActiveClientCount {
     #[must_use]
     pub const fn active_pressure(&self) -> u32 {
         self.active_pressure
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouteBandAccountStateRow {
+    state: String,
+    reason_code: String,
+    observed_unix_seconds: u64,
+    expires_unix_seconds: Option<u64>,
+}
+
+impl RouteBandAccountStateRow {
+    fn is_active_suspect_exhausted(&self, now_unix_seconds: u64) -> bool {
+        self.state == "suspect_exhausted"
+            && !self.reason_code.is_empty()
+            && !self.is_expired(now_unix_seconds)
+    }
+
+    fn is_expired(&self, now_unix_seconds: u64) -> bool {
+        self.expires_unix_seconds
+            .is_some_and(|expires_unix_seconds| now_unix_seconds >= expires_unix_seconds)
     }
 }
 
@@ -271,6 +304,7 @@ impl AsyncSqliteStateStore {
         store.migrate().await?;
         store.ensure_quota_history_schema().await?;
         store.ensure_active_client_schema().await?;
+        store.ensure_route_band_account_state_schema().await?;
 
         Ok(store)
     }
@@ -302,11 +336,26 @@ impl AsyncSqliteStateStore {
             let mut windows = self
                 .load_selector_windows(account.account_id(), route_band)
                 .await?;
-            let refresh_status = self
-                .load_quota_refresh_status(account.account_id(), route_band)
+            let route_band_state = self
+                .load_route_band_account_state(account.account_id(), route_band)
                 .await?;
-            if selector_windows_are_stale(&windows, refresh_status.as_ref(), now_unix_seconds) {
-                mark_selector_windows_stale(&mut windows);
+            if let Some(state) = route_band_state.as_ref() {
+                if state.is_active_suspect_exhausted(now_unix_seconds) {
+                    windows = suspect_exhausted_selector_windows(
+                        account.account_id(),
+                        route_band,
+                        state.observed_unix_seconds,
+                    );
+                } else if state.is_expired(now_unix_seconds) {
+                    windows.clear();
+                }
+            } else {
+                let refresh_status = self
+                    .load_quota_refresh_status(account.account_id(), route_band)
+                    .await?;
+                if selector_windows_are_stale(&windows, refresh_status.as_ref(), now_unix_seconds) {
+                    mark_selector_windows_stale(&mut windows);
+                }
             }
             inputs.push(SelectorQuotaInput::new(
                 account.account_id().clone(),
@@ -328,8 +377,32 @@ impl AsyncSqliteStateStore {
         route_band: &str,
         observed_unix_seconds: u64,
     ) -> Result<(), StateStoreError> {
+        let observed_unix_seconds_value = observed_unix_seconds;
         let observed_unix_seconds = u64_to_i64(observed_unix_seconds)?;
+        let expires_unix_seconds =
+            u64_to_i64(observed_unix_seconds_value + SUSPECT_EXHAUSTED_TTL_SECONDS)?;
         let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query(
+            "INSERT INTO route_band_account_states (
+               account_id, route_band, state, reason_code,
+               observed_unix_seconds, expires_unix_seconds
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(account_id, route_band) DO UPDATE SET
+               state = excluded.state,
+               reason_code = excluded.reason_code,
+               observed_unix_seconds = excluded.observed_unix_seconds,
+               expires_unix_seconds = excluded.expires_unix_seconds",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .bind("suspect_exhausted")
+        .bind("provider_quota_exhausted")
+        .bind(observed_unix_seconds)
+        .bind(expires_unix_seconds)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
         sqlx::query(
             "INSERT INTO quota_snapshots (
                account_id, source, observed_unix_seconds, route_band,
@@ -350,7 +423,7 @@ impl AsyncSqliteStateStore {
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?;
-        let update = sqlx::query(
+        sqlx::query(
             "UPDATE selector_quota_windows
                 SET status = ?3,
                     remaining_headroom = 0,
@@ -364,23 +437,14 @@ impl AsyncSqliteStateStore {
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?;
-        if update.rows_affected() == 0 && selector_route_band(route_band) {
-            sqlx::query(
-                "INSERT INTO selector_quota_windows (
-                   account_id, route_band, limit_window_seconds, status,
-                   remaining_headroom, reset_unix_seconds, effective,
-                   observed_unix_seconds
-                 )
-                 VALUES (?1, ?2, ?3, ?4, 0, NULL, 1, ?5)",
-            )
-            .bind(account_id.as_str())
-            .bind(route_band)
-            .bind(u64_to_i64(DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS)?)
-            .bind(SelectorQuotaWindowStatus::Ineligible.as_str())
-            .bind(observed_unix_seconds)
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
+        if selector_route_band(route_band) {
+            for window in suspect_exhausted_selector_windows(
+                account_id,
+                route_band,
+                observed_unix_seconds_value,
+            ) {
+                insert_selector_window_in_async_transaction(&mut transaction, &window).await?;
+            }
         }
         transaction.commit().await.map_err(sqlx_error)?;
 
@@ -784,6 +848,15 @@ impl AsyncSqliteStateStore {
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?;
+        sqlx::query(
+            "DELETE FROM route_band_account_states
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
         for window in windows {
             insert_selector_window_in_async_transaction(&mut transaction, window).await?;
         }
@@ -979,6 +1052,44 @@ impl AsyncSqliteStateStore {
         }
 
         Ok(windows)
+    }
+
+    async fn load_route_band_account_state(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+    ) -> Result<Option<RouteBandAccountStateRow>, StateStoreError> {
+        let row = sqlx::query(
+            "SELECT state, reason_code, observed_unix_seconds, expires_unix_seconds
+               FROM route_band_account_states
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let observed_unix_seconds = i64_to_u64(
+            row.get::<i64, _>(2),
+            account_id.as_str(),
+            "observed_unix_seconds",
+        )?;
+        let expires_unix_seconds = row
+            .get::<Option<i64>, _>(3)
+            .map(|value| i64_to_u64(value, account_id.as_str(), "expires_unix_seconds"))
+            .transpose()?;
+
+        Ok(Some(RouteBandAccountStateRow {
+            state: row.get::<String, _>(0),
+            reason_code: row.get::<String, _>(1),
+            observed_unix_seconds,
+            expires_unix_seconds,
+        }))
     }
 
     /// Loads a hashed previous-response owner record for one route band.
@@ -1265,6 +1376,17 @@ impl AsyncSqliteStateStore {
 
     async fn ensure_active_client_schema(&self) -> Result<(), StateStoreError> {
         for statement in ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS {
+            sqlx::query(*statement)
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_route_band_account_state_schema(&self) -> Result<(), StateStoreError> {
+        for statement in ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS {
             sqlx::query(*statement)
                 .execute(&self.pool)
                 .await
@@ -3141,6 +3263,30 @@ fn mark_selector_windows_stale(windows: &mut [PersistedSelectorQuotaWindow]) {
         }
         *window = stale_window;
     }
+}
+
+fn suspect_exhausted_selector_windows(
+    account_id: &AccountId,
+    route_band: &str,
+    observed_unix_seconds: u64,
+) -> Vec<PersistedSelectorQuotaWindow> {
+    [
+        (DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS, true),
+        (WEEKLY_SELECTOR_LIMIT_WINDOW_SECONDS, false),
+    ]
+    .into_iter()
+    .map(|(limit_window_seconds, effective)| {
+        PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            route_band,
+            limit_window_seconds,
+            SelectorQuotaWindowStatus::Ineligible,
+        )
+        .with_remaining_headroom(0)
+        .with_effective(effective)
+        .with_observed_unix_seconds(observed_unix_seconds)
+    })
+    .collect()
 }
 
 fn parse_refresh_error_class(value: &str) -> Result<QuotaRefreshErrorClass, StateStoreError> {

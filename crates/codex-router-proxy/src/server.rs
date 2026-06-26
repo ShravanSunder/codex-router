@@ -1019,7 +1019,7 @@ impl LoopbackProtocolConnectionHandler {
                 }
                 Err(PrecommitHttpQuotaResponse::AccountQuotaExhausted) => {
                     if replayable_request.is_none() {
-                        return empty_response(StatusCode::SERVICE_UNAVAILABLE);
+                        return all_accounts_exhausted_response();
                     }
                     tracing::info!(
                         attempt = attempt_index + 1,
@@ -1036,7 +1036,7 @@ impl LoopbackProtocolConnectionHandler {
             }
         }
 
-        empty_response(StatusCode::SERVICE_UNAVAILABLE)
+        all_accounts_exhausted_response()
     }
 
     async fn enabled_account_attempt_limit(&self) -> usize {
@@ -1794,7 +1794,7 @@ fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
 fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     match error {
         HttpProxyError::LocalAuth { .. } => empty_response(StatusCode::UNAUTHORIZED),
-        HttpProxyError::Selection { .. } => empty_response(StatusCode::SERVICE_UNAVAILABLE),
+        HttpProxyError::Selection { .. } => all_accounts_exhausted_response(),
         HttpProxyError::ProviderCredential { .. } | HttpProxyError::Upstream { .. } => {
             empty_response(StatusCode::BAD_GATEWAY)
         }
@@ -1806,6 +1806,17 @@ fn empty_response(status: StatusCode) -> HttpResponse<BoxBody<Bytes, AsyncHttpBo
     HttpResponse::builder()
         .status(status)
         .body(empty_body())
+        .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
+}
+
+fn all_accounts_exhausted_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    HttpResponse::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(box_body_from_bytes(
+            crate::websocket::ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL
+                .as_bytes()
+                .to_vec(),
+        ))
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 

@@ -22,6 +22,7 @@ use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
+use codex_router_core::redaction::safe_account_label;
 use codex_router_core::routes::RouteBand;
 use codex_router_selection::burn_down::AccountAvailability;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
@@ -593,10 +594,10 @@ where
                     "failure",
                     QuotaRefreshErrorClass::AuthError.as_str(),
                 );
+                let diagnostic_account = quota_refresh_diagnostic_account_label(account);
                 writeln!(
                     stdout,
-                    "refresh failed: account={} route_band=* error={error}",
-                    account.label()
+                    "refresh failed: account={diagnostic_account} route_band=* error={error}",
                 )
                 .map_err(QuotaCommandError::Stdout)?;
                 continue;
@@ -638,11 +639,10 @@ where
                         "codex_router.quota_refresh_failed"
                     );
                     record_quota_refresh_metric(route_band, "failure", error_class.as_str());
+                    let diagnostic_account = quota_refresh_diagnostic_account_label(account);
                     writeln!(
                         stdout,
-                        "refresh failed: account={} route_band={} error={error}",
-                        account.label(),
-                        route_band
+                        "refresh failed: account={diagnostic_account} route_band={route_band} error={error}",
                     )
                     .map_err(QuotaCommandError::Stdout)?;
                     continue;
@@ -679,11 +679,10 @@ where
                         "failure",
                         QuotaRefreshErrorClass::ParseError.as_str(),
                     );
+                    let diagnostic_account = quota_refresh_diagnostic_account_label(account);
                     writeln!(
                         stdout,
-                        "refresh failed: account={} route_band={} error=missing provider quota windows",
-                        account.label(),
-                        route_band
+                        "refresh failed: account={diagnostic_account} route_band={route_band} error=missing provider quota windows",
                     )
                     .map_err(QuotaCommandError::Stdout)?;
                     continue;
@@ -1023,6 +1022,12 @@ fn sleep_interruptibly(stop: &AtomicBool, interval: Duration) -> bool {
     }
 
     false
+}
+
+fn quota_refresh_diagnostic_account_label(account: &AccountRecord) -> String {
+    safe_account_label(account.label(), account.account_id())
+        .as_str()
+        .to_owned()
 }
 
 fn quota_response_for_route_band(

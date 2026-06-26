@@ -4280,6 +4280,8 @@ mod tests {
             response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
             "Codex-side response should be router-level exhausted response, got:\n{response}"
         );
+        assert!(response.contains("codex_router_all_accounts_exhausted"));
+        assert!(response.contains("All configured codex-router accounts are out of usable quota"));
         assert!(!response.contains("usage_limit_reached"));
         assert!(!response.contains("acct_primary_all_exhausted"));
         assert_eq!(
@@ -4588,6 +4590,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].contains("audit append failed"));
+        assert!(!diagnostics[0].contains(&blocked_parent.display().to_string()));
         assert!(!diagnostics[0].contains("access-token-canary"));
         assert!(!diagnostics[0].contains("refresh-token-canary"));
         assert!(!diagnostics[0].contains("local-token-canary"));

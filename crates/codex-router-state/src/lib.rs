@@ -645,6 +645,122 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn async_quota_exhaustion_without_existing_windows_blocks_expected_windows() {
+        let temp_dir = TestTempDir::new("async_quota_exhaustion_no_windows");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_unknown_exhausted");
+        let account = AccountRecord::new(
+            account_id.clone(),
+            "unknown-exhausted",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("account should persist: {error}");
+        }
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+
+        if let Err(error) = AsyncQuotaExhaustionRepository::mark_route_band_quota_exhausted(
+            &async_store,
+            &account_id,
+            "responses",
+            2_000,
+        )
+        .await
+        {
+            panic!("quota exhaustion should persist: {error}");
+        }
+
+        let inputs = match AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+            &async_store,
+            "responses",
+            2_000,
+        )
+        .await
+        {
+            Ok(inputs) => inputs,
+            Err(error) => panic!("selector input should load: {error}"),
+        };
+        let input = inputs
+            .iter()
+            .find(|input| input.account_id() == &account_id)
+            .unwrap_or_else(|| panic!("exhausted account selector input should exist"));
+        assert_eq!(
+            input
+                .windows()
+                .iter()
+                .map(|window| window.limit_window_seconds())
+                .collect::<Vec<_>>(),
+            vec![18_000, 604_800]
+        );
+        assert!(
+            input
+                .windows()
+                .iter()
+                .all(|window| window.status() == SelectorQuotaWindowStatus::Ineligible),
+            "suspect-exhausted accounts without prior quota windows must not degrade to unknown fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_quota_exhaustion_expires_back_to_probe_candidate() {
+        let temp_dir = TestTempDir::new("async_quota_exhaustion_ttl");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_exhausted_ttl");
+        let account =
+            AccountRecord::new(account_id.clone(), "exhausted-ttl", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("account should persist: {error}");
+        }
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+
+        if let Err(error) = AsyncQuotaExhaustionRepository::mark_route_band_quota_exhausted(
+            &async_store,
+            &account_id,
+            "responses",
+            2_000,
+        )
+        .await
+        {
+            panic!("quota exhaustion should persist: {error}");
+        }
+
+        let expired_inputs = match AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+            &async_store,
+            "responses",
+            2_301,
+        )
+        .await
+        {
+            Ok(inputs) => inputs,
+            Err(error) => panic!("selector input should load after suspect TTL expiry: {error}"),
+        };
+        let expired_input = expired_inputs
+            .iter()
+            .find(|input| input.account_id() == &account_id)
+            .unwrap_or_else(|| panic!("expired suspect account selector input should exist"));
+        assert!(
+            expired_input.windows().is_empty(),
+            "expired suspect-exhausted state should return to unknown probe behavior"
+        );
+    }
+
     #[test]
     fn refresh_success_replaces_selector_windows_and_records_status() {
         let temp_dir = TestTempDir::new("refresh_success_replaces_windows");

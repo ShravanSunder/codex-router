@@ -106,7 +106,7 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
     tracing::info!(
         service.name = SERVICE_NAME,
         service.version = env!("CARGO_PKG_VERSION"),
-        otel.endpoint = %endpoint,
+        otel.endpoint.configured = true,
         "codex_router.process_start"
     );
 
@@ -262,4 +262,16 @@ fn sanitize_error(error: &str) -> String {
         .file_name()
         .and_then(|value| value.to_str())
         .map_or_else(|| "redacted".to_owned(), ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn process_start_telemetry_does_not_emit_raw_otlp_endpoint() {
+        let source = include_str!("telemetry.rs");
+        let forbidden_raw_endpoint_field = ["otel.endpoint", " = ", "%endpoint"].concat();
+
+        assert!(source.contains("otel.endpoint.configured = true"));
+        assert!(!source.contains(&forbidden_raw_endpoint_field));
+    }
 }

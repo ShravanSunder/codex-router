@@ -63,6 +63,43 @@ export CODEX_ROUTER_RELEASE_CHANNEL="local"
 export CODEX_ROUTER_FORBIDDEN_CANARY="${secret_canary}"
 export RUST_LOG="warn,codex_router_cli=info,codex_router_proxy=info,opentelemetry_sdk=off,opentelemetry_otlp=off"
 
+installed_codex_output="${smoke_root}/installed-codex-concurrent.out"
+set +e
+tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent | tee "${installed_codex_output}"
+installed_codex_status=${PIPESTATUS[0]}
+set -e
+if [[ "${installed_codex_status}" -ne 0 ]]; then
+  exit "${installed_codex_status}"
+fi
+
+installed_codex_artifact="$(
+  awk '/codex_router_three_websocket_artifact=/{sub(/^.*codex_router_three_websocket_artifact=/, ""); value=$0} END{print value}' "${installed_codex_output}"
+)"
+if [[ -z "${installed_codex_artifact}" || ! -f "${installed_codex_artifact}" ]]; then
+  echo "installed-Codex concurrent WebSocket smoke did not produce an artifact path" >&2
+  cat "${installed_codex_output}" >&2
+  exit 1
+fi
+
+python3 - "${installed_codex_artifact}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+assert payload["router_process"]["spawned_real_serve_child"] is True
+assert payload["shared_router_pid"] == payload["router_process"]["pid"]
+assert payload["clients"]["count"] == 3
+assert payload["clients"]["all_success"] is True
+assert payload["upstream"]["active_high_water"] >= 3
+assert payload["upstream"]["overlap_proven"] is True
+assert payload["upstream"]["target_model_session_count"] == 3
+for status in payload["clients"]["statuses"]:
+    assert status["status"] == "exit status: 0"
+    assert status["stdout_contains_smoke_text"] is True
+PY
+
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
   quota \
   --no-refresh \
@@ -474,6 +511,7 @@ for forbidden in \
   if grep -q "${forbidden}" \
     "${trace_result}" \
     "${metric_series}" \
+    "${installed_codex_artifact}" \
     "${server_stdout}" \
     "${server_stderr}" \
     "${smoke_root}/reject-http.out" \

@@ -199,7 +199,7 @@ pub enum AuditSinkError {
     #[error("failed serializing audit event: {0}")]
     Serialize(serde_json::Error),
     /// Filesystem operation failed.
-    #[error("audit filesystem error at {}: {source}", path.display())]
+    #[error("audit filesystem error at <redacted-path>: {source}")]
     Filesystem {
         /// Path that failed.
         path: PathBuf,

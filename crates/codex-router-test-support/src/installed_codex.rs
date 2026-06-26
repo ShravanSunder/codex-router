@@ -2007,6 +2007,15 @@ fn quota_reconnect_label_from_upstream_token(token: &str) -> Option<&'static str
     .find_map(|(candidate_token, label)| (candidate_token == token).then_some(label))
 }
 
+fn quota_reconnect_role_from_label(label: Option<&str>) -> &'static str {
+    match label {
+        Some(candidate) if candidate == QUOTA_RECONNECT_PRIMARY.label => "primary",
+        Some(candidate) if candidate == QUOTA_RECONNECT_FALLBACK.label => "fallback",
+        Some(_) => "unknown",
+        None => "none",
+    }
+}
+
 fn quota_reconnect_usage_limit_frame() -> &'static str {
     r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#
 }
@@ -2481,12 +2490,16 @@ fn write_redacted_quota_reconnect_transcript(
             "websocket_local_auth_validated": input.router_audit.websocket_local_auth_validated,
         },
         "quota_reconnect": {
-            "primary_account_label": QUOTA_RECONNECT_PRIMARY.label,
-            "fallback_account_label": QUOTA_RECONNECT_FALLBACK.label,
+            "primary_account_role": "primary",
+            "fallback_account_role": "fallback",
             "quota_error_hidden_from_codex": !input.codex_stdout.contains("usage_limit_reached")
                 && !input.codex_stderr.contains("usage_limit_reached"),
-            "first_real_request_account": input.upstream.quota_error_connection_label,
-            "completion_account": input.upstream.completion_connection_label,
+            "first_real_request_account_role": quota_reconnect_role_from_label(
+                input.upstream.quota_error_connection_label.as_deref(),
+            ),
+            "completion_account_role": quota_reconnect_role_from_label(
+                input.upstream.completion_connection_label.as_deref(),
+            ),
             "reconnected_to_different_account": input.upstream.quota_error_connection_label != input.upstream.completion_connection_label,
         },
         "upstream": {
@@ -2912,6 +2925,8 @@ fn assert_redacted_quota_reconnect_payload(
         QUOTA_RECONNECT_FALLBACK.upstream_token,
         "installed-quota-primary-token-refresh",
         "installed-quota-fallback-token-refresh",
+        QUOTA_RECONNECT_PRIMARY.label,
+        QUOTA_RECONNECT_FALLBACK.label,
         quota_reconnect_usage_limit_frame(),
         input.codex_stdout,
         input.codex_stderr,
