@@ -2531,6 +2531,7 @@ exit 42
                 path_to_str(&router_root),
                 "--format",
                 "plain",
+                "--no-refresh",
                 "--now-unix-seconds",
                 "10000",
             ],
@@ -2623,6 +2624,7 @@ exit 42
                 "--format",
                 "plain",
                 "--all-limits",
+                "--no-refresh",
                 "--now-unix-seconds",
                 "11000",
             ],
@@ -4375,10 +4377,16 @@ exit 42
             Err(error) => panic!("quota command should parse: {error}"),
         };
 
-        let QuotaCommand::Status { router_root, .. } = command else {
+        let QuotaCommand::Status {
+            router_root,
+            auto_refresh,
+            ..
+        } = command
+        else {
             panic!("quota status command should parse");
         };
         assert_eq!(router_root, default_router_root_for_test());
+        assert!(auto_refresh);
     }
 
     #[test]
@@ -4419,6 +4427,29 @@ exit 42
         };
         assert_eq!(format, crate::quota::QuotaStatusFormat::Json);
         assert_eq!(now_unix_seconds, 0);
+    }
+
+    #[test]
+    fn quota_status_no_refresh_is_available_on_bare_and_explicit_status_forms() {
+        for arguments in [
+            vec![OsString::from("quota"), OsString::from("--no-refresh")],
+            vec![
+                OsString::from("quota"),
+                OsString::from("status"),
+                OsString::from("--no-refresh"),
+            ],
+        ] {
+            let command = match CliCommand::parse(arguments) {
+                Ok(CliCommand::Quota(command)) => command,
+                Ok(other) => panic!("quota command should parse, got {other:?}"),
+                Err(error) => panic!("quota command should parse: {error}"),
+            };
+
+            let QuotaCommand::Status { auto_refresh, .. } = command else {
+                panic!("quota --no-refresh should parse as status");
+            };
+            assert!(!auto_refresh);
+        }
     }
 
     #[test]

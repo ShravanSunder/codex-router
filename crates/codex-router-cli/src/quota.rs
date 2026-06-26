@@ -131,7 +131,7 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
-                    auto_refresh: false,
+                    auto_refresh: !options.no_refresh,
                 })
             }
             "refresh" => {
@@ -155,7 +155,7 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
-                    auto_refresh: true,
+                    auto_refresh: !options.no_refresh,
                 })
             }
             unknown => Err(CliError::UnknownCommand {
@@ -271,16 +271,18 @@ commands:
 options:
   --format table|plain|json
   --all-limits
+  --no-refresh
 ";
 
 const QUOTA_STATUS_HELP_TEXT: &str = "\
 codex-router quota status
 
-Shows cached quota without the best-effort refresh step.
+Shows cached quota immediately, then refreshes quota best-effort and updates the view.
 
 options:
   --format table|plain|json
   --all-limits
+  --no-refresh
 ";
 
 const QUOTA_REFRESH_HELP_TEXT: &str = "\
@@ -2297,6 +2299,7 @@ struct QuotaStatusOptions {
     router_root: Option<PathBuf>,
     format: QuotaStatusFormat,
     all_limits: bool,
+    no_refresh: bool,
     now_unix_seconds: u64,
 }
 
@@ -2306,6 +2309,7 @@ impl Default for QuotaStatusOptions {
             router_root: None,
             format: QuotaStatusFormat::Table,
             all_limits: false,
+            no_refresh: false,
             now_unix_seconds: current_unix_seconds(),
         }
     }
@@ -2327,6 +2331,9 @@ impl QuotaStatusOptions {
                 }
                 "--all-limits" => {
                     options.all_limits = true;
+                }
+                "--no-refresh" => {
+                    options.no_refresh = true;
                 }
                 "--now-unix-seconds" => {
                     let value = parser.next_required_value("--now-unix-seconds")?;
