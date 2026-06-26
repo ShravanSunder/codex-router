@@ -1,0 +1,21 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh AR-SESSIONS",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "sessions defaults to cwd, supports checkout/repo/any root flags, and reads Codex state read-only",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "crates/codex-router-cli/src/sessions.rs crates/codex-router-cli/src/lib.rs crates/codex-router-state/src/* scripts/proof-matrix.sh",
+  "git_head": "e471566e4b1a3c2b982cb83dfcde070dfa5f4a28",
+  "layer": "integration",
+  "notes": "Sessions tests prove cwd default, checkout/repo/any root flags, provider/source filters, picker launch, and SQLx read-only state boundary.",
+  "owner": "account-router-ux-fix",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "AR-SESSIONS",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-26T02:09:19Z",
+  "touched_targets": []
+}

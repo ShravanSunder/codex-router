@@ -1,0 +1,21 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh AR-E2E-ACCOUNTS",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "three concurrent installed Codex clients prove WebSocket continuity and selected account tags",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-proxy/src/* crates/codex-router-cli/src/* scripts/proof-matrix.sh",
+  "git_head": "e471566e4b1a3c2b982cb83dfcde070dfa5f4a28",
+  "layer": "e2e",
+  "notes": "Installed-Codex smoke proves WebSocket account-token selection and three concurrent WebSocket clients share one router without transport degradation.",
+  "owner": "account-router-ux-fix",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "AR-E2E-ACCOUNTS",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-26T02:09:35Z",
+  "touched_targets": []
+}

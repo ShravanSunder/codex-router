@@ -1,0 +1,21 @@
+{
+  "artifact_paths": [],
+  "command": "scripts/proof-matrix.sh AR-HTTP-PASSTHROUGH",
+  "cwd": ".",
+  "exit_code": 0,
+  "expected_observation": "HTTP/SSE request bodies and response streams remain pass-through while bounded metadata is observed",
+  "freshness_check": "guarded_source_paths_clean_at_git_head",
+  "freshness_guard": "crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/upstream.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/lib.rs scripts/proof-matrix.sh",
+  "git_head": "e471566e4b1a3c2b982cb83dfcde070dfa5f4a28",
+  "layer": "integration",
+  "notes": "HTTP/SSE pass-through tests prove request bodies stream before EOF and response streams are forwarded while bounded metadata is observed.",
+  "owner": "account-router-ux-fix",
+  "redaction_check": "pass",
+  "result": "pass",
+  "row_id": "AR-HTTP-PASSTHROUGH",
+  "schema_version": 1,
+  "status_after": "[x] passed",
+  "status_before": "[ ] pending",
+  "timestamp_utc": "2026-06-26T02:09:14Z",
+  "touched_targets": []
+}
