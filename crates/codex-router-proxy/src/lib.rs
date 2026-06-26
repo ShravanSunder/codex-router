@@ -75,7 +75,6 @@ mod tests {
     use crate::websocket::AsyncWebSocketTunnel;
     use crate::websocket::AuthenticatedWebSocketRouter;
     use crate::websocket::BlockingWebSocketTunnel;
-    use crate::websocket::FirstFramePolicy;
     use crate::websocket::WebSocketCloseReason;
     use crate::websocket::WebSocketFirstFrameDecision;
     use crate::websocket::WebSocketFrame;
@@ -2356,6 +2355,74 @@ mod tests {
                 reason: QuotaAwareAccountSelectorError::MalformedAffinityKey
             })
         );
+    }
+
+    #[test]
+    fn repository_backed_selector_ignores_prompt_text_previous_response_id_fragment() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_prompt_fragment");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let selector = RepositoryBackedAccountSelector::new(&state);
+
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses").with_body(
+                br#"{"input":"please print \"previous_response_id\":\"resp_nested\" literally"}"#
+                    .to_vec(),
+            ),
+            TokenGeneration::new(1),
+            None,
+        ) {
+            Ok(selected) => selected,
+            Err(error) => {
+                panic!("prompt text must not trigger previous_response_id affinity: {error:?}")
+            }
+        };
+
+        assert_eq!(selected.account_id().as_str(), "acct_alpha");
+    }
+
+    #[test]
+    fn repository_backed_selector_ignores_malformed_prompt_previous_response_id_fragment() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_malformed_prompt");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let selector = RepositoryBackedAccountSelector::new(&state);
+
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses").with_body(
+                br#"{"input":"please print "previous_response_id":"resp_nested" literally"#
+                    .to_vec(),
+            ),
+            TokenGeneration::new(1),
+            None,
+        ) {
+            Ok(selected) => selected,
+            Err(error) => {
+                panic!("malformed prompt text must not trigger affinity parsing: {error:?}")
+            }
+        };
+
+        assert_eq!(selected.account_id().as_str(), "acct_alpha");
     }
 
     #[test]
@@ -6685,7 +6752,7 @@ mod tests {
 
     #[test]
     fn websocket_first_response_create_frame_selects_and_forwards_unchanged() {
-        let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let router = WebSocketProtocolRouter::new();
         let frame = WebSocketFrame::Text(
             br#"{"type":"response.create","unknown_codex_field":{"kept":true}}"#.to_vec(),
         );
@@ -6731,7 +6798,7 @@ mod tests {
 
     #[test]
     fn websocket_first_future_json_payload_selects_and_forwards_unchanged() {
-        let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let router = WebSocketProtocolRouter::new();
         let frame = WebSocketFrame::Text(
             br#"{"future_codex_shape":{"kept":true},"unknown_codex_field":{"kept":true}}"#.to_vec(),
         );
@@ -6767,7 +6834,7 @@ mod tests {
 
     #[test]
     fn authenticated_websocket_router_selects_after_local_auth_and_first_frame() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -6805,7 +6872,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_authenticated_websocket_router_selects_after_local_auth_and_first_frame() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingAsyncSelector::default();
         let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -6853,7 +6920,7 @@ mod tests {
 
     #[test]
     fn authenticated_websocket_router_rejects_mismatched_local_auth_carriers() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -6877,7 +6944,7 @@ mod tests {
 
     #[test]
     fn authenticated_websocket_router_rejects_first_frame_auth_smuggling_before_selection() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -6900,8 +6967,8 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_websocket_router_rejects_first_frame_before_selection_or_credentials() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+    fn authenticated_websocket_router_routes_malformed_first_frame_to_upstream_owner() {
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -6909,21 +6976,82 @@ mod tests {
             AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
                 .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+            WebSocketFrame::Text(br#"{"type":"#.to_vec()),
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("router must not reject malformed Codex payload: {error:?}"),
+        };
+
         assert_eq!(
-            router.route_first_frame(
-                WebSocketHandshakeRequest::new()
-                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
-                WebSocketFrame::Text(br#"{"type":"#.to_vec()),
-            ),
-            Err(WebSocketCloseReason::MalformedFirstFrame)
+            selector.take_recorded(),
+            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
         );
-        assert!(selector.take_recorded().is_empty());
-        assert!(resolver.take_recorded().is_empty());
+        assert_eq!(resolver.take_recorded(), vec!["acct_selected".to_owned()]);
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            headers,
+            first_frame,
+            ..
+        } = decision;
+        assert_eq!(first_frame, WebSocketFrame::Text(br#"{"type":"#.to_vec()));
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer selected-upstream-token"]
+        );
+    }
+
+    #[test]
+    fn websocket_first_frame_rejects_hostile_preselection_cases() {
+        let router = WebSocketProtocolRouter::new();
+
+        let binary_decision = router.route_first_frame(
+            WebSocketHandshakeRequest::new(),
+            WebSocketFrame::Binary(vec![1, 2, 3]),
+            SecretString::new("selected-upstream-token"),
+            None,
+        );
+        assert!(
+            binary_decision.is_ok(),
+            "router must not reject binary frames before upstream"
+        );
+        let large_decision = router.route_first_frame(
+            WebSocketHandshakeRequest::new(),
+            WebSocketFrame::Text(br#"{"type":"response.create","padding":"too-large"}"#.to_vec()),
+            SecretString::new("selected-upstream-token"),
+            None,
+        );
+        assert!(
+            large_decision.is_ok(),
+            "router must not own a first-frame size cap"
+        );
+        assert_eq!(
+            router
+                .route_first_frame(
+                    WebSocketHandshakeRequest::new(),
+                    WebSocketFrame::Text(br#"{"x-codex-router-token":"smuggled"}"#.to_vec()),
+                    SecretString::new("selected-upstream-token"),
+                    None,
+                )
+                .err(),
+            Some(WebSocketCloseReason::UnexpectedFirstFrame)
+        );
+        let malformed_decision = router.route_first_frame(
+            WebSocketHandshakeRequest::new(),
+            WebSocketFrame::Text(br#"{"type":"#.to_vec()),
+            SecretString::new("selected-upstream-token"),
+            None,
+        );
+        assert!(
+            malformed_decision.is_ok(),
+            "router must not reject malformed Codex-owned payloads"
+        );
     }
 
     #[test]
     fn authenticated_websocket_router_requires_affinity_secret_before_selection() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -6971,7 +7099,7 @@ mod tests {
             panic!("affinity owner should persist: {error}");
         }
 
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RepositoryBackedAccountSelector::new(&state);
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -7020,7 +7148,7 @@ mod tests {
             panic!("affinity owner should persist with original secret: {error}");
         }
 
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RepositoryBackedAccountSelector::new(&state);
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let replacement_secret_provider =
@@ -7080,7 +7208,7 @@ mod tests {
         );
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let auth_gate = local_auth_gate();
         let router =
@@ -7189,7 +7317,7 @@ mod tests {
         );
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let auth_gate = local_auth_gate();
         let router =
@@ -7212,7 +7340,7 @@ mod tests {
 
     #[test]
     fn authenticated_websocket_router_rejects_missing_local_token_before_selection() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -7234,7 +7362,7 @@ mod tests {
 
     #[test]
     fn authenticated_websocket_router_accepts_codex_env_key_authorization_bearer() {
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
@@ -7268,61 +7396,53 @@ mod tests {
     }
 
     #[test]
-    fn websocket_first_frame_rejects_hostile_preselection_cases() {
-        let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(32));
-        let metadata_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+    fn websocket_first_frame_forwards_large_malformed_payload_without_router_policy() {
+        let router = WebSocketProtocolRouter::new();
+        let mut first_frame = br#"{"type":"response.create","input":"#.to_vec();
+        first_frame.extend(std::iter::repeat_n(b'x', 2 * 1024 * 1024));
 
-        assert_eq!(
-            router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Binary(vec![1, 2, 3]),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::UnsupportedFirstFrameType)
-        );
-        assert_eq!(
-            router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Text(
-                        br#"{"type":"response.create","padding":"too-large"}"#.to_vec()
-                    ),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::FirstFrameTooLarge)
-        );
-        assert_eq!(
-            metadata_router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Text(br#"{"x-codex-router-token":"smuggled"}"#.to_vec()),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::UnexpectedFirstFrame)
-        );
-        assert_eq!(
-            router
-                .route_first_frame(
-                    WebSocketHandshakeRequest::new(),
-                    WebSocketFrame::Text(br#"{"type":"#.to_vec()),
-                    SecretString::new("selected-upstream-token"),
-                    None,
-                )
-                .err(),
-            Some(WebSocketCloseReason::MalformedFirstFrame)
-        );
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new(),
+            WebSocketFrame::Text(first_frame.clone()),
+            SecretString::new("selected-upstream-token"),
+            None,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("router must not own payload size/json validity: {error:?}"),
+        };
+
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            first_frame: routed_first_frame,
+            ..
+        } = decision;
+        assert_eq!(routed_first_frame, WebSocketFrame::Text(first_frame));
+    }
+
+    #[test]
+    fn websocket_first_frame_allows_nested_auth_words_in_prompt_content() {
+        let router = WebSocketProtocolRouter::new();
+        let first_frame = br#"{"type":"response.create","input":[{"role":"user","content":"please print \"authorization\": \"Bearer not-a-router-token\" literally"}]}"#.to_vec();
+
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new(),
+            WebSocketFrame::Text(first_frame.clone()),
+            SecretString::new("selected-upstream-token"),
+            None,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("nested prompt text must not trip auth smuggling: {error:?}"),
+        };
+
+        let WebSocketFirstFrameDecision::OpenUpstream {
+            first_frame: routed_first_frame,
+            ..
+        } = decision;
+        assert_eq!(routed_first_frame, WebSocketFrame::Text(first_frame));
     }
 
     #[test]
     fn websocket_first_frame_accepts_future_request_shape_without_prompt_policy() {
-        let router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let router = WebSocketProtocolRouter::new();
         let first_frame = br#"{"model":"gpt-5.5","future_codex_shape":{"kept":true}}"#.to_vec();
 
         let decision = match router.route_first_frame(
@@ -7410,7 +7530,7 @@ mod tests {
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
         let router_thread = thread::spawn(move || {
             let (stream, _peer_address) = match router_listener.accept() {
@@ -7545,7 +7665,7 @@ mod tests {
         let auth_gate = local_auth_gate();
         let selector = RecordingAsyncSelector::default();
         let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let revocations = WebSocketRevocationRegistry::new();
         let client_revocations = revocations.clone();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
@@ -7654,7 +7774,7 @@ mod tests {
         let auth_gate = local_auth_gate();
         let selector = RecordingAsyncSelector::default();
         let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
             .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
         let server_future = async {
@@ -7788,7 +7908,7 @@ mod tests {
         let auth_gate = local_auth_gate();
         let selector = RecordingAsyncSelector::default();
         let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
             .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
@@ -7882,7 +8002,7 @@ mod tests {
         let auth_gate = local_auth_gate();
         let selector = RecordingAsyncSelector::default();
         let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let recorder = RecordingAffinityOwnerRecorder::default();
         let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
             .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER)
@@ -8003,7 +8123,7 @@ mod tests {
         let auth_gate = local_auth_gate();
         let selector = RecordingAsyncSelector::default();
         let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let (recorder_entered_sender, recorder_entered_receiver) = mpsc::channel();
         let (recorder_release_sender, recorder_release_receiver) = mpsc::channel();
         let recorder = Arc::new(BlockingAffinityOwnerRecorder::new(
@@ -8158,7 +8278,7 @@ mod tests {
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let recorder = RecordingAffinityOwnerRecorder::default();
         let recorder_for_thread = recorder.clone();
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
@@ -8297,7 +8417,7 @@ mod tests {
         let selector = RecordingSelector::new();
         let resolver = RecordingProviderCredentialResolver::new("selected-upstream-token");
         let auth_gate = local_auth_gate();
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let upstream_url = format!("ws://{upstream_address}/v1/responses");
         let router_thread = thread::spawn(move || {
             let (stream, _peer_address) = match router_listener.accept() {

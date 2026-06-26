@@ -30,8 +30,10 @@ use crate::CliContext;
 pub enum SessionsScope {
     /// Exact current working directory.
     Cwd,
-    /// Current git worktree or repository root.
-    Worktree,
+    /// Current git checkout or worktree root.
+    Checkout,
+    /// All checkouts/worktrees for the same git repository.
+    Repo,
     /// All known Codex sessions.
     Any,
 }
@@ -123,8 +125,18 @@ impl SessionsCommand {
         argv.extend(arguments);
         let parsed =
             ClapSessionsCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
+        let _cwd_requested = parsed.cwd;
+        let scope = if parsed.any {
+            SessionsScope::Any
+        } else if parsed.repo {
+            SessionsScope::Repo
+        } else if parsed.checkout {
+            SessionsScope::Checkout
+        } else {
+            SessionsScope::Cwd
+        };
         Ok(Self {
-            scope: parsed.scope,
+            scope,
             provider: parsed.provider,
             source: parsed.source,
             sort: parsed.sort,
@@ -139,8 +151,14 @@ impl SessionsCommand {
 #[derive(Debug, Parser)]
 #[command(name = "sessions", disable_help_subcommand = true)]
 struct ClapSessionsCommand {
-    #[arg(long, value_enum, default_value = "worktree")]
-    scope: SessionsScope,
+    #[arg(long, conflicts_with_all = ["checkout", "repo", "any"])]
+    cwd: bool,
+    #[arg(long, conflicts_with_all = ["cwd", "repo", "any"])]
+    checkout: bool,
+    #[arg(long, conflicts_with_all = ["cwd", "checkout", "any"])]
+    repo: bool,
+    #[arg(long, conflicts_with_all = ["cwd", "checkout", "repo"])]
+    any: bool,
     #[arg(long, default_value = "any")]
     provider: SessionsProvider,
     #[arg(long, value_enum, default_value = "interactive")]
@@ -437,7 +455,8 @@ impl ProviderFilter {
 enum ScopeFilter {
     Any,
     Cwd(PathBuf),
-    Worktree(PathBuf),
+    Checkout(PathBuf),
+    Repo(PathBuf),
 }
 
 impl ScopeFilter {
@@ -445,10 +464,17 @@ impl ScopeFilter {
         match scope {
             SessionsScope::Any => Self::Any,
             SessionsScope::Cwd => Self::Cwd(normalize_path(context.current_dir())),
-            SessionsScope::Worktree => Self::Worktree(
+            SessionsScope::Checkout => Self::Checkout(
                 find_worktree_root(context.current_dir())
                     .unwrap_or_else(|| normalize_path(context.current_dir())),
             ),
+            SessionsScope::Repo => {
+                let checkout_root = find_worktree_root(context.current_dir())
+                    .unwrap_or_else(|| normalize_path(context.current_dir()));
+                Self::Repo(
+                    find_git_common_dir(&checkout_root).unwrap_or_else(|| checkout_root.clone()),
+                )
+            }
         }
     }
 
@@ -458,9 +484,18 @@ impl ScopeFilter {
             Self::Cwd(current_dir) => cwd
                 .map(|session_cwd| normalize_path(Path::new(session_cwd)) == *current_dir)
                 .unwrap_or(false),
-            Self::Worktree(worktree_root) => cwd
+            Self::Checkout(worktree_root) => cwd
                 .map(|session_cwd| {
                     path_is_equal_or_child(&normalize_path(Path::new(session_cwd)), worktree_root)
+                })
+                .unwrap_or(false),
+            Self::Repo(repo_common_dir) => cwd
+                .map(|session_cwd| {
+                    let session_path = Path::new(session_cwd);
+                    find_worktree_root(session_path)
+                        .and_then(|session_root| find_git_common_dir(&session_root))
+                        .map(|session_common_dir| session_common_dir == *repo_common_dir)
+                        .unwrap_or(false)
                 })
                 .unwrap_or(false),
         }
@@ -600,6 +635,30 @@ fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn find_git_common_dir(checkout_root: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(checkout_root)
+        .arg("rev-parse")
+        .arg("--git-common-dir")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return Some(normalize_path(&checkout_root.join(".git")));
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let common_dir = stdout.trim();
+    if common_dir.is_empty() {
+        return None;
+    }
+    let common_path = Path::new(common_dir);
+    if common_path.is_absolute() {
+        Some(normalize_path(common_path))
+    } else {
+        Some(normalize_path(&checkout_root.join(common_path)))
+    }
 }
 
 fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {

@@ -15,7 +15,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLAN_ROOT = REPO_ROOT / "tmp/plan-workflows/2026-06-24-async-router-runtime"
+ACCOUNT_ROUTER_PLAN_ROOT = REPO_ROOT / "tmp/plan-workflows/2026-06-25-account-router-ux-fix"
 EVIDENCE_ROOT = PLAN_ROOT / "evidence/structural"
+ACCOUNT_ROUTER_EVIDENCE_ROOT = ACCOUNT_ROUTER_PLAN_ROOT / "evidence/structural"
 RELEASE_RUNTIME_CRATES = (
     "codex-router-auth",
     "codex-router-cli",
@@ -169,6 +171,34 @@ CHECKS: dict[str, Check] = {
         required=(
             ("crates/codex-router-proxy/src/websocket.rs", "validate_first_frame"),
             ("crates/codex-router-proxy/src/websocket.rs", "has_forbidden_top_level_json_auth_carrier"),
+        ),
+    ),
+    "AR-WS-GUARD": Check(
+        row_id="AR-WS-GUARD",
+        description=(
+            "release WebSocket routing has no invented first-frame size or whole-frame JSON gate"
+        ),
+        forbidden=(
+            ("crates/codex-router-proxy/src/server.rs", "FirstFramePolicy"),
+            ("crates/codex-router-proxy/src/websocket.rs", "FirstFramePolicy"),
+            ("crates/codex-router-proxy/src/websocket.rs", "FirstFrameTooLarge"),
+            ("crates/codex-router-proxy/src/websocket.rs", "MalformedFirstFrame"),
+            ("crates/codex-router-proxy/src/websocket.rs", "UnsupportedFirstFrameType"),
+            (
+                "crates/codex-router-proxy/src/websocket.rs",
+                "serde_json::from_slice::<serde_json::Value>(first_frame_bytes)",
+            ),
+        ),
+        release_scan_forbidden=(
+            "FirstFramePolicy",
+            "FirstFrameTooLarge",
+            "MalformedFirstFrame",
+            "UnsupportedFirstFrameType",
+            "serde_json::from_slice::<serde_json::Value>(first_frame_bytes)",
+        ),
+        required=(
+            ("crates/codex-router-proxy/src/server.rs", "hyper_tungstenite::upgrade"),
+            ("crates/codex-router-proxy/src/websocket.rs", "tokio_tungstenite::connect_async"),
         ),
     ),
     "G-28": Check(
@@ -331,13 +361,14 @@ def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:
         receipt_path = Path(receipt.name)
         receipt.close()
     else:
-        EVIDENCE_ROOT.mkdir(parents=True, exist_ok=True)
-        receipt_path = EVIDENCE_ROOT / f"{check.row_id}.json"
+        evidence_root = ACCOUNT_ROUTER_EVIDENCE_ROOT if check.row_id.startswith("AR-") else EVIDENCE_ROOT
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        receipt_path = evidence_root / f"{check.row_id}.json"
     payload = {
         "schema_version": 1,
         "row_id": check.row_id,
         "layer": "structural",
-        "owner": "T6",
+        "owner": "account-router-ux-fix" if check.row_id.startswith("AR-") else "T6",
         "command": os.environ.get(
             "CODEX_ROUTER_PROOF_COMMAND",
             f"scripts/check-release-runtime-guardrails.py {check.row_id}",

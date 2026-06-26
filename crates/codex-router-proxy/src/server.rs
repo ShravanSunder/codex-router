@@ -102,7 +102,6 @@ use crate::routes::classify_route;
 use crate::upstream::HyperHttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
 use crate::websocket::AsyncWebSocketTunnel;
-use crate::websocket::FirstFramePolicy;
 use crate::websocket::WebSocketHandshakeRequest;
 use crate::websocket::WebSocketProtocolRouter;
 use crate::websocket::WebSocketRegistrySnapshot;
@@ -877,7 +876,7 @@ impl LoopbackProtocolConnectionHandler {
         let credential_resolver = self
             .credential_factory
             .resolver_for_state(state_store.clone());
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let tunnel = if let Some(audit_sink) = &self.audit_sink {
             AsyncWebSocketTunnel::new_with_audit_sink(
                 &self.auth_gate,

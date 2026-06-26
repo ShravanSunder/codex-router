@@ -100,6 +100,24 @@ impl ActiveReservationGuard {
     pub fn release(&self) {
         self.inner.release_once();
     }
+
+    /// Reserves the same account/route/cost again after a completed turn.
+    pub fn reserve_again_at(&self, reserved_unix_seconds: u64) -> Option<Self> {
+        let mut active_reservations = self.inner.active_reservations.lock().ok()?;
+        let reservation_handle = active_reservations
+            .entry(self.inner.route_band.clone())
+            .or_insert_with(ReservationBook::default)
+            .reserve_next_at(
+                self.inner.reservation_handle.account_id().clone(),
+                self.inner.reservation_handle.headroom_cost(),
+                reserved_unix_seconds,
+            );
+        Some(Self::new(
+            Arc::clone(&self.inner.active_reservations),
+            self.inner.route_band.clone(),
+            reservation_handle,
+        ))
+    }
 }
 
 impl std::fmt::Debug for ActiveReservationGuard {
@@ -1129,39 +1147,118 @@ fn path_without_query(path: &str) -> &str {
 fn previous_response_id(
     request: &HttpProxyRequest,
 ) -> Result<Option<PreviousResponseId>, HttpProxyError> {
-    if !body_mentions_previous_response_id(request.body()) {
-        return Ok(None);
-    }
-
-    let value = serde_json::from_slice::<serde_json::Value>(request.body()).map_err(|_error| {
-        HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
-        }
-    })?;
-    let Some(previous_response_id) = value.get("previous_response_id") else {
+    let Some(previous_response_id) =
+        top_level_json_string_field(request.body(), b"previous_response_id")?
+    else {
         return Ok(None);
     };
-    let previous_response_id = previous_response_id
-        .as_str()
-        .ok_or(HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
-        })?;
     if previous_response_id.is_empty() {
-        return Err(HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
-        });
+        return Err(malformed_affinity_key_error());
     }
 
-    PreviousResponseId::new(previous_response_id.to_owned())
+    PreviousResponseId::new(previous_response_id)
         .map(Some)
-        .map_err(|_error| HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
-        })
+        .map_err(|_error| malformed_affinity_key_error())
 }
 
-fn body_mentions_previous_response_id(body: &[u8]) -> bool {
-    body.windows(b"previous_response_id".len())
-        .any(|window| window == b"previous_response_id")
+fn top_level_json_string_field(
+    body: &[u8],
+    field_name: &[u8],
+) -> Result<Option<String>, HttpProxyError> {
+    let mut cursor = skip_json_whitespace(body, 0);
+    if body.get(cursor) != Some(&b'{') {
+        return Ok(None);
+    }
+    cursor += 1;
+    let mut depth = 1_u32;
+
+    while cursor < body.len() {
+        cursor = skip_json_whitespace(body, cursor);
+        let Some(byte) = body.get(cursor).copied() else {
+            return Ok(None);
+        };
+        match byte {
+            b'"' => {
+                let Some((string_slice, after_string)) = json_string_slice(body, cursor) else {
+                    return Ok(None);
+                };
+                let after_key = skip_json_whitespace(body, after_string);
+                if depth == 1 && body.get(after_key) == Some(&b':') {
+                    let key_matches = serde_json::from_slice::<String>(string_slice)
+                        .ok()
+                        .is_some_and(|key| key.as_bytes() == field_name);
+                    if key_matches {
+                        let value_start = skip_json_whitespace(body, after_key + 1);
+                        let Some((value_slice, _after_value)) =
+                            json_string_slice(body, value_start)
+                        else {
+                            return Err(malformed_affinity_key_error());
+                        };
+                        let value = serde_json::from_slice::<String>(value_slice)
+                            .map_err(|_error| malformed_affinity_key_error())?;
+                        return Ok(Some(value));
+                    }
+                    cursor = after_key + 1;
+                } else {
+                    cursor = after_string;
+                }
+            }
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+                if depth == 0 {
+                    return Ok(None);
+                }
+            }
+            _ => {
+                cursor += 1;
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn json_string_slice(body: &[u8], start: usize) -> Option<(&[u8], usize)> {
+    if body.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while cursor < body.len() {
+        match body[cursor] {
+            b'\\' => {
+                cursor = cursor.saturating_add(2);
+            }
+            b'"' => {
+                let end = cursor + 1;
+                return Some((&body[start..end], end));
+            }
+            _ => {
+                cursor += 1;
+            }
+        }
+    }
+    None
+}
+
+fn skip_json_whitespace(body: &[u8], mut cursor: usize) -> usize {
+    while body
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn malformed_affinity_key_error() -> HttpProxyError {
+    HttpProxyError::Selection {
+        reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+    }
 }
 
 fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownAccountInput {

@@ -98,18 +98,10 @@ pub enum WebSocketFrame {
     Binary(Vec<u8>),
 }
 
-/// WebSocket first-frame resource policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FirstFramePolicy {
-    max_first_frame_bytes: usize,
-}
-
-impl FirstFramePolicy {
-    /// Creates first-frame policy.
-    #[must_use]
-    pub const fn new(max_first_frame_bytes: usize) -> Self {
-        Self {
-            max_first_frame_bytes,
+impl WebSocketFrame {
+    fn payload(&self) -> &[u8] {
+        match self {
+            Self::Text(payload) | Self::Binary(payload) => payload,
         }
     }
 }
@@ -207,47 +199,33 @@ pub enum WebSocketCloseReason {
     Selection,
     /// Provider credential resolution failed before upstream open.
     ProviderCredential,
-    /// First frame exceeded local resource limit.
-    FirstFrameTooLarge,
-    /// First frame was not text.
-    UnsupportedFirstFrameType,
-    /// First frame text was not valid JSON.
-    MalformedFirstFrame,
     /// First frame failed local auth-safety or routing metadata constraints.
     UnexpectedFirstFrame,
 }
 
 /// WebSocket first-frame router.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebSocketProtocolRouter {
-    first_frame_policy: FirstFramePolicy,
-}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebSocketProtocolRouter;
 
 impl WebSocketProtocolRouter {
     /// Creates a WebSocket protocol router.
     #[must_use]
-    pub const fn new(first_frame_policy: FirstFramePolicy) -> Self {
-        Self { first_frame_policy }
+    pub const fn new() -> Self {
+        Self
     }
 
-    /// Validates the first frame before account selection or upstream open.
-    pub fn validate_first_frame<'a>(
+    /// Checks router-owned first-frame auth invariants before upstream open.
+    pub fn ensure_first_frame_allowed(
         &self,
-        first_frame: &'a WebSocketFrame,
-    ) -> Result<&'a [u8], WebSocketCloseReason> {
-        let WebSocketFrame::Text(first_frame_bytes) = first_frame else {
-            return Err(WebSocketCloseReason::UnsupportedFirstFrameType);
-        };
-        if first_frame_bytes.len() > self.first_frame_policy.max_first_frame_bytes {
-            return Err(WebSocketCloseReason::FirstFrameTooLarge);
-        }
-        let _payload = serde_json::from_slice::<serde_json::Value>(first_frame_bytes)
-            .map_err(|_| WebSocketCloseReason::MalformedFirstFrame)?;
-        if has_forbidden_top_level_json_auth_carrier(first_frame_bytes) {
+        first_frame: &WebSocketFrame,
+    ) -> Result<(), WebSocketCloseReason> {
+        if let WebSocketFrame::Text(first_frame_bytes) = first_frame
+            && has_forbidden_top_level_json_auth_carrier(first_frame_bytes)
+        {
             return Err(WebSocketCloseReason::UnexpectedFirstFrame);
         }
 
-        Ok(first_frame_bytes)
+        Ok(())
     }
 
     /// Routes the first frame, returning either sanitized upstream open data or a local close reason.
@@ -258,7 +236,7 @@ impl WebSocketProtocolRouter {
         provider_bearer_token: SecretString,
         chatgpt_account_id: Option<&str>,
     ) -> Result<WebSocketFirstFrameDecision, WebSocketCloseReason> {
-        self.validate_first_frame(&first_frame)?;
+        self.ensure_first_frame_allowed(&first_frame)?;
 
         Ok(WebSocketFirstFrameDecision::OpenUpstream {
             token_generation: TokenGeneration::new(0),
@@ -385,16 +363,14 @@ where
                 return Err(WebSocketCloseReason::LocalAuth { reason });
             }
         };
-        let first_frame_bytes = self
-            .protocol_router
-            .validate_first_frame(&first_frame)
+        self.protocol_router
+            .ensure_first_frame_allowed(&first_frame)
             .inspect_err(|_reason| {
                 self.emit_audit_event(websocket_first_frame_rejection_audit_event(None));
-            })?
-            .to_vec();
+            })?;
         let selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
             .with_websocket_upgrade(true)
-            .with_body(first_frame_bytes);
+            .with_body(first_frame.payload().to_vec());
         let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
             self.emit_audit_event(websocket_selection_rejection_audit_event());
             WebSocketCloseReason::Selection
@@ -550,16 +526,14 @@ where
                 return Err(WebSocketCloseReason::LocalAuth { reason });
             }
         };
-        let first_frame_bytes = self
-            .protocol_router
-            .validate_first_frame(&first_frame)
+        self.protocol_router
+            .ensure_first_frame_allowed(&first_frame)
             .inspect_err(|_reason| {
                 self.emit_audit_event(websocket_first_frame_rejection_audit_event(None));
-            })?
-            .to_vec();
+            })?;
         let selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
             .with_websocket_upgrade(true)
-            .with_body(first_frame_bytes);
+            .with_body(first_frame.payload().to_vec());
         let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
             self.emit_audit_event(websocket_selection_rejection_audit_event());
             WebSocketCloseReason::Selection
@@ -1076,7 +1050,6 @@ mod registry_tests {
 #[cfg(test)]
 mod async_forwarding_tests {
     use super::AsyncWebSocketTunnel;
-    use super::FirstFramePolicy;
     use super::TokenGeneration;
     use super::WebSocketAffinityOwnerContext;
     use super::WebSocketForwardingContext;
@@ -1259,7 +1232,7 @@ mod async_forwarding_tests {
         let credential_resolver = FixedAsyncCredentialResolver { account_id };
         let auth_gate = ProxyLocalAuthGate::disabled();
         let affinity_secret_provider = FixedAffinitySecretProvider::new();
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let registry = WebSocketRevocationRegistry::new();
         let session_shutdown = CancellationToken::new();
         let tunnel = AsyncWebSocketTunnel::new(
@@ -1344,7 +1317,7 @@ mod async_forwarding_tests {
         let credential_resolver = FixedAsyncCredentialResolver { account_id };
         let auth_gate = ProxyLocalAuthGate::disabled();
         let affinity_secret_provider = FixedAffinitySecretProvider::new();
-        let protocol_router = WebSocketProtocolRouter::new(FirstFramePolicy::new(1024 * 1024));
+        let protocol_router = WebSocketProtocolRouter::new();
         let registry = WebSocketRevocationRegistry::new();
         let session_shutdown = CancellationToken::new();
         let tunnel = AsyncWebSocketTunnel::new(
@@ -1693,6 +1666,146 @@ mod async_forwarding_tests {
             "completion release should not close the websocket by itself, got {router_result:?}"
         );
         assert_eq!(active_pressure(), 0);
+    }
+
+    #[tokio::test]
+    async fn same_socket_request_after_completion_reserves_pinned_account_again() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let active_reservations = RouteBandReservationBooks::default();
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_next_at(selected_account.clone(), 8, 1)
+        };
+        let active_reservation_guard = ActiveReservationGuard::new(
+            active_reservations.clone(),
+            "responses".to_owned(),
+            reservation_handle,
+        );
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: Some(active_reservation_guard),
+        };
+        let active_pressure = || {
+            let reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .get("responses")
+                .map_or(0, |book| book.active_load_pressure(&selected_account))
+        };
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: None,
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            assert_eq!(active_pressure(), 8);
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first request should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first request: {error}"),
+                None => panic!("upstream should receive first request"),
+            }
+            upstream_websocket
+                .send(Message::text(r#"{"type":"response.completed","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first completion should send: {error}"));
+            match client_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("client should receive first completion: {error}"),
+                None => panic!("client should receive first completion"),
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while active_pressure() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_elapsed| panic!("first completion should release active load"));
+
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":2}"#))
+                .await
+                .unwrap_or_else(|error| panic!("second request should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive second request: {error}"),
+                None => panic!("upstream should receive second request"),
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while active_pressure() != 8 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_elapsed| panic!("second request should re-reserve active load"));
+
+            upstream_websocket
+                .send(Message::text(r#"{"type":"response.completed","turn":2}"#))
+                .await
+                .unwrap_or_else(|error| panic!("second completion should send: {error}"));
+            match client_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("client should receive second completion: {error}"),
+                None => panic!("client should receive second completion"),
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while active_pressure() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_elapsed| panic!("second completion should release active load"));
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "same-socket re-reservation flow should complete: {router_result:?}"
+        );
     }
 
     #[tokio::test]
@@ -2416,12 +2529,19 @@ where
     let session_registry = context.session_registration.registry.clone();
     let session_id = context.session_registration.session_id;
     let affinity_owner_context = context.affinity_owner_context.cloned();
+    let active_turn_reservation = ActiveTurnReservationState::new(
+        affinity_owner_context
+            .as_ref()
+            .and_then(|context| context.active_reservation_guard.clone()),
+    );
+    let local_active_turn_reservation = active_turn_reservation.clone();
     let mut local_to_upstream = tokio::spawn(async move {
         pump_local_to_upstream(
             local_read,
             upstream_write,
             local_to_upstream_revocation,
             local_to_upstream_shutdown,
+            local_active_turn_reservation,
         )
         .await
     });
@@ -2438,6 +2558,7 @@ where
                 async_affinity_owner_recorder: context.async_affinity_owner_recorder,
                 affinity_record_tasks: context.affinity_record_tasks,
                 affinity_owner_context,
+                active_turn_reservation,
                 provider_error_observer: context.provider_error_observer,
             },
         )
@@ -2474,6 +2595,7 @@ async fn pump_local_to_upstream<LocalStream, UpstreamStream>(
     mut upstream_write: SplitSink<WebSocketStream<UpstreamStream>, Message>,
     revocation: CancellationToken,
     session_shutdown: CancellationToken,
+    active_turn_reservation: ActiveTurnReservationState,
 ) -> Result<(), WebSocketTunnelError>
 where
     LocalStream: AsyncRead + AsyncWrite + Unpin,
@@ -2503,6 +2625,9 @@ where
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
                 };
                 let is_close = matches!(local_message, Message::Close(_));
+                if is_response_create(&local_message) {
+                    active_turn_reservation.reserve_if_idle(current_unix_seconds());
+                }
                 upstream_write.send(local_message).await?;
                 if is_close {
                     return Ok(());
@@ -2521,6 +2646,7 @@ struct UpstreamToLocalPumpContext {
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
     affinity_owner_context: Option<WebSocketAffinityOwnerContext>,
+    active_turn_reservation: ActiveTurnReservationState,
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
 }
 
@@ -2565,6 +2691,7 @@ where
                     let session_registry = context.session_registry.clone();
                     let session_id = context.session_id;
                     let affinity_owner_context = context.affinity_owner_context.clone();
+                    let active_turn_reservation = context.active_turn_reservation.clone();
                     let async_affinity_owner_recorder =
                         context.async_affinity_owner_recorder.clone();
                     let affinity_owner_recorder = context.affinity_owner_recorder.clone();
@@ -2574,6 +2701,7 @@ where
                             session_registry,
                             session_id,
                             affinity_owner_context.as_ref(),
+                            active_turn_reservation,
                             async_affinity_owner_recorder,
                             affinity_owner_recorder,
                         )
@@ -2609,6 +2737,7 @@ async fn record_forwarded_websocket_metadata(
     session_registry: WebSocketRevocationRegistry,
     session_id: u64,
     affinity_owner_context: Option<&WebSocketAffinityOwnerContext>,
+    active_turn_reservation: ActiveTurnReservationState,
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_owner_recorder: Option<Arc<dyn HttpAffinityOwnerRecorder>>,
 ) {
@@ -2626,12 +2755,45 @@ async fn record_forwarded_websocket_metadata(
         }
     }
     if is_completed {
-        if let Some(context) = affinity_owner_context
-            && let Some(active_reservation_guard) = context.active_reservation_guard.as_ref()
-        {
-            active_reservation_guard.release();
-        }
+        active_turn_reservation.release_current();
         session_registry.note_response_completed(session_id);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ActiveTurnReservationState {
+    reservation_template: Option<ActiveReservationGuard>,
+    current_reservation: Arc<Mutex<Option<ActiveReservationGuard>>>,
+}
+
+impl ActiveTurnReservationState {
+    fn new(initial_reservation: Option<ActiveReservationGuard>) -> Self {
+        Self {
+            reservation_template: initial_reservation.clone(),
+            current_reservation: Arc::new(Mutex::new(initial_reservation)),
+        }
+    }
+
+    fn release_current(&self) {
+        let Ok(mut current_reservation) = self.current_reservation.lock() else {
+            return;
+        };
+        if let Some(reservation) = current_reservation.take() {
+            reservation.release();
+        }
+    }
+
+    fn reserve_if_idle(&self, reserved_unix_seconds: u64) {
+        let Some(template) = self.reservation_template.as_ref() else {
+            return;
+        };
+        let Ok(mut current_reservation) = self.current_reservation.lock() else {
+            return;
+        };
+        if current_reservation.is_some() {
+            return;
+        }
+        *current_reservation = template.reserve_again_at(reserved_unix_seconds);
     }
 }
 
@@ -2745,6 +2907,13 @@ fn is_response_completed(message: &Message) -> bool {
     is_response_completed_text(&text)
 }
 
+fn is_response_create(message: &Message) -> bool {
+    let Some(text) = websocket_metadata_text_handle(message) else {
+        return false;
+    };
+    top_level_json_string_field_equals(text.as_str().as_bytes(), b"type", b"response.create")
+}
+
 fn is_response_completed_text(text: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
@@ -2756,6 +2925,91 @@ fn is_response_completed_text(text: &str) -> bool {
         })
         .as_deref()
         == Some("response.completed")
+}
+
+fn top_level_json_string_field_equals(body: &[u8], field_name: &[u8], expected: &[u8]) -> bool {
+    let mut cursor = skip_json_whitespace(body, 0);
+    if body.get(cursor) != Some(&b'{') {
+        return false;
+    }
+    cursor += 1;
+    let mut depth = 1_u32;
+    while cursor < body.len() {
+        cursor = skip_json_whitespace(body, cursor);
+        let Some(byte) = body.get(cursor).copied() else {
+            return false;
+        };
+        match byte {
+            b'"' => {
+                let Some((string_slice, after_string)) = json_string_slice(body, cursor) else {
+                    return false;
+                };
+                let after_key = skip_json_whitespace(body, after_string);
+                if depth == 1 && body.get(after_key) == Some(&b':') {
+                    let key_matches = serde_json::from_slice::<String>(string_slice)
+                        .ok()
+                        .is_some_and(|key| key.as_bytes() == field_name);
+                    if key_matches {
+                        let value_start = skip_json_whitespace(body, after_key + 1);
+                        let Some((value_slice, _after_value)) =
+                            json_string_slice(body, value_start)
+                        else {
+                            return false;
+                        };
+                        return serde_json::from_slice::<String>(value_slice)
+                            .ok()
+                            .is_some_and(|value| value.as_bytes() == expected);
+                    }
+                    cursor = after_key + 1;
+                } else {
+                    cursor = after_string;
+                }
+            }
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+                if depth == 0 {
+                    return false;
+                }
+            }
+            _ => {
+                cursor += 1;
+            }
+        }
+    }
+    false
+}
+
+fn json_string_slice(body: &[u8], start: usize) -> Option<(&[u8], usize)> {
+    if body.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while cursor < body.len() {
+        match body[cursor] {
+            b'\\' => cursor = cursor.saturating_add(2),
+            b'"' => {
+                let end = cursor + 1;
+                return Some((&body[start..end], end));
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn skip_json_whitespace(body: &[u8], mut cursor: usize) -> usize {
+    while body
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        cursor += 1;
+    }
+    cursor
 }
 
 fn websocket_metadata_text_handle(message: &Message) -> Option<tungstenite::Utf8Bytes> {

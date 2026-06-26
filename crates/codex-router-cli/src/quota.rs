@@ -1,5 +1,6 @@
 //! Quota command glue for persisted router-owned quota state.
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -58,6 +59,8 @@ use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
+use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -85,6 +88,8 @@ pub enum QuotaCommand {
         all_limits: bool,
         /// Current clock used for pace and runout math.
         now_unix_seconds: u64,
+        /// Whether to refresh persisted quota best-effort before finishing.
+        auto_refresh: bool,
     },
     /// Refreshes persisted quota from the provider.
     Refresh {
@@ -98,8 +103,13 @@ pub enum QuotaCommand {
 impl QuotaCommand {
     pub(crate) fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
         let Some(command) = parser.next_string()? else {
-            return Err(CliError::MissingCommand {
-                command: "quota".to_owned(),
+            let options = QuotaStatusOptions::default();
+            return Ok(Self::Status {
+                router_root: options.router_root()?,
+                format: options.format,
+                all_limits: options.all_limits,
+                now_unix_seconds: options.now_unix_seconds,
+                auto_refresh: true,
             });
         };
 
@@ -111,6 +121,7 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
+                    auto_refresh: false,
                 })
             }
             "refresh" => {
@@ -118,6 +129,19 @@ impl QuotaCommand {
                 Ok(Self::Refresh {
                     router_root: options.router_root()?,
                     base_url: options.base_url,
+                })
+            }
+            option if option.starts_with("--") => {
+                let mut arguments = vec![OsString::from(option)];
+                arguments.extend(parser.remaining_arguments());
+                let mut status_parser = ArgumentParser::new(arguments);
+                let options = QuotaStatusOptions::parse(&mut status_parser)?;
+                Ok(Self::Status {
+                    router_root: options.router_root()?,
+                    format: options.format,
+                    all_limits: options.all_limits,
+                    now_unix_seconds: options.now_unix_seconds,
+                    auto_refresh: true,
                 })
             }
             unknown => Err(CliError::UnknownCommand {
@@ -202,7 +226,15 @@ pub fn run_quota_command(
             format,
             all_limits,
             now_unix_seconds,
-        } => render_quota_status(stdout, router_root, format, all_limits, now_unix_seconds),
+            auto_refresh,
+        } => render_quota_status_with_optional_refresh(
+            stdout,
+            router_root,
+            format,
+            all_limits,
+            now_unix_seconds,
+            auto_refresh,
+        ),
         QuotaCommand::Refresh {
             router_root,
             base_url,
@@ -1042,6 +1074,67 @@ fn current_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+fn render_quota_status_with_optional_refresh(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    format: QuotaStatusFormat,
+    all_limits: bool,
+    now_unix_seconds: u64,
+    auto_refresh: bool,
+) -> Result<(), QuotaCommandError> {
+    if !auto_refresh {
+        return render_quota_status(stdout, router_root, format, all_limits, now_unix_seconds);
+    }
+    match format {
+        QuotaStatusFormat::Json => {
+            let _refresh_result = refresh_quota_best_effort(&router_root);
+            render_quota_status(stdout, router_root, format, all_limits, now_unix_seconds)
+        }
+        QuotaStatusFormat::Plain | QuotaStatusFormat::Table => {
+            render_quota_status(
+                stdout,
+                router_root.clone(),
+                format,
+                all_limits,
+                now_unix_seconds,
+            )?;
+            writeln!(stdout).map_err(QuotaCommandError::Stdout)?;
+            let refresh_result = refresh_quota_best_effort(&router_root);
+            match refresh_result {
+                Ok(()) => {
+                    writeln!(stdout, "updated quota:").map_err(QuotaCommandError::Stdout)?;
+                }
+                Err(error) => {
+                    writeln!(stdout, "quota refresh failed; showing cached data: {error}")
+                        .map_err(QuotaCommandError::Stdout)?;
+                }
+            }
+            render_quota_status(
+                stdout,
+                router_root,
+                format,
+                all_limits,
+                current_unix_seconds(),
+            )
+        }
+    }
+}
+
+fn refresh_quota_best_effort(router_root: &Path) -> Result<(), QuotaCommandError> {
+    let progress = ProgressBar::new_spinner();
+    if let Ok(style) = ProgressStyle::with_template("{spinner} refreshing quota") {
+        progress.set_style(style);
+    }
+    progress.enable_steady_tick(Duration::from_millis(80));
+    let refresh_result = refresh_quota(
+        &mut std::io::sink(),
+        router_root.to_path_buf(),
+        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+    );
+    progress.finish_and_clear();
+    refresh_result
 }
 
 fn render_quota_status(

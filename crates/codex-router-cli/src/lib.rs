@@ -488,6 +488,10 @@ impl CliCommand {
         match command.as_str() {
             "serve" => Ok(Self::Serve(ServeCommand::parse(parser)?)),
             "profile" => Ok(Self::Profile(ProfileCommand::parse(parser)?)),
+            "doctor" => {
+                parser.reject_remaining()?;
+                Ok(Self::Profile(ProfileCommand::Doctor))
+            }
             "token" => Ok(Self::Token(TokenCommand::parse(parser)?)),
             "account" => Ok(Self::Account(AccountCommand::parse(parser)?)),
             "quota" => Ok(Self::Quota(QuotaCommand::parse(parser)?)),
@@ -1122,21 +1126,17 @@ const HELP_TEXT: &str = "\
 codex-router
 
 commands:
-  serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh] [--require-local-token]
-  serve internal proof flags: [--max-connections <n>] [--audit-file <path>] [--websocket-registry-report-file <path>]
-  account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
-  account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets
-  account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
-  account list [--router-root <path>]
-  quota refresh [--router-root <path>] [--base-url <url>]
-  quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]
-  sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]
-  profile print [--port <port>]
-  profile doctor
-  profile write --codex-home <path> [--port <port>] [--dry-run]
-  profile write --codex-home <path> --approve-codex-home-write
-  live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]
-  live quota --profiles-root <path> [--base-url <url>] [--dry-run|--approve-network-account-use]
+  serve                         Run the local Codex account router
+  account login --label <name>  Add an OAuth account
+  account list                  Show configured router accounts
+  quota                         Show quota, refresh state, and next account
+  quota refresh                 Refresh quota data now
+  sessions                      Pick and resume a Codex session from this folder
+  sessions --checkout           Pick from this git checkout
+  sessions --repo               Pick from all checkouts for this repo
+  sessions --any                Pick from all Codex sessions
+  doctor                        Diagnose local router setup
+  profile print                 Print the Codex profile snippet
 ";
 
 #[cfg(test)]
@@ -1333,17 +1333,37 @@ mod tests {
         );
 
         for expected_line in [
-            "serve [--state-db <path>] [--secret-root <path>] [--upstream-base-url <url>] [--quota-refresh-interval-seconds <seconds>] [--disable-background-quota-refresh] [--require-local-token]",
-            "account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets",
-            "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
-            "quota refresh [--router-root <path>] [--base-url <url>]",
-            "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]",
-            "sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]",
-            "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]",
+            "serve                         Run the local Codex account router",
+            "account login --label <name>  Add an OAuth account",
+            "account list                  Show configured router accounts",
+            "quota                         Show quota, refresh state, and next account",
+            "sessions                      Pick and resume a Codex session from this folder",
+            "sessions --checkout           Pick from this git checkout",
+            "sessions --repo               Pick from all checkouts for this repo",
+            "doctor                        Diagnose local router setup",
         ] {
             assert!(
                 output.stdout.contains(expected_line),
                 "help output missing expected line: {expected_line}\n{}",
+                output.stdout
+            );
+        }
+        for hidden_line in [
+            "--state-db",
+            "--secret-root",
+            "--upstream-base-url",
+            "serve internal proof flags",
+            "token",
+            "account import-codex-auth",
+            "profile write",
+            "live quota",
+            "--scope",
+            "--router-root",
+            "--allow-plaintext-file-secrets",
+        ] {
+            assert!(
+                !output.stdout.contains(hidden_line),
+                "help output leaked internal line: {hidden_line}\n{}",
                 output.stdout
             );
         }
@@ -4184,6 +4204,68 @@ exit 42
     }
 
     #[test]
+    fn account_login_defaults_to_device_auth_method() {
+        let command = match CliCommand::parse([
+            OsString::from("account"),
+            OsString::from("login"),
+            OsString::from("--label"),
+            OsString::from("primary"),
+        ]) {
+            Ok(CliCommand::Account(command)) => command,
+            Ok(other) => panic!("account command should parse, got {other:?}"),
+            Err(error) => panic!("account command should parse: {error}"),
+        };
+
+        let AccountCommand::LoginDeviceAuth {
+            router_root,
+            label,
+            codex_bin,
+            allow_plaintext_file_secrets,
+        } = command
+        else {
+            panic!("account login should default to device auth");
+        };
+        assert_eq!(router_root, default_router_root_for_test());
+        assert_eq!(label, "primary");
+        assert_eq!(codex_bin, PathBuf::from("codex"));
+        assert!(!allow_plaintext_file_secrets);
+    }
+
+    #[test]
+    fn account_list_renders_friendly_table_without_account_ids() {
+        let test_root = TestRoot::new("account-list-table");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(
+                account_id("acct_primary"),
+                "primary".to_owned(),
+                AccountStatus::Enabled,
+            ),
+        ));
+
+        let output = run_cli(
+            [
+                "account",
+                "list",
+                "--router-root",
+                path_to_str(&router_root),
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("account"));
+        assert!(output.stdout.contains("status"));
+        assert!(output.stdout.contains("primary"));
+        assert!(output.stdout.contains("enabled"));
+        assert!(!output.stdout.contains("acct_primary"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
     fn quota_status_command_defaults_to_home_router_root() {
         let command = match CliCommand::parse([
             OsString::from("quota"),
@@ -4203,14 +4285,54 @@ exit 42
     }
 
     #[test]
-    fn sessions_command_defaults_to_worktree_scope_provider_any_interactive_source() {
+    fn quota_command_defaults_to_status() {
+        let command = match CliCommand::parse([OsString::from("quota")]) {
+            Ok(CliCommand::Quota(command)) => command,
+            Ok(other) => panic!("quota command should parse, got {other:?}"),
+            Err(error) => panic!("quota command should parse: {error}"),
+        };
+
+        let QuotaCommand::Status { router_root, .. } = command else {
+            panic!("bare quota command should parse as status");
+        };
+        assert_eq!(router_root, default_router_root_for_test());
+    }
+
+    #[test]
+    fn quota_command_treats_leading_options_as_status_options() {
+        let command = match CliCommand::parse([
+            OsString::from("quota"),
+            OsString::from("--format"),
+            OsString::from("json"),
+            OsString::from("--now-unix-seconds"),
+            OsString::from("0"),
+        ]) {
+            Ok(CliCommand::Quota(command)) => command,
+            Ok(other) => panic!("quota command should parse, got {other:?}"),
+            Err(error) => panic!("quota command should parse: {error}"),
+        };
+
+        let QuotaCommand::Status {
+            format,
+            now_unix_seconds,
+            ..
+        } = command
+        else {
+            panic!("quota options should parse as status options");
+        };
+        assert_eq!(format, crate::quota::QuotaStatusFormat::Json);
+        assert_eq!(now_unix_seconds, 0);
+    }
+
+    #[test]
+    fn sessions_command_defaults_to_cwd_root_provider_any_interactive_source() {
         let command = match CliCommand::parse([OsString::from("sessions")]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
             Err(error) => panic!("sessions command should parse: {error}"),
         };
 
-        assert_eq!(command.scope, crate::sessions::SessionsScope::Worktree);
+        assert_eq!(command.scope, crate::sessions::SessionsScope::Cwd);
         assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
         assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
         assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);
@@ -4224,8 +4346,7 @@ exit 42
     fn sessions_command_parses_explicit_filters_for_list_json_last() {
         let command = match CliCommand::parse([
             OsString::from("sessions"),
-            OsString::from("--scope"),
-            OsString::from("any"),
+            OsString::from("--any"),
             OsString::from("--provider"),
             OsString::from("current"),
             OsString::from("--source"),
@@ -4253,17 +4374,39 @@ exit 42
     }
 
     #[test]
-    fn sessions_command_rejects_invalid_scope() {
+    fn sessions_command_parses_checkout_and_repo_roots() {
+        let checkout_command =
+            match CliCommand::parse([OsString::from("sessions"), OsString::from("--checkout")]) {
+                Ok(CliCommand::Sessions(command)) => command,
+                Ok(other) => panic!("sessions command should parse, got {other:?}"),
+                Err(error) => panic!("sessions command should parse: {error}"),
+            };
+        let repo_command =
+            match CliCommand::parse([OsString::from("sessions"), OsString::from("--repo")]) {
+                Ok(CliCommand::Sessions(command)) => command,
+                Ok(other) => panic!("sessions command should parse, got {other:?}"),
+                Err(error) => panic!("sessions command should parse: {error}"),
+            };
+
+        assert_eq!(
+            checkout_command.scope,
+            crate::sessions::SessionsScope::Checkout
+        );
+        assert_eq!(repo_command.scope, crate::sessions::SessionsScope::Repo);
+    }
+
+    #[test]
+    fn sessions_command_rejects_legacy_scope_option() {
         let error = must_err(CliCommand::parse([
             OsString::from("sessions"),
             OsString::from("--scope"),
-            OsString::from("repo"),
+            OsString::from("any"),
         ]));
 
         assert!(
-            error.to_string().contains("invalid value")
-                || error.to_string().contains("invalid sessions scope"),
-            "unexpected sessions scope error: {error}"
+            error.to_string().contains("unexpected argument")
+                || error.to_string().contains("unrecognized option"),
+            "unexpected legacy sessions scope error: {error}"
         );
     }
 
@@ -4278,7 +4421,7 @@ exit 42
 
         let output = run_cli(
             [
-                "sessions", "--scope", "any", "--source", "all", "--list", "--format", "json",
+                "sessions", "--any", "--source", "all", "--list", "--format", "json",
             ],
             CliContext::new(vec![
                 ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
@@ -4403,8 +4546,6 @@ exit 42
         let cwd_output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "cwd",
                 "--provider",
                 "codex-router",
                 "--source",
@@ -4420,8 +4561,7 @@ exit 42
         let worktree_output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "worktree",
+                "--checkout",
                 "--provider",
                 "codex-router",
                 "--source",
@@ -4437,8 +4577,7 @@ exit 42
         let subagent_output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--provider",
                 "codex-router",
                 "--source",
@@ -4496,8 +4635,7 @@ exit 42
         let output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--provider",
                 "current",
                 "--source",
@@ -4527,8 +4665,7 @@ exit 42
         let error = match run_with_io(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--provider",
                 "current",
                 "--list",
@@ -4577,7 +4714,7 @@ exit 42
 
         let output = run_cli(
             [
-                "sessions", "--scope", "any", "--source", "all", "--list", "--format", "table",
+                "sessions", "--any", "--source", "all", "--list", "--format", "table",
             ],
             CliContext::new(vec![
                 ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
@@ -4628,8 +4765,7 @@ exit 42
         let output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--source",
                 "interactive",
                 "--provider",
@@ -4678,8 +4814,7 @@ exit 42
             vec![
                 "codex-router".into(),
                 "sessions".into(),
-                "--scope".into(),
-                "any".into(),
+                "--any".into(),
                 "--source".into(),
                 "interactive".into(),
                 "--provider".into(),
@@ -4741,8 +4876,7 @@ exit 42
         );
         let command = match CliCommand::parse([
             OsString::from("sessions"),
-            OsString::from("--scope"),
-            OsString::from("any"),
+            OsString::from("--any"),
             OsString::from("--provider"),
             OsString::from("codex-router"),
             OsString::from("--last"),
@@ -4806,8 +4940,7 @@ exit 42
         );
         let command = match CliCommand::parse([
             OsString::from("sessions"),
-            OsString::from("--scope"),
-            OsString::from("any"),
+            OsString::from("--any"),
             OsString::from("--provider"),
             OsString::from("codex-router"),
         ]) {

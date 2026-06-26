@@ -3,6 +3,8 @@ set -euo pipefail
 
 PLAN_ROOT="tmp/plan-workflows/2026-06-24-async-router-runtime"
 EVIDENCE_ROOT="$PLAN_ROOT/evidence"
+ACCOUNT_ROUTER_PLAN_ROOT="tmp/plan-workflows/2026-06-25-account-router-ux-fix"
+ACCOUNT_ROUTER_EVIDENCE_ROOT="$ACCOUNT_ROUTER_PLAN_ROOT/evidence"
 
 usage() {
   cat >&2 <<'EOF'
@@ -25,6 +27,9 @@ json_escape() {
 
 row_layer() {
   case "$1" in
+    AR-WS-GUARD) printf 'structural' ;;
+    AR-E2E-ACCOUNTS) printf 'e2e' ;;
+    AR-*) printf 'integration' ;;
     U-*) printf 'unit' ;;
     I-*) printf 'integration' ;;
     S-*) printf 'smoke' ;;
@@ -37,6 +42,7 @@ row_layer() {
 
 row_owner() {
   case "$1" in
+    AR-*) printf 'account-router-ux-fix' ;;
     U-06|U-07|I-16) printf 'T2' ;;
     I-21) printf 'T1/T2' ;;
     I-19) printf 'T5' ;;
@@ -53,6 +59,30 @@ row_owner() {
 
 expected_observation() {
   case "$1" in
+    AR-WS-GUARD)
+      printf 'release WebSocket routing has no first-frame size cap, first-frame type rejection, or whole-frame JSON validity gate'
+      ;;
+    AR-WS-PASSTHROUGH)
+      printf 'real serve path forwards a legal >1 MiB first WebSocket data frame byte-identically'
+      ;;
+    AR-WS-ACTIVE-TURN)
+      printf 'same WebSocket re-reserves active turn load on later request-like frames for the pinned account'
+      ;;
+    AR-HTTP-PASSTHROUGH)
+      printf 'HTTP/SSE request bodies and response streams remain pass-through while bounded metadata is observed'
+      ;;
+    AR-CLI-UX)
+      printf 'normal CLI help/default command contract hides internal proof/import/token noise'
+      ;;
+    AR-SESSIONS)
+      printf 'sessions defaults to cwd, supports checkout/repo/any root flags, and reads Codex state read-only'
+      ;;
+    AR-SCHEMA)
+      printf 'default router root and SQLite schema behavior are reproducible for fresh and drifted databases'
+      ;;
+    AR-E2E-ACCOUNTS)
+      printf 'three concurrent installed Codex clients prove WebSocket continuity and selected account tags'
+      ;;
     E-02)
       printf 'five-minute soak holds three installed Codex WebSocket sessions through one real router process'
       ;;
@@ -208,6 +238,13 @@ expected_observation() {
 
 freshness_guard() {
   case "$1" in
+    AR-WS-GUARD) printf 'crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs scripts/check-release-runtime-guardrails.py scripts/proof-matrix.sh' ;;
+    AR-WS-PASSTHROUGH|AR-WS-ACTIVE-TURN) printf 'crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/lib.rs crates/codex-router-selection/src/* scripts/proof-matrix.sh' ;;
+    AR-HTTP-PASSTHROUGH) printf 'crates/codex-router-proxy/src/http_sse.rs crates/codex-router-proxy/src/upstream.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/lib.rs scripts/proof-matrix.sh' ;;
+    AR-CLI-UX) printf 'crates/codex-router-cli/src/* Cargo.toml crates/codex-router-cli/Cargo.toml scripts/proof-matrix.sh' ;;
+    AR-SESSIONS) printf 'crates/codex-router-cli/src/sessions.rs crates/codex-router-cli/src/lib.rs crates/codex-router-state/src/* scripts/proof-matrix.sh' ;;
+    AR-SCHEMA) printf 'crates/codex-router-state/src/* crates/codex-router-cli/src/* scripts/proof-matrix.sh' ;;
+    AR-E2E-ACCOUNTS) printf 'crates/codex-router-test-support/src/* tests/smoke/* crates/codex-router-proxy/src/* crates/codex-router-cli/src/* scripts/proof-matrix.sh' ;;
     I-19|I-20) printf 'crates/codex-router-proxy/src/websocket.rs crates/codex-router-proxy/src/server.rs crates/codex-router-proxy/src/lib.rs scripts/proof-matrix.sh' ;;
     I-21) printf 'crates/codex-router-cli/src/lib.rs crates/codex-router-proxy/src/server.rs crates/codex-router-quota/src/* crates/codex-router-state/src/*' ;;
     U-*) printf 'crates/codex-router-proxy/src/* crates/codex-router-core/src/* crates/codex-router-selection/src/*' ;;
@@ -262,6 +299,7 @@ PY
 
 known_row() {
   case "$1" in
+    AR-WS-GUARD|AR-WS-PASSTHROUGH|AR-WS-ACTIVE-TURN|AR-HTTP-PASSTHROUGH|AR-CLI-UX|AR-SESSIONS|AR-SCHEMA|AR-E2E-ACCOUNTS) return 0 ;;
     U-01|U-02|U-03|U-04|U-05|U-06|U-07) return 0 ;;
     I-01|I-02|I-03|I-04|I-05a|I-05b|I-06|I-07|I-08|I-09|I-10|I-11|I-12|I-13|I-14|I-15|I-16|I-17a|I-17b|I-18|I-19|I-20|I-21) return 0 ;;
     S-01|S-02|S-03|S-04) return 0 ;;
@@ -278,7 +316,11 @@ write_receipt() {
   local owner="$3"
   local result="$4"
   local exit_code="$5"
-  local evidence_dir="$EVIDENCE_ROOT/$layer"
+  local root="$EVIDENCE_ROOT"
+  case "$row_id" in
+    AR-*) root="$ACCOUNT_ROUTER_EVIDENCE_ROOT" ;;
+  esac
+  local evidence_dir="$root/$layer"
   local timestamp
   local git_head
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -413,6 +455,16 @@ main() {
   owner=$(row_owner "$row_id")
 
   case "$row_id" in
+    AR-WS-GUARD)
+      CODEX_ROUTER_PROOF_COMMAND="scripts/proof-matrix.sh $row_id" \
+        scripts/check-release-runtime-guardrails.py "$row_id"
+      exit $?
+      ;;
+    AR-WS-PASSTHROUGH|AR-WS-ACTIVE-TURN|AR-HTTP-PASSTHROUGH|AR-CLI-UX|AR-SESSIONS|AR-SCHEMA|AR-E2E-ACCOUNTS)
+      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
+      printf 'proof row %s failed; harness for this account-router row is not implemented yet; receipt: %s\n' "$row_id" "$receipt" >&2
+      exit 1
+      ;;
     U-01)
       mark_row_pass "$row_id" "$layer" "$owner" \
         "Route classification and unsupported route unit proofs passed." \

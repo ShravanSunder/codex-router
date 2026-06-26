@@ -21,6 +21,8 @@ use codex_router_state::account::AccountStatus;
 use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
+use comfy_table::Table;
+use comfy_table::presets::UTF8_FULL;
 use thiserror::Error;
 
 use crate::ArgumentParser;
@@ -494,16 +496,13 @@ pub fn import_codex_auth_from_request(
 fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), AccountCommandError> {
     let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
     let accounts = AccountStateRepository::list_accounts(&state)?;
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["account", "status"]);
     for account in accounts {
-        writeln!(
-            stdout,
-            "{}\t{}\t{}",
-            account.account_id().as_str(),
-            account.label(),
-            account.status().as_str()
-        )
-        .map_err(AccountCommandError::Stdout)?;
+        table.add_row([account.label(), account.status().as_str()]);
     }
+    writeln!(stdout, "{table}").map_err(AccountCommandError::Stdout)?;
 
     Ok(())
 }
@@ -683,9 +682,9 @@ impl AccountLoginOptions {
 
     fn method(&self) -> Result<AccountLoginMethod, CliError> {
         match (&self.auth_json, self.device_auth) {
-            (Some(_), true) | (None, false) => Err(AccountCommandError::LoginMethodRequired.into()),
+            (Some(_), true) => Err(AccountCommandError::LoginMethodRequired.into()),
             (Some(auth_json), false) => Ok(AccountLoginMethod::AuthJson(auth_json.clone())),
-            (None, true) => Ok(AccountLoginMethod::DeviceAuth {
+            (None, false) | (None, true) => Ok(AccountLoginMethod::DeviceAuth {
                 codex_bin: self
                     .codex_bin
                     .clone()
