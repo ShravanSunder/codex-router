@@ -753,9 +753,19 @@ fn format_recency_at_ms(recency_at_ms: Option<i64>) -> String {
         .unwrap_or(0);
     let recency_at_ms = recency_at_ms as u128;
     if now_ms >= recency_at_ms {
-        format!("{} ago", format_duration_ms(now_ms - recency_at_ms))
+        let duration = format_duration_ms(now_ms - recency_at_ms);
+        if duration == "now" {
+            duration
+        } else {
+            format!("{duration} ago")
+        }
     } else {
-        format!("in {}", format_duration_ms(recency_at_ms - now_ms))
+        let duration = format_duration_ms(recency_at_ms - now_ms);
+        if duration == "now" {
+            duration
+        } else {
+            format!("in {duration}")
+        }
     }
 }
 
@@ -774,6 +784,18 @@ fn format_duration_ms(duration_ms: u128) -> String {
     }
     let days = hours / 24;
     format!("{days}d")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_duration_ms;
+
+    #[test]
+    fn duration_format_uses_now_without_suffix_for_subminute_values() {
+        assert_eq!(format_duration_ms(0), "now");
+        assert_eq!(format_duration_ms(59_000), "now");
+        assert_eq!(format_duration_ms(60_000), "1m");
+    }
 }
 
 impl fmt::Display for SessionPickerChoice {
