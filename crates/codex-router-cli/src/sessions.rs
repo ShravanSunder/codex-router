@@ -8,6 +8,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -23,6 +25,9 @@ use sqlx::sqlite::SqlitePoolOptions;
 use thiserror::Error;
 
 use crate::CliContext;
+
+const SESSION_TITLE_MAX_CHARS: usize = 96;
+const SESSION_CONTEXT_MAX_CHARS: usize = 32;
 
 /// Session search scope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -215,19 +220,9 @@ fn write_sessions_table<W: Write>(
     let records = runtime.block_on(load_session_records(command, context))?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(["session", "provider", "source", "branch", "cwd", "recency"]);
+    table.set_header(["session"]);
     for record in records {
-        table.add_row([
-            record.session_id,
-            record.provider.unwrap_or_else(|| "-".to_owned()),
-            record.source.unwrap_or_else(|| "-".to_owned()),
-            record.git_branch.unwrap_or_else(|| "-".to_owned()),
-            record.cwd.unwrap_or_else(|| "-".to_owned()),
-            record
-                .recency_at_ms
-                .map(|recency_at_ms| recency_at_ms.to_string())
-                .unwrap_or_else(|| "-".to_owned()),
-        ]);
+        table.add_row([human_session_row(&record)]);
     }
     writeln!(stdout, "{table}").map_err(SessionsCommandError::Stdout)?;
     Ok(())
@@ -256,6 +251,7 @@ async fn load_session_records(
         r#"
         SELECT
             id, cwd, model_provider, model, source, thread_source, git_branch,
+            title, preview, first_user_message,
             created_at_ms, updated_at_ms, recency_at_ms
         FROM threads
         WHERE archived = 0
@@ -291,6 +287,12 @@ async fn load_session_records(
             source,
             thread_source,
             git_branch: row.get::<Option<String>, _>("git_branch"),
+            display_title: display_title_from_session_fields(
+                row.get::<Option<String>, _>("title").as_deref(),
+                row.get::<Option<String>, _>("preview").as_deref(),
+                row.get::<Option<String>, _>("first_user_message")
+                    .as_deref(),
+            ),
             created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
             updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
             recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
@@ -609,6 +611,8 @@ fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
 #[derive(Debug, Serialize)]
 struct SessionRecord {
     session_id: String,
+    #[serde(skip)]
+    display_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -629,6 +633,16 @@ struct SessionRecord {
     recency_at_ms: Option<i64>,
 }
 
+impl SessionRecord {
+    fn display_title(&self) -> &str {
+        self.display_title.as_deref().unwrap_or("Untitled session")
+    }
+
+    fn branch(&self) -> &str {
+        self.git_branch.as_deref().unwrap_or("-")
+    }
+}
+
 /// Picker display row for one session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionPickerChoice {
@@ -638,16 +652,9 @@ pub(crate) struct SessionPickerChoice {
 
 impl SessionPickerChoice {
     fn from_record(record: SessionRecord) -> Self {
-        let provider = record.provider.unwrap_or_else(|| "-".to_owned());
-        let source = record.source.unwrap_or_else(|| "-".to_owned());
-        let branch = record.git_branch.unwrap_or_else(|| "-".to_owned());
-        let cwd = record.cwd.unwrap_or_else(|| "-".to_owned());
         Self {
             session_id: record.session_id.clone(),
-            label: format!(
-                "{}  provider={} source={} branch={} cwd={}",
-                record.session_id, provider, source, branch, cwd
-            ),
+            label: human_session_row(&record),
         }
     }
 
@@ -656,6 +663,117 @@ impl SessionPickerChoice {
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
     }
+}
+
+fn human_session_row(record: &SessionRecord) -> String {
+    let context = record
+        .cwd
+        .as_deref()
+        .map(session_context_from_cwd)
+        .unwrap_or_else(|| "-".to_owned());
+    format!(
+        "{}\n  {}  {}  {}  id={}",
+        record.display_title(),
+        format_recency_at_ms(record.recency_at_ms),
+        record.branch(),
+        context,
+        short_session_id(&record.session_id)
+    )
+}
+
+fn session_context_from_cwd(cwd: &str) -> String {
+    let leaf = Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(cwd);
+    truncate_middle(leaf, SESSION_CONTEXT_MAX_CHARS)
+}
+
+fn display_title_from_session_fields(
+    title: Option<&str>,
+    preview: Option<&str>,
+    first_user_message: Option<&str>,
+) -> Option<String> {
+    [title, preview, first_user_message]
+        .into_iter()
+        .flatten()
+        .find_map(normalize_display_title)
+}
+
+fn normalize_display_title(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    Some(truncate_end(&compact, SESSION_TITLE_MAX_CHARS))
+}
+
+fn truncate_end(value: &str, max_chars: usize) -> String {
+    let character_count = value.chars().count();
+    if character_count <= max_chars {
+        return value.to_owned();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("{}…", value.chars().take(keep).collect::<String>())
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let character_count = value.chars().count();
+    if character_count <= max_chars {
+        return value.to_owned();
+    }
+    let side = max_chars.saturating_sub(1) / 2;
+    let prefix = value.chars().take(side).collect::<String>();
+    let suffix = value
+        .chars()
+        .rev()
+        .take(side)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
+fn short_session_id(session_id: &str) -> String {
+    truncate_end(session_id, 8)
+}
+
+fn format_recency_at_ms(recency_at_ms: Option<i64>) -> String {
+    let Some(recency_at_ms) = recency_at_ms else {
+        return "-".to_owned();
+    };
+    if recency_at_ms < 0 {
+        return "-".to_owned();
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let recency_at_ms = recency_at_ms as u128;
+    if now_ms >= recency_at_ms {
+        format!("{} ago", format_duration_ms(now_ms - recency_at_ms))
+    } else {
+        format!("in {}", format_duration_ms(recency_at_ms - now_ms))
+    }
+}
+
+fn format_duration_ms(duration_ms: u128) -> String {
+    let seconds = duration_ms / 1_000;
+    if seconds < 60 {
+        return "now".to_owned();
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    if hours < 48 {
+        return format!("{hours}h");
+    }
+    let days = hours / 24;
+    format!("{days}d")
 }
 
 impl fmt::Display for SessionPickerChoice {

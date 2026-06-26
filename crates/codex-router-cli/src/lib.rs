@@ -4676,7 +4676,7 @@ exit 42
     }
 
     #[test]
-    fn sessions_list_table_renders_metadata_without_prompt_leak() {
+    fn sessions_list_table_renders_human_title_without_noisy_default_columns() {
         const PROMPT_CANARY: &str = "TABLE_CANARY_SHOULD_NOT_LEAK";
         let test_root = TestRoot::new("sessions-table");
         must_ok(fs::create_dir(test_root.path()));
@@ -4695,7 +4695,8 @@ exit 42
                 "cli",
                 "main",
                 1000,
-            )],
+            )
+            .with_title("Pull main origin please")],
         );
 
         let output = run_cli(
@@ -4709,9 +4710,13 @@ exit 42
             .with_current_dir(project),
         );
 
-        assert!(output.stdout.contains("thread-table"));
-        assert!(output.stdout.contains("codex-router"));
+        assert!(output.stdout.contains("Pull main origin please"));
+        assert!(output.stdout.contains("id=thread-…"));
         assert!(output.stdout.contains("main"));
+        assert!(output.stdout.contains("ago"));
+        assert!(!output.stdout.contains("provider"));
+        assert!(!output.stdout.contains("source"));
+        assert!(!output.stdout.contains("codex-router"));
         assert!(!output.stdout.contains(PROMPT_CANARY));
     }
 
@@ -4735,7 +4740,8 @@ exit 42
                     "cli",
                     "main",
                     1000,
-                ),
+                )
+                .with_title("Resume old router work"),
                 CodexStateThreadFixture::new(
                     "thread-new",
                     &project,
@@ -4744,7 +4750,8 @@ exit 42
                     "cli",
                     "main",
                     2000,
-                ),
+                )
+                .with_title("Fix WebSocket router"),
             ],
         );
 
@@ -4850,7 +4857,8 @@ exit 42
                     "cli",
                     "main",
                     1000,
-                ),
+                )
+                .with_title("Resume old router work"),
                 CodexStateThreadFixture::new(
                     "thread-new",
                     &project,
@@ -4859,7 +4867,8 @@ exit 42
                     "cli",
                     "main",
                     2000,
-                ),
+                )
+                .with_title("Fix WebSocket router"),
             ],
         );
         let command = match CliCommand::parse([
@@ -4915,7 +4924,8 @@ exit 42
                     "cli",
                     "main",
                     1000,
-                ),
+                )
+                .with_title("Resume old router work"),
                 CodexStateThreadFixture::new(
                     "thread-new",
                     &project,
@@ -4924,7 +4934,8 @@ exit 42
                     "cli",
                     "main",
                     2000,
-                ),
+                )
+                .with_title("Fix WebSocket router"),
             ],
         );
         let command = match CliCommand::parse([
@@ -4957,6 +4968,11 @@ exit 42
 
         assert!(stdout.is_empty());
         assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
+        assert!(picker.offered_labels[0].contains("Fix WebSocket router"));
+        assert!(picker.offered_labels[0].contains("main"));
+        assert!(!picker.offered_labels[0].contains("provider="));
+        assert!(!picker.offered_labels[0].contains("source="));
+        assert!(!picker.offered_labels[0].contains("PICKER_CANARY_SHOULD_NOT_LEAK"));
         assert_eq!(runner.resumed_session_ids, ["thread-old"]);
     }
 
@@ -6159,6 +6175,7 @@ exit 42
     struct CodexStateThreadFixture {
         id: String,
         cwd: PathBuf,
+        title: String,
         provider: String,
         model: String,
         source: String,
@@ -6180,6 +6197,7 @@ exit 42
             Self {
                 id: id.to_owned(),
                 cwd: cwd.to_path_buf(),
+                title: format!("Session {id}"),
                 provider: provider.to_owned(),
                 model: "gpt-5.4-mini".to_owned(),
                 source: source.to_owned(),
@@ -6191,6 +6209,11 @@ exit 42
 
         fn with_thread_source(mut self, thread_source: Option<&str>) -> Self {
             self.thread_source = thread_source.map(str::to_owned);
+            self
+        }
+
+        fn with_title(mut self, title: &str) -> Self {
+            self.title = title.to_owned();
             self
         }
     }
@@ -6213,6 +6236,7 @@ exit 42
     struct FakeSessionsPicker {
         selected_session_id: String,
         offered_session_ids: Vec<String>,
+        offered_labels: Vec<String>,
     }
 
     impl FakeSessionsPicker {
@@ -6220,6 +6244,7 @@ exit 42
             Self {
                 selected_session_id: selected_session_id.to_owned(),
                 offered_session_ids: Vec::new(),
+                offered_labels: Vec::new(),
             }
         }
     }
@@ -6232,6 +6257,10 @@ exit 42
             self.offered_session_ids = choices
                 .iter()
                 .map(|choice| choice.session_id().to_owned())
+                .collect();
+            self.offered_labels = choices
+                .iter()
+                .map(std::string::ToString::to_string)
                 .collect();
             Ok(Some(self.selected_session_id.clone()))
         }
@@ -6356,7 +6385,7 @@ exit 42
                     .bind(&row.source)
                     .bind(&row.provider)
                     .bind(row.cwd.display().to_string())
-                    .bind(prompt_canary)
+                    .bind(&row.title)
                     .bind(&row.git_branch)
                     .bind(prompt_canary)
                     .bind(&row.model)
