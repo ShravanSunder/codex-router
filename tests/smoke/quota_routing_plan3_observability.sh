@@ -117,15 +117,178 @@ SQL
   --now-unix-seconds 10000 \
   >"${smoke_root}/quota.json"
 
+"${cargo_command[@]}" run -q -p codex-router-cli -- \
+  quota refresh \
+  --router-root "${router_root}" \
+  --base-url "https://chatgpt.com/backend-api" \
+  >"${smoke_root}/quota-refresh.out" \
+  2>"${smoke_root}/quota-refresh.err" || true
+
+reject_root="${smoke_root}/reject-router"
+mkdir -p "${reject_root}"
+CODEX_ROUTER_OBSERVABILITY_MARKER="${marker}-setup" "${cargo_command[@]}" run -q -p codex-router-cli -- \
+  quota \
+  --no-refresh \
+  --router-root "${reject_root}" \
+  --format plain \
+  --now-unix-seconds 10000 \
+  >/dev/null
+
+server_stdout="${smoke_root}/reject-server.stdout"
+server_stderr="${smoke_root}/reject-server.stderr"
+reject_port="$(
+  python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)"
+"${cargo_command[@]}" run -q -p codex-router-cli -- \
+  serve \
+  --port "${reject_port}" \
+  --state-db "${reject_root}/state.sqlite" \
+  --secret-root "${reject_root}/secrets" \
+  --upstream-base-url "http://127.0.0.1:9/v1" \
+  --disable-background-quota-refresh \
+  --max-connections 2 \
+  >"${server_stdout}" \
+  2>"${server_stderr}" &
+server_pid="$!"
+
+cleanup_server() {
+  if kill -0 "${server_pid}" >/dev/null 2>&1; then
+    kill "${server_pid}" >/dev/null 2>&1 || true
+    wait "${server_pid}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_server EXIT
+
+for _attempt in $(seq 1 50); do
+  if grep -q "listening:" "${server_stdout}"; then
+    break
+  fi
+  if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+    echo "reject server exited before readiness" >&2
+    cat "${server_stderr}" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+
+if ! grep -q "listening:" "${server_stdout}"; then
+  echo "reject server did not become ready" >&2
+  cat "${server_stderr}" >&2
+  exit 1
+fi
+
+listener="$(
+  python3 - "${server_stdout}" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    text = handle.read()
+
+match = re.search(r"listening:\s+(127\.0\.0\.1:\d+)", text)
+if not match:
+    raise SystemExit(1)
+print(match.group(1))
+PY
+)"
+
+reject_http_status="$(
+  curl --silent --show-error --max-time 5 \
+  --output "${smoke_root}/reject-http.out" \
+  --write-out "%{http_code}" \
+  --request POST \
+  --header "content-type: application/json" \
+  --data '{"type":"response.create","input":"hello"}' \
+  "http://${listener}/v1/responses" || true
+)"
+if [[ "${reject_http_status}" != "503" ]]; then
+  echo "expected no-account HTTP rejection status 503, got ${reject_http_status}" >&2
+  cat "${smoke_root}/reject-http.out" >&2
+  cat "${server_stderr}" >&2
+  exit 1
+fi
+
+python3 - "${listener}" <<'PY' || true
+import base64
+import os
+import socket
+import struct
+import sys
+
+host, port_text = sys.argv[1].split(":")
+port = int(port_text)
+key = base64.b64encode(os.urandom(16)).decode("ascii")
+payload = b'{"type":"response.create","input":"hello"}'
+header = bytearray()
+header.append(0x81)
+header.append(0x80 | len(payload))
+mask = os.urandom(4)
+header.extend(mask)
+header.extend(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+
+with socket.create_connection((host, port), timeout=5) as sock:
+    request = (
+        "GET /v1/responses HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    sock.sendall(request.encode("ascii"))
+    sock.recv(4096)
+    sock.sendall(header)
+    try:
+        sock.recv(4096)
+    except TimeoutError:
+        pass
+PY
+
+for _attempt in $(seq 1 50); do
+  if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+    wait "${server_pid}" >/dev/null 2>&1 || true
+    break
+  fi
+  sleep 0.1
+done
+
+if kill -0 "${server_pid}" >/dev/null 2>&1; then
+  echo "reject server did not exit after bounded proof connections" >&2
+  cat "${server_stdout}" >&2
+  cat "${server_stderr}" >&2
+  cleanup_server
+  exit 1
+fi
+trap - EXIT
+
+if ! grep -q "codex_router.account_selection_rejected" "${server_stderr}"; then
+  echo "reject server did not log account selection rejection" >&2
+  cat "${server_stderr}" >&2
+  exit 1
+fi
+
 metric_series="${smoke_root}/metric-series.json"
 trace_result="${smoke_root}/trace-result.json"
 
 wait_for_metric() {
-  local metric_name="$1"
+  local metric_selector="$1"
+  local metric_query
+  if [[ "${metric_selector}" == *"{"* ]]; then
+    metric_query="${metric_selector%?},agent.proof.marker=\"${marker}\"}"
+  else
+    metric_query="${metric_selector}{agent.proof.marker=\"${marker}\"}"
+  fi
   for _attempt in $(seq 1 20); do
     curl --silent --show-error --max-time 5 --get \
       "${metrics_url}/api/v1/series" \
-      --data-urlencode "match[]=${metric_name}{agent.proof.marker=\"${marker}\"}" \
+      --data-urlencode "match[]=${metric_query}" \
       >"${metric_series}"
     if python3 - "$metric_series" <<'PY'
 import json
@@ -141,7 +304,7 @@ PY
     fi
     sleep 1
   done
-  echo "metric ${metric_name} was not exported with marker ${marker}" >&2
+  echo "metric ${metric_selector} was not exported with marker ${marker}" >&2
   cat "${metric_series}" >&2
   return 1
 }
@@ -149,10 +312,14 @@ PY
 for metric_name in \
   codex_router_account_selections_total \
   codex_router_active_clients \
+  codex_router_quota_refresh_total \
+  codex_router_websocket_events_total \
   codex_router_quota_remaining_bucket \
   codex_router_quota_pressure_bucket; do
   wait_for_metric "${metric_name}"
 done
+
+wait_for_metric 'codex_router_account_rejections_total{selection.reason="no_eligible_accounts"}'
 
 curl --silent --show-error --max-time 5 --get \
   "${metrics_url}/api/v1/series" \

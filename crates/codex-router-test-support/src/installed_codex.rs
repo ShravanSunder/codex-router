@@ -254,6 +254,93 @@ pub fn run_installed_codex_three_websocket_mock_soak() -> Result<InstalledCodexS
     run_installed_codex_three_websocket_mock_e2e_inner(ConcurrentWebSocketHarnessConfig::soak())
 }
 
+/// Runs one installed Codex WebSocket client through provider quota exhaustion,
+/// then proves Codex reconnects and completes on the next router account.
+pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
+-> Result<InstalledCodexSmokeReport, String> {
+    let smoke_root = SmokeTempRoot::new("installed-codex-quota-reconnect")?;
+    let codex_home = smoke_root.path().join("codex-home");
+    let workdir = smoke_root.path().join("workdir");
+    let process_home = smoke_root.path().join("home");
+    let xdg_config_home = smoke_root.path().join("xdg-config");
+    let xdg_state_home = smoke_root.path().join("xdg-state");
+    let xdg_cache_home = smoke_root.path().join("xdg-cache");
+    let router_root = smoke_root.path().join("router");
+    let state_path = router_root.join("state.sqlite");
+    let secret_root = router_root.join("secrets");
+    for path in [
+        &codex_home,
+        &workdir,
+        &process_home,
+        &xdg_config_home,
+        &xdg_state_home,
+        &xdg_cache_home,
+        &router_root,
+    ] {
+        fs::create_dir_all(path)
+            .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+    }
+
+    let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
+    seed_quota_reconnect_router_state(&state_path, &secret_root)?;
+    let upstream = MockQuotaReconnectWebSocketUpstream::start()?;
+    let router_port = reserve_loopback_port()?;
+    let audit_path = router_root.join("audit").join("events.jsonl");
+    let profile_writer = CodexRouterProfileWriter::new(&codex_home);
+    let profile = CodexRouterProfile::new(router_port);
+    let profile_path = profile_writer
+        .write(&profile, true)
+        .map_err(|error| format!("failed to write quota reconnect Codex profile: {error}"))?;
+    let router_process = start_router_process(
+        router_port,
+        state_path,
+        secret_root,
+        None,
+        format!("http://{}/v1", upstream.address()),
+        audit_path.clone(),
+    )?;
+
+    let last_message_path = smoke_root.path().join("websocket-last-message.txt");
+    let codex_output = run_codex_exec_with_timeout(
+        CodexTransportMode::WebSocket,
+        &codex_home,
+        &workdir,
+        &last_message_path,
+        CodexChildEnvironment::new(
+            &process_home,
+            &xdg_config_home,
+            &xdg_state_home,
+            &xdg_cache_home,
+        ),
+        CODEX_COMMAND_TIMEOUT,
+    )?;
+    assert_codex_visible_output(
+        "WebSocket quota reconnect",
+        &codex_output,
+        &last_message_path,
+    )?;
+    assert_codex_quota_reconnect_output_is_safe(&codex_output, &last_message_path)?;
+    let router_process = router_process.stop("quota reconnect router process")?;
+    let router_audit = RouterAuditObservation::from_file(&audit_path)?;
+    router_audit.require_mode(InstalledCodexSmokeMode::WebSocket)?;
+    let upstream_result = upstream.join()?;
+    assert_quota_reconnect_contract(&upstream_result)?;
+    let transcript_path =
+        write_redacted_quota_reconnect_transcript(&QuotaReconnectTranscriptInput {
+            codex_version: codex_version.trim(),
+            profile_path: &profile_path,
+            codex_status: &codex_output.status,
+            codex_stdout: &String::from_utf8_lossy(&codex_output.stdout),
+            codex_stderr: &String::from_utf8_lossy(&codex_output.stderr),
+            last_message_path: &last_message_path,
+            upstream: &upstream_result,
+            router_process: &router_process,
+            router_audit: &router_audit,
+        })?;
+
+    Ok(InstalledCodexSmokeReport { transcript_path })
+}
+
 fn run_installed_codex_mock_smoke_with_mode(
     mode: InstalledCodexSmokeMode,
 ) -> Result<InstalledCodexSmokeReport, String> {
@@ -951,6 +1038,28 @@ const SMOKE_ACCOUNT_FIXTURES: &[SmokeAccountFixture] = &[
     },
 ];
 
+const QUOTA_RECONNECT_PRIMARY: SmokeAccountFixture = SmokeAccountFixture {
+    account_id: "acct_quota_primary",
+    label: "quota-primary",
+    upstream_token: "installed-quota-primary-token",
+    short_remaining: 100,
+    short_reset: 17_900,
+    weekly_remaining: 100,
+    weekly_reset: 525_000,
+    weekly_status: SelectorQuotaWindowStatus::Eligible,
+};
+
+const QUOTA_RECONNECT_FALLBACK: SmokeAccountFixture = SmokeAccountFixture {
+    account_id: "acct_quota_fallback",
+    label: "quota-fallback",
+    upstream_token: "installed-quota-fallback-token",
+    short_remaining: 80,
+    short_reset: 17_900,
+    weekly_remaining: 80,
+    weekly_reset: 525_000,
+    weekly_status: SelectorQuotaWindowStatus::Eligible,
+};
+
 fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed, String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open smoke SQLite state: {error}"))?;
@@ -996,6 +1105,16 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
             .collect(),
         quota_status,
     })
+}
+
+fn seed_quota_reconnect_router_state(state_path: &Path, secret_root: &Path) -> Result<(), String> {
+    let state = SqliteStateStore::open(state_path)
+        .map_err(|error| format!("failed to open quota reconnect SQLite state: {error}"))?;
+    let secrets = FileSecretStore::open(secret_root)
+        .map_err(|error| format!("failed to open quota reconnect secret store: {error}"))?;
+    seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_PRIMARY)?;
+    seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_FALLBACK)?;
+    Ok(())
 }
 
 fn seed_smoke_account(
@@ -1851,6 +1970,13 @@ fn bearer_token_from_authorization_header(authorization: Option<&str>) -> Option
     authorization?.strip_prefix("Bearer ")
 }
 
+fn bearer_token_from_headers(headers: &[(String, String)]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| bearer_token_from_authorization_header(Some(value)))
+}
+
 fn authorization_header_matches_expected(
     authorization: Option<String>,
     expected_token: &str,
@@ -1864,6 +1990,91 @@ fn upstream_label_from_authorization_header(authorization: Option<String>) -> Op
     smoke_account_label_from_upstream_token(bearer_token_from_authorization_header(Some(
         &authorization,
     ))?)
+}
+
+fn quota_reconnect_label_from_upstream_token(token: &str) -> Option<&'static str> {
+    [
+        (
+            QUOTA_RECONNECT_PRIMARY.upstream_token,
+            QUOTA_RECONNECT_PRIMARY.label,
+        ),
+        (
+            QUOTA_RECONNECT_FALLBACK.upstream_token,
+            QUOTA_RECONNECT_FALLBACK.label,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(candidate_token, label)| (candidate_token == token).then_some(label))
+}
+
+fn quota_reconnect_usage_limit_frame() -> &'static str {
+    r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#
+}
+
+fn assert_codex_quota_reconnect_output_is_safe(
+    output: &Output,
+    last_message_path: &Path,
+) -> Result<(), String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let last_message = fs::read_to_string(last_message_path).map_err(|error| {
+        format!(
+            "quota reconnect smoke failed to read last-message file {}: {error}",
+            last_message_path.display()
+        )
+    })?;
+    for (label, contents) in [
+        ("stdout", stdout.as_ref()),
+        ("stderr", stderr.as_ref()),
+        ("last_message", last_message.as_str()),
+    ] {
+        if contents.contains("usage_limit_reached") {
+            return Err(format!(
+                "quota reconnect leaked provider quota error to Codex {label}"
+            ));
+        }
+        if contents.contains("codex_router_all_accounts_exhausted") {
+            return Err(format!(
+                "quota reconnect incorrectly reported all accounts exhausted in Codex {label}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn assert_quota_reconnect_contract(
+    transcript: &QuotaReconnectWebSocketTranscript,
+) -> Result<(), String> {
+    if transcript.websocket_handshake_count < 2 {
+        return Err(format!(
+            "quota reconnect expected at least two upstream websocket handshakes, observed {}",
+            transcript.websocket_handshake_count
+        ));
+    }
+    if transcript.non_prewarm_frame_count < 2 {
+        return Err(format!(
+            "quota reconnect expected at least two non-prewarm requests, observed {}",
+            transcript.non_prewarm_frame_count
+        ));
+    }
+    if !transcript.quota_error_sent || !transcript.completion_sent {
+        return Err(format!(
+            "quota reconnect did not send both quota error and completion: {transcript:?}"
+        ));
+    }
+    if transcript.quota_error_connection_label.as_deref() != Some(QUOTA_RECONNECT_PRIMARY.label) {
+        return Err(format!(
+            "quota reconnect first real request used {:?}, expected {}",
+            transcript.quota_error_connection_label, QUOTA_RECONNECT_PRIMARY.label
+        ));
+    }
+    if transcript.completion_connection_label.as_deref() != Some(QUOTA_RECONNECT_FALLBACK.label) {
+        return Err(format!(
+            "quota reconnect completion used {:?}, expected {}",
+            transcript.completion_connection_label, QUOTA_RECONNECT_FALLBACK.label
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2112,6 +2323,18 @@ struct RedactedTranscriptInput<'a> {
     router_audit: &'a RouterAuditObservation,
 }
 
+struct QuotaReconnectTranscriptInput<'a> {
+    codex_version: &'a str,
+    profile_path: &'a Path,
+    codex_status: &'a ExitStatus,
+    codex_stdout: &'a str,
+    codex_stderr: &'a str,
+    last_message_path: &'a Path,
+    upstream: &'a QuotaReconnectWebSocketTranscript,
+    router_process: &'a RouterProcessObservation,
+    router_audit: &'a RouterAuditObservation,
+}
+
 fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathBuf, String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let artifact_dir = manifest_dir
@@ -2213,6 +2436,74 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
     fs::write(&transcript_path, payload)
         .map_err(|error| format!("failed to write smoke transcript: {error}"))?;
 
+    Ok(transcript_path)
+}
+
+fn write_redacted_quota_reconnect_transcript(
+    input: &QuotaReconnectTranscriptInput<'_>,
+) -> Result<PathBuf, String> {
+    let artifact_dir = workspace_root()?.join("tmp").join("smoke");
+    fs::create_dir_all(&artifact_dir).map_err(|error| {
+        format!(
+            "failed to create smoke artifact dir {}: {error}",
+            artifact_dir.display()
+        )
+    })?;
+    let transcript_path = artifact_dir.join(format!(
+        "installed-codex-quota-reconnect-{}-{}.json",
+        std::process::id(),
+        timestamp_millis()
+    ));
+    let payload = serde_json::json!({
+        "git_head": current_git_head()?,
+        "mode": "quota-reconnect-websocket",
+        "codex_version": input.codex_version,
+        "profile_written": input.profile_path.exists(),
+        "profile_uses_codex_router_token": false,
+        "router_process": {
+            "binary_path": sanitized_artifact_path(&input.router_process.binary_path)?,
+            "pid": input.router_process.pid,
+            "argv": sanitized_router_argv(&input.router_process.argv),
+            "listener": input.router_process.listener,
+            "readiness_line": input.router_process.readiness_line,
+            "cleanup_result": input.router_process.cleanup_result,
+            "spawned_real_serve_child": true,
+        },
+        "codex": {
+            "status": input.codex_status.to_string(),
+            "stdout_contains_smoke_text": input.codex_stdout.contains(SMOKE_EXPECTED_TEXT),
+            "stderr_line_count": input.codex_stderr.lines().count(),
+            "stdout_contains_usage_limit_reached": input.codex_stdout.contains("usage_limit_reached"),
+            "stderr_contains_usage_limit_reached": input.codex_stderr.contains("usage_limit_reached"),
+            "last_message_written": input.last_message_path.exists(),
+        },
+        "router_audit": {
+            "websocket_local_auth_validated": input.router_audit.websocket_local_auth_validated,
+        },
+        "quota_reconnect": {
+            "primary_account_label": QUOTA_RECONNECT_PRIMARY.label,
+            "fallback_account_label": QUOTA_RECONNECT_FALLBACK.label,
+            "quota_error_hidden_from_codex": !input.codex_stdout.contains("usage_limit_reached")
+                && !input.codex_stderr.contains("usage_limit_reached"),
+            "first_real_request_account": input.upstream.quota_error_connection_label,
+            "completion_account": input.upstream.completion_connection_label,
+            "reconnected_to_different_account": input.upstream.quota_error_connection_label != input.upstream.completion_connection_label,
+        },
+        "upstream": {
+            "http_probe_count": input.upstream.http_probe_count,
+            "websocket_handshake_count": input.upstream.websocket_handshake_count,
+            "request_frame_count": input.upstream.request_frame_count,
+            "prewarm_frame_count": input.upstream.prewarm_frame_count,
+            "non_prewarm_frame_count": input.upstream.non_prewarm_frame_count,
+            "quota_error_sent": input.upstream.quota_error_sent,
+            "completion_sent": input.upstream.completion_sent,
+        },
+    });
+    let rendered = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("failed to render quota reconnect transcript: {error}"))?;
+    assert_redacted_quota_reconnect_payload(&rendered, input)?;
+    fs::write(&transcript_path, rendered)
+        .map_err(|error| format!("failed to write quota reconnect transcript: {error}"))?;
     Ok(transcript_path)
 }
 
@@ -2612,6 +2903,34 @@ fn assert_redacted_three_websocket_payload(
     Ok(())
 }
 
+fn assert_redacted_quota_reconnect_payload(
+    payload: &str,
+    input: &QuotaReconnectTranscriptInput<'_>,
+) -> Result<(), String> {
+    let forbidden_fragments = [
+        QUOTA_RECONNECT_PRIMARY.upstream_token,
+        QUOTA_RECONNECT_FALLBACK.upstream_token,
+        "installed-quota-primary-token-refresh",
+        "installed-quota-fallback-token-refresh",
+        quota_reconnect_usage_limit_frame(),
+        input.codex_stdout,
+        input.codex_stderr,
+        "/Users/",
+        "/var/folders/",
+    ];
+    for forbidden in forbidden_fragments
+        .into_iter()
+        .filter(|fragment| !fragment.is_empty())
+    {
+        if payload.contains(forbidden) {
+            return Err(format!(
+                "quota reconnect transcript leaked forbidden fragment: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn first_frame_shape_summary(first_frame: &Value) -> Value {
     serde_json::json!({
         "json_object": first_frame.is_object(),
@@ -2727,6 +3046,39 @@ struct MockConcurrentWebSocketUpstream {
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+struct MockQuotaReconnectWebSocketUpstream {
+    address: String,
+    state: Arc<Mutex<QuotaReconnectUpstreamState>>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct QuotaReconnectWebSocketTranscript {
+    http_probe_count: usize,
+    websocket_handshake_count: usize,
+    request_frame_count: usize,
+    prewarm_frame_count: usize,
+    non_prewarm_frame_count: usize,
+    quota_error_sent: bool,
+    completion_sent: bool,
+    quota_error_connection_label: Option<String>,
+    completion_connection_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct QuotaReconnectUpstreamState {
+    http_probe_count: usize,
+    websocket_handshake_count: usize,
+    request_frame_count: usize,
+    prewarm_frame_count: usize,
+    non_prewarm_frame_count: usize,
+    quota_error_sent: bool,
+    completion_sent: bool,
+    quota_error_connection_token: Option<String>,
+    completion_connection_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3044,6 +3396,85 @@ impl Drop for MockWebSocketUpstream {
     }
 }
 
+impl MockQuotaReconnectWebSocketUpstream {
+    fn start() -> Result<Self, String> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| format!("failed to bind quota reconnect upstream: {error}"))?;
+        listener.set_nonblocking(true).map_err(|error| {
+            format!("failed to configure quota reconnect upstream nonblocking: {error}")
+        })?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("failed to read quota reconnect upstream address: {error}"))?
+            .to_string();
+        let state = Arc::new(Mutex::new(QuotaReconnectUpstreamState::default()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_state = Arc::clone(&state);
+        let thread_shutdown = Arc::clone(&shutdown);
+        let handle = thread::Builder::new()
+            .name("codex-router-quota-reconnect-upstream".to_owned())
+            .spawn(move || {
+                run_quota_reconnect_mock_upstream(listener, thread_state, thread_shutdown)
+            })
+            .map_err(|error| format!("failed to spawn quota reconnect upstream thread: {error}"))?;
+
+        Ok(Self {
+            address,
+            state,
+            shutdown,
+            handle: Some(handle),
+        })
+    }
+
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn join(mut self) -> Result<QuotaReconnectWebSocketTranscript, String> {
+        self.shutdown.store(true, Ordering::SeqCst);
+        wake_mock_upstream_accept(&self.address);
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| "quota reconnect upstream was already joined".to_owned())?;
+        join_result(handle, "quota reconnect upstream")?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?
+            .clone();
+        Ok(QuotaReconnectWebSocketTranscript {
+            http_probe_count: state.http_probe_count,
+            websocket_handshake_count: state.websocket_handshake_count,
+            request_frame_count: state.request_frame_count,
+            prewarm_frame_count: state.prewarm_frame_count,
+            non_prewarm_frame_count: state.non_prewarm_frame_count,
+            quota_error_sent: state.quota_error_sent,
+            completion_sent: state.completion_sent,
+            quota_error_connection_label: state
+                .quota_error_connection_token
+                .as_deref()
+                .and_then(quota_reconnect_label_from_upstream_token)
+                .map(str::to_owned),
+            completion_connection_label: state
+                .completion_connection_token
+                .as_deref()
+                .and_then(quota_reconnect_label_from_upstream_token)
+                .map(str::to_owned),
+        })
+    }
+}
+
+impl Drop for MockQuotaReconnectWebSocketUpstream {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.shutdown.store(true, Ordering::SeqCst);
+            wake_mock_upstream_accept(&self.address);
+            let _ = join_result(handle, "quota reconnect upstream cleanup");
+        }
+    }
+}
+
 impl MockConcurrentWebSocketUpstream {
     fn start(config: ConcurrentUpstreamConfig) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -3249,6 +3680,176 @@ fn run_mock_upstream(
             return Ok(());
         }
     }
+}
+
+fn run_quota_reconnect_mock_upstream(
+    listener: TcpListener,
+    state: Arc<Mutex<QuotaReconnectUpstreamState>>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + UPSTREAM_ACCEPT_TIMEOUT;
+    loop {
+        if quota_reconnect_completion_sent(&state)? {
+            return Ok(());
+        }
+        if shutdown.load(Ordering::SeqCst) {
+            return Err("quota reconnect upstream shut down before completion".to_owned());
+        }
+        if Instant::now() >= deadline {
+            return Err("quota reconnect upstream timed out before completion".to_owned());
+        }
+        match listener.accept() {
+            Ok((stream, _peer)) => {
+                stream.set_nonblocking(false).map_err(|error| {
+                    format!("failed to restore quota reconnect stream blocking mode: {error}")
+                })?;
+                if !looks_like_websocket_upgrade(&stream)? {
+                    respond_to_http_request(stream)?;
+                    let mut state = state
+                        .lock()
+                        .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?;
+                    state.http_probe_count = state.http_probe_count.saturating_add(1);
+                    continue;
+                }
+                run_quota_reconnect_mock_websocket_session(stream, Arc::clone(&state))?;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(format!("quota reconnect upstream accept failed: {error}")),
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn run_quota_reconnect_mock_websocket_session(
+    stream: std::net::TcpStream,
+    state: Arc<Mutex<QuotaReconnectUpstreamState>>,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|error| {
+            format!("quota reconnect upstream failed to set websocket read timeout: {error}")
+        })?;
+    let captured_headers = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let callback_headers = Arc::clone(&captured_headers);
+    let mut websocket = accept_hdr(stream, move |request: &Request, response: Response| {
+        let headers = request
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        if let Ok(mut captured) = callback_headers.lock() {
+            *captured = headers;
+        }
+        Ok(response)
+    })
+    .map_err(|error| format!("quota reconnect websocket handshake failed: {error}"))?;
+    {
+        let mut state = state
+            .lock()
+            .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?;
+        state.websocket_handshake_count = state.websocket_handshake_count.saturating_add(1);
+    }
+    let token = {
+        let headers = captured_headers
+            .lock()
+            .map_err(|_| "quota reconnect upstream header mutex poisoned".to_owned())?;
+        bearer_token_from_headers(&headers)
+            .ok_or_else(|| "quota reconnect upstream missing bearer token".to_owned())?
+            .to_owned()
+    };
+    for request_index in 0..4 {
+        let frame = match websocket.read() {
+            Ok(Message::Text(text)) => text.to_string(),
+            Ok(Message::Binary(bytes)) => String::from_utf8(bytes.to_vec()).map_err(|error| {
+                format!("quota reconnect upstream frame was not UTF-8: {error}")
+            })?,
+            Ok(Message::Close(_)) => return Ok(()),
+            Ok(_other) => continue,
+            Err(tungstenite::Error::Io(error))
+                if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "quota reconnect upstream failed to read frame: {error}"
+                ));
+            }
+        };
+        {
+            let mut state = state
+                .lock()
+                .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?;
+            state.request_frame_count = state.request_frame_count.saturating_add(1);
+        }
+        if is_prewarm_request_frame(&frame) {
+            {
+                let mut state = state
+                    .lock()
+                    .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?;
+                state.prewarm_frame_count = state.prewarm_frame_count.saturating_add(1);
+            }
+            for event in smoke_prewarm_events(request_index) {
+                websocket
+                    .send(Message::Text(event.into()))
+                    .map_err(|error| {
+                        format!("quota reconnect upstream failed to send prewarm event: {error}")
+                    })?;
+            }
+            continue;
+        }
+
+        let send_quota_error = {
+            let mut state = state
+                .lock()
+                .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?;
+            state.non_prewarm_frame_count = state.non_prewarm_frame_count.saturating_add(1);
+            if !state.quota_error_sent {
+                state.quota_error_sent = true;
+                state.quota_error_connection_token = Some(token);
+                true
+            } else {
+                state.completion_sent = true;
+                state.completion_connection_token = Some(token);
+                false
+            }
+        };
+        if send_quota_error {
+            websocket
+                .send(Message::Text(quota_reconnect_usage_limit_frame().into()))
+                .map_err(|error| {
+                    format!("quota reconnect upstream failed to send usage limit: {error}")
+                })?;
+            let _close_result = websocket.close(None);
+            return Ok(());
+        }
+        for event in smoke_response_events(request_index) {
+            websocket
+                .send(Message::Text(event.into()))
+                .map_err(|error| {
+                    format!("quota reconnect upstream failed to send completion event: {error}")
+                })?;
+        }
+        let _close_result = websocket.close(None);
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn quota_reconnect_completion_sent(
+    state: &Arc<Mutex<QuotaReconnectUpstreamState>>,
+) -> Result<bool, String> {
+    state
+        .lock()
+        .map(|state| state.completion_sent)
+        .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())
 }
 
 fn run_concurrent_mock_upstream(
@@ -4531,6 +5132,7 @@ mod tests {
     use super::run_hostile_no_token_smoke;
     use super::run_installed_codex_http_sse_mock_smoke;
     use super::run_installed_codex_mock_smoke;
+    use super::run_installed_codex_quota_reconnect_websocket_mock_smoke;
     use super::run_installed_codex_three_websocket_mock_e2e;
     use super::run_installed_codex_three_websocket_mock_soak;
     use super::run_installed_codex_websocket_mock_smoke;
@@ -4610,6 +5212,7 @@ mod tests {
         assert!(
             script.contains(r#"run_three_websocket_soak_filter "three_codex_websocket_soak_""#)
         );
+        assert!(script.contains(r#"run_test_filter "installed_codex_websocket_quota_reconnect_""#));
         assert!(script.contains(r#"smoke_target_model="gpt-5.4-mini""#));
         assert!(script.contains(r#"smoke_concurrent_clients="3""#));
         assert!(script.contains("bounded explicit exact-reply prompt"));
@@ -4943,6 +5546,21 @@ mod tests {
         assert!(report.transcript_path().exists());
         println!(
             "codex_router_three_websocket_artifact={}",
+            report.transcript_path().display()
+        );
+    }
+
+    #[test]
+    #[ignore = "T8 installed-Codex quota reconnect WebSocket e2e; run through tests/smoke/installed_codex_mock.sh --transport websocket --scenario quota-reconnect"]
+    fn installed_codex_websocket_quota_reconnect_e2e_switches_account_and_completes() {
+        let report = match run_installed_codex_quota_reconnect_websocket_mock_smoke() {
+            Ok(report) => report,
+            Err(error) => panic!("installed Codex quota reconnect WebSocket e2e failed: {error}"),
+        };
+
+        assert!(report.transcript_path().exists());
+        println!(
+            "codex_router_quota_reconnect_artifact={}",
             report.transcript_path().display()
         );
     }

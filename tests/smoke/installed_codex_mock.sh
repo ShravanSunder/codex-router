@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --scenario)
       if [[ $# -lt 2 ]]; then
-        echo "--scenario requires one of: serial, concurrent, soak, all" >&2
+        echo "--scenario requires one of: serial, concurrent, quota-reconnect, soak, all" >&2
         exit 2
       fi
       scenario="$2"
@@ -28,12 +28,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       cat <<'USAGE'
-Usage: tests/smoke/installed_codex_mock.sh [--transport http-sse|websocket|all] [--scenario serial|concurrent|soak|all]
+Usage: tests/smoke/installed_codex_mock.sh [--transport http-sse|websocket|all] [--scenario serial|concurrent|quota-reconnect|soak|all]
 
 Installed Codex smoke contract:
   - uses the existing codex CLI from PATH; it does not install Codex
   - targets the cheap mini model gpt-5.4-mini
   - concurrent and soak scenarios run three Codex client jobs at once
+  - quota-reconnect proves provider quota exhaustion reconnects onto another account
   - prompts are bounded exact-reply instructions, with harness markers only
 USAGE
       exit 0
@@ -62,15 +63,15 @@ case "${transport}" in
 esac
 
 case "${scenario}" in
-  serial|concurrent|soak|all)
+  serial|concurrent|quota-reconnect|soak|all)
     ;;
   *)
-    echo "--scenario must be one of: serial, concurrent, soak, all" >&2
+    echo "--scenario must be one of: serial, concurrent, quota-reconnect, soak, all" >&2
     exit 2
     ;;
 esac
 
-if [[ "${scenario}" =~ ^(concurrent|soak)$ && "${transport}" != "websocket" ]]; then
+if [[ "${scenario}" =~ ^(concurrent|quota-reconnect|soak)$ && "${transport}" != "websocket" ]]; then
   echo "--scenario ${scenario} requires --transport websocket" >&2
   exit 2
 fi
@@ -140,11 +141,14 @@ run_three_websocket_soak_filter() {
 
 if [[ "${scenario}" == "concurrent" ]]; then
   run_test_filter "three_codex_websocket_concurrent_e2e_"
+elif [[ "${scenario}" == "quota-reconnect" ]]; then
+  run_test_filter "installed_codex_websocket_quota_reconnect_"
 elif [[ "${scenario}" == "soak" ]]; then
   run_three_websocket_soak_filter "three_codex_websocket_soak_"
 elif [[ "${scenario}" == "all" && "${transport}" == "websocket" ]]; then
   run_test_filter "installed_codex_websocket_"
   run_test_filter "three_codex_websocket_concurrent_e2e_"
+  run_test_filter "installed_codex_websocket_quota_reconnect_"
   run_three_websocket_soak_filter "three_codex_websocket_soak_"
 else
   run_test_filter "${test_filter}"

@@ -2146,6 +2146,61 @@ mod tests {
     }
 
     #[test]
+    fn repository_backed_selector_allows_retiring_affinity_owner_outside_new_work_pool() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_retiring_affinity_owner");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let preferred = AccountRecord::new(
+            account_id("acct_preferred"),
+            "preferred",
+            AccountStatus::Enabled,
+        );
+        let retiring = AccountRecord::new(
+            account_id("acct_retiring"),
+            "retiring",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &preferred,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &retiring,
+            "responses",
+            &[(18_000, 4, true), (604_800, 80, false)],
+        );
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
+            &state,
+            "resp_retiring",
+            &affinity_secret,
+            retiring.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected = match selector.select_upstream_account(
+            &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_body(br#"{"previous_response_id":"resp_retiring"}"#.to_vec()),
+            TokenGeneration::new(1),
+            Some(&affinity_secret),
+        ) {
+            Ok(selected) => selected,
+            Err(error) => panic!("retiring affinity owner should remain usable: {error}"),
+        };
+
+        assert_eq!(selected.account_id(), retiring.account_id());
+        assert_eq!(selected.selection_reason(), "previous_response_affinity");
+    }
+
+    #[test]
     fn repository_backed_selector_ignores_previous_response_id_for_non_capable_routes() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_non_capable_previous_response");
         let database_path = temp_dir.path().join("state.sqlite");

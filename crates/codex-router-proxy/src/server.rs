@@ -1785,8 +1785,6 @@ fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
         "websocket transport failed: BadRecordMac".to_owned()
     } else if rendered_error.contains("FirstFrameTimeout") {
         "websocket closed before upstream open: FirstFrameTimeout".to_owned()
-    } else if rendered_error.contains("FirstFrameTooLarge") {
-        "websocket closed before upstream open: FirstFrameTooLarge".to_owned()
     } else {
         websocket_runtime_error_kind(error).to_owned()
     }

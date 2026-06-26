@@ -21,6 +21,8 @@ const DEFAULT_RISK_PENALTY_CAP: u32 = 90;
 const DEFAULT_SELECTABLE_WEIGHT_MIN: u32 = 1;
 const DEFAULT_SELECTABLE_WEIGHT_MAX: u32 = 100;
 const DEFAULT_UNKNOWN_FALLBACK_WEIGHT: u32 = 1;
+const DEFAULT_NEAR_ZERO_HEADROOM_THRESHOLD: u32 = 5;
+const DEFAULT_NEAR_ZERO_PROJECTED_RUNOUT_SECONDS: u64 = 1_800;
 
 /// Input for one route-band assessment.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -404,6 +406,8 @@ pub enum AccountAvailability {
     Usable,
     /// Selectable only when no usable account exists.
     Reserve,
+    /// Not selectable for new work because remaining quota is close to zero.
+    Retiring,
     /// Not selectable because known quota is exhausted or ineligible.
     Blocked,
     /// Selectable only as fallback because quota evidence is missing or unknown.
@@ -493,6 +497,8 @@ pub enum RoutingReason {
     UnknownFallbackPreferred,
     /// Non-preferred fallback account in the unknown pool.
     UnknownFallbackAvailable,
+    /// Existing work may finish, but new work should not start here.
+    RetiringNearZero,
     /// Excluded because the account is disabled.
     ExcludedDisabled,
     /// Excluded because the account has no active credential.
@@ -518,6 +524,7 @@ impl RoutingReason {
             Self::HeldUnknown => "held_unknown",
             Self::UnknownFallbackPreferred => "unknown_fallback_preferred",
             Self::UnknownFallbackAvailable => "unknown_fallback_available",
+            Self::RetiringNearZero => "retiring_near_zero",
             Self::ExcludedDisabled => "excluded_disabled",
             Self::ExcludedMissingCredential => "excluded_missing_credential",
             Self::BlockedWindowExhausted => "blocked_window_exhausted",
@@ -539,6 +546,7 @@ impl RoutingReason {
             Self::HeldUnknown => "held: needs refresh",
             Self::UnknownFallbackPreferred => "fallback: needs refresh",
             Self::UnknownFallbackAvailable => "fallback: same unknown pool",
+            Self::RetiringNearZero => "retiring: near zero quota",
             Self::ExcludedDisabled => "blocked: disabled",
             Self::ExcludedMissingCredential => "blocked: missing credential",
             Self::BlockedWindowExhausted => "blocked: quota empty",
@@ -596,6 +604,7 @@ struct WindowAssessment {
     status: QuotaWindowStatus,
     pressure: u32,
     projected_pressure: u32,
+    projected_exhaustion_unix_seconds: Option<u64>,
     surplus: u32,
     time_left_seconds: Option<u64>,
     near_reset: bool,
@@ -792,6 +801,20 @@ fn assess_account(
     }
     if windows
         .iter()
+        .any(|window| window_requires_near_zero_retirement(window, now_unix_seconds))
+    {
+        return BurnDownAccountAssessment {
+            availability: AccountAvailability::Retiring,
+            freshness: freshness_for_windows(&windows),
+            limiting_window: limiting_window(&windows),
+            quota_evidence_reason: QuotaEvidenceReason::Ok,
+            routing_reason: RoutingReason::RetiringNearZero,
+            routing_weight: None,
+            ..base
+        };
+    }
+    if windows
+        .iter()
         .any(|window| window.reset_unix_seconds.is_none())
     {
         return BurnDownAccountAssessment {
@@ -906,6 +929,7 @@ fn assess_window(
         status: window.status,
         pressure,
         projected_pressure,
+        projected_exhaustion_unix_seconds: window.projected_exhaustion_unix_seconds,
         surplus,
         time_left_seconds,
         near_reset,
@@ -1009,6 +1033,19 @@ fn selected_pool_matches(selected_pool: SelectedPool, availability: AccountAvail
             | (SelectedPool::Reserve, AccountAvailability::Reserve)
             | (SelectedPool::Unknown, AccountAvailability::Unknown)
     )
+}
+
+fn window_requires_near_zero_retirement(window: &WindowAssessment, now_unix_seconds: u64) -> bool {
+    if window.remaining_headroom < DEFAULT_NEAR_ZERO_HEADROOM_THRESHOLD {
+        return true;
+    }
+
+    window
+        .projected_exhaustion_unix_seconds
+        .is_some_and(|projected_exhaustion_unix_seconds| {
+            projected_exhaustion_unix_seconds
+                <= now_unix_seconds.saturating_add(DEFAULT_NEAR_ZERO_PROJECTED_RUNOUT_SECONDS)
+        })
 }
 
 fn selected_pool_weight(
@@ -1115,6 +1152,7 @@ fn routing_reason_for_account(
         AccountAvailability::Reserve if context.selected_pool == SelectedPool::Usable => {
             return RoutingReason::HeldReserve;
         }
+        AccountAvailability::Retiring => return RoutingReason::RetiringNearZero,
         AccountAvailability::Unknown if !account.preferred_next => {
             return RoutingReason::UnknownFallbackAvailable;
         }
@@ -1596,6 +1634,65 @@ mod tests {
     }
 
     #[test]
+    fn near_zero_projected_runout_retires_account_from_new_selection() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_fast",
+                vec![
+                    projected_window(FIVE_HOURS, 20, 4 * 3_600, 600),
+                    window(WEEKLY, 80, 5 * 86_400),
+                ],
+            ),
+            account(
+                "acct_slow",
+                vec![
+                    window(FIVE_HOURS, 20, 4 * 3_600),
+                    window(WEEKLY, 80, 5 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_slow")
+        );
+        assert_account(
+            &assessment,
+            "acct_fast",
+            AccountAvailability::Retiring,
+            None,
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_fast").routing_reason(),
+            RoutingReason::RetiringNearZero
+        );
+    }
+
+    #[test]
+    fn near_zero_headroom_retires_account_even_without_history() {
+        let assessment = assess_route_band(input(vec![account(
+            "acct_near_empty",
+            vec![
+                window(FIVE_HOURS, 4, 4 * 3_600),
+                window(WEEKLY, 80, 5 * 86_400),
+            ],
+        )]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::None);
+        assert_account(
+            &assessment,
+            "acct_near_empty",
+            AccountAvailability::Retiring,
+            None,
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_near_empty").routing_reason(),
+            RoutingReason::RetiringNearZero
+        );
+    }
+
+    #[test]
     fn six_session_burn_down_keeps_weak_weekly_account_out_and_uses_active_load() {
         let mut active_load = std::collections::HashMap::<&'static str, u32>::new();
         let mut selected_accounts = Vec::new();
@@ -1718,6 +1815,16 @@ mod tests {
             .with_remaining_headroom(remaining_headroom)
             .with_reset_unix_seconds(NOW + resets_in_seconds)
             .with_observed_unix_seconds(NOW)
+    }
+
+    fn projected_window(
+        window_seconds: u64,
+        remaining_headroom: u32,
+        resets_in_seconds: u64,
+        projected_runout_in_seconds: u64,
+    ) -> QuotaWindowFact {
+        window(window_seconds, remaining_headroom, resets_in_seconds)
+            .with_projected_exhaustion_unix_seconds(NOW + projected_runout_in_seconds)
     }
 
     fn account_assessment<'a>(

@@ -1,3 +1,3 @@
 fn main() {
-    codex_router_cli::run();
+    std::process::exit(codex_router_cli::run());
 }

@@ -708,9 +708,7 @@ where
             BurnDownRouteBandAssessmentInput::new(route_band, now_unix_seconds, selector_accounts);
         let assessment = assess_route_band(assessment_input);
         if assessment.selected_pool() == SelectedPool::None {
-            return Err(HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-            });
+            return Err(account_selection_rejected_no_eligible(route_band.as_str()));
         }
 
         let mut weighted_selectors =
@@ -825,9 +823,7 @@ where
             );
             let assessment = assess_route_band(assessment_input);
             if assessment.selected_pool() == SelectedPool::None {
-                return Err(HttpProxyError::Selection {
-                    reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-                });
+                return Err(account_selection_rejected_no_eligible(route_band.as_str()));
             }
 
             let affinity_owner_account_id = if route_kind.previous_response_affinity_capable() {
@@ -937,7 +933,9 @@ fn select_affinity_owner(
         account.account_id() == owner_account_id
             && matches!(
                 account.availability(),
-                AccountAvailability::Usable | AccountAvailability::Reserve
+                AccountAvailability::Usable
+                    | AccountAvailability::Reserve
+                    | AccountAvailability::Retiring
             )
     }) {
         account_holds.remove(route_band.as_str());
@@ -1021,15 +1019,7 @@ fn select_from_burn_down_assessment(
     let weighted_candidates = assessment.weighted_candidates();
     if weighted_candidates.is_empty() {
         account_holds.remove(route_band);
-        crate::telemetry::record_account_rejected(route_band, "no_eligible_accounts");
-        tracing::warn!(
-            route_band,
-            reason = "no_eligible_accounts",
-            "codex_router.account_selection_rejected"
-        );
-        return Err(HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-        });
+        return Err(account_selection_rejected_no_eligible(route_band));
     }
 
     if let Some(held_account_id) = reusable_held_account_id(
@@ -1088,6 +1078,18 @@ fn strict_preferred_account_id(
         .ok_or(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
         })
+}
+
+fn account_selection_rejected_no_eligible(route_band: &str) -> HttpProxyError {
+    crate::telemetry::record_account_rejected(route_band, "no_eligible_accounts");
+    tracing::warn!(
+        route_band,
+        reason = "no_eligible_accounts",
+        "codex_router.account_selection_rejected"
+    );
+    HttpProxyError::Selection {
+        reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+    }
 }
 
 fn reusable_held_account_id(

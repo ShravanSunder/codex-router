@@ -54,7 +54,7 @@ const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 
 /// Runs the process CLI.
-pub fn run() {
+pub fn run() -> i32 {
     let _telemetry_guard = telemetry::init_from_env();
     let run_span = telemetry::run_span();
     let _run_span_guard = run_span.enter();
@@ -64,8 +64,9 @@ pub fn run() {
     let mut stderr = std::io::stderr();
     if let Err(error) = run_with_io(args, &context, &mut stdout, &mut stderr) {
         let _ = writeln!(stderr, "{error}");
-        std::process::exit(2);
+        return 2;
     }
+    0
 }
 
 /// Executes CLI args with process-independent IO.

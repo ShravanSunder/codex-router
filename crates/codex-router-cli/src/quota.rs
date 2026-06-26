@@ -1419,6 +1419,7 @@ fn quota_status_report(
             account,
             &display_windows,
             active_clients.pressure_for_selection(),
+            now_unix_seconds,
         ));
         status_inputs.push(QuotaStatusAccountInput {
             account_label: account.label().to_owned(),
@@ -1815,6 +1816,7 @@ fn burn_down_input_from_display_windows(
     account: &AccountRecord,
     windows: &[DisplayQuotaWindow],
     active_pressure: u32,
+    now_unix_seconds: u64,
 ) -> BurnDownAccountInput {
     let facts = windows
         .iter()
@@ -1825,6 +1827,16 @@ fn burn_down_input_from_display_windows(
                 .with_effective(window.effective);
             if let Some(reset_unix_seconds) = window.reset_unix_seconds {
                 fact = fact.with_reset_unix_seconds(reset_unix_seconds);
+            }
+            if matches!(
+                window.run_rate_estimate.confidence(),
+                QuotaRunRateConfidence::Low | QuotaRunRateConfidence::Normal
+            ) && let Some(projected_exhaustion_unix_seconds) = window
+                .run_rate_estimate
+                .projected_exhaustion_unix_seconds(now_unix_seconds)
+            {
+                fact =
+                    fact.with_projected_exhaustion_unix_seconds(projected_exhaustion_unix_seconds);
             }
             fact
         })
@@ -2132,6 +2144,7 @@ fn format_routing_reason(reason: RoutingReason) -> &'static str {
         RoutingReason::HeldUnknown => "held by quota: needs refresh",
         RoutingReason::UnknownFallbackPreferred => "fallback by quota: needs refresh",
         RoutingReason::UnknownFallbackAvailable => "fallback by quota: same unknown pool",
+        RoutingReason::RetiringNearZero => "retiring: near zero quota",
         RoutingReason::ExcludedDisabled => "excluded: account disabled",
         RoutingReason::ExcludedMissingCredential => "excluded: missing credential",
         RoutingReason::BlockedWindowExhausted => "blocked: quota empty",
@@ -2151,6 +2164,7 @@ fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
             "fallback by quota"
         }
+        RoutingReason::RetiringNearZero => "retiring",
         RoutingReason::ExcludedDisabled
         | RoutingReason::ExcludedMissingCredential
         | RoutingReason::BlockedWindowExhausted
@@ -2442,6 +2456,7 @@ const fn availability_json(value: AccountAvailability) -> &'static str {
     match value {
         AccountAvailability::Usable => "usable",
         AccountAvailability::Reserve => "reserve",
+        AccountAvailability::Retiring => "retiring",
         AccountAvailability::Blocked => "blocked",
         AccountAvailability::Unknown => "unknown",
         AccountAvailability::Excluded => "excluded",
@@ -2610,6 +2625,19 @@ fn telemetry_hash(value: &str) -> String {
 }
 
 fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
+    if !rows.iter().any(|row| row.preferred_next) {
+        global::meter("codex-router")
+            .u64_counter("codex_router_account_rejections_total")
+            .build()
+            .add(
+                1,
+                &[
+                    KeyValue::new("route_band", route_band.to_owned()),
+                    KeyValue::new("selection.reason", "no_quota_candidate"),
+                ],
+            );
+    }
+
     for row in rows {
         let account_hash = telemetry_hash(row.account_id.as_str());
         if row.preferred_next {
@@ -2856,5 +2884,110 @@ impl QuotaRefreshOptions {
 
     fn router_root(&self) -> Result<PathBuf, CliError> {
         router_root_or_default(self.router_root.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_router_core::ids::AccountId;
+    use codex_router_selection::burn_down::RoutingReason;
+
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn quota_status_selection_uses_projected_run_rate_like_runtime_selector() {
+        let fast_burning_account = account("acct_fast", "fast");
+        let slow_burning_account = account("acct_slow", "slow");
+        let fast_burning_input = burn_down_input_from_display_windows(
+            &fast_burning_account,
+            &[
+                display_window(
+                    V1_SHORT_WINDOW_SECONDS,
+                    50,
+                    NOW + V1_SHORT_WINDOW_SECONDS,
+                    QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 80, 50),
+                ),
+                display_window(
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    80,
+                    NOW + V1_WEEKLY_WINDOW_SECONDS,
+                    QuotaRunRateEstimate::unknown(),
+                ),
+            ],
+            0,
+            NOW,
+        );
+        let slow_burning_input = burn_down_input_from_display_windows(
+            &slow_burning_account,
+            &[
+                display_window(
+                    V1_SHORT_WINDOW_SECONDS,
+                    50,
+                    NOW + V1_SHORT_WINDOW_SECONDS,
+                    QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 1, 50),
+                ),
+                display_window(
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    80,
+                    NOW + V1_WEEKLY_WINDOW_SECONDS,
+                    QuotaRunRateEstimate::unknown(),
+                ),
+            ],
+            0,
+            NOW,
+        );
+
+        let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            NOW,
+            vec![fast_burning_input, slow_burning_input],
+        ));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_slow")
+        );
+        let Some(slow_burning_assessment) = assessment
+            .accounts()
+            .iter()
+            .find(|account| account.account_id().as_str() == "acct_slow")
+        else {
+            panic!("slow-burning account should be assessed");
+        };
+        assert_eq!(
+            slow_burning_assessment.routing_reason(),
+            RoutingReason::PreferredProjectedBurn
+        );
+    }
+
+    fn account(account_id: &str, label: &str) -> AccountRecord {
+        AccountRecord::new(
+            match AccountId::new(account_id) {
+                Ok(account_id) => account_id,
+                Err(error) => panic!("test account id is valid: {error}"),
+            },
+            label,
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1)
+    }
+
+    fn display_window(
+        window_seconds: u64,
+        remaining_headroom: u32,
+        reset_unix_seconds: u64,
+        run_rate_estimate: QuotaRunRateEstimate,
+    ) -> DisplayQuotaWindow {
+        DisplayQuotaWindow {
+            window_seconds,
+            status: QuotaWindowStatus::Eligible,
+            remaining_headroom,
+            reset_unix_seconds: Some(reset_unix_seconds),
+            observed_unix_seconds: NOW,
+            effective: window_seconds == V1_SHORT_WINDOW_SECONDS,
+            run_rate_estimate,
+        }
     }
 }
