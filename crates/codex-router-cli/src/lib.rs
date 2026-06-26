@@ -1129,7 +1129,7 @@ commands:
   account import-codex-auth [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
   account list [--router-root <path>]
   quota refresh [--router-root <path>] [--base-url <url>]
-  quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]
+  quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--no-refresh] [--now-unix-seconds <seconds>]
   sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]
   profile print [--port <port>]
   profile doctor
@@ -1178,6 +1178,7 @@ mod tests {
     use codex_router_auth::resolver::ProviderCredentialResolver;
     use codex_router_auth::resolver::RouterCredentialResolver;
     use codex_router_core::ids::AccountId;
+    use codex_router_core::ids::ReservationId;
     use codex_router_core::redaction::SecretString;
     use codex_router_proxy::server::LoopbackBindAddress;
     use codex_router_proxy::server::LoopbackRouterRuntime;
@@ -1337,7 +1338,7 @@ mod tests {
             "account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets",
             "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
             "quota refresh [--router-root <path>] [--base-url <url>]",
-            "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--now-unix-seconds <seconds>]",
+            "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--no-refresh] [--now-unix-seconds <seconds>]",
             "sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]",
             "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]",
         ] {
@@ -2361,6 +2362,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
             ],
@@ -2418,6 +2420,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
                 "--format",
@@ -2431,11 +2434,11 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients\t-\tfallback: needs refresh limiting window: 5h 75% left\tfallback"
         );
         assert_eq!(
             lines[2],
@@ -2509,6 +2512,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
                 "--format",
@@ -2523,11 +2527,11 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients\t1 available\tpreferred next: safest quota limiting window: 5h 25% left\tpreferred"
         );
         assert_eq!(
             lines[2],
@@ -2604,6 +2608,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
                 "--format",
@@ -2752,6 +2757,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
                 "--format",
@@ -2769,6 +2775,88 @@ exit 42
             "{}",
             output.stdout
         );
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_plain_shows_active_clients_from_runtime_leases() {
+        let test_root = TestRoot::new("quota-status-active-clients");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state_path = router_root.join("state.sqlite");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let primary_account = AccountRecord::new(
+            account_id("acct_primary_clients"),
+            "primary",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        let five_hour_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary_clients"),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(20_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(11_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary_clients"),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(90)
+        .with_reset_unix_seconds(614_800)
+        .with_observed_unix_seconds(11_000);
+        must_ok(
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                primary_account.account_id(),
+                "responses",
+                &[five_hour_window, weekly_window],
+                11_000,
+                20_000,
+            ),
+        );
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        let async_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+        for reservation_id in ["reservation_one", "reservation_two"] {
+            must_ok(runtime.block_on(async_state.record_active_client_acquired(
+                "responses",
+                &ReservationId::new(reservation_id),
+                primary_account.account_id(),
+                11_100,
+            )));
+        }
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--no-refresh",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "plain",
+                "--now-unix-seconds",
+                "11100",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert!(output.stdout.contains("\t2 clients\t"));
         assert!(output.stderr.is_empty());
     }
 
@@ -3494,6 +3582,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
                 "--format",
@@ -3565,6 +3654,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
                 "--format",
@@ -3651,6 +3741,7 @@ exit 42
                 "codex-router",
                 "quota",
                 "status",
+                "--no-refresh",
                 "--router-root",
                 path_to_str(&router_root),
                 "--format",
@@ -3708,7 +3799,7 @@ exit 42
         let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
         let address = must_ok(listener.local_addr());
         let server_thread = thread::spawn(move || {
-            for _request_index in 0..2 {
+            for _request_index in 0..4 {
                 let (mut stream, _peer_address) = match listener.accept() {
                     Ok(connection) => connection,
                     Err(error) => panic!("quota mock should accept: {error}"),
@@ -3722,9 +3813,18 @@ exit 42
                     Err(error) => panic!("quota mock should read request: {error}"),
                 };
                 let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-                assert!(request.starts_with("GET /api/codex/usage HTTP/1.1\r\n"));
                 assert!(request.contains("authorization: Bearer quota-http-access-token\r\n"));
-                let body = r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}},"reset_credits":{"available":1}}"#;
+                assert!(request.contains("openai-beta: codex-1\r\n"));
+                assert!(request.contains("originator: Codex Desktop\r\n"));
+                let body = if request.starts_with("GET /api/codex/usage HTTP/1.1\r\n") {
+                    r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}}}"#
+                } else if request
+                    .starts_with("GET /api/codex/rate-limit-reset-credits HTTP/1.1\r\n")
+                {
+                    r#"{"available_count":1,"credits":[{"granted_at":"2026-06-17T00:00:00Z","expires_at":"2026-07-17T00:00:00Z"}]}"#
+                } else {
+                    panic!("unexpected quota provider request: {request}");
+                };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
@@ -3807,6 +3907,7 @@ exit 42
             "responses",
             format!("http://{address}"),
             SecretString::new("timeout-token-canary"),
+            None,
         )) {
             Ok(response) => panic!("hanging quota endpoint should time out: {response:?}"),
             Err(error) => error,
@@ -4196,10 +4297,32 @@ exit 42
             Err(error) => panic!("quota command should parse: {error}"),
         };
 
-        let QuotaCommand::Status { router_root, .. } = command else {
+        let QuotaCommand::Status {
+            router_root,
+            auto_refresh,
+            ..
+        } = command
+        else {
             panic!("quota status command should parse");
         };
         assert_eq!(router_root, default_router_root_for_test());
+        assert!(auto_refresh);
+
+        let command = match CliCommand::parse([
+            OsString::from("quota"),
+            OsString::from("status"),
+            OsString::from("--no-refresh"),
+            OsString::from("--now-unix-seconds"),
+            OsString::from("0"),
+        ]) {
+            Ok(CliCommand::Quota(command)) => command,
+            Ok(other) => panic!("quota command should parse, got {other:?}"),
+            Err(error) => panic!("quota command should parse: {error}"),
+        };
+        let QuotaCommand::Status { auto_refresh, .. } = command else {
+            panic!("quota status command should parse");
+        };
+        assert!(!auto_refresh);
     }
 
     #[test]

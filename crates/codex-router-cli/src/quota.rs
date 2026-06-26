@@ -1,5 +1,6 @@
 //! Quota command glue for persisted router-owned quota state.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use std::time::UNIX_EPOCH;
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use codex_router_auth::live_quota::UsageResponse;
 use codex_router_auth::live_quota::WindowPair;
+use codex_router_auth::live_quota::reset_credits_url;
 use codex_router_auth::live_quota::usage_url;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialResolver;
@@ -47,6 +49,8 @@ use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
 use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
 use codex_router_state::quota_snapshot::QuotaHistoryRefreshOutcome;
 use codex_router_state::quota_snapshot::QuotaRefreshErrorClass;
+use codex_router_state::quota_snapshot::QuotaRefreshStatusSource;
+use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
@@ -71,6 +75,7 @@ use crate::router_root_or_default;
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
 const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 600;
+const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
 
 /// Quota CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,6 +90,8 @@ pub enum QuotaCommand {
         all_limits: bool,
         /// Current clock used for pace and runout math.
         now_unix_seconds: u64,
+        /// Whether human status should refresh after rendering cached data.
+        auto_refresh: bool,
     },
     /// Refreshes persisted quota from the provider.
     Refresh {
@@ -111,6 +118,7 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
+                    auto_refresh: options.auto_refresh,
                 })
             }
             "refresh" => {
@@ -202,7 +210,15 @@ pub fn run_quota_command(
             format,
             all_limits,
             now_unix_seconds,
-        } => render_quota_status(stdout, router_root, format, all_limits, now_unix_seconds),
+            auto_refresh,
+        } => render_quota_status(
+            stdout,
+            router_root,
+            format,
+            all_limits,
+            now_unix_seconds,
+            auto_refresh,
+        ),
         QuotaCommand::Refresh {
             router_root,
             base_url,
@@ -248,6 +264,7 @@ pub(crate) struct QuotaRefreshProviderRequest {
     route_band: String,
     base_url: String,
     access_token: SecretString,
+    chatgpt_account_id: Option<String>,
 }
 
 impl QuotaRefreshProviderRequest {
@@ -257,6 +274,7 @@ impl QuotaRefreshProviderRequest {
         route_band: impl Into<String>,
         base_url: impl Into<String>,
         access_token: SecretString,
+        chatgpt_account_id: Option<&str>,
     ) -> Self {
         Self {
             account_id,
@@ -264,6 +282,7 @@ impl QuotaRefreshProviderRequest {
             route_band: route_band.into(),
             base_url: base_url.into(),
             access_token,
+            chatgpt_account_id: chatgpt_account_id.map(str::to_owned),
         }
     }
 
@@ -295,6 +314,12 @@ impl QuotaRefreshProviderRequest {
     #[must_use]
     pub(crate) const fn access_token(&self) -> &SecretString {
         &self.access_token
+    }
+
+    /// Returns the ChatGPT account id header value, if known.
+    #[must_use]
+    pub(crate) fn chatgpt_account_id(&self) -> Option<&str> {
+        self.chatgpt_account_id.as_deref()
     }
 }
 
@@ -363,14 +388,21 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
         request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
         let _account_context = (request.account_id(), request.account_label());
-        let response = self
+        let mut usage_request = self
             .client
             .get(usage_url(request.base_url()))
             .bearer_auth(request.access_token().expose_secret())
-            .send()
-            .map_err(|error| QuotaCommandError::ProviderRequest {
-                message: error.to_string(),
-            })?;
+            .header("OpenAI-Beta", "codex-1")
+            .header("originator", "Codex Desktop");
+        if let Some(chatgpt_account_id) = request.chatgpt_account_id() {
+            usage_request = usage_request.header("ChatGPT-Account-ID", chatgpt_account_id);
+        }
+        let response =
+            usage_request
+                .send()
+                .map_err(|error| QuotaCommandError::ProviderRequest {
+                    message: error.to_string(),
+                })?;
         let status = response.status();
         if !status.is_success() {
             return Err(QuotaCommandError::ProviderStatus {
@@ -387,16 +419,56 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
                 message: error.to_string(),
             }
         })?;
-        let reset_credits_available = reset_credits_available_from_json(&usage_value);
         let usage = serde_json::from_value::<UsageResponse>(usage_value).map_err(|error| {
             QuotaCommandError::ProviderResponse {
                 message: error.to_string(),
             }
         })?;
+        let reset_credits_available = self.fetch_reset_credits_available(&request)?;
         quota_response_for_route_band(&usage, request.route_band()).map(|mut response| {
             response.reset_credits_available = reset_credits_available;
             response
         })
+    }
+}
+
+impl HttpQuotaRefreshProvider {
+    fn fetch_reset_credits_available(
+        &self,
+        request: &QuotaRefreshProviderRequest,
+    ) -> Result<Option<u32>, QuotaCommandError> {
+        let mut reset_request = self
+            .client
+            .get(reset_credits_url(request.base_url()))
+            .bearer_auth(request.access_token().expose_secret())
+            .header("OpenAI-Beta", "codex-1")
+            .header("originator", "Codex Desktop");
+        if let Some(chatgpt_account_id) = request.chatgpt_account_id() {
+            reset_request = reset_request.header("ChatGPT-Account-ID", chatgpt_account_id);
+        }
+        let response =
+            reset_request
+                .send()
+                .map_err(|error| QuotaCommandError::ProviderRequest {
+                    message: error.to_string(),
+                })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(QuotaCommandError::ProviderStatus {
+                status: status.as_u16(),
+            });
+        }
+        let body = response
+            .text()
+            .map_err(|error| QuotaCommandError::ProviderRequest {
+                message: error.to_string(),
+            })?;
+        let value = serde_json::from_str::<Value>(&body).map_err(|error| {
+            QuotaCommandError::ProviderResponse {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(reset_credits_available_from_json(&value))
     }
 }
 
@@ -489,6 +561,7 @@ where
                 *route_band,
                 base_url.clone(),
                 resolved.access_token().clone(),
+                resolved.chatgpt_account_id(),
             )) {
                 Ok(response) => response,
                 Err(error) => {
@@ -952,7 +1025,7 @@ fn reset_credits_available_from_json(value: &Value) -> Option<u32> {
                 let normalized_key = normalize_json_key(key);
                 if matches!(
                     normalized_key.as_str(),
-                    "resetcreditsavailable" | "availableresetcredits"
+                    "resetcreditsavailable" | "availableresetcredits" | "availablecount"
                 ) && let Some(value) = json_u32(child)
                 {
                     return Some(value);
@@ -1050,6 +1123,45 @@ fn render_quota_status(
     format: QuotaStatusFormat,
     all_limits: bool,
     now_unix_seconds: u64,
+    auto_refresh: bool,
+) -> Result<(), QuotaCommandError> {
+    render_quota_status_once(stdout, &router_root, format, all_limits, now_unix_seconds)?;
+    if !auto_refresh || format == QuotaStatusFormat::Json {
+        return Ok(());
+    }
+
+    writeln!(stdout, "refreshing quota...").map_err(QuotaCommandError::Stdout)?;
+    let mut refresh_output = Vec::new();
+    match refresh_quota(
+        &mut refresh_output,
+        router_root.clone(),
+        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+    ) {
+        Ok(()) => {
+            write!(stdout, "{}", String::from_utf8_lossy(&refresh_output))
+                .map_err(QuotaCommandError::Stdout)?;
+            writeln!(stdout, "updated quota:").map_err(QuotaCommandError::Stdout)?;
+            render_quota_status_once(
+                stdout,
+                &router_root,
+                format,
+                all_limits,
+                current_unix_seconds(),
+            )
+        }
+        Err(error) => {
+            writeln!(stdout, "refresh failed: {error}").map_err(QuotaCommandError::Stdout)?;
+            Ok(())
+        }
+    }
+}
+
+fn render_quota_status_once(
+    stdout: &mut impl Write,
+    router_root: &Path,
+    format: QuotaStatusFormat,
+    all_limits: bool,
+    now_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
     let state_db_path = router_root.join("state.sqlite");
     let state = SqliteStateStore::open(&state_db_path)?;
@@ -1091,6 +1203,24 @@ fn quota_status_report(
         USER_QUOTA_ROUTE_BAND,
         now_unix_seconds,
     )?;
+    let refresh_statuses = SelectorQuotaRepository::quota_refresh_statuses_for_route_band(
+        state,
+        USER_QUOTA_ROUTE_BAND,
+    )?;
+    let refresh_statuses = refresh_statuses
+        .into_iter()
+        .map(|status| (status.account_id().clone(), status))
+        .collect::<HashMap<_, _>>();
+    let active_client_counts =
+        quota_history_runtime.block_on(quota_history_state.active_client_counts_for_route_band(
+            USER_QUOTA_ROUTE_BAND,
+            now_unix_seconds,
+            ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
+        ))?;
+    let active_client_counts = active_client_counts
+        .into_iter()
+        .map(|count| (count.account_id().clone(), count.active_clients()))
+        .collect::<HashMap<_, _>>();
     let mut status_inputs = Vec::new();
     let mut burn_down_inputs = Vec::new();
     for account in accounts {
@@ -1129,6 +1259,14 @@ fn quota_status_report(
             account_status: account.status().as_str().to_owned(),
             account_id: account.account_id().clone(),
             reset_credits_available,
+            updated: format_refresh_status(
+                refresh_statuses.get(account.account_id()),
+                now_unix_seconds,
+            ),
+            active_clients: active_client_counts
+                .get(account.account_id())
+                .copied()
+                .unwrap_or(0),
             windows: display_windows,
         });
     }
@@ -1181,6 +1319,8 @@ fn write_quota_table(
         "weekly",
         "pace",
         "burn",
+        "updated",
+        "clients",
         "resets available",
         "routing",
         "next use",
@@ -1193,6 +1333,8 @@ fn write_quota_table(
             row.weekly_window.as_str(),
             row.pace.as_str(),
             row.burn.as_str(),
+            row.updated.as_str(),
+            row.active_clients.as_str(),
             row.reset_credits_available.as_str(),
             row.routing.as_str(),
             row.next_use.as_str(),
@@ -1209,19 +1351,21 @@ fn write_quota_plain(
 ) -> Result<(), QuotaCommandError> {
     writeln!(
         stdout,
-        "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
+        "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
             row.account_status,
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
             row.pace.replace('\n', " "),
             row.burn.replace('\n', " "),
+            row.updated.replace('\n', " "),
+            row.active_clients,
             row.reset_credits_available,
             row.routing.replace('\n', " "),
             row.next_use,
@@ -1308,6 +1452,8 @@ struct QuotaStatusAccountInput {
     account_status: String,
     account_id: AccountId,
     reset_credits_available: Option<u32>,
+    updated: String,
+    active_clients: u32,
     windows: Vec<DisplayQuotaWindow>,
 }
 
@@ -1320,6 +1466,9 @@ struct QuotaStatusRow {
     weekly_window: String,
     pace: String,
     burn: String,
+    updated: String,
+    active_clients: String,
+    active_clients_value: u32,
     reset_credits_available: String,
     reset_credits_available_value: Option<u32>,
     routing: String,
@@ -1364,6 +1513,9 @@ impl QuotaStatusRow {
             ),
             pace: format_pace_cell(&input.windows, assessment, now_unix_seconds),
             burn: format_burn_cell(assessment),
+            updated: input.updated.clone(),
+            active_clients: format_active_clients(input.active_clients),
+            active_clients_value: input.active_clients,
             reset_credits_available: format_reset_credits(input.reset_credits_available),
             reset_credits_available_value: input.reset_credits_available,
             routing: format_routing_cell(assessment),
@@ -1546,6 +1698,64 @@ fn format_reset_credits(reset_credits_available: Option<u32>) -> String {
             }
         },
     )
+}
+
+fn format_active_clients(active_clients: u32) -> String {
+    if active_clients == 1 {
+        "1 client".to_owned()
+    } else {
+        format!("{active_clients} clients")
+    }
+}
+
+fn format_refresh_status(
+    refresh_status: Option<&QuotaRefreshStatusView>,
+    now_unix_seconds: u64,
+) -> String {
+    let Some(refresh_status) = refresh_status else {
+        return "never\nneeds refresh".to_owned();
+    };
+    match refresh_status.status_source() {
+        QuotaRefreshStatusSource::LegacyMissingRefreshStatus => "legacy\nneeds refresh".to_owned(),
+        QuotaRefreshStatusSource::Recorded => {
+            let success = refresh_status.last_success_unix_seconds().map_or_else(
+                || "no success".to_owned(),
+                |last_success| {
+                    format!(
+                        "ok {}",
+                        format_relative_time(last_success, now_unix_seconds)
+                    )
+                },
+            );
+            if let Some(error_class) = refresh_status.last_error_class() {
+                let attempt = refresh_status.last_attempt_unix_seconds().map_or_else(
+                    || "attempt unknown".to_owned(),
+                    |last_attempt| {
+                        format!(
+                            "failed {}",
+                            format_relative_time(last_attempt, now_unix_seconds)
+                        )
+                    },
+                );
+                format!(
+                    "{success}\n{attempt}: {}",
+                    quota_refresh_error_class_label(error_class)
+                )
+            } else {
+                success
+            }
+        }
+    }
+}
+
+const fn quota_refresh_error_class_label(error_class: QuotaRefreshErrorClass) -> &'static str {
+    match error_class {
+        QuotaRefreshErrorClass::AuthError => "auth",
+        QuotaRefreshErrorClass::NetworkError => "network",
+        QuotaRefreshErrorClass::ProviderError => "provider",
+        QuotaRefreshErrorClass::ParseError => "parse",
+        QuotaRefreshErrorClass::RateLimited => "rate limited",
+    }
 }
 
 fn format_pace_cell(
@@ -1759,6 +1969,8 @@ struct JsonQuotaStatusAccount {
     routing_weight: Option<u32>,
     preferred_next: bool,
     reset_credits_available: Option<u32>,
+    active_clients: u32,
+    updated: String,
     window_slots: JsonWindowSlots,
     windows: Vec<JsonQuotaWindow>,
 }
@@ -1785,6 +1997,8 @@ impl JsonQuotaStatusAccount {
             routing_weight: row.routing_weight,
             preferred_next: row.preferred_next,
             reset_credits_available: row.reset_credits_available_value,
+            active_clients: row.active_clients_value,
+            updated: row.updated.clone(),
             window_slots: JsonWindowSlots::from_windows(&row.windows, now_unix_seconds),
             windows: row
                 .windows
@@ -2139,6 +2353,7 @@ struct QuotaStatusOptions {
     format: QuotaStatusFormat,
     all_limits: bool,
     now_unix_seconds: u64,
+    auto_refresh: bool,
 }
 
 impl Default for QuotaStatusOptions {
@@ -2148,6 +2363,7 @@ impl Default for QuotaStatusOptions {
             format: QuotaStatusFormat::Table,
             all_limits: false,
             now_unix_seconds: current_unix_seconds(),
+            auto_refresh: true,
         }
     }
 }
@@ -2168,6 +2384,9 @@ impl QuotaStatusOptions {
                 }
                 "--all-limits" => {
                     options.all_limits = true;
+                }
+                "--no-refresh" => {
+                    options.auto_refresh = false;
                 }
                 "--now-unix-seconds" => {
                     let value = parser.next_required_value("--now-unix-seconds")?;

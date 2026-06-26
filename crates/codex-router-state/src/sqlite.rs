@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use codex_router_core::affinity::AffinityKeyHash;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::AffinityKey;
+use codex_router_core::ids::ReservationId;
 use codex_router_core::routes::RouteBand;
 use futures_util::future::BoxFuture;
 use rusqlite::Connection;
@@ -126,6 +127,49 @@ const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
             account_id, route_band, limit_window_seconds, observed_unix_seconds
         )",
 ];
+const ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS active_client_leases (
+        route_band TEXT NOT NULL,
+        reservation_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        acquired_unix_seconds INTEGER NOT NULL,
+        PRIMARY KEY (route_band, reservation_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS active_client_leases_account_lookup
+        ON active_client_leases (
+            route_band, account_id, acquired_unix_seconds
+        )",
+];
+
+/// Active client count for one account and route band.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveClientCount {
+    account_id: AccountId,
+    active_clients: u32,
+}
+
+impl ActiveClientCount {
+    /// Creates an active client count row.
+    #[must_use]
+    pub const fn new(account_id: AccountId, active_clients: u32) -> Self {
+        Self {
+            account_id,
+            active_clients,
+        }
+    }
+
+    /// Returns the account id.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns active clients.
+    #[must_use]
+    pub const fn active_clients(&self) -> u32 {
+        self.active_clients
+    }
+}
 
 /// SQLite state store failure.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -205,6 +249,7 @@ impl AsyncSqliteStateStore {
         };
         store.migrate().await?;
         store.ensure_quota_history_schema().await?;
+        store.ensure_active_client_schema().await?;
 
         Ok(store)
     }
@@ -791,6 +836,100 @@ impl AsyncSqliteStateStore {
         Ok(())
     }
 
+    /// Records one active client lease for status/proof surfaces.
+    pub async fn record_active_client_acquired(
+        &self,
+        route_band: &str,
+        reservation_id: &ReservationId,
+        account_id: &AccountId,
+        acquired_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "INSERT INTO active_client_leases (
+               route_band, reservation_id, account_id, acquired_unix_seconds
+             )
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(route_band, reservation_id) DO UPDATE SET
+               account_id = excluded.account_id,
+               acquired_unix_seconds = excluded.acquired_unix_seconds",
+        )
+        .bind(route_band)
+        .bind(reservation_id.as_str())
+        .bind(account_id.as_str())
+        .bind(u64_to_i64(acquired_unix_seconds)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Releases one active client lease.
+    pub async fn record_active_client_released(
+        &self,
+        route_band: &str,
+        reservation_id: &ReservationId,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "DELETE FROM active_client_leases
+              WHERE route_band = ?1 AND reservation_id = ?2",
+        )
+        .bind(route_band)
+        .bind(reservation_id.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Loads active client counts and prunes stale leases.
+    pub async fn active_client_counts_for_route_band(
+        &self,
+        route_band: &str,
+        now_unix_seconds: u64,
+        max_age_seconds: u64,
+    ) -> Result<Vec<ActiveClientCount>, StateStoreError> {
+        let oldest_allowed = now_unix_seconds.saturating_sub(max_age_seconds);
+        sqlx::query(
+            "DELETE FROM active_client_leases
+              WHERE route_band = ?1 AND acquired_unix_seconds < ?2",
+        )
+        .bind(route_band)
+        .bind(u64_to_i64(oldest_allowed)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let rows = sqlx::query(
+            "SELECT account_id, COUNT(*) AS active_clients
+               FROM active_client_leases
+              WHERE route_band = ?1
+              GROUP BY account_id
+              ORDER BY account_id",
+        )
+        .bind(route_band)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let mut counts = Vec::new();
+        for row in rows {
+            let account_id_value = row.get::<String, _>(0);
+            let active_clients =
+                i64_to_u32(row.get::<i64, _>(1), &account_id_value, "active_clients")?;
+            let account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
+                StateStoreError::CorruptAccount {
+                    account_id: account_id_value,
+                    field: "account_id",
+                }
+            })?;
+            counts.push(ActiveClientCount::new(account_id, active_clients));
+        }
+
+        Ok(counts)
+    }
+
     async fn migrate(&self) -> Result<(), StateStoreError> {
         match self.schema_version().await? {
             0 => self.apply_v1().await,
@@ -812,6 +951,17 @@ impl AsyncSqliteStateStore {
 
     async fn ensure_quota_history_schema(&self) -> Result<(), StateStoreError> {
         for statement in ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS {
+            sqlx::query(*statement)
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_active_client_schema(&self) -> Result<(), StateStoreError> {
+        for statement in ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS {
             sqlx::query(*statement)
                 .execute(&self.pool)
                 .await

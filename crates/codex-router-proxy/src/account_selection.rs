@@ -42,9 +42,11 @@ use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::AsyncAffinityRepository;
 use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
 use codex_router_state::sqlite::AsyncSelectorQuotaRepository;
+use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
 use thiserror::Error;
+use tokio_util::task::TaskTracker;
 
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
@@ -68,6 +70,70 @@ const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
+/// Mirrors active client leases into a process-external status source.
+pub trait ActiveClientLeaseReporter: Send + Sync {
+    /// Records one acquired client lease.
+    fn record_acquired(
+        &self,
+        route_band: &str,
+        reservation_handle: &ReservationHandle,
+        acquired_unix_seconds: u64,
+    );
+
+    /// Records one released client lease.
+    fn record_released(&self, route_band: &str, reservation_handle: &ReservationHandle);
+}
+
+/// SQLx-backed active client lease reporter.
+#[derive(Clone, Debug)]
+pub struct SqliteActiveClientLeaseReporter {
+    state: AsyncSqliteStateStore,
+    tasks: TaskTracker,
+}
+
+impl SqliteActiveClientLeaseReporter {
+    /// Creates a SQLx-backed active client lease reporter.
+    #[must_use]
+    pub const fn new(state: AsyncSqliteStateStore, tasks: TaskTracker) -> Self {
+        Self { state, tasks }
+    }
+}
+
+impl ActiveClientLeaseReporter for SqliteActiveClientLeaseReporter {
+    fn record_acquired(
+        &self,
+        route_band: &str,
+        reservation_handle: &ReservationHandle,
+        acquired_unix_seconds: u64,
+    ) {
+        let state = self.state.clone();
+        let route_band = route_band.to_owned();
+        let reservation_id = reservation_handle.reservation_id().clone();
+        let account_id = reservation_handle.account_id().clone();
+        self.tasks.spawn(async move {
+            let _result = state
+                .record_active_client_acquired(
+                    &route_band,
+                    &reservation_id,
+                    &account_id,
+                    acquired_unix_seconds,
+                )
+                .await;
+        });
+    }
+
+    fn record_released(&self, route_band: &str, reservation_handle: &ReservationHandle) {
+        let state = self.state.clone();
+        let route_band = route_band.to_owned();
+        let reservation_id = reservation_handle.reservation_id().clone();
+        self.tasks.spawn(async move {
+            let _result = state
+                .record_active_client_released(&route_band, &reservation_id)
+                .await;
+        });
+    }
+}
+
 /// RAII guard that releases active-load accounting when the stream lifecycle ends.
 #[derive(Clone)]
 pub struct ActiveReservationGuard {
@@ -75,16 +141,18 @@ pub struct ActiveReservationGuard {
 }
 
 impl ActiveReservationGuard {
-    pub(crate) fn new(
+    pub(crate) fn new_with_active_client_leases(
         active_reservations: RouteBandReservationBooks,
         route_band: String,
         reservation_handle: ReservationHandle,
+        active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
     ) -> Self {
         Self {
             inner: Arc::new(ActiveReservationGuardInner {
                 active_reservations,
                 route_band,
                 reservation_handle,
+                active_client_leases,
                 released: AtomicBool::new(false),
             }),
         }
@@ -125,6 +193,7 @@ struct ActiveReservationGuardInner {
     active_reservations: RouteBandReservationBooks,
     route_band: String,
     reservation_handle: ReservationHandle,
+    active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
     released: AtomicBool,
 }
 
@@ -140,6 +209,9 @@ impl ActiveReservationGuardInner {
                 &self.route_band,
                 &self.reservation_handle,
             );
+            if let Some(active_client_leases) = self.active_client_leases.as_ref() {
+                active_client_leases.record_released(&self.route_band, &self.reservation_handle);
+            }
         }
     }
 }
@@ -345,6 +417,7 @@ where
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
+    active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
     minimum_account_hold_cooldown_seconds: u64,
     clock: UnixClock,
 }
@@ -412,6 +485,7 @@ where
             weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
             account_holds: Arc::new(Mutex::new(HashMap::new())),
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
+            active_client_leases: None,
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
         }
@@ -429,6 +503,7 @@ where
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
+            active_client_leases: None,
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
         }
@@ -448,6 +523,7 @@ where
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
+            active_client_leases: None,
             minimum_account_hold_cooldown_seconds,
             clock,
         }
@@ -468,9 +544,20 @@ where
             weighted_selectors,
             account_holds,
             active_reservations,
+            active_client_leases: None,
             minimum_account_hold_cooldown_seconds,
             clock,
         }
+    }
+
+    /// Adds process-external active client lease reporting.
+    #[must_use]
+    pub fn with_active_client_lease_reporter(
+        mut self,
+        active_client_leases: Arc<dyn ActiveClientLeaseReporter>,
+    ) -> Self {
+        self.active_client_leases = Some(active_client_leases);
+        self
     }
 }
 
@@ -678,6 +765,7 @@ where
                 return reserve_selected_account(
                     selected,
                     &self.active_reservations,
+                    self.active_client_leases.as_ref(),
                     route_band.as_str(),
                     active_load_pressure_for_request(request),
                     now_unix_seconds,
@@ -695,6 +783,7 @@ where
             reserve_selected_account(
                 selected,
                 &self.active_reservations,
+                self.active_client_leases.as_ref(),
                 route_band.as_str(),
                 active_load_pressure_for_request(request),
                 now_unix_seconds,
@@ -986,6 +1075,7 @@ fn active_reservation_book_for_route_band(
 fn reserve_selected_account(
     selected: SelectedAccountDecision,
     active_reservations: &RouteBandReservationBooks,
+    active_client_leases: Option<&Arc<dyn ActiveClientLeaseReporter>>,
     route_band: &str,
     headroom_cost: u32,
     now_unix_seconds: u64,
@@ -1008,13 +1098,17 @@ fn reserve_selected_account(
             headroom_cost,
             now_unix_seconds,
         );
-    Ok(
-        selected.with_active_reservation_guard(ActiveReservationGuard::new(
+    if let Some(active_client_leases) = active_client_leases {
+        active_client_leases.record_acquired(route_band, &reservation_handle, now_unix_seconds);
+    }
+    Ok(selected.with_active_reservation_guard(
+        ActiveReservationGuard::new_with_active_client_leases(
             active_reservations_guard_source,
             route_band.to_owned(),
             reservation_handle,
-        )),
-    )
+            active_client_leases.cloned(),
+        ),
+    ))
 }
 
 /// Releases a selection reservation from route-band active load accounting.
