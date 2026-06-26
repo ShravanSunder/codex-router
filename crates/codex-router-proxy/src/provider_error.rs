@@ -5,12 +5,19 @@ use codex_router_core::routes::RouteBand;
 use codex_router_state::sqlite::AsyncQuotaExhaustionRepository;
 use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderErrorClassification {
     Unknown,
     AccountQuotaExhausted,
     WebSocketConnectionLimit,
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderErrorObservationError {
+    #[error("state store unavailable while recording provider error")]
+    State(#[from] StateStoreError),
 }
 
 pub trait AsyncProviderErrorObserver: Send + Sync {
@@ -20,7 +27,7 @@ pub trait AsyncProviderErrorObserver: Send + Sync {
         route_band: RouteBand,
         body: Vec<u8>,
         observed_unix_seconds: u64,
-    ) -> BoxFuture<'a, ()>;
+    ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>>;
 }
 
 pub fn classify_provider_error_envelope(body: &[u8]) -> ProviderErrorClassification {

@@ -1596,6 +1596,72 @@ mod tests {
     }
 
     #[test]
+    fn six_session_burn_down_keeps_weak_weekly_account_out_and_uses_active_load() {
+        let mut active_load = std::collections::HashMap::<&'static str, u32>::new();
+        let mut selected_accounts = Vec::new();
+
+        for _session_start in 0..6 {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_askluna",
+                    vec![
+                        window(FIVE_HOURS, 98, 4 * 3_600),
+                        window(WEEKLY, 23, 3 * 86_400),
+                    ],
+                )
+                .with_active_load_pressure(*active_load.get("acct_askluna").unwrap_or(&0)),
+                account(
+                    "acct_matches",
+                    vec![
+                        window(FIVE_HOURS, 99, 4 * 3_600),
+                        window(WEEKLY, 34, 3 * 86_400),
+                    ],
+                )
+                .with_active_load_pressure(*active_load.get("acct_matches").unwrap_or(&0)),
+                account(
+                    "acct_ssdev",
+                    vec![
+                        window(FIVE_HOURS, 78, 3 * 3_600),
+                        window(WEEKLY, 76, 5 * 86_400),
+                    ],
+                )
+                .with_active_load_pressure(*active_load.get("acct_ssdev").unwrap_or(&0)),
+            ]));
+            let selected = assessment
+                .preferred_next()
+                .unwrap_or_else(|| panic!("session start should have a quota candidate"))
+                .as_str();
+            selected_accounts.push(selected.to_owned());
+            active_load
+                .entry(match selected {
+                    "acct_askluna" => "acct_askluna",
+                    "acct_matches" => "acct_matches",
+                    "acct_ssdev" => "acct_ssdev",
+                    other => panic!("unexpected selected account: {other}"),
+                })
+                .and_modify(|load| *load = load.saturating_add(35).min(100))
+                .or_insert(35);
+        }
+
+        assert_eq!(
+            selected_accounts.first().map(String::as_str),
+            Some("acct_ssdev")
+        );
+        assert!(
+            selected_accounts
+                .iter()
+                .any(|account| account == "acct_matches"),
+            "active load should send one of six session starts to the next healthier account: {selected_accounts:?}"
+        );
+        assert!(
+            selected_accounts
+                .iter()
+                .all(|account| account != "acct_askluna"),
+            "weak weekly quota account must not be selected while healthier accounts exist: {selected_accounts:?}"
+        );
+    }
+
+    #[test]
     fn account_assessment_uses_safe_display_label() {
         let assessment = assess_route_band(input(vec![BurnDownAccountInput::new(
             account_id("acct_secret"),

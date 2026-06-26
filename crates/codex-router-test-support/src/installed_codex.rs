@@ -55,8 +55,6 @@ use codex_router_state::repositories::QuotaSnapshotRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::SqliteStateStore;
 use serde_json::Value;
-use sha2::Digest;
-use sha2::Sha256;
 use tungstenite::Message;
 use tungstenite::WebSocket;
 use tungstenite::accept_hdr;
@@ -974,19 +972,22 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
     }
 
     let quota_status = capture_quota_status(state_path)?;
-    let selected_account_id = selected_account_id_from_status_json(&quota_status.json)?;
+    let selected_account = selected_account_from_status_json(&quota_status.json)?;
     let selected_fixture = SMOKE_ACCOUNT_FIXTURES
         .iter()
-        .find(|fixture| fixture.account_id == selected_account_id)
+        .find(|fixture| fixture.label == selected_account.safe_label)
         .ok_or_else(|| {
-            format!("quota status selected unknown smoke account: {selected_account_id}")
+            format!(
+                "quota status selected unknown smoke account: {}",
+                selected_account.safe_label
+            )
         })?;
 
     Ok(SmokeSeed {
         local_token_assignment,
         local_token: exported_token,
         expected_account_label: selected_fixture.label.to_owned(),
-        expected_account_tag: safe_account_tag(&selected_account_id),
+        expected_account_tag: selected_account.account_hash,
         expected_upstream_token: selected_fixture.upstream_token.to_owned(),
         routable_upstream_tokens: SMOKE_ACCOUNT_FIXTURES
             .iter()
@@ -1093,6 +1094,7 @@ fn run_quota_status(router_root: &Path, format: &str) -> Result<String, String> 
             OsString::from("status"),
             OsString::from("--router-root"),
             router_root.as_os_str().to_owned(),
+            OsString::from("--no-refresh"),
             OsString::from("--format"),
             OsString::from(format),
             OsString::from("--now-unix-seconds"),
@@ -1118,40 +1120,40 @@ fn run_quota_status(router_root: &Path, format: &str) -> Result<String, String> 
         .map_err(|error| format!("quota status {format} was not UTF-8: {error}"))
 }
 
-fn selected_account_id_from_status_json(payload: &str) -> Result<String, String> {
-    let value: Value = serde_json::from_str(payload)
-        .map_err(|error| format!("quota status json was invalid: {error}"))?;
-    value
-        .get("preferred_next_account_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| "quota status json did not name preferred account".to_owned())
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectedQuotaStatusAccount {
+    safe_label: String,
+    account_hash: String,
 }
 
-fn selected_account_label_from_status_json(payload: &str) -> Result<String, String> {
+fn selected_account_from_status_json(payload: &str) -> Result<SelectedQuotaStatusAccount, String> {
     let value: Value = serde_json::from_str(payload)
         .map_err(|error| format!("quota status json was invalid: {error}"))?;
-    let selected_account_id = value
-        .get("preferred_next_account_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "quota status json did not name preferred account".to_owned())?;
     value
         .get("accounts")
         .and_then(Value::as_array)
         .and_then(|accounts| {
             accounts.iter().find_map(|account| {
-                let account_id = account.get("account_id").and_then(Value::as_str)?;
-                if account_id == selected_account_id {
-                    account
-                        .get("safe_account_label")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                } else {
-                    None
+                if !account
+                    .get("preferred_next")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return None;
                 }
+                Some(SelectedQuotaStatusAccount {
+                    safe_label: account
+                        .get("safe_account_label")
+                        .and_then(Value::as_str)?
+                        .to_owned(),
+                    account_hash: account
+                        .get("account_hash")
+                        .and_then(Value::as_str)?
+                        .to_owned(),
+                })
             })
         })
-        .ok_or_else(|| "quota status json did not include selected account label".to_owned())
+        .ok_or_else(|| "quota status json did not include preferred account label".to_owned())
 }
 
 fn smoke_account_label_from_upstream_token(token: &str) -> Option<&'static str> {
@@ -2130,9 +2132,9 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
         timestamp_millis()
     ));
     let first_frame = input.upstream.first_frame_json().unwrap_or(Value::Null);
-    let selected_account_id = selected_account_id_from_status_json(&input.quota_status.json)?;
-    let selected_account_tag = safe_account_tag(&selected_account_id);
-    let selected_account_label = selected_account_label_from_status_json(&input.quota_status.json)?;
+    let selected_account = selected_account_from_status_json(&input.quota_status.json)?;
+    let selected_account_tag = selected_account.account_hash;
+    let selected_account_label = selected_account.safe_label;
     let router_binary_path = sanitized_artifact_path(&input.router_process.binary_path)?;
     let router_argv = sanitized_router_argv(&input.router_process.argv);
     let redacted = serde_json::json!({
@@ -2628,27 +2630,6 @@ fn response_create_frame_shape_summary(upstream: &MockWebSocketTranscript) -> Va
         "present": response_create.is_object(),
         "non_prewarm_response_create": is_non_prewarm_response_create_frame(&response_create),
     })
-}
-
-fn safe_account_tag(account_id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"codex-router:smoke-selected-account:v1:");
-    hasher.update(account_id.as_bytes());
-    let digest = hasher.finalize();
-    let mut output = String::from("acct-");
-    for byte in digest.iter().take(6) {
-        output.push(hex_digit(byte >> 4));
-        output.push(hex_digit(byte & 0x0f));
-    }
-    output
-}
-
-fn hex_digit(nibble: u8) -> char {
-    match nibble {
-        0..=9 => char::from(b'0' + nibble),
-        10..=15 => char::from(b'a' + (nibble - 10)),
-        _ => unreachable!("nibble is masked to four bits"),
-    }
 }
 
 fn assert_redacted_transcript_payload(
@@ -4601,7 +4582,7 @@ mod tests {
         SmokeQuotaStatus {
             table: "matches 5h weekly resets available routing next use\n".to_owned(),
             plain: "account\tstatus\t5h\tweekly\tresets available\trouting\tnext use\nmatches\tenabled\t██████████ 91% resets in 4h\t██████░░░░ 54% resets in 6d\t-\t✓ preferred 5h 91%\tnext\nresponses route\tnext: matches\twhy: ✓ preferred 5h 91%\n".to_owned(),
-            json: r#"{"preferred_next_account_id":"acct_matches","accounts":[{"account_id":"acct_matches","safe_account_label":"matches"}]}"#.to_owned(),
+            json: r#"{"preferred_next_account_hash":"hash_matches","accounts":[{"account_hash":"hash_matches","safe_account_label":"matches","preferred_next":true}]}"#.to_owned(),
         }
     }
 

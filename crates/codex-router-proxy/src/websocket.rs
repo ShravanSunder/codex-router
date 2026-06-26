@@ -67,6 +67,7 @@ use tokio_util::task::TaskTracker;
 use crate::account_selection::AccountDecisionSelector;
 use crate::account_selection::ActiveReservationGuard;
 use crate::account_selection::AsyncAccountDecisionSelector;
+use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::headers::sanitize_headers_for_upstream;
@@ -74,6 +75,7 @@ use crate::http_sse::AsyncHttpAffinityOwnerRecorder;
 use crate::http_sse::AsyncProviderCredentialResolver;
 use crate::http_sse::HttpAffinityOwnerRecorder;
 use crate::http_sse::HttpAffinitySecretProvider;
+use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::http_sse::StderrAuditFailureReporter;
 use crate::http_sse::allowed_audit_event;
@@ -90,6 +92,9 @@ use crate::routes::Method;
 
 const WEBSOCKET_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
 const WEBSOCKET_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
+const CODEX_WEBSOCKET_RECONNECT_SIGNAL: &str = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}"#;
+const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"codex_router_quota_exhausted","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
+const ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL: &str = r#"{"type":"error","status":503,"error":{"type":"codex_router_quota_state_unavailable","code":"codex_router_quota_state_unavailable","message":"codex-router cannot safely rotate accounts because quota state is unavailable."}}"#;
 
 /// WebSocket frame subset needed before upstream connection opens.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,7 +203,10 @@ pub enum WebSocketCloseReason {
         reason: codex_router_core::local_auth::LocalAuthError,
     },
     /// Account selection failed before upstream open.
-    Selection,
+    Selection {
+        /// Selection failure reason.
+        reason: QuotaAwareAccountSelectorError,
+    },
     /// Provider credential resolution failed before upstream open.
     ProviderCredential,
     /// First frame failed local auth-safety or routing metadata constraints.
@@ -375,14 +383,16 @@ where
             .with_body(first_frame.payload().to_vec());
         let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
             self.emit_audit_event(websocket_selection_rejection_audit_event());
-            WebSocketCloseReason::Selection
+            WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            }
         })?;
         let selected = self
             .selector
             .select_upstream_account(&selection_request, token_generation, Some(&affinity_secret))
-            .map_err(|_error| {
+            .map_err(|error| {
                 self.emit_audit_event(websocket_selection_rejection_audit_event());
-                WebSocketCloseReason::Selection
+                selection_close_reason_from_http_error(error)
             })?;
         let account_hash = redacted_account_hash(selected.account_id());
         let resolved = self
@@ -439,10 +449,14 @@ where
     fn load_affinity_secret(&self) -> Result<RouterAffinityHashSecret, WebSocketCloseReason> {
         let provider = self
             .affinity_secret_provider
-            .ok_or(WebSocketCloseReason::Selection)?;
-        provider
-            .load_or_create_affinity_secret()
-            .map_err(|_error| WebSocketCloseReason::Selection)
+            .ok_or(WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            })?;
+        provider.load_or_create_affinity_secret().map_err(|_error| {
+            WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            }
+        })
     }
 }
 
@@ -538,15 +552,17 @@ where
             .with_body(first_frame.payload().to_vec());
         let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
             self.emit_audit_event(websocket_selection_rejection_audit_event());
-            WebSocketCloseReason::Selection
+            WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            }
         })?;
         let selected = self
             .selector
             .select_upstream_account(&selection_request, token_generation, Some(&affinity_secret))
             .await
-            .map_err(|_error| {
+            .map_err(|error| {
                 self.emit_audit_event(websocket_selection_rejection_audit_event());
-                WebSocketCloseReason::Selection
+                selection_close_reason_from_http_error(error)
             })?;
         let account_hash = redacted_account_hash(selected.account_id());
         let resolved = self
@@ -604,10 +620,23 @@ where
     fn load_affinity_secret(&self) -> Result<RouterAffinityHashSecret, WebSocketCloseReason> {
         let provider = self
             .affinity_secret_provider
-            .ok_or(WebSocketCloseReason::Selection)?;
-        provider
-            .load_or_create_affinity_secret()
-            .map_err(|_error| WebSocketCloseReason::Selection)
+            .ok_or(WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            })?;
+        provider.load_or_create_affinity_secret().map_err(|_error| {
+            WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+            }
+        })
+    }
+}
+
+fn selection_close_reason_from_http_error(error: HttpProxyError) -> WebSocketCloseReason {
+    match error {
+        HttpProxyError::Selection { reason } => WebSocketCloseReason::Selection { reason },
+        _ => WebSocketCloseReason::Selection {
+            reason: QuotaAwareAccountSelectorError::StateUnavailable,
+        },
     }
 }
 
@@ -1088,6 +1117,7 @@ mod async_forwarding_tests {
 
     use crate::account_selection::ActiveReservationGuard;
     use crate::account_selection::AsyncAccountDecisionSelector;
+    use crate::account_selection::QuotaAwareAccountSelectorError;
     use crate::account_selection::RouteBandReservationBooks;
     use crate::account_selection::SelectedAccountDecision;
     use crate::http_sse::AsyncHttpAffinityOwnerRecorder;
@@ -1097,6 +1127,7 @@ mod async_forwarding_tests {
     use crate::http_sse::HttpProxyRequest;
     use crate::local_auth::ProxyLocalAuthGate;
     use crate::provider_error::AsyncProviderErrorObserver;
+    use crate::provider_error::ProviderErrorObservationError;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 
@@ -1129,7 +1160,7 @@ mod async_forwarding_tests {
             route_band: codex_router_core::routes::RouteBand,
             body: Vec<u8>,
             _observed_unix_seconds: u64,
-        ) -> BoxFuture<'a, ()> {
+        ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>> {
             Box::pin(async move {
                 self.records
                     .lock()
@@ -1140,6 +1171,28 @@ mod async_forwarding_tests {
                         body,
                     });
                 self.observed.notify_one();
+                Ok(())
+            })
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingAsyncProviderErrorObserver;
+
+    impl AsyncProviderErrorObserver for FailingAsyncProviderErrorObserver {
+        fn observe_provider_error<'a>(
+            &'a self,
+            _account_id: AccountId,
+            _route_band: codex_router_core::routes::RouteBand,
+            _body: Vec<u8>,
+            _observed_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>> {
+            Box::pin(async {
+                Err(ProviderErrorObservationError::State(
+                    codex_router_state::sqlite::StateStoreError::UnsupportedSchemaVersion {
+                        version: 0,
+                    },
+                ))
             })
         }
     }
@@ -1315,6 +1368,26 @@ mod async_forwarding_tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct RejectingAsyncSelector {
+        reason: QuotaAwareAccountSelectorError,
+    }
+
+    impl AsyncAccountDecisionSelector for RejectingAsyncSelector {
+        fn select_upstream_account<'a>(
+            &'a self,
+            _request: &'a HttpProxyRequest,
+            _token_generation: LocalTokenGeneration,
+            _affinity_secret: Option<&'a RouterAffinityHashSecret>,
+        ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
+            Box::pin(async move {
+                Err(HttpProxyError::Selection {
+                    reason: self.reason,
+                })
+            })
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct FixedAsyncCredentialResolver {
         account_id: AccountId,
@@ -1413,6 +1486,62 @@ mod async_forwarding_tests {
             "shutdown should close pending first-frame routing cleanly, got {router_result:?}"
         );
         assert_eq!(registry.snapshot().active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn all_accounts_exhausted_sends_scrubbed_router_error_before_upstream_connect() {
+        let account_id = AccountId::new("acct_ws_test")
+            .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+        let selector = RejectingAsyncSelector {
+            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+        };
+        let credential_resolver = FixedAsyncCredentialResolver { account_id };
+        let auth_gate = ProxyLocalAuthGate::disabled();
+        let affinity_secret_provider = FixedAffinitySecretProvider::new();
+        let protocol_router = WebSocketProtocolRouter::new();
+        let tunnel = AsyncWebSocketTunnel::new(
+            &auth_gate,
+            &selector,
+            &credential_resolver,
+            &protocol_router,
+        )
+        .with_affinity_secret_provider(&affinity_secret_provider);
+        let (router_local_stream, client_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let router_future = tunnel.handle_upgraded_connection(
+            router_local_websocket,
+            WebSocketHandshakeRequest::new(),
+            "ws://127.0.0.1:1/v1/responses",
+        );
+        let peer_future = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first local frame should send: {error}"));
+            let message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive router exhausted error: {error}"),
+                None => panic!("client should receive router exhausted error"),
+            };
+            let rendered = message.to_string();
+            assert_eq!(rendered, super::ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL);
+            assert!(!rendered.contains("acct_"));
+            assert!(!rendered.contains("usage_limit_reached"));
+        };
+
+        let (router_result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(router_future, peer_future)
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("router should return exhausted error promptly"));
+
+        assert!(
+            router_result.is_ok(),
+            "all-accounts exhausted should be a clean router-level WebSocket error, got {router_result:?}"
+        );
     }
 
     #[test]
@@ -1947,7 +2076,7 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
-    async fn upstream_usage_limit_frame_is_forwarded_unchanged_and_observed() {
+    async fn upstream_usage_limit_frame_is_hidden_behind_codex_reconnect_signal() {
         let (router_local_stream, client_stream) = duplex(4096);
         let (router_upstream_stream, upstream_stream) = duplex(4096);
         let router_local_websocket =
@@ -2010,17 +2139,24 @@ mod async_forwarding_tests {
                 .unwrap_or_else(|error| panic!("usage limit should send: {error}"));
             let client_message = match client_websocket.next().await {
                 Some(Ok(message)) => message,
-                Some(Err(error)) => panic!("client should receive usage-limit frame: {error}"),
-                None => panic!("client should receive usage-limit frame"),
+                Some(Err(error)) => panic!("client should receive reconnect signal: {error}"),
+                None => panic!("client should receive reconnect signal"),
             };
-            assert_eq!(client_message.to_string(), usage_limit_frame);
+            assert_eq!(
+                client_message.to_string(),
+                super::CODEX_WEBSOCKET_RECONNECT_SIGNAL
+            );
+            assert!(
+                !client_message.to_string().contains("usage_limit_reached"),
+                "single-account quota exhaustion must not leak to Codex while router can rotate"
+            );
             drop(upstream_websocket);
         };
 
         let (router_result, ()) = tokio::join!(router_task, peer_task);
         assert!(
             router_result.is_ok(),
-            "router should keep provider error as pass-through frame, got {router_result:?}"
+            "router should hide provider quota exhaustion behind reconnect signal, got {router_result:?}"
         );
         tokio::time::timeout(
             Duration::from_secs(1),
@@ -2035,6 +2171,92 @@ mod async_forwarding_tests {
                 route_band: codex_router_core::routes::RouteBand::Responses,
                 body: usage_limit_frame.as_bytes().to_vec(),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_usage_limit_frame_does_not_emit_reconnect_when_exhaustion_mark_fails() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account,
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: Some(Arc::new(FailingAsyncProviderErrorObserver)),
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(usage_limit_frame))
+                .await
+                .unwrap_or_else(|error| panic!("usage limit should send: {error}"));
+            let client_message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive router state failure: {error}"),
+                None => panic!("client should receive router state failure"),
+            };
+            assert_eq!(
+                client_message.to_string(),
+                super::ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL
+            );
+            assert!(!client_message.to_string().contains("usage_limit_reached"));
+            assert_ne!(
+                client_message.to_string(),
+                super::CODEX_WEBSOCKET_RECONNECT_SIGNAL,
+                "router must not ask Codex to reconnect when it failed to mark the account exhausted"
+            );
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should emit scrubbed state-unavailable signal, got {router_result:?}"
         );
     }
 
@@ -2543,7 +2765,15 @@ where
                 return Ok(());
             }
             decision = self.router.route_first_frame(handshake, first_frame) => {
-                decision.map_err(WebSocketTunnelError::CloseReason)?
+                match decision {
+                    Ok(decision) => decision,
+                    Err(close_reason) => {
+                        if handle_pre_upstream_close_reason(&mut local_websocket, &close_reason).await? {
+                            return Ok(());
+                        }
+                        return Err(WebSocketTunnelError::CloseReason(close_reason));
+                    }
+                }
             }
         };
         let WebSocketFirstFrameDecision::OpenUpstream {
@@ -2603,6 +2833,29 @@ where
         )
         .await
     }
+}
+
+async fn handle_pre_upstream_close_reason<LocalStream>(
+    local_websocket: &mut WebSocketStream<LocalStream>,
+    close_reason: &WebSocketCloseReason,
+) -> Result<bool, WebSocketTunnelError>
+where
+    LocalStream: AsyncRead + AsyncWrite + Unpin,
+{
+    if !matches!(
+        close_reason,
+        WebSocketCloseReason::Selection {
+            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+        }
+    ) {
+        return Ok(false);
+    }
+
+    local_websocket
+        .send(Message::text(ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL))
+        .await?;
+    local_websocket.close(None).await?;
+    Ok(true)
 }
 
 async fn next_data_message_before_upstream<LocalStream>(
@@ -2822,7 +3075,16 @@ where
                 };
                 let is_close = matches!(upstream_message, Message::Close(_));
                 let metadata_text = websocket_metadata_text_handle(&upstream_message);
+                let provider_error_classification = provider_error_classification_from_message(&upstream_message);
                 let provider_error_body = provider_error_body_from_message(&upstream_message);
+                let upstream_message =
+                    maybe_replace_account_quota_exhaustion_with_reconnect_signal(
+                        upstream_message,
+                        provider_error_classification,
+                        provider_error_body.as_deref(),
+                        &context,
+                    )
+                    .await;
                 local_write.send(upstream_message).await?;
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
                 if let Some(metadata_text) = metadata_text {
@@ -2846,13 +3108,14 @@ where
                         .await;
                     });
                 }
-                if let Some(provider_error_body) = provider_error_body
+                if provider_error_classification != ProviderErrorClassification::AccountQuotaExhausted
+                    && let Some(provider_error_body) = provider_error_body
                     && let Some(provider_error_observer) = context.provider_error_observer.clone()
                     && let Some(affinity_owner_context) = context.affinity_owner_context.as_ref()
                 {
                     let account_id = affinity_owner_context.account_id.clone();
                     context.affinity_record_tasks.spawn(async move {
-                        provider_error_observer
+                        let _observation_result = provider_error_observer
                             .observe_provider_error(
                                 account_id,
                                 RouteBand::Responses,
@@ -2867,6 +3130,39 @@ where
                 }
             }
         }
+    }
+}
+
+async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
+    upstream_message: Message,
+    classification: ProviderErrorClassification,
+    provider_error_body: Option<&[u8]>,
+    context: &UpstreamToLocalPumpContext,
+) -> Message {
+    if classification != ProviderErrorClassification::AccountQuotaExhausted {
+        return upstream_message;
+    }
+    let Some(provider_error_body) = provider_error_body else {
+        return upstream_message;
+    };
+    let Some(provider_error_observer) = context.provider_error_observer.as_ref() else {
+        return upstream_message;
+    };
+    let Some(affinity_owner_context) = context.affinity_owner_context.as_ref() else {
+        return upstream_message;
+    };
+
+    match provider_error_observer
+        .observe_provider_error(
+            affinity_owner_context.account_id.clone(),
+            RouteBand::Responses,
+            provider_error_body.to_vec(),
+            current_unix_seconds(),
+        )
+        .await
+    {
+        Ok(()) => Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL),
+        Err(_error) => Message::text(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL),
     }
 }
 
@@ -3281,11 +3577,18 @@ fn provider_error_body_from_message(message: &Message) -> Option<Vec<u8>> {
         return None;
     };
     let body = text.as_str().as_bytes();
-    if classify_provider_error_envelope(body) == ProviderErrorClassification::Unknown {
+    if provider_error_classification_from_message(message) == ProviderErrorClassification::Unknown {
         return None;
     }
 
     Some(body.to_vec())
+}
+
+fn provider_error_classification_from_message(message: &Message) -> ProviderErrorClassification {
+    let Message::Text(text) = message else {
+        return ProviderErrorClassification::Unknown;
+    };
+    classify_provider_error_envelope(text.as_str().as_bytes())
 }
 
 fn current_unix_seconds() -> u64 {

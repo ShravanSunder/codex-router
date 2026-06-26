@@ -32,6 +32,7 @@ use http::StatusCode;
 use http::Uri;
 use http_body_util::BodyExt;
 use http_body_util::Empty;
+use http_body_util::Full;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Body as HyperBody;
 use hyper::body::Frame;
@@ -54,6 +55,7 @@ use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_core::routes::RouteBand;
+use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -95,6 +97,7 @@ use crate::http_sse::local_auth_rejection_audit_event;
 use crate::local_auth::extract_presented_local_token_from_request;
 use crate::provider_error::AsyncProviderErrorObserver;
 use crate::provider_error::ProviderErrorClassification;
+use crate::provider_error::ProviderErrorObservationError;
 use crate::provider_error::classify_provider_error_envelope;
 use crate::provider_error::record_provider_error_observation;
 use crate::routes::Method;
@@ -960,24 +963,90 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
-        let (request, body) = match hyper_request_to_streaming_proxy_request(request).await {
-            Ok(request) => request,
-            Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
-        };
-        let prepared = match self
-            .prepare_async_streaming_http_request_async(request, body)
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => return http_error_response(error),
-        };
-        let (upstream_request, completion) = prepared.into_parts();
-        let response = match self.upstream.send_streaming(upstream_request).await {
-            Ok(response) => response,
-            Err(error) => return http_error_response(error),
-        };
+        let (request, body, full_replay_body) =
+            match hyper_request_to_streaming_proxy_request(request).await {
+                Ok(request) => request,
+                Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
+            };
+        let replayable_request = full_replay_body
+            .filter(|body| request_metadata_prefix_is_complete_json(body))
+            .map(|body| request.clone().with_body(body));
 
-        self.async_streaming_http_response_to_hyper(response, completion)
+        let max_account_attempts = if replayable_request.is_some() {
+            self.enabled_account_attempt_limit().await
+        } else {
+            1
+        };
+        let mut first_attempt_body = Some(body);
+        for attempt_index in 0..max_account_attempts {
+            let (attempt_request, attempt_body) = if attempt_index == 0 {
+                let Some(first_attempt_body) = first_attempt_body.take() else {
+                    return empty_response(StatusCode::SERVICE_UNAVAILABLE);
+                };
+                (request.clone(), first_attempt_body)
+            } else if let Some(replayable_request) = replayable_request.clone() {
+                let retry_body = box_body_from_bytes(replayable_request.body().to_vec());
+                (replayable_request, retry_body)
+            } else {
+                return empty_response(StatusCode::SERVICE_UNAVAILABLE);
+            };
+
+            let prepared = match self
+                .prepare_async_streaming_http_request_async(attempt_request, attempt_body)
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => return http_error_response(error),
+            };
+            let (upstream_request, completion) = prepared.into_parts();
+            let response = match self.upstream.send_streaming(upstream_request).await {
+                Ok(response) => response,
+                Err(error) => return http_error_response(error),
+            };
+            match self
+                .observe_precommit_http_quota_response(response, completion)
+                .await
+            {
+                Ok(prepared_response) => {
+                    return self.async_streaming_http_response_to_hyper(
+                        prepared_response.completion,
+                        prepared_response.response,
+                    );
+                }
+                Err(PrecommitHttpQuotaResponse::AccountQuotaExhausted) => {
+                    if replayable_request.is_none() {
+                        return empty_response(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+                    tracing::info!(
+                        attempt = attempt_index + 1,
+                        max_attempts = max_account_attempts,
+                        "codex_router.http_precommit_account_exhausted_retry"
+                    );
+                }
+                Err(PrecommitHttpQuotaResponse::ProbeFailed(error)) => {
+                    return http_error_response(error);
+                }
+                Err(PrecommitHttpQuotaResponse::ObservationFailed) => {
+                    return empty_response(StatusCode::SERVICE_UNAVAILABLE);
+                }
+            }
+        }
+
+        empty_response(StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    async fn enabled_account_attempt_limit(&self) -> usize {
+        let Ok(state_store) = AsyncSqliteStateStore::open(&self.state_database_path).await else {
+            return 1;
+        };
+        let Ok(accounts) = state_store.list_accounts().await else {
+            return 1;
+        };
+        accounts
+            .iter()
+            .filter(|account| account.status() == AccountStatus::Enabled)
+            .count()
+            .max(1)
     }
 
     async fn prepare_async_streaming_http_request_async(
@@ -1027,8 +1096,8 @@ impl LoopbackProtocolConnectionHandler {
 
     fn async_streaming_http_response_to_hyper(
         &self,
-        response: AsyncStreamingHttpProxyResponse,
         completion: crate::http_sse::StreamingHttpProxyCompletion,
+        response: AsyncStreamingHttpProxyResponse,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
         if let Some(audit_sink) = &self.audit_sink {
             append_audit_event_with_reporter(
@@ -1046,6 +1115,39 @@ impl LoopbackProtocolConnectionHandler {
             Arc::clone(&self.affinity_owner_recorder),
             self.affinity_record_tasks.clone(),
         )
+    }
+
+    async fn observe_precommit_http_quota_response(
+        &self,
+        response: AsyncStreamingHttpProxyResponse,
+        completion: StreamingHttpProxyCompletion,
+    ) -> Result<PreparedHttpResponseForCommit, PrecommitHttpQuotaResponse> {
+        let provider_error_observer = completion.provider_error_observer().cloned();
+        let account_id = completion.account_id().clone();
+        let route_band = completion.route_band();
+        match split_precommit_http_quota_response(response).await {
+            Ok(PrecommitHttpResponseProbe::Forward(response)) => {
+                Ok(PreparedHttpResponseForCommit {
+                    response,
+                    completion,
+                })
+            }
+            Ok(PrecommitHttpResponseProbe::AccountQuotaExhausted { body }) => {
+                if let Some(observer) = provider_error_observer {
+                    observer
+                        .observe_provider_error(
+                            account_id,
+                            route_band,
+                            body,
+                            current_unix_seconds().map_or(0, |seconds| seconds),
+                        )
+                        .await
+                        .map_err(|_error| PrecommitHttpQuotaResponse::ObservationFailed)?;
+                }
+                Err(PrecommitHttpQuotaResponse::AccountQuotaExhausted)
+            }
+            Err(error) => Err(PrecommitHttpQuotaResponse::ProbeFailed(error)),
+        }
     }
 
     fn preflight_hyper_websocket_request(
@@ -1174,19 +1276,27 @@ fn path_without_query(path: &str) -> &str {
 }
 
 const HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES: usize = 16 * 1024;
+const HTTP_REQUEST_REPLAY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS: usize = 64;
 
 async fn hyper_request_to_streaming_proxy_request(
     request: HttpRequest<Incoming>,
-) -> Result<(HttpProxyRequest, BoxBody<Bytes, AsyncHttpBodyError>), LoopbackRouterRuntimeError> {
+) -> Result<
+    (
+        HttpProxyRequest,
+        BoxBody<Bytes, AsyncHttpBodyError>,
+        Option<Vec<u8>>,
+    ),
+    LoopbackRouterRuntimeError,
+> {
     let (parts, body) = request.into_parts();
     let path = parts
         .uri
         .path_and_query()
         .map_or("/", http::uri::PathAndQuery::as_str)
         .to_owned();
-    let (metadata_prefix, replay_body) = bounded_request_metadata_body(body)
+    let buffered_body = bounded_request_metadata_body(body)
         .await
         .map_err(LoopbackRouterRuntimeError::HyperBody)?;
     let mut proxy_request = HttpProxyRequest::new(method_from_hyper(&parts.method), path);
@@ -1195,40 +1305,186 @@ async fn hyper_request_to_streaming_proxy_request(
             proxy_request = proxy_request.with_header(Header::new(name.as_str(), value));
         }
     }
-    let streaming_body = replay_body.map_err(incoming_body_error).boxed();
+    let streaming_body = buffered_body
+        .streaming_body
+        .map_err(incoming_body_error)
+        .boxed();
 
-    Ok((proxy_request.with_body(metadata_prefix), streaming_body))
+    Ok((
+        proxy_request.with_body(buffered_body.routing_metadata_prefix),
+        streaming_body,
+        buffered_body.full_replay_body,
+    ))
+}
+
+struct BufferedRequestBody {
+    routing_metadata_prefix: Vec<u8>,
+    full_replay_body: Option<Vec<u8>>,
+    streaming_body: PrefixFramesThenIncomingBody,
 }
 
 async fn bounded_request_metadata_body(
     mut body: Incoming,
-) -> Result<(Vec<u8>, PrefixFramesThenIncomingBody), hyper::Error> {
-    let mut metadata_prefix = Vec::new();
+) -> Result<BufferedRequestBody, hyper::Error> {
+    let mut routing_metadata_prefix = Vec::new();
+    let mut full_replay_body = Some(Vec::new());
     let mut replay_frames = VecDeque::new();
-    while metadata_prefix.len() < HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES {
+    loop {
         let Some(frame) = body.frame().await.transpose()? else {
             break;
         };
         if let Some(data) = frame.data_ref() {
-            let remaining_bytes = HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES - metadata_prefix.len();
-            let bytes_to_scan = data.len().min(remaining_bytes);
-            metadata_prefix.extend_from_slice(&data[..bytes_to_scan]);
+            if routing_metadata_prefix.len() < HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES {
+                let remaining_bytes =
+                    HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES - routing_metadata_prefix.len();
+                let bytes_to_scan = data.len().min(remaining_bytes);
+                routing_metadata_prefix.extend_from_slice(&data[..bytes_to_scan]);
+            }
+            if let Some(replay_body) = full_replay_body.as_mut() {
+                if replay_body.len().saturating_add(data.len()) <= HTTP_REQUEST_REPLAY_MAX_BYTES {
+                    replay_body.extend_from_slice(data);
+                } else {
+                    full_replay_body = None;
+                }
+            }
+        } else {
+            full_replay_body = None;
         }
-        let metadata_is_complete = request_metadata_prefix_is_complete_json(&metadata_prefix);
+        let replay_body_is_complete = full_replay_body
+            .as_deref()
+            .is_some_and(request_metadata_prefix_is_complete_json);
         replay_frames.push_back(frame);
-        if metadata_is_complete || metadata_prefix.len() >= HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES {
+        if replay_body_is_complete || full_replay_body.is_none() {
             break;
         }
     }
 
-    Ok((
-        metadata_prefix,
-        PrefixFramesThenIncomingBody::new(replay_frames, body),
-    ))
+    Ok(BufferedRequestBody {
+        routing_metadata_prefix,
+        full_replay_body,
+        streaming_body: PrefixFramesThenIncomingBody::new(replay_frames, body),
+    })
 }
 
 fn request_metadata_prefix_is_complete_json(metadata_prefix: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(metadata_prefix).is_ok()
+}
+
+struct PreparedHttpResponseForCommit {
+    response: AsyncStreamingHttpProxyResponse,
+    completion: StreamingHttpProxyCompletion,
+}
+
+enum PrecommitHttpQuotaResponse {
+    AccountQuotaExhausted,
+    ObservationFailed,
+    ProbeFailed(HttpProxyError),
+}
+
+enum PrecommitHttpResponseProbe {
+    Forward(AsyncStreamingHttpProxyResponse),
+    AccountQuotaExhausted { body: Vec<u8> },
+}
+
+async fn split_precommit_http_quota_response(
+    response: AsyncStreamingHttpProxyResponse,
+) -> Result<PrecommitHttpResponseProbe, HttpProxyError> {
+    let (status, headers, mut body) = response.into_parts();
+    let mut replay_frames = VecDeque::new();
+    let mut buffered = Vec::new();
+    let mut scanned_bytes = 0_usize;
+    let mut scanned_events = 0_usize;
+
+    while scanned_bytes < HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES
+        && scanned_events < HTTP_RESPONSE_AFFINITY_SCAN_MAX_EVENTS
+    {
+        let Some(frame) =
+            body.frame()
+                .await
+                .transpose()
+                .map_err(|error| HttpProxyError::Upstream {
+                    message: error.to_string(),
+                })?
+        else {
+            break;
+        };
+        scanned_events += 1;
+        if let Some(data) = frame.data_ref() {
+            let remaining_bytes = HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES - scanned_bytes;
+            let bytes_to_scan = data.len().min(remaining_bytes);
+            buffered.extend_from_slice(&data[..bytes_to_scan]);
+            scanned_bytes += bytes_to_scan;
+            if let Some(provider_error_body) = provider_error_body_from_http_buffer(&buffered)
+                && classify_provider_error_envelope(&provider_error_body)
+                    == ProviderErrorClassification::AccountQuotaExhausted
+            {
+                return Ok(PrecommitHttpResponseProbe::AccountQuotaExhausted {
+                    body: provider_error_body,
+                });
+            }
+        }
+        replay_frames.push_back(frame);
+        if status < 400 && !precommit_probe_should_continue_for_success_status(&buffered) {
+            break;
+        }
+    }
+
+    let replay_body = PrefixFramesThenBoxBody::new(replay_frames, body).boxed();
+    Ok(PrecommitHttpResponseProbe::Forward(
+        AsyncStreamingHttpProxyResponse::new(status, headers, replay_body),
+    ))
+}
+
+fn precommit_probe_should_continue_for_success_status(buffered: &[u8]) -> bool {
+    let trimmed = trim_ascii_bytes(buffered);
+    trimmed.starts_with(b"event: error") && !trimmed.windows(2).any(|window| window == b"\n\n")
+}
+
+fn box_body_from_bytes(bytes: Vec<u8>) -> BoxBody<Bytes, AsyncHttpBodyError> {
+    Full::new(Bytes::from(bytes))
+        .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
+        .boxed()
+}
+
+struct PrefixFramesThenBoxBody {
+    prefix_frames: VecDeque<Frame<Bytes>>,
+    inner: BoxBody<Bytes, AsyncHttpBodyError>,
+}
+
+impl PrefixFramesThenBoxBody {
+    fn new(
+        prefix_frames: VecDeque<Frame<Bytes>>,
+        inner: BoxBody<Bytes, AsyncHttpBodyError>,
+    ) -> Self {
+        Self {
+            prefix_frames,
+            inner,
+        }
+    }
+}
+
+impl HyperBody for PrefixFramesThenBoxBody {
+    type Data = Bytes;
+    type Error = AsyncHttpBodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if let Some(frame) = self.prefix_frames.pop_front() {
+            return Poll::Ready(Some(Ok(frame)));
+        }
+
+        Pin::new(&mut self.inner).poll_frame(context)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.prefix_frames.is_empty() && self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        prefix_frames_size_hint(&self.prefix_frames, self.inner.size_hint())
+    }
 }
 
 struct PrefixFramesThenIncomingBody {
@@ -1265,8 +1521,26 @@ impl HyperBody for PrefixFramesThenIncomingBody {
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
+        prefix_frames_size_hint(&self.prefix_frames, self.inner.size_hint())
     }
+}
+
+fn prefix_frames_size_hint(
+    prefix_frames: &VecDeque<Frame<Bytes>>,
+    inner_hint: SizeHint,
+) -> SizeHint {
+    let prefix_data_length = prefix_frames
+        .iter()
+        .filter_map(Frame::data_ref)
+        .map(|data| u64::try_from(data.len()).unwrap_or(u64::MAX))
+        .fold(0_u64, u64::saturating_add);
+    let mut size_hint = SizeHint::new();
+    size_hint.set_lower(prefix_data_length.saturating_add(inner_hint.lower()));
+    if let Some(inner_upper) = inner_hint.upper() {
+        size_hint.set_upper(prefix_data_length.saturating_add(inner_upper));
+    }
+
+    size_hint
 }
 
 fn method_from_hyper(method: &HttpMethod) -> Method {
@@ -1456,7 +1730,7 @@ fn spawn_async_provider_error_observation(
     affinity_record_tasks: TaskTracker,
 ) {
     affinity_record_tasks.spawn(async move {
-        observer
+        let _observation_result = observer
             .observe_provider_error(
                 account_id,
                 route_band,
@@ -1585,16 +1859,18 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
         route_band: RouteBand,
         body: Vec<u8>,
         observed_unix_seconds: u64,
-    ) -> BoxFuture<'a, ()> {
+    ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>> {
         Box::pin(async move {
-            let _result = record_provider_error_observation(
+            record_provider_error_observation(
                 &self.state_store,
                 &account_id,
                 route_band.as_str(),
                 &body,
                 observed_unix_seconds,
             )
-            .await;
+            .await
+            .map(|_classification| ())
+            .map_err(ProviderErrorObservationError::from)
         })
     }
 }
@@ -1642,7 +1918,7 @@ mod tests {
             route_band: RouteBand,
             body: Vec<u8>,
             _observed_unix_seconds: u64,
-        ) -> BoxFuture<'a, ()> {
+        ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>> {
             Box::pin(async move {
                 match self.records.lock() {
                     Ok(mut records) => records.push(RecordedHttpProviderError {
@@ -1654,6 +1930,7 @@ mod tests {
                         panic!("test provider observer lock should be available: {error}")
                     }
                 }
+                Ok(())
             })
         }
     }
@@ -1788,6 +2065,55 @@ mod tests {
                 body: usage_limit_body.to_vec(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn precommit_http_usage_limit_body_requests_account_retry_before_commit() {
+        let usage_limit_body = Bytes::from_static(
+            br#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#,
+        );
+        let body_stream = futures_util::stream::iter(std::iter::once(Ok::<_, AsyncHttpBodyError>(
+            Frame::data(usage_limit_body.clone()),
+        )));
+        let body = BodyExt::boxed(StreamBody::new(body_stream));
+        let response =
+            AsyncStreamingHttpProxyResponse::new(429, HeaderCollection::new(Vec::new()), body);
+
+        match split_precommit_http_quota_response(response).await {
+            Ok(PrecommitHttpResponseProbe::AccountQuotaExhausted { body }) => {
+                assert_eq!(body, usage_limit_body.to_vec());
+            }
+            Ok(PrecommitHttpResponseProbe::Forward(_response)) => {
+                panic!("quota response should request account retry before commit");
+            }
+            Err(error) => panic!("quota response should classify before commit: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn precommit_http_non_error_body_replays_exact_bytes() {
+        let response_body = Bytes::from_static(br#"data: {"id":"resp-ok"}\n\n"#);
+        let body_stream = futures_util::stream::iter(std::iter::once(Ok::<_, AsyncHttpBodyError>(
+            Frame::data(response_body.clone()),
+        )));
+        let body = BodyExt::boxed(StreamBody::new(body_stream));
+        let response =
+            AsyncStreamingHttpProxyResponse::new(200, HeaderCollection::new(Vec::new()), body);
+
+        match split_precommit_http_quota_response(response).await {
+            Ok(PrecommitHttpResponseProbe::Forward(response)) => {
+                let (_status, _headers, body) = response.into_parts();
+                let forwarded_bytes = match body.collect().await {
+                    Ok(collected) => collected.to_bytes(),
+                    Err(error) => panic!("forwarded body should collect: {error}"),
+                };
+                assert_eq!(forwarded_bytes, response_body);
+            }
+            Ok(PrecommitHttpResponseProbe::AccountQuotaExhausted { .. }) => {
+                panic!("non-error response should pass through");
+            }
+            Err(error) => panic!("non-error response should pass through: {error}"),
+        }
     }
 
     #[tokio::test]

@@ -1664,13 +1664,13 @@ mod tests {
             &state,
             &alpha,
             "responses",
-            &[(18_000, 70, true), (604_800, 70, false)],
+            &[(18_000, 100, true), (604_800, 100, false)],
         );
         persist_account_with_selector_window_specs(
             &state,
             &beta,
             "responses",
-            &[(18_000, 70, true), (604_800, 70, false)],
+            &[(18_000, 100, true), (604_800, 100, false)],
         );
         let async_state = match AsyncSqliteStateStore::open(&database_path).await {
             Ok(state) => state,
@@ -2016,7 +2016,7 @@ mod tests {
             &state,
             &beta,
             "responses",
-            &[(18_000, 100, true), (604_800, 100, false)],
+            &[(18_000, 50, true), (604_800, 50, false)],
         );
         let affinity_secret = test_affinity_secret();
         if let Err(error) = persist_previous_response_owner(
@@ -2326,6 +2326,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn async_repository_backed_selector_affinity_ineligible_owner_fails_closed() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_affinity_ineligible");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let exhausted = AccountRecord::new(
+            account_id("acct_exhausted"),
+            "exhausted",
+            AccountStatus::Enabled,
+        );
+        let eligible = AccountRecord::new(
+            account_id("acct_eligible"),
+            "eligible",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &exhausted,
+            "responses",
+            &[(18_000, 0, true), (604_800, 0, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &eligible,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
+            &state,
+            "resp_exhausted",
+            &affinity_secret,
+            exhausted.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+
+        let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
+
+        assert_eq!(
+            selector
+                .select_upstream_account(
+                    &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                        .with_body(br#"{"previous_response_id":"resp_exhausted"}"#.to_vec()),
+                    TokenGeneration::new(1),
+                    Some(&affinity_secret),
+                )
+                .await,
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable
+            })
+        );
+    }
+
     #[test]
     fn repository_backed_selector_ignores_malformed_affinity_key_and_selects_normally() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_affinity_malformed");
@@ -2596,6 +2657,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_repository_backed_selector_six_concurrent_sessions_use_active_load() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_six_session_load");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let askluna = AccountRecord::new(
+            account_id("acct_askluna"),
+            "askluna",
+            AccountStatus::Enabled,
+        );
+        let matches = AccountRecord::new(
+            account_id("acct_matches"),
+            "matches",
+            AccountStatus::Enabled,
+        );
+        let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &askluna,
+            "responses",
+            &[
+                (18_000, 98, true, test_unix_seconds() + 4 * 3_600),
+                (604_800, 23, false, test_unix_seconds() + 3 * 86_400),
+            ],
+        );
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &matches,
+            "responses",
+            &[
+                (18_000, 55, true, test_unix_seconds() + 4 * 3_600),
+                (604_800, 55, false, test_unix_seconds() + 3 * 86_400),
+            ],
+        );
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &ssdev,
+            "responses",
+            &[
+                (18_000, 60, true, test_unix_seconds() + 4 * 3_600),
+                (604_800, 60, false, test_unix_seconds() + 3 * 86_400),
+            ],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            RouteBandReservationBooks::default(),
+            0,
+            Arc::new(test_unix_seconds),
+        );
+        let mut selected_accounts = Vec::new();
+        let mut active_sessions = Vec::new();
+
+        for session_index in 0..6 {
+            let selected = match selector
+                .select_upstream_account(
+                    &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                        .with_websocket_upgrade(true),
+                    TokenGeneration::new(1),
+                    None,
+                )
+                .await
+            {
+                Ok(selected) => selected,
+                Err(error) => panic!("session {session_index} should select account: {error}"),
+            };
+            selected_accounts.push(selected.account_id().as_str().to_owned());
+            active_sessions.push(selected);
+        }
+
+        assert_eq!(
+            selected_accounts.first().map(String::as_str),
+            Some("acct_ssdev")
+        );
+        assert!(
+            selected_accounts
+                .iter()
+                .any(|account| account == "acct_matches"),
+            "six concurrent sessions should spill to the next healthy account as active load accumulates: {selected_accounts:?}"
+        );
+        assert!(
+            selected_accounts
+                .iter()
+                .all(|account| account != "acct_askluna"),
+            "weak weekly quota account must not be selected while healthier accounts exist: {selected_accounts:?}"
+        );
+        assert_eq!(active_sessions.len(), 6);
+    }
+
+    #[tokio::test]
     async fn async_repository_backed_selector_reuses_held_account_inside_cooldown() {
         let temp_dir = ProxyTestTempDir::new("async_repository_selector_hold_cooldown");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -2615,7 +2773,7 @@ mod tests {
             &state,
             &beta,
             "responses",
-            &[(18_000, 100, true), (604_800, 100, false)],
+            &[(18_000, 50, true), (604_800, 50, false)],
         );
         let async_state = match AsyncSqliteStateStore::open(&database_path).await {
             Ok(state) => state,
@@ -2655,7 +2813,7 @@ mod tests {
         };
 
         assert_eq!(first.account_id(), alpha.account_id());
-        assert_eq!(first.selection_reason(), "preferred_highest_weight");
+        assert_eq!(first.selection_reason(), "preferred_weekly_healthier");
         assert_eq!(second.account_id(), alpha.account_id());
         assert_eq!(second.selection_reason(), "account_hold_cooldown");
     }
@@ -2724,7 +2882,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_backed_selector_rebalances_after_cooldown_expires() {
+    fn repository_backed_selector_keeps_strict_preferred_account_after_cooldown_expires() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_hold_expired");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = match SqliteStateStore::open(&database_path) {
@@ -2774,12 +2932,12 @@ mod tests {
             None,
         ) {
             Ok(selected) => selected,
-            Err(error) => panic!("second request should rebalance after cooldown: {error}"),
+            Err(error) => panic!("second request should keep strict preferred account: {error}"),
         };
 
         assert_eq!(first.account_id(), alpha.account_id());
-        assert_eq!(second.account_id(), beta.account_id());
-        assert_eq!(second.selection_reason(), "available_same_pool");
+        assert_eq!(second.account_id(), alpha.account_id());
+        assert_eq!(second.selection_reason(), "preferred_highest_weight");
     }
 
     #[test]
@@ -3490,6 +3648,603 @@ mod tests {
         };
         assert_eq!(owner.account_id(), account.account_id());
         assert_eq!(owner.credential_generation(), 1);
+    }
+
+    #[test]
+    fn assembled_loopback_router_runtime_retries_http_quota_error_on_fallback_account() {
+        let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_quota_retry");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let primary = AccountRecord::new(
+            account_id("acct_primary_quota"),
+            "primary-quota",
+            AccountStatus::Enabled,
+        );
+        let fallback = AccountRecord::new(
+            account_id("acct_fallback_quota"),
+            "fallback-quota",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &primary, 90, "primary-token");
+        persist_account_with_snapshot_and_token(&state, &secrets, &fallback, 80, "fallback-token");
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            for connection_index in 0..2 {
+                let (mut stream, _peer_address) = match upstream_listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) => panic!("mock upstream should accept retry connection: {error}"),
+                };
+                let request = read_test_http_request(&mut stream);
+                let authorization = request
+                    .lines()
+                    .find(|line| line.starts_with("authorization: "))
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                if let Err(error) = upstream_sender.send(authorization) {
+                    panic!("mock upstream authorization should record: {error}");
+                }
+                if connection_index == 0 {
+                    let quota_body = br#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+                    if let Err(error) = write!(
+                        stream,
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        quota_body.len()
+                    ) {
+                        panic!("mock upstream should write quota response headers: {error}");
+                    }
+                    if let Err(error) = stream.write_all(quota_body) {
+                        panic!("mock upstream should write quota response body: {error}");
+                    }
+                } else if let Err(error) = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\nfallback-response")
+                {
+                    panic!("mock upstream should write fallback response: {error}");
+                }
+            }
+        });
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock upstream endpoint should validate: {error}"),
+        };
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path.clone(),
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses?retry=true HTTP/1.1\r\n",
+                br#"{"model":"gpt-5","retry":true}"#,
+            )
+        });
+
+        let handled = match runtime.serve_http_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve one client connection: {error}"),
+        };
+        assert_eq!(handled, 1);
+        let response = match client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("client thread panicked: {error:?}"),
+        };
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "Codex-side response should be fallback success, got:\n{response}"
+        );
+        assert!(response.ends_with("\r\nfallback-response"));
+        assert!(!response.contains("usage_limit_reached"));
+        let first_authorization = match upstream_receiver.recv() {
+            Ok(authorization) => authorization,
+            Err(error) => panic!("first upstream auth should record: {error}"),
+        };
+        let second_authorization = match upstream_receiver.recv() {
+            Ok(authorization) => authorization,
+            Err(error) => panic!("second upstream auth should record: {error}"),
+        };
+        assert_eq!(first_authorization, "authorization: Bearer primary-token");
+        assert_eq!(second_authorization, "authorization: Bearer fallback-token");
+
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        let runtime_state = must_ok(SqliteStateStore::open(&database_path));
+        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("fallback should remain selectable: {error}"));
+        assert_eq!(selected_after_retry.account_id(), fallback.account_id());
+    }
+
+    #[test]
+    fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fallback_account() {
+        let temp_dir = ProxyTestTempDir::new("assembled_runtime_large_http_quota_retry");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let primary = AccountRecord::new(
+            account_id("acct_primary_large_quota"),
+            "primary-large-quota",
+            AccountStatus::Enabled,
+        );
+        let fallback = AccountRecord::new(
+            account_id("acct_fallback_large_quota"),
+            "fallback-large-quota",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &primary, 90, "primary-token");
+        persist_account_with_snapshot_and_token(&state, &secrets, &fallback, 80, "fallback-token");
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            for connection_index in 0..2 {
+                let (mut stream, _peer_address) = match upstream_listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) => panic!("mock upstream should accept retry connection: {error}"),
+                };
+                let request = read_test_http_request(&mut stream);
+                let authorization = request
+                    .lines()
+                    .find(|line| line.starts_with("authorization: "))
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                let body_contains_large_padding =
+                    request.contains("\"large_padding\":\"") && request.len() > 16 * 1024;
+                if let Err(error) =
+                    upstream_sender.send((authorization, body_contains_large_padding))
+                {
+                    panic!("mock upstream authorization should record: {error}");
+                }
+                if connection_index == 0 {
+                    let quota_body = br#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+                    if let Err(error) = write!(
+                        stream,
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        quota_body.len()
+                    ) {
+                        panic!("mock upstream should write quota response headers: {error}");
+                    }
+                    if let Err(error) = stream.write_all(quota_body) {
+                        panic!("mock upstream should write quota response body: {error}");
+                    }
+                } else if let Err(error) = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\nfallback-response")
+                {
+                    panic!("mock upstream should write fallback response: {error}");
+                }
+            }
+        });
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock upstream endpoint should validate: {error}"),
+        };
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path.clone(),
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let large_body = format!(
+            r#"{{"model":"gpt-5","large_padding":"{}"}}"#,
+            "x".repeat(17 * 1024)
+        );
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses?retry=true HTTP/1.1\r\n",
+                large_body.as_bytes(),
+            )
+        });
+
+        let handled = match runtime.serve_http_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve one client connection: {error}"),
+        };
+        assert_eq!(handled, 1);
+        let response = match client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("client thread panicked: {error:?}"),
+        };
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "Codex-side response should be fallback success, got:\n{response}"
+        );
+        assert!(response.ends_with("\r\nfallback-response"));
+        assert!(!response.contains("usage_limit_reached"));
+        let first = upstream_receiver
+            .recv()
+            .unwrap_or_else(|error| panic!("first upstream auth should record: {error}"));
+        let second = upstream_receiver
+            .recv()
+            .unwrap_or_else(|error| panic!("second upstream auth should record: {error}"));
+        assert_eq!(first.0, "authorization: Bearer primary-token");
+        assert_eq!(second.0, "authorization: Bearer fallback-token");
+        assert!(first.1);
+        assert!(
+            second.1,
+            "fallback attempt must replay the exact large JSON body, not only the metadata prefix"
+        );
+
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        let runtime_state = must_ok(SqliteStateStore::open(&database_path));
+        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("fallback should remain selectable: {error}"));
+        assert_eq!(selected_after_retry.account_id(), fallback.account_id());
+    }
+
+    #[test]
+    fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can_serve() {
+        let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_quota_retry_chain");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let primary = AccountRecord::new(
+            account_id("acct_primary_quota_chain"),
+            "primary-quota-chain",
+            AccountStatus::Enabled,
+        );
+        let secondary = AccountRecord::new(
+            account_id("acct_secondary_quota_chain"),
+            "secondary-quota-chain",
+            AccountStatus::Enabled,
+        );
+        let tertiary = AccountRecord::new(
+            account_id("acct_tertiary_quota_chain"),
+            "tertiary-quota-chain",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &primary, 90, "primary-token");
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &secondary,
+            80,
+            "secondary-token",
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &tertiary, 70, "tertiary-token");
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            for connection_index in 0..3 {
+                let (mut stream, _peer_address) = match upstream_listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) => panic!("mock upstream should accept retry connection: {error}"),
+                };
+                let request = read_test_http_request(&mut stream);
+                let authorization = request
+                    .lines()
+                    .find(|line| line.starts_with("authorization: "))
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                if let Err(error) = upstream_sender.send(authorization) {
+                    panic!("mock upstream authorization should record: {error}");
+                }
+                if connection_index < 2 {
+                    let quota_body = br#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+                    if let Err(error) = write!(
+                        stream,
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        quota_body.len()
+                    ) {
+                        panic!("mock upstream should write quota response headers: {error}");
+                    }
+                    if let Err(error) = stream.write_all(quota_body) {
+                        panic!("mock upstream should write quota response body: {error}");
+                    }
+                } else if let Err(error) = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\ntertiary-response")
+                {
+                    panic!("mock upstream should write tertiary response: {error}");
+                }
+            }
+        });
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock upstream endpoint should validate: {error}"),
+        };
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path.clone(),
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses?retry=true HTTP/1.1\r\n",
+                br#"{"model":"gpt-5","retry":true}"#,
+            )
+        });
+
+        let handled = match runtime.serve_http_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve one client connection: {error}"),
+        };
+        assert_eq!(handled, 1);
+        let response = match client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("client thread panicked: {error:?}"),
+        };
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "Codex-side response should be tertiary success, got:\n{response}"
+        );
+        assert!(response.ends_with("\r\ntertiary-response"));
+        assert!(!response.contains("usage_limit_reached"));
+        let authorizations: Vec<String> = (0..3)
+            .map(|_| match upstream_receiver.recv() {
+                Ok(authorization) => authorization,
+                Err(error) => panic!("upstream auth should record: {error}"),
+            })
+            .collect();
+        assert_eq!(
+            authorizations,
+            vec![
+                "authorization: Bearer primary-token".to_owned(),
+                "authorization: Bearer secondary-token".to_owned(),
+                "authorization: Bearer tertiary-token".to_owned(),
+            ]
+        );
+
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        let runtime_state = must_ok(SqliteStateStore::open(&database_path));
+        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("tertiary should remain selectable: {error}"));
+        assert_eq!(selected_after_retry.account_id(), tertiary.account_id());
+    }
+
+    #[test]
+    fn assembled_loopback_router_runtime_hides_http_quota_errors_when_all_accounts_exhausted() {
+        let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_all_quota_exhausted");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let primary = AccountRecord::new(
+            account_id("acct_primary_all_exhausted"),
+            "primary-all-exhausted",
+            AccountStatus::Enabled,
+        );
+        let secondary = AccountRecord::new(
+            account_id("acct_secondary_all_exhausted"),
+            "secondary-all-exhausted",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &primary, 90, "primary-token");
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &secondary,
+            80,
+            "secondary-token",
+        );
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            for _connection_index in 0..2 {
+                let (mut stream, _peer_address) = match upstream_listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) => panic!("mock upstream should accept retry connection: {error}"),
+                };
+                let request = read_test_http_request(&mut stream);
+                let authorization = request
+                    .lines()
+                    .find(|line| line.starts_with("authorization: "))
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                if let Err(error) = upstream_sender.send(authorization) {
+                    panic!("mock upstream authorization should record: {error}");
+                }
+                let quota_body = br#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"acct_primary_all_exhausted is out"}}"#;
+                if let Err(error) = write!(
+                    stream,
+                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    quota_body.len()
+                ) {
+                    panic!("mock upstream should write quota response headers: {error}");
+                }
+                if let Err(error) = stream.write_all(quota_body) {
+                    panic!("mock upstream should write quota response body: {error}");
+                }
+            }
+        });
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock upstream endpoint should validate: {error}"),
+        };
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses?all-exhausted=true HTTP/1.1\r\n",
+                br#"{"model":"gpt-5","all_exhausted":true}"#,
+            )
+        });
+
+        let handled = match runtime.serve_http_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve one client connection: {error}"),
+        };
+        assert_eq!(handled, 1);
+        let response = match client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("client thread panicked: {error:?}"),
+        };
+
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "Codex-side response should be router-level exhausted response, got:\n{response}"
+        );
+        assert!(!response.contains("usage_limit_reached"));
+        assert!(!response.contains("acct_primary_all_exhausted"));
+        assert_eq!(
+            vec![
+                upstream_receiver
+                    .recv()
+                    .unwrap_or_else(|error| panic!("first upstream auth should record: {error}")),
+                upstream_receiver
+                    .recv()
+                    .unwrap_or_else(|error| panic!("second upstream auth should record: {error}")),
+            ],
+            vec![
+                "authorization: Bearer primary-token".to_owned(),
+                "authorization: Bearer secondary-token".to_owned(),
+            ]
+        );
+
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
     }
 
     #[test]
@@ -6038,6 +6793,33 @@ mod tests {
             request_bytes.extend_from_slice(&buffer[..read]);
         };
         let headers = String::from_utf8_lossy(&request_bytes[..header_length]);
+        let transfer_encoding_is_chunked = headers.lines().any(|line| {
+            let Some((name, value)) = line.split_once(':') else {
+                return false;
+            };
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        });
+        if transfer_encoding_is_chunked {
+            while !request_bytes[header_length..]
+                .windows(5)
+                .any(|window| window == b"0\r\n\r\n")
+            {
+                let mut buffer = [0_u8; 1024];
+                let read = match stream.read(&mut buffer) {
+                    Ok(read) => read,
+                    Err(error) => panic!("mock upstream should read chunked request body: {error}"),
+                };
+                if read == 0 {
+                    panic!("mock upstream request ended before chunked body completed");
+                }
+                request_bytes.extend_from_slice(&buffer[..read]);
+            }
+
+            return String::from_utf8_lossy(&request_bytes).into_owned();
+        }
         let content_length = headers
             .lines()
             .find_map(|line| {
@@ -7275,7 +8057,9 @@ mod tests {
                     .with_header(Header::new("X-Codex-Router-Token", "current-token")),
                 WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec()),
             ),
-            Err(WebSocketCloseReason::Selection)
+            Err(WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::SecretUnavailable
+            })
         );
         assert!(selector.take_recorded().is_empty());
         assert!(resolver.take_recorded().is_empty());
@@ -7378,7 +8162,9 @@ mod tests {
                         .to_vec(),
                 ),
             ),
-            Err(WebSocketCloseReason::Selection)
+            Err(WebSocketCloseReason::Selection {
+                reason: QuotaAwareAccountSelectorError::AffinityOwnerMissing
+            })
         );
         assert!(resolver.take_recorded().is_empty());
     }
