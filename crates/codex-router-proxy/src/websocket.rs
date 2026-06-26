@@ -2125,11 +2125,34 @@ mod async_forwarding_tests {
         .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
         let selected_account = AccountId::new("acct_selected")
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let active_reservations = RouteBandReservationBooks::default();
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_next_at(selected_account.clone(), 8, 1)
+        };
+        let active_reservation_guard = ActiveReservationGuard::new(
+            active_reservations.clone(),
+            "responses".to_owned(),
+            reservation_handle,
+        );
         let affinity_owner_context = WebSocketAffinityOwnerContext {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
-            active_reservation_guard: None,
+            active_reservation_guard: Some(active_reservation_guard),
+        };
+        let active_pressure = || {
+            let reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .get("responses")
+                .map_or(0, |book| book.active_load_pressure(&selected_account))
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -2177,6 +2200,15 @@ mod async_forwarding_tests {
                 !client_message.to_string().contains("usage_limit_reached"),
                 "single-account quota exhaustion must not leak to Codex while router can rotate"
             );
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while active_pressure() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_elapsed| {
+                panic!("quota replacement should release exhausted account active load")
+            });
             drop(upstream_websocket);
         };
 
@@ -3286,6 +3318,7 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
 
     let observed_unix_seconds = current_unix_seconds();
     let exhausted_account_id = affinity_owner_context.account_id.clone();
+    context.active_turn_reservation.release_current();
 
     match provider_error_observer
         .observe_provider_error(

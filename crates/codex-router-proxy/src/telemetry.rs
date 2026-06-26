@@ -36,7 +36,9 @@ pub fn record_account_rejected(route_band: &str, selection_reason: &'static str)
         .add(
             1,
             &[
+                KeyValue::new("account.slot", "none"),
                 KeyValue::new("route_band", route_band.to_owned()),
+                KeyValue::new("transport", "runtime"),
                 KeyValue::new("selection.reason", selection_reason),
             ],
         );
@@ -110,6 +112,33 @@ mod tests {
             assert!(
                 !production_source.contains(forbidden),
                 "runtime metrics must not use forbidden label key {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn account_rejection_metrics_include_scrubbed_routing_dimensions() {
+        let source = include_str!("telemetry.rs");
+        let Some(after_function_name) = source.split("pub fn record_account_rejected").nth(1)
+        else {
+            panic!("record_account_rejected helper should exist");
+        };
+        let Some(rejection_helper) = after_function_name
+            .split("/// Records a scrubbed active-client")
+            .next()
+        else {
+            panic!("record_account_rejected helper should precede active-client helper");
+        };
+
+        for required_label in [
+            "account.slot",
+            "transport",
+            "route_band",
+            "selection.reason",
+        ] {
+            assert!(
+                rejection_helper.contains(required_label),
+                "account rejection metrics must include {required_label}"
             );
         }
     }

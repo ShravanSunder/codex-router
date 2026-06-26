@@ -2632,7 +2632,9 @@ fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
             .add(
                 1,
                 &[
+                    KeyValue::new("account.slot", "none"),
                     KeyValue::new("route_band", route_band.to_owned()),
+                    KeyValue::new("transport", "cli"),
                     KeyValue::new("selection.reason", "no_quota_candidate"),
                 ],
             );
@@ -2643,6 +2645,20 @@ fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
         if row.preferred_next {
             global::meter("codex-router")
                 .u64_counter("codex_router_account_selections_total")
+                .build()
+                .add(
+                    1,
+                    &[
+                        KeyValue::new("account.slot", account_hash.clone()),
+                        KeyValue::new("route_band", route_band.to_owned()),
+                        KeyValue::new("transport", "cli"),
+                        KeyValue::new("selection.reason", routing_reason_json(row.routing_reason)),
+                    ],
+                );
+        }
+        if !row.preferred_next {
+            global::meter("codex-router")
+                .u64_counter("codex_router_account_rejections_total")
                 .build()
                 .add(
                     1,
@@ -2960,6 +2976,47 @@ mod tests {
             slow_burning_assessment.routing_reason(),
             RoutingReason::PreferredProjectedBurn
         );
+    }
+
+    #[test]
+    fn quota_status_telemetry_contract_uses_scrubbed_low_cardinality_labels() {
+        let source = include_str!("quota.rs");
+        let Some(after_function_name) = source.split("fn emit_quota_status_metrics").nth(1) else {
+            panic!("emit_quota_status_metrics helper should exist");
+        };
+        let Some(metrics_helper) = after_function_name
+            .split("fn record_quota_refresh_metric")
+            .next()
+        else {
+            panic!("quota status metrics helper should precede refresh metric helper");
+        };
+
+        for required_label in [
+            "account.slot",
+            "route_band",
+            "transport",
+            "selection.reason",
+            "quota.window",
+            "quota.remaining_bucket",
+            "quota.pressure_bucket",
+        ] {
+            assert!(
+                metrics_helper.contains(required_label),
+                "quota status telemetry must include {required_label}"
+            );
+        }
+        for forbidden_label in [
+            "account.id",
+            "account.label",
+            "reservation.id",
+            "payload",
+            "token",
+        ] {
+            assert!(
+                !metrics_helper.contains(forbidden_label),
+                "quota status telemetry must not include {forbidden_label}"
+            );
+        }
     }
 
     fn account(account_id: &str, label: &str) -> AccountRecord {

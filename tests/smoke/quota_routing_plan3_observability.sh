@@ -74,9 +74,10 @@ export RUST_LOG="warn,codex_router_cli=info,codex_router_proxy=info,opentelemetr
 sqlite3 "${router_root}/state.sqlite" <<'SQL'
 INSERT INTO accounts (account_id, label, status, active_credential_generation)
 VALUES
-  ('acct_askluna', 'askluna', 'enabled', 1),
-  ('acct_matches', 'matches', 'enabled', 1),
-  ('acct_ssdev', 'ssdev', 'enabled', 1);
+  ('acct_retire', 'askluna', 'enabled', 1),
+  ('acct_reserve', 'matches', 'enabled', 1),
+  ('acct_ssdev', 'ssdev', 'enabled', 1),
+  ('acct_unknown', 'needsprobe', 'enabled', 1);
 
 INSERT INTO selector_quota_windows (
   account_id,
@@ -89,10 +90,10 @@ INSERT INTO selector_quota_windows (
   observed_unix_seconds
 )
 VALUES
-  ('acct_askluna', 'responses', 18000, 'eligible', 98, 24400, 1, 10000),
-  ('acct_askluna', 'responses', 604800, 'eligible', 23, 269200, 0, 10000),
-  ('acct_matches', 'responses', 18000, 'eligible', 99, 26200, 1, 10000),
-  ('acct_matches', 'responses', 604800, 'eligible', 34, 272800, 0, 10000),
+  ('acct_retire', 'responses', 18000, 'eligible', 98, 24400, 1, 10000),
+  ('acct_retire', 'responses', 604800, 'eligible', 4, 269200, 0, 10000),
+  ('acct_reserve', 'responses', 18000, 'eligible', 99, 26200, 1, 10000),
+  ('acct_reserve', 'responses', 604800, 'eligible', 9, 272800, 0, 10000),
   ('acct_ssdev', 'responses', 18000, 'eligible', 78, 20800, 1, 10000),
   ('acct_ssdev', 'responses', 604800, 'eligible', 76, 485200, 0, 10000);
 
@@ -105,8 +106,8 @@ INSERT INTO active_client_leases (
   active_pressure
 )
 VALUES
-  ('responses', 'process-smoke', 'reservation-askluna-1', 'acct_askluna', 9900, 8),
-  ('responses', 'process-smoke', 'reservation-matches-1', 'acct_matches', 9900, 8);
+  ('responses', 'process-smoke', 'reservation-retire-1', 'acct_retire', 9900, 8),
+  ('responses', 'process-smoke', 'reservation-reserve-1', 'acct_reserve', 9900, 8);
 SQL
 
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
@@ -320,6 +321,10 @@ for metric_name in \
 done
 
 wait_for_metric 'codex_router_account_rejections_total{selection.reason="no_eligible_accounts"}'
+wait_for_metric 'codex_router_account_rejections_total{selection.reason="held_reserve"}'
+wait_for_metric 'codex_router_account_rejections_total{selection.reason="held_unknown"}'
+wait_for_metric 'codex_router_account_rejections_total{selection.reason="retiring_near_zero"}'
+wait_for_metric 'codex_router_account_selections_total{selection.reason="preferred_weekly_healthier"}'
 wait_for_metric 'codex_router_websocket_events_total{event.kind="open"}'
 
 curl --silent --show-error --max-time 5 --get \
@@ -337,11 +342,12 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
 series_text = json.dumps(payload, sort_keys=True)
 for forbidden in [
     sys.argv[2],
-    "acct_askluna",
-    "acct_matches",
+    "acct_retire",
+    "acct_reserve",
     "acct_ssdev",
-    "reservation-askluna-1",
-    "reservation-matches-1",
+    "acct_unknown",
+    "reservation-retire-1",
+    "reservation-reserve-1",
     "access-token",
     "refresh-token",
     "authorization",
@@ -349,17 +355,75 @@ for forbidden in [
 ]:
     assert forbidden not in series_text, forbidden
 
+required_by_metric = {
+    "codex_router_account_selections_total": {
+        "account.slot",
+        "agent.proof.marker",
+        "route_band",
+        "selection.reason",
+        "service.name",
+        "transport",
+    },
+    "codex_router_account_rejections_total": {
+        "account.slot",
+        "agent.proof.marker",
+        "route_band",
+        "selection.reason",
+        "service.name",
+        "transport",
+    },
+    "codex_router_active_clients": {
+        "account.slot",
+        "agent.proof.marker",
+        "route_band",
+        "service.name",
+        "transport",
+    },
+    "codex_router_quota_refresh_total": {
+        "agent.proof.marker",
+        "refresh.error_class",
+        "refresh.outcome",
+        "route_band",
+        "service.name",
+    },
+    "codex_router_websocket_events_total": {
+        "agent.proof.marker",
+        "event.kind",
+        "route_band",
+        "service.name",
+    },
+    "codex_router_quota_remaining_bucket": {
+        "account.slot",
+        "agent.proof.marker",
+        "quota.remaining_bucket",
+        "quota.window",
+        "route_band",
+        "service.name",
+    },
+    "codex_router_quota_pressure_bucket": {
+        "account.slot",
+        "agent.proof.marker",
+        "quota.pressure_bucket",
+        "quota.window",
+        "route_band",
+        "service.name",
+    },
+}
+
+seen_metrics = set()
+for series in payload.get("data", []):
+    name = series.get("__name__")
+    if name not in required_by_metric:
+        continue
+    seen_metrics.add(name)
+    missing = required_by_metric[name] - set(series)
+    assert not missing, f"{name} missing {sorted(missing)}"
+
+assert seen_metrics == set(required_by_metric), sorted(set(required_by_metric) - seen_metrics)
+
 label_keys = set()
 for series in payload.get("data", []):
     label_keys.update(series)
-
-for required in {
-    "__name__",
-    "agent.proof.marker",
-    "service.name",
-    "route_band",
-}:
-    assert required in label_keys, required
 
 for forbidden_key in {
     "account.id",
@@ -397,11 +461,12 @@ done
 
 for forbidden in \
   "${secret_canary}" \
-  "acct_askluna" \
-  "acct_matches" \
+  "acct_retire" \
+  "acct_reserve" \
   "acct_ssdev" \
-  "reservation-askluna-1" \
-  "reservation-matches-1" \
+  "acct_unknown" \
+  "reservation-retire-1" \
+  "reservation-reserve-1" \
   "access-token" \
   "refresh-token" \
   "authorization" \
