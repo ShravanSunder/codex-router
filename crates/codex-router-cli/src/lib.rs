@@ -1130,7 +1130,7 @@ commands:
   account list [--router-root <path>]
   quota refresh [--router-root <path>] [--base-url <url>]
   quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--no-refresh] [--now-unix-seconds <seconds>]
-  sessions [--repo|--any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]
+  sessions [--checkout|--repo|--any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -1339,7 +1339,7 @@ mod tests {
             "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
             "quota refresh [--router-root <path>] [--base-url <url>]",
             "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--no-refresh] [--now-unix-seconds <seconds>]",
-            "sessions [--repo|--any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]",
+            "sessions [--checkout|--repo|--any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]",
             "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]",
         ] {
             assert!(
@@ -4345,6 +4345,17 @@ exit 42
 
     #[test]
     fn sessions_command_parses_root_options_and_filters_for_list_json_last() {
+        let checkout_command =
+            match CliCommand::parse([OsString::from("sessions"), OsString::from("--checkout")]) {
+                Ok(CliCommand::Sessions(command)) => command,
+                Ok(other) => panic!("sessions command should parse, got {other:?}"),
+                Err(error) => panic!("sessions command should parse: {error}"),
+            };
+        assert_eq!(
+            checkout_command.root,
+            crate::sessions::SessionsRoot::Checkout
+        );
+
         let repo_command =
             match CliCommand::parse([OsString::from("sessions"), OsString::from("--repo")]) {
                 Ok(CliCommand::Sessions(command)) => command,
@@ -4387,6 +4398,30 @@ exit 42
         let error = must_err(CliCommand::parse([
             OsString::from("sessions"),
             OsString::from("--repo"),
+            OsString::from("--any"),
+        ]));
+
+        assert!(
+            error.to_string().contains("cannot be used with")
+                || error.to_string().contains("cannot be used together"),
+            "unexpected sessions root option error: {error}"
+        );
+
+        let error = must_err(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--checkout"),
+            OsString::from("--repo"),
+        ]));
+
+        assert!(
+            error.to_string().contains("cannot be used with")
+                || error.to_string().contains("cannot be used together"),
+            "unexpected sessions root option error: {error}"
+        );
+
+        let error = must_err(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--checkout"),
             OsString::from("--any"),
         ]));
 
@@ -4662,6 +4697,132 @@ exit 42
         assert_session_ids(
             &output.stdout,
             &["thread-current-repo", "thread-sibling-worktree"],
+        );
+    }
+
+    #[test]
+    fn sessions_checkout_root_includes_current_checkout_and_excludes_linked_worktrees() {
+        const PROMPT_CANARY: &str = "CHECKOUT_ROOT_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-checkout-root");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let repo = test_root.path().join("project");
+        let repo_src = repo.join("src");
+        let repo_tools = repo.join("tools");
+        let sibling_worktree = test_root.path().join("project-feature");
+        let sibling_tools = sibling_worktree.join("tools");
+        let unrelated_repo = test_root.path().join("unrelated");
+        let unrelated_src = unrelated_repo.join("src");
+        for directory in [
+            &codex_home,
+            &repo,
+            &repo_src,
+            &repo_tools,
+            &unrelated_repo,
+            &unrelated_src,
+        ] {
+            must_ok(fs::create_dir(directory));
+        }
+        run_git(&["init"], &repo);
+        run_git(
+            &["config", "user.email", "codex-router@example.test"],
+            &repo,
+        );
+        run_git(&["config", "user.name", "Codex Router Test"], &repo);
+        run_git(&["commit", "--allow-empty", "-m", "initial"], &repo);
+        run_git(
+            &[
+                "worktree",
+                "add",
+                path_to_str(&sibling_worktree),
+                "-b",
+                "feature",
+            ],
+            &repo,
+        );
+        must_ok(fs::create_dir(&sibling_tools));
+        run_git(&["init"], &unrelated_repo);
+
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            PROMPT_CANARY,
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-exact-cwd",
+                    &repo_src,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    4000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-same-checkout-tools",
+                    &repo_tools,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    3000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-sibling-worktree",
+                    &sibling_tools,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "feature",
+                    2000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-unrelated-repo",
+                    &unrelated_src,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    1000,
+                ),
+            ],
+        );
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(repo_src);
+
+        let cwd_output = run_cli(
+            [
+                "sessions",
+                "--provider",
+                "codex-router",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+            ],
+            context.clone(),
+        );
+        assert_session_ids(&cwd_output.stdout, &["thread-exact-cwd"]);
+
+        let checkout_output = run_cli(
+            [
+                "sessions",
+                "--checkout",
+                "--provider",
+                "codex-router",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+            ],
+            context,
+        );
+        assert_session_ids(
+            &checkout_output.stdout,
+            &["thread-exact-cwd", "thread-same-checkout-tools"],
         );
     }
 

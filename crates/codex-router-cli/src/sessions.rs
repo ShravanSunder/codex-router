@@ -35,6 +35,8 @@ const SESSION_CONTEXT_MAX_CHARS: usize = 32;
 pub enum SessionsRoot {
     /// Exact current working directory.
     Cwd,
+    /// Current Git checkout/worktree root.
+    Checkout,
     /// All linked worktrees for the current Git repository.
     Repo,
     /// All known Codex sessions.
@@ -144,9 +146,11 @@ impl SessionsCommand {
 #[derive(Debug, Parser)]
 #[command(name = "sessions", disable_help_subcommand = true)]
 struct ClapSessionsCommand {
-    #[arg(long, conflicts_with = "any")]
+    #[arg(long, conflicts_with_all = ["repo", "any"])]
+    checkout: bool,
+    #[arg(long, conflicts_with_all = ["checkout", "any"])]
     repo: bool,
-    #[arg(long, conflicts_with = "repo")]
+    #[arg(long, conflicts_with_all = ["checkout", "repo"])]
     any: bool,
     #[arg(long, default_value = "any")]
     provider: SessionsProvider,
@@ -166,11 +170,12 @@ struct ClapSessionsCommand {
 
 impl ClapSessionsCommand {
     fn root(&self) -> Result<SessionsRoot, String> {
-        match (self.repo, self.any) {
-            (true, false) => Ok(SessionsRoot::Repo),
-            (false, true) => Ok(SessionsRoot::Any),
-            (false, false) => Ok(SessionsRoot::Cwd),
-            (true, true) => Err("--repo and --any cannot be used together".to_owned()),
+        match (self.checkout, self.repo, self.any) {
+            (true, false, false) => Ok(SessionsRoot::Checkout),
+            (false, true, false) => Ok(SessionsRoot::Repo),
+            (false, false, true) => Ok(SessionsRoot::Any),
+            (false, false, false) => Ok(SessionsRoot::Cwd),
+            _ => Err("--checkout, --repo, and --any cannot be used together".to_owned()),
         }
     }
 }
@@ -454,6 +459,7 @@ impl ProviderFilter {
 enum RootFilter {
     Any,
     Cwd(PathBuf),
+    Checkout(PathBuf),
     Repo(Vec<PathBuf>),
 }
 
@@ -462,6 +468,7 @@ impl RootFilter {
         match root {
             SessionsRoot::Any => Self::Any,
             SessionsRoot::Cwd => Self::Cwd(normalize_path(context.current_dir())),
+            SessionsRoot::Checkout => Self::Checkout(checkout_root(context.current_dir())),
             SessionsRoot::Repo => Self::Repo(repo_roots(context.current_dir())),
         }
     }
@@ -471,6 +478,12 @@ impl RootFilter {
             Self::Any => true,
             Self::Cwd(current_dir) => cwd
                 .map(|session_cwd| normalize_path(Path::new(session_cwd)) == *current_dir)
+                .unwrap_or(false),
+            Self::Checkout(checkout_root) => cwd
+                .map(|session_cwd| {
+                    let session_cwd = normalize_path(Path::new(session_cwd));
+                    path_is_equal_or_child(&session_cwd, checkout_root)
+                })
                 .unwrap_or(false),
             Self::Repo(repo_roots) => cwd
                 .map(|session_cwd| {
@@ -619,6 +632,10 @@ fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+fn checkout_root(current_dir: &Path) -> PathBuf {
+    find_worktree_root(current_dir).unwrap_or_else(|| normalize_path(current_dir))
+}
+
 fn repo_roots(current_dir: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -636,9 +653,7 @@ fn repo_roots(current_dir: &Path) -> Vec<PathBuf> {
             return roots;
         }
     }
-    find_worktree_root(current_dir)
-        .map(|root| vec![root])
-        .unwrap_or_else(|| vec![normalize_path(current_dir)])
+    vec![checkout_root(current_dir)]
 }
 
 fn parse_git_worktree_roots(output: &str) -> Vec<PathBuf> {
