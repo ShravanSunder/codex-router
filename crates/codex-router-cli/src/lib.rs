@@ -1130,7 +1130,7 @@ commands:
   account list [--router-root <path>]
   quota refresh [--router-root <path>] [--base-url <url>]
   quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--no-refresh] [--now-unix-seconds <seconds>]
-  sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]
+  sessions [--repo|--any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]
   profile print [--port <port>]
   profile doctor
   profile write --codex-home <path> [--port <port>] [--dry-run]
@@ -1339,7 +1339,7 @@ mod tests {
             "account login [--router-root <path>] --label <label> --device-auth [--codex-bin <path>] --allow-plaintext-file-secrets",
             "quota refresh [--router-root <path>] [--base-url <url>]",
             "quota status [--router-root <path>] [--format table|plain|json] [--all-limits] [--no-refresh] [--now-unix-seconds <seconds>]",
-            "sessions [--scope cwd|worktree|any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]",
+            "sessions [--repo|--any] [--provider any|current|<id>] [--source interactive|all|subagents] [--sort updated|created] [--list] [--format table|json] [--last] [--dry-run]",
             "live quota --auth-json <path> [--profile-label <label>] [--base-url <url>] [--dry-run|--approve-network-account-use]",
         ] {
             assert!(
@@ -4326,14 +4326,14 @@ exit 42
     }
 
     #[test]
-    fn sessions_command_defaults_to_worktree_scope_provider_any_interactive_source() {
+    fn sessions_command_defaults_to_cwd_root_provider_any_interactive_source() {
         let command = match CliCommand::parse([OsString::from("sessions")]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
             Err(error) => panic!("sessions command should parse: {error}"),
         };
 
-        assert_eq!(command.scope, crate::sessions::SessionsScope::Worktree);
+        assert_eq!(command.root, crate::sessions::SessionsRoot::Cwd);
         assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
         assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
         assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);
@@ -4344,11 +4344,18 @@ exit 42
     }
 
     #[test]
-    fn sessions_command_parses_explicit_filters_for_list_json_last() {
+    fn sessions_command_parses_root_options_and_filters_for_list_json_last() {
+        let repo_command =
+            match CliCommand::parse([OsString::from("sessions"), OsString::from("--repo")]) {
+                Ok(CliCommand::Sessions(command)) => command,
+                Ok(other) => panic!("sessions command should parse, got {other:?}"),
+                Err(error) => panic!("sessions command should parse: {error}"),
+            };
+        assert_eq!(repo_command.root, crate::sessions::SessionsRoot::Repo);
+
         let command = match CliCommand::parse([
             OsString::from("sessions"),
-            OsString::from("--scope"),
-            OsString::from("any"),
+            OsString::from("--any"),
             OsString::from("--provider"),
             OsString::from("current"),
             OsString::from("--source"),
@@ -4365,7 +4372,7 @@ exit 42
             Err(error) => panic!("sessions command should parse: {error}"),
         };
 
-        assert_eq!(command.scope, crate::sessions::SessionsScope::Any);
+        assert_eq!(command.root, crate::sessions::SessionsRoot::Any);
         assert_eq!(command.provider, crate::sessions::SessionsProvider::Current);
         assert_eq!(command.source, crate::sessions::SessionsSource::Subagents);
         assert_eq!(command.sort, crate::sessions::SessionsSort::Created);
@@ -4376,17 +4383,17 @@ exit 42
     }
 
     #[test]
-    fn sessions_command_rejects_invalid_scope() {
+    fn sessions_command_rejects_conflicting_root_options() {
         let error = must_err(CliCommand::parse([
             OsString::from("sessions"),
-            OsString::from("--scope"),
-            OsString::from("repo"),
+            OsString::from("--repo"),
+            OsString::from("--any"),
         ]));
 
         assert!(
-            error.to_string().contains("invalid value")
-                || error.to_string().contains("invalid sessions scope"),
-            "unexpected sessions scope error: {error}"
+            error.to_string().contains("cannot be used with")
+                || error.to_string().contains("cannot be used together"),
+            "unexpected sessions root option error: {error}"
         );
     }
 
@@ -4401,7 +4408,7 @@ exit 42
 
         let output = run_cli(
             [
-                "sessions", "--scope", "any", "--source", "all", "--list", "--format", "json",
+                "sessions", "--any", "--source", "all", "--list", "--format", "json",
             ],
             CliContext::new(vec![
                 ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
@@ -4433,7 +4440,7 @@ exit 42
     }
 
     #[test]
-    fn sessions_list_json_applies_scope_provider_and_source_filters() {
+    fn sessions_list_json_applies_root_provider_and_source_filters() {
         const PROMPT_CANARY: &str = "FILTER_CANARY_SHOULD_NOT_LEAK";
         let test_root = TestRoot::new("sessions-filters");
         must_ok(fs::create_dir(test_root.path()));
@@ -4526,8 +4533,6 @@ exit 42
         let cwd_output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "cwd",
                 "--provider",
                 "codex-router",
                 "--source",
@@ -4540,28 +4545,10 @@ exit 42
         );
         assert_session_ids(&cwd_output.stdout, &["thread-a-src"]);
 
-        let worktree_output = run_cli(
-            [
-                "sessions",
-                "--scope",
-                "worktree",
-                "--provider",
-                "codex-router",
-                "--source",
-                "interactive",
-                "--list",
-                "--format",
-                "json",
-            ],
-            context.clone(),
-        );
-        assert_session_ids(&worktree_output.stdout, &["thread-a-src", "thread-a-tools"]);
-
         let subagent_output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--provider",
                 "codex-router",
                 "--source",
@@ -4575,6 +4562,106 @@ exit 42
         assert_session_ids(
             &subagent_output.stdout,
             &["thread-a-json-subagent", "thread-a-subagent"],
+        );
+    }
+
+    #[test]
+    fn sessions_repo_root_includes_linked_worktrees_and_excludes_unrelated_repos() {
+        const PROMPT_CANARY: &str = "REPO_ROOT_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-repo-root");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let repo = test_root.path().join("project");
+        let repo_src = repo.join("src");
+        let sibling_worktree = test_root.path().join("project-feature");
+        let sibling_tools = sibling_worktree.join("tools");
+        let unrelated_repo = test_root.path().join("unrelated");
+        let unrelated_src = unrelated_repo.join("src");
+        for directory in [
+            &codex_home,
+            &repo,
+            &repo_src,
+            &unrelated_repo,
+            &unrelated_src,
+        ] {
+            must_ok(fs::create_dir(directory));
+        }
+        run_git(&["init"], &repo);
+        run_git(
+            &["config", "user.email", "codex-router@example.test"],
+            &repo,
+        );
+        run_git(&["config", "user.name", "Codex Router Test"], &repo);
+        run_git(&["commit", "--allow-empty", "-m", "initial"], &repo);
+        run_git(
+            &[
+                "worktree",
+                "add",
+                path_to_str(&sibling_worktree),
+                "-b",
+                "feature",
+            ],
+            &repo,
+        );
+        must_ok(fs::create_dir(&sibling_tools));
+        run_git(&["init"], &unrelated_repo);
+
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            PROMPT_CANARY,
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-current-repo",
+                    &repo_src,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    3000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-sibling-worktree",
+                    &sibling_tools,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "feature",
+                    2000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-unrelated-repo",
+                    &unrelated_src,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    1000,
+                ),
+            ],
+        );
+
+        let output = run_cli(
+            [
+                "sessions",
+                "--repo",
+                "--provider",
+                "codex-router",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(repo_src),
+        );
+
+        assert_session_ids(
+            &output.stdout,
+            &["thread-current-repo", "thread-sibling-worktree"],
         );
     }
 
@@ -4619,8 +4706,7 @@ exit 42
         let output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--provider",
                 "current",
                 "--source",
@@ -4650,8 +4736,7 @@ exit 42
         let error = match run_with_io(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--provider",
                 "current",
                 "--list",
@@ -4701,7 +4786,7 @@ exit 42
 
         let output = run_cli(
             [
-                "sessions", "--scope", "any", "--source", "all", "--list", "--format", "table",
+                "sessions", "--any", "--source", "all", "--list", "--format", "table",
             ],
             CliContext::new(vec![
                 ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
@@ -4758,8 +4843,7 @@ exit 42
         let output = run_cli(
             [
                 "sessions",
-                "--scope",
-                "any",
+                "--any",
                 "--source",
                 "interactive",
                 "--provider",
@@ -4808,8 +4892,7 @@ exit 42
             vec![
                 "codex-router".into(),
                 "sessions".into(),
-                "--scope".into(),
-                "any".into(),
+                "--any".into(),
                 "--source".into(),
                 "interactive".into(),
                 "--provider".into(),
@@ -4873,8 +4956,7 @@ exit 42
         );
         let command = match CliCommand::parse([
             OsString::from("sessions"),
-            OsString::from("--scope"),
-            OsString::from("any"),
+            OsString::from("--any"),
             OsString::from("--provider"),
             OsString::from("codex-router"),
             OsString::from("--last"),
@@ -4940,8 +5022,7 @@ exit 42
         );
         let command = match CliCommand::parse([
             OsString::from("sessions"),
-            OsString::from("--scope"),
-            OsString::from("any"),
+            OsString::from("--any"),
             OsString::from("--provider"),
             OsString::from("codex-router"),
         ]) {
@@ -5009,6 +5090,10 @@ exit 42
 
         assert!(sessions_source.contains("use sqlx::"));
         assert!(sessions_source.contains("SqliteConnectOptions"));
+        assert!(sessions_source.contains(".read_only(true)"));
+        assert!(sessions_source.contains(".create_if_missing(false)"));
+        assert!(sessions_source.contains(".busy_timeout(Duration::from_millis(0))"));
+        assert!(sessions_source.contains(".pragma(\"query_only\", \"ON\")"));
         assert!(!sessions_source.contains("rusqlite"));
 
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -6406,6 +6491,24 @@ exit 42
         match path.to_str() {
             Some(path) => path,
             None => panic!("test path must be UTF-8"),
+        }
+    }
+
+    fn run_git(args: &[&str], cwd: &Path) {
+        let output = must_ok(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output(),
+        );
+        if !output.status.success() {
+            panic!(
+                "git {:?} failed in {}\nstdout:\n{}\nstderr:\n{}",
+                args,
+                cwd.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 

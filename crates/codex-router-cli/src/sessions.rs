@@ -8,6 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -29,14 +30,13 @@ use crate::CliContext;
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
 
-/// Session search scope.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-#[value(rename_all = "kebab-case")]
-pub enum SessionsScope {
+/// Session search root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionsRoot {
     /// Exact current working directory.
     Cwd,
-    /// Current git worktree or repository root.
-    Worktree,
+    /// All linked worktrees for the current Git repository.
+    Repo,
     /// All known Codex sessions.
     Any,
 }
@@ -104,7 +104,7 @@ pub enum SessionsFormat {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionsCommand {
     /// Scope filter.
-    pub scope: SessionsScope,
+    pub root: SessionsRoot,
     /// Provider filter.
     pub provider: SessionsProvider,
     /// Source filter.
@@ -129,7 +129,7 @@ impl SessionsCommand {
         let parsed =
             ClapSessionsCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
         Ok(Self {
-            scope: parsed.scope,
+            root: parsed.root()?,
             provider: parsed.provider,
             source: parsed.source,
             sort: parsed.sort,
@@ -144,8 +144,10 @@ impl SessionsCommand {
 #[derive(Debug, Parser)]
 #[command(name = "sessions", disable_help_subcommand = true)]
 struct ClapSessionsCommand {
-    #[arg(long, value_enum, default_value = "worktree")]
-    scope: SessionsScope,
+    #[arg(long, conflicts_with = "any")]
+    repo: bool,
+    #[arg(long, conflicts_with = "repo")]
+    any: bool,
     #[arg(long, default_value = "any")]
     provider: SessionsProvider,
     #[arg(long, value_enum, default_value = "interactive")]
@@ -160,6 +162,17 @@ struct ClapSessionsCommand {
     last: bool,
     #[arg(long)]
     dry_run: bool,
+}
+
+impl ClapSessionsCommand {
+    fn root(&self) -> Result<SessionsRoot, String> {
+        match (self.repo, self.any) {
+            (true, false) => Ok(SessionsRoot::Repo),
+            (false, true) => Ok(SessionsRoot::Any),
+            (false, false) => Ok(SessionsRoot::Cwd),
+            (true, true) => Err("--repo and --any cannot be used together".to_owned()),
+        }
+    }
 }
 
 /// Runs the sessions command.
@@ -232,7 +245,7 @@ async fn load_session_records(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<Vec<SessionRecord>, SessionsCommandError> {
-    let scope_filter = ScopeFilter::from_command(command.scope, context);
+    let root_filter = RootFilter::from_command(command.root, context);
     let codex_home_path = codex_home(context)?;
     let provider_filter = ProviderFilter::from_command(&command.provider, &codex_home_path)?;
 
@@ -240,7 +253,9 @@ async fn load_session_records(
     let options = SqliteConnectOptions::new()
         .filename(&state_database_path)
         .read_only(true)
-        .create_if_missing(false);
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_millis(0))
+        .pragma("query_only", "ON");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
@@ -276,7 +291,7 @@ async fn load_session_records(
         if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
             continue;
         }
-        if !scope_filter.matches(cwd.as_deref()) {
+        if !root_filter.matches(cwd.as_deref()) {
             continue;
         }
         records.push(SessionRecord {
@@ -436,21 +451,18 @@ impl ProviderFilter {
 }
 
 #[derive(Debug)]
-enum ScopeFilter {
+enum RootFilter {
     Any,
     Cwd(PathBuf),
-    Worktree(PathBuf),
+    Repo(Vec<PathBuf>),
 }
 
-impl ScopeFilter {
-    fn from_command(scope: SessionsScope, context: &CliContext) -> Self {
-        match scope {
-            SessionsScope::Any => Self::Any,
-            SessionsScope::Cwd => Self::Cwd(normalize_path(context.current_dir())),
-            SessionsScope::Worktree => Self::Worktree(
-                find_worktree_root(context.current_dir())
-                    .unwrap_or_else(|| normalize_path(context.current_dir())),
-            ),
+impl RootFilter {
+    fn from_command(root: SessionsRoot, context: &CliContext) -> Self {
+        match root {
+            SessionsRoot::Any => Self::Any,
+            SessionsRoot::Cwd => Self::Cwd(normalize_path(context.current_dir())),
+            SessionsRoot::Repo => Self::Repo(repo_roots(context.current_dir())),
         }
     }
 
@@ -460,9 +472,12 @@ impl ScopeFilter {
             Self::Cwd(current_dir) => cwd
                 .map(|session_cwd| normalize_path(Path::new(session_cwd)) == *current_dir)
                 .unwrap_or(false),
-            Self::Worktree(worktree_root) => cwd
+            Self::Repo(repo_roots) => cwd
                 .map(|session_cwd| {
-                    path_is_equal_or_child(&normalize_path(Path::new(session_cwd)), worktree_root)
+                    let session_cwd = normalize_path(Path::new(session_cwd));
+                    repo_roots
+                        .iter()
+                        .any(|repo_root| path_is_equal_or_child(&session_cwd, repo_root))
                 })
                 .unwrap_or(false),
         }
@@ -602,6 +617,37 @@ fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn repo_roots(current_dir: &Path) -> Vec<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(current_dir)
+        .arg("worktree")
+        .arg("list")
+        .arg("--porcelain")
+        .output();
+    if let Ok(output) = output
+        && output.status.success()
+        && let Ok(stdout) = String::from_utf8(output.stdout)
+    {
+        let roots = parse_git_worktree_roots(&stdout);
+        if !roots.is_empty() {
+            return roots;
+        }
+    }
+    find_worktree_root(current_dir)
+        .map(|root| vec![root])
+        .unwrap_or_else(|| vec![normalize_path(current_dir)])
+}
+
+fn parse_git_worktree_roots(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .map(|path| normalize_path(&path))
+        .collect()
 }
 
 fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
