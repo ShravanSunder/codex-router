@@ -304,6 +304,7 @@ pub struct BurnDownAccountAssessment {
     routing_weight: Option<u32>,
     routing_reason: RoutingReason,
     preferred_next: bool,
+    near_zero_retirement_candidate: bool,
     salvage_sort_key: Option<SalvageSortKey>,
 }
 
@@ -621,6 +622,7 @@ pub fn assess_route_band(
         .map(|account| assess_account(account, input.now_unix_seconds, input.policy))
         .collect::<Vec<_>>();
     accounts.sort_by(|left, right| left.account_id.cmp(&right.account_id));
+    apply_near_zero_retirement(&mut accounts);
 
     let selected_pool = if accounts
         .iter()
@@ -667,12 +669,7 @@ pub fn assess_route_band(
         .collect::<Vec<_>>();
 
     candidate_accounts.sort_by(|(left, left_weight), (right, right_weight)| {
-        right_weight
-            .cmp(left_weight)
-            .then_with(|| left.long_pressure.cmp(&right.long_pressure))
-            .then_with(|| left.short_pressure.cmp(&right.short_pressure))
-            .then_with(|| compare_salvage_key(left, right))
-            .then_with(|| left.account_id.cmp(&right.account_id))
+        candidate_priority_cmp(left, *left_weight, right, *right_weight)
     });
 
     let weighted_candidates = candidate_accounts
@@ -725,6 +722,7 @@ fn assess_account(
         routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
         routing_reason: RoutingReason::UnknownFallbackAvailable,
         preferred_next: false,
+        near_zero_retirement_candidate: false,
         salvage_sort_key: None,
     };
 
@@ -801,20 +799,6 @@ fn assess_account(
     }
     if windows
         .iter()
-        .any(|window| window_requires_near_zero_retirement(window, now_unix_seconds))
-    {
-        return BurnDownAccountAssessment {
-            availability: AccountAvailability::Retiring,
-            freshness: freshness_for_windows(&windows),
-            limiting_window: limiting_window(&windows),
-            quota_evidence_reason: QuotaEvidenceReason::Ok,
-            routing_reason: RoutingReason::RetiringNearZero,
-            routing_weight: None,
-            ..base
-        };
-    }
-    if windows
-        .iter()
         .any(|window| window.reset_unix_seconds.is_none())
     {
         return BurnDownAccountAssessment {
@@ -882,6 +866,9 @@ fn assess_account(
     } else {
         AccountAvailability::Usable
     };
+    let near_zero_retirement_candidate = windows
+        .iter()
+        .any(|window| window_requires_near_zero_retirement(window, now_unix_seconds));
 
     BurnDownAccountAssessment {
         availability,
@@ -894,10 +881,63 @@ fn assess_account(
         long_salvage,
         projected_burn_pressure,
         routing_weight: Some(routing_weight),
+        near_zero_retirement_candidate,
         salvage_sort_key: salvage_sort_key(&windows, short_salvage, long_salvage, policy),
         routing_reason: RoutingReason::AvailableSamePool,
         ..base
     }
+}
+
+fn apply_near_zero_retirement(accounts: &mut [BurnDownAccountAssessment]) {
+    let assessed_accounts = accounts.to_vec();
+    for account in accounts.iter_mut() {
+        if !account.near_zero_retirement_candidate
+            || !matches!(
+                account.availability,
+                AccountAvailability::Usable | AccountAvailability::Reserve
+            )
+        {
+            continue;
+        }
+
+        let has_not_worse_alternative = assessed_accounts
+            .iter()
+            .any(|alternative| not_worse_retirement_alternative(alternative, account));
+        if has_not_worse_alternative {
+            account.availability = AccountAvailability::Retiring;
+            account.routing_weight = None;
+            account.routing_reason = RoutingReason::RetiringNearZero;
+        }
+    }
+}
+
+fn not_worse_retirement_alternative(
+    alternative: &BurnDownAccountAssessment,
+    retirement_candidate: &BurnDownAccountAssessment,
+) -> bool {
+    if alternative.account_id == retirement_candidate.account_id
+        || alternative.near_zero_retirement_candidate
+        || !matches!(
+            alternative.availability,
+            AccountAvailability::Usable | AccountAvailability::Reserve
+        )
+    {
+        return false;
+    }
+
+    let (Some(alternative_weight), Some(candidate_weight)) = (
+        alternative.routing_weight,
+        retirement_candidate.routing_weight,
+    ) else {
+        return false;
+    };
+
+    candidate_priority_cmp(
+        alternative,
+        alternative_weight,
+        retirement_candidate,
+        candidate_weight,
+    ) != std::cmp::Ordering::Greater
 }
 
 fn assess_window(
@@ -1043,6 +1083,11 @@ fn window_requires_near_zero_retirement(window: &WindowAssessment, now_unix_seco
     window
         .projected_exhaustion_unix_seconds
         .is_some_and(|projected_exhaustion_unix_seconds| {
+            if window.reset_unix_seconds.is_some_and(|reset_unix_seconds| {
+                projected_exhaustion_unix_seconds >= reset_unix_seconds
+            }) {
+                return false;
+            }
             projected_exhaustion_unix_seconds
                 <= now_unix_seconds.saturating_add(DEFAULT_NEAR_ZERO_PROJECTED_RUNOUT_SECONDS)
         })
@@ -1215,6 +1260,20 @@ fn compare_salvage_key(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     }
+}
+
+fn candidate_priority_cmp(
+    left: &BurnDownAccountAssessment,
+    left_weight: u32,
+    right: &BurnDownAccountAssessment,
+    right_weight: u32,
+) -> std::cmp::Ordering {
+    right_weight
+        .cmp(&left_weight)
+        .then_with(|| left.long_pressure.cmp(&right.long_pressure))
+        .then_with(|| left.short_pressure.cmp(&right.short_pressure))
+        .then_with(|| compare_salvage_key(left, right))
+        .then_with(|| left.account_id.cmp(&right.account_id))
 }
 
 const fn is_short_window(window_seconds: u64, policy: BurnDownRouteBandPolicy) -> bool {
@@ -1670,7 +1729,39 @@ mod tests {
     }
 
     #[test]
-    fn near_zero_headroom_retires_account_even_without_history() {
+    fn near_zero_projected_runout_survives_to_reset_stays_selectable() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_survives",
+                vec![
+                    projected_window(FIVE_HOURS, 20, 20 * 60, 25 * 60),
+                    window(WEEKLY, 80, 5 * 86_400),
+                ],
+            ),
+            account(
+                "acct_worse_weekly",
+                vec![
+                    window(FIVE_HOURS, 80, 4 * 3_600),
+                    window(WEEKLY, 10, 5 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_survives")
+        );
+        assert_account(
+            &assessment,
+            "acct_survives",
+            AccountAvailability::Usable,
+            Some(30),
+        );
+    }
+
+    #[test]
+    fn near_zero_headroom_stays_selectable_when_no_alternative_can_serve() {
         let assessment = assess_route_band(input(vec![account(
             "acct_near_empty",
             vec![
@@ -1679,16 +1770,92 @@ mod tests {
             ],
         )]));
 
-        assert_eq!(assessment.selected_pool(), SelectedPool::None);
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_near_empty")
+        );
+        assert_account(
+            &assessment,
+            "acct_near_empty",
+            AccountAvailability::Usable,
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn near_zero_headroom_stays_selectable_when_all_alternatives_are_worse() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_near_empty",
+                vec![
+                    window(FIVE_HOURS, 4, 4 * 3_600),
+                    window(WEEKLY, 90, 5 * 86_400),
+                ],
+            ),
+            account(
+                "acct_worse_weekly",
+                vec![
+                    window(FIVE_HOURS, 90, 4 * 3_600),
+                    window(WEEKLY, 6, 5 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_near_empty")
+        );
+        assert_account(
+            &assessment,
+            "acct_near_empty",
+            AccountAvailability::Usable,
+            Some(1),
+        );
+        assert_account(
+            &assessment,
+            "acct_worse_weekly",
+            AccountAvailability::Reserve,
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn near_zero_headroom_retires_when_not_worse_alternative_exists() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_near_empty",
+                vec![
+                    window(FIVE_HOURS, 4, 4 * 3_600),
+                    window(WEEKLY, 80, 5 * 86_400),
+                ],
+            ),
+            account(
+                "acct_healthy",
+                vec![
+                    window(FIVE_HOURS, 40, 4 * 3_600),
+                    window(WEEKLY, 80, 5 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_healthy")
+        );
         assert_account(
             &assessment,
             "acct_near_empty",
             AccountAvailability::Retiring,
             None,
         );
-        assert_eq!(
-            account_assessment(&assessment, "acct_near_empty").routing_reason(),
-            RoutingReason::RetiringNearZero
+        assert_account(
+            &assessment,
+            "acct_healthy",
+            AccountAvailability::Usable,
+            Some(1),
         );
     }
 

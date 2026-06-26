@@ -67,6 +67,7 @@ use crate::account_selection::RouteBandAccountHolds;
 use crate::account_selection::RouteBandReservationBooks;
 use crate::account_selection::RouteBandWeightedSelectors;
 use crate::account_selection::SqliteActiveClientLeaseReporter;
+use crate::account_selection::route_band_has_selectable_alternative;
 use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
 use crate::credential_runtime::ProxyRuntimeCredentialResources;
 use crate::credential_runtime::ProxyRuntimeCredentialResourcesOpenError;
@@ -1871,6 +1872,24 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
             )
             .await
             .map(|_classification| ())
+            .map_err(ProviderErrorObservationError::from)
+        })
+    }
+
+    fn route_band_has_selectable_alternative_after_exhaustion<'a>(
+        &'a self,
+        exhausted_account_id: codex_router_core::ids::AccountId,
+        route_band: RouteBand,
+        observed_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
+        Box::pin(async move {
+            route_band_has_selectable_alternative(
+                &self.state_store,
+                route_band,
+                &exhausted_account_id,
+                observed_unix_seconds,
+            )
+            .await
             .map_err(ProviderErrorObservationError::from)
         })
     }

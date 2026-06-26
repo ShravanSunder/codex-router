@@ -304,6 +304,12 @@ impl ActiveReservationGuardInner {
                 &self.route_band,
                 &self.reservation_handle,
             );
+            let active_client_count = active_client_count_for_handle(
+                &self.active_reservations,
+                &self.route_band,
+                &self.reservation_handle,
+            )
+            .unwrap_or(0);
             if let Some(active_client_leases) = self.active_client_leases.as_ref() {
                 active_client_leases.record_released(&self.route_band, &self.reservation_handle);
             }
@@ -318,7 +324,7 @@ impl ActiveReservationGuardInner {
                 account_hash.clone(),
                 &self.route_band,
                 transport,
-                0,
+                active_client_count,
             );
             let span = tracing::info_span!(
                 "codex_router.account_reservation_released",
@@ -1212,6 +1218,9 @@ fn reserve_selected_account(
             headroom_cost,
             now_unix_seconds,
         );
+    let active_client_count = active_reservations.get(route_band).map_or(0, |book| {
+        book.active_client_count(selected.account_id(), headroom_cost)
+    });
     if let Some(active_client_leases) = active_client_leases {
         active_client_leases.record_acquired(
             route_band,
@@ -1232,7 +1241,12 @@ fn reserve_selected_account(
         transport,
         selected.selection_reason(),
     );
-    crate::telemetry::record_active_clients(account_hash.clone(), route_band, transport, 1);
+    crate::telemetry::record_active_clients(
+        account_hash.clone(),
+        route_band,
+        transport,
+        active_client_count,
+    );
     let span = tracing::info_span!(
         "codex_router.account_reserved",
         route_band,
@@ -1265,6 +1279,56 @@ pub fn release_account_reservation(
     if let Some(book) = active_reservations.get_mut(route_band) {
         book.release_handle(reservation_handle);
     }
+}
+
+/// Returns whether a route band still has a selectable account after excluding one account.
+pub async fn route_band_has_selectable_alternative<R>(
+    state_repository: &R,
+    route_band: RouteBand,
+    excluded_account_id: &AccountId,
+    now_unix_seconds: u64,
+) -> Result<bool, StateStoreError>
+where
+    R: AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
+{
+    let selector_inputs = AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+        state_repository,
+        route_band.as_str(),
+        now_unix_seconds,
+    )
+    .await?;
+    let filtered_inputs = selector_inputs
+        .into_iter()
+        .filter(|input| input.account_id() != excluded_account_id)
+        .collect::<Vec<_>>();
+    let account_inputs = account_inputs_from_selector_inputs_with_history(
+        state_repository,
+        route_band.as_str(),
+        now_unix_seconds,
+        &filtered_inputs,
+        None,
+    )
+    .await?;
+    let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+        route_band,
+        now_unix_seconds,
+        account_inputs,
+    ));
+    Ok(assessment.selected_pool() != SelectedPool::None)
+}
+
+fn active_client_count_for_handle(
+    active_reservations: &RouteBandReservationBooks,
+    route_band: &str,
+    reservation_handle: &ReservationHandle,
+) -> Option<u64> {
+    let active_reservations = active_reservations.lock().ok()?;
+    active_reservations.get(route_band).map(|book| {
+        book.active_client_count(
+            reservation_handle.account_id(),
+            reservation_handle.headroom_cost(),
+        )
+    })
 }
 
 fn quota_window_fact_from_selector_window(

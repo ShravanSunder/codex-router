@@ -5,7 +5,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 transport="all"
 scenario="serial"
 smoke_target_model="gpt-5.4-mini"
-smoke_concurrent_clients="3"
 smoke_prompt_contract="bounded explicit exact-reply prompt"
 
 while [[ $# -gt 0 ]]; do
@@ -80,10 +79,24 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 
 cd "${repo_root}"
 three_websocket_soak_artifact_pointer="${repo_root}/tmp/smoke/installed-codex-three-websocket-soak-artifact.txt"
+case "${scenario}" in
+  concurrent|soak)
+    smoke_client_summary="3 concurrent clients"
+    ;;
+  all)
+    smoke_client_summary="serial + 3 concurrent clients + quota reconnect + soak"
+    ;;
+  quota-reconnect)
+    smoke_client_summary="1 client with quota reconnect"
+    ;;
+  *)
+    smoke_client_summary="1 client"
+    ;;
+esac
 
-printf 'installed Codex smoke contract: model=%s concurrent_clients=%s prompt=%s\n' \
+printf 'installed Codex smoke contract: model=%s clients=%s prompt=%s\n' \
   "${smoke_target_model}" \
-  "${smoke_concurrent_clients}" \
+  "${smoke_client_summary}" \
   "${smoke_prompt_contract}" >&2
 
 if command -v cargo >/dev/null 2>&1 && cargo --version >/dev/null 2>&1; then

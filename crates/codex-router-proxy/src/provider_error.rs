@@ -28,6 +28,15 @@ pub trait AsyncProviderErrorObserver: Send + Sync {
         body: Vec<u8>,
         observed_unix_seconds: u64,
     ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>>;
+
+    fn route_band_has_selectable_alternative_after_exhaustion<'a>(
+        &'a self,
+        _exhausted_account_id: AccountId,
+        _route_band: RouteBand,
+        _observed_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
+        Box::pin(async { Ok(true) })
+    }
 }
 
 pub fn classify_provider_error_envelope(body: &[u8]) -> ProviderErrorClassification {

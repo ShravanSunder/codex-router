@@ -204,7 +204,7 @@ reject_http_status="$(
   --write-out "%{http_code}" \
   --request POST \
   --header "content-type: application/json" \
-  --data '{"type":"response.create","input":"hello"}' \
+  --data "{\"type\":\"response.create\",\"input\":\"${secret_canary}\"}" \
   "http://${listener}/v1/responses" || true
 )"
 if [[ "${reject_http_status}" != "503" ]]; then
@@ -214,7 +214,7 @@ if [[ "${reject_http_status}" != "503" ]]; then
   exit 1
 fi
 
-python3 - "${listener}" <<'PY' || true
+python3 - "${listener}" "${secret_canary}" <<'PY' || true
 import base64
 import os
 import socket
@@ -224,7 +224,7 @@ import sys
 host, port_text = sys.argv[1].split(":")
 port = int(port_text)
 key = base64.b64encode(os.urandom(16)).decode("ascii")
-payload = b'{"type":"response.create","input":"hello"}'
+payload = ('{"type":"response.create","input":"%s"}' % sys.argv[2]).encode("utf-8")
 header = bytearray()
 header.append(0x81)
 header.append(0x80 | len(payload))
@@ -320,6 +320,7 @@ for metric_name in \
 done
 
 wait_for_metric 'codex_router_account_rejections_total{selection.reason="no_eligible_accounts"}'
+wait_for_metric 'codex_router_websocket_events_total{event.kind="open"}'
 
 curl --silent --show-error --max-time 5 --get \
   "${metrics_url}/api/v1/series" \
@@ -376,7 +377,7 @@ PY
 for _attempt in $(seq 1 20); do
   curl --silent --show-error --max-time 5 --get \
     "${traces_url}/select/logsql/query" \
-    --data-urlencode "query=\"span_attr:agent.proof.marker\":\"${marker}\"" \
+    --data-urlencode "query=\"resource_attr:agent.proof.marker\":\"${marker}\"" \
     >"${trace_result}" || true
   if grep -q "codex_router.run" "${trace_result}"; then
     break
@@ -384,11 +385,15 @@ for _attempt in $(seq 1 20); do
   sleep 1
 done
 
-if ! grep -q "codex_router.run" "${trace_result}"; then
-  echo "VictoriaTraces did not contain codex_router.run for marker ${marker}" >&2
-  cat "${trace_result}" >&2
-  exit 1
-fi
+for trace_name in \
+  "codex_router.run" \
+  "codex_router.websocket_open"; do
+  if ! grep -q "${trace_name}" "${trace_result}"; then
+    echo "VictoriaTraces did not contain ${trace_name} for marker ${marker}" >&2
+    cat "${trace_result}" >&2
+    exit 1
+  fi
+done
 
 for forbidden in \
   "${secret_canary}" \
@@ -401,7 +406,14 @@ for forbidden in \
   "refresh-token" \
   "authorization" \
   "X-Codex-Router-Token"; do
-  if grep -q "${forbidden}" "${trace_result}" "${metric_series}"; then
+  if grep -q "${forbidden}" \
+    "${trace_result}" \
+    "${metric_series}" \
+    "${server_stdout}" \
+    "${server_stderr}" \
+    "${smoke_root}/reject-http.out" \
+    "${smoke_root}/quota-refresh.out" \
+    "${smoke_root}/quota-refresh.err"; then
     echo "observability smoke leaked forbidden text: ${forbidden}" >&2
     exit 1
   fi

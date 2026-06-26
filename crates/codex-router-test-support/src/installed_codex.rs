@@ -5214,7 +5214,9 @@ mod tests {
         );
         assert!(script.contains(r#"run_test_filter "installed_codex_websocket_quota_reconnect_""#));
         assert!(script.contains(r#"smoke_target_model="gpt-5.4-mini""#));
-        assert!(script.contains(r#"smoke_concurrent_clients="3""#));
+        assert!(script.contains(r#"smoke_client_summary="3 concurrent clients""#));
+        assert!(script.contains(r#"smoke_client_summary="1 client with quota reconnect""#));
+        assert!(script.contains(r#"clients=%s"#));
         assert!(script.contains("bounded explicit exact-reply prompt"));
         assert!(
             script.contains("uses the existing codex CLI from PATH; it does not install Codex")

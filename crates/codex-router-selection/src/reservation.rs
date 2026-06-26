@@ -136,6 +136,17 @@ impl ReservationBook {
             .min(100)
     }
 
+    /// Returns active client count for an account and reservation cost class.
+    #[must_use]
+    pub fn active_client_count(&self, account_id: &AccountId, headroom_cost: u32) -> u64 {
+        self.reservations
+            .values()
+            .filter(|reservation| {
+                &reservation.account_id == account_id && reservation.headroom_cost == headroom_cost
+            })
+            .count() as u64
+    }
+
     /// Removes reservations older than `max_age_seconds`.
     pub fn purge_stale(&mut self, now_unix_seconds: u64, max_age_seconds: u64) -> usize {
         let before_count = self.reservations.len();
@@ -149,5 +160,38 @@ impl ReservationBook {
     #[must_use]
     pub fn available_headroom(&self, account_id: &AccountId, raw_headroom: u32) -> u32 {
         raw_headroom.saturating_sub(self.active_load_pressure(account_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_router_core::ids::AccountId;
+
+    use super::ReservationBook;
+
+    #[test]
+    fn active_client_count_tracks_account_and_cost_class() {
+        let account_id = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let other_account_id = AccountId::new("acct_other")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let mut book = ReservationBook::default();
+
+        let first = book.reserve_next_at(account_id.clone(), 8, 1);
+        assert_eq!(book.active_client_count(&account_id, 8), 1);
+
+        let second = book.reserve_next_at(account_id.clone(), 8, 2);
+        assert_eq!(book.active_client_count(&account_id, 8), 2);
+
+        let _http = book.reserve_next_at(account_id.clone(), 1, 3);
+        let _other = book.reserve_next_at(other_account_id, 8, 4);
+        assert_eq!(book.active_client_count(&account_id, 8), 2);
+        assert_eq!(book.active_client_count(&account_id, 1), 1);
+
+        book.release_handle(&first);
+        assert_eq!(book.active_client_count(&account_id, 8), 1);
+
+        book.release_handle(&second);
+        assert_eq!(book.active_client_count(&account_id, 8), 0);
     }
 }
