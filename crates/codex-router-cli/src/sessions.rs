@@ -8,6 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -26,15 +27,17 @@ use thiserror::Error;
 
 use crate::CliContext;
 
-/// Session search scope.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-#[value(rename_all = "kebab-case")]
-pub enum SessionsScope {
+const SESSION_TITLE_MAX_CHARS: usize = 96;
+const SESSION_CONTEXT_MAX_CHARS: usize = 32;
+
+/// Session search root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionsRoot {
     /// Exact current working directory.
     Cwd,
-    /// Current git checkout or worktree root.
+    /// Current Git checkout/worktree root.
     Checkout,
-    /// All checkouts/worktrees for the same git repository.
+    /// All linked worktrees for the current Git repository.
     Repo,
     /// All known Codex sessions.
     Any,
@@ -103,7 +106,7 @@ pub enum SessionsFormat {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionsCommand {
     /// Scope filter.
-    pub scope: SessionsScope,
+    pub root: SessionsRoot,
     /// Provider filter.
     pub provider: SessionsProvider,
     /// Source filter.
@@ -127,18 +130,8 @@ impl SessionsCommand {
         argv.extend(arguments);
         let parsed =
             ClapSessionsCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
-        let _cwd_requested = parsed.cwd;
-        let scope = if parsed.any {
-            SessionsScope::Any
-        } else if parsed.repo {
-            SessionsScope::Repo
-        } else if parsed.checkout {
-            SessionsScope::Checkout
-        } else {
-            SessionsScope::Cwd
-        };
         Ok(Self {
-            scope,
+            root: parsed.root()?,
             provider: parsed.provider,
             source: parsed.source,
             sort: parsed.sort,
@@ -153,13 +146,11 @@ impl SessionsCommand {
 #[derive(Debug, Parser)]
 #[command(name = "sessions", disable_help_subcommand = true)]
 struct ClapSessionsCommand {
-    #[arg(long, conflicts_with_all = ["checkout", "repo", "any"])]
-    cwd: bool,
-    #[arg(long, conflicts_with_all = ["cwd", "repo", "any"])]
+    #[arg(long, conflicts_with_all = ["repo", "any"])]
     checkout: bool,
-    #[arg(long, conflicts_with_all = ["cwd", "checkout", "any"])]
+    #[arg(long, conflicts_with_all = ["checkout", "any"])]
     repo: bool,
-    #[arg(long, conflicts_with_all = ["cwd", "checkout", "repo"])]
+    #[arg(long, conflicts_with_all = ["checkout", "repo"])]
     any: bool,
     #[arg(long, default_value = "any")]
     provider: SessionsProvider,
@@ -175,6 +166,18 @@ struct ClapSessionsCommand {
     last: bool,
     #[arg(long)]
     dry_run: bool,
+}
+
+impl ClapSessionsCommand {
+    fn root(&self) -> Result<SessionsRoot, String> {
+        match (self.checkout, self.repo, self.any) {
+            (true, false, false) => Ok(SessionsRoot::Checkout),
+            (false, true, false) => Ok(SessionsRoot::Repo),
+            (false, false, true) => Ok(SessionsRoot::Any),
+            (false, false, false) => Ok(SessionsRoot::Cwd),
+            _ => Err("--checkout, --repo, and --any cannot be used together".to_owned()),
+        }
+    }
 }
 
 /// Runs the sessions command.
@@ -235,19 +238,9 @@ fn write_sessions_table<W: Write>(
     let records = runtime.block_on(load_session_records(command, context))?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(["session", "provider", "source", "branch", "cwd", "recency"]);
+    table.set_header(["session"]);
     for record in records {
-        table.add_row([
-            record.session_id,
-            record.provider.unwrap_or_else(|| "-".to_owned()),
-            record.source.unwrap_or_else(|| "-".to_owned()),
-            record.git_branch.unwrap_or_else(|| "-".to_owned()),
-            record.cwd.unwrap_or_else(|| "-".to_owned()),
-            record
-                .recency_at_ms
-                .map(|recency_at_ms| recency_at_ms.to_string())
-                .unwrap_or_else(|| "-".to_owned()),
-        ]);
+        table.add_row([human_session_row(&record)]);
     }
     writeln!(stdout, "{table}").map_err(SessionsCommandError::Stdout)?;
     Ok(())
@@ -257,7 +250,7 @@ async fn load_session_records(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<Vec<SessionRecord>, SessionsCommandError> {
-    let scope_filter = ScopeFilter::from_command(command.scope, context);
+    let root_filter = RootFilter::from_command(command.root, context);
     let codex_home_path = codex_home(context)?;
     let provider_filter = ProviderFilter::from_command(&command.provider, &codex_home_path)?;
 
@@ -265,7 +258,9 @@ async fn load_session_records(
     let options = SqliteConnectOptions::new()
         .filename(&state_database_path)
         .read_only(true)
-        .create_if_missing(false);
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_millis(0))
+        .pragma("query_only", "ON");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
@@ -276,7 +271,8 @@ async fn load_session_records(
         r#"
         SELECT
             id, cwd, model_provider, model, source, thread_source, git_branch,
-            title, created_at_ms, updated_at_ms, recency_at_ms
+            title, preview, first_user_message,
+            created_at_ms, updated_at_ms, recency_at_ms
         FROM threads
         WHERE archived = 0
         ORDER BY
@@ -300,7 +296,7 @@ async fn load_session_records(
         if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
             continue;
         }
-        if !scope_filter.matches(cwd.as_deref()) {
+        if !root_filter.matches(cwd.as_deref()) {
             continue;
         }
         records.push(SessionRecord {
@@ -311,7 +307,12 @@ async fn load_session_records(
             source,
             thread_source,
             git_branch: row.get::<Option<String>, _>("git_branch"),
-            title: row.get::<Option<String>, _>("title"),
+            display_title: display_title_from_session_fields(
+                row.get::<Option<String>, _>("title").as_deref(),
+                row.get::<Option<String>, _>("preview").as_deref(),
+                row.get::<Option<String>, _>("first_user_message")
+                    .as_deref(),
+            ),
             created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
             updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
             recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
@@ -455,29 +456,20 @@ impl ProviderFilter {
 }
 
 #[derive(Debug)]
-enum ScopeFilter {
+enum RootFilter {
     Any,
     Cwd(PathBuf),
     Checkout(PathBuf),
-    Repo(PathBuf),
+    Repo(Vec<PathBuf>),
 }
 
-impl ScopeFilter {
-    fn from_command(scope: SessionsScope, context: &CliContext) -> Self {
-        match scope {
-            SessionsScope::Any => Self::Any,
-            SessionsScope::Cwd => Self::Cwd(normalize_path(context.current_dir())),
-            SessionsScope::Checkout => Self::Checkout(
-                find_worktree_root(context.current_dir())
-                    .unwrap_or_else(|| normalize_path(context.current_dir())),
-            ),
-            SessionsScope::Repo => {
-                let checkout_root = find_worktree_root(context.current_dir())
-                    .unwrap_or_else(|| normalize_path(context.current_dir()));
-                Self::Repo(
-                    find_git_common_dir(&checkout_root).unwrap_or_else(|| checkout_root.clone()),
-                )
-            }
+impl RootFilter {
+    fn from_command(root: SessionsRoot, context: &CliContext) -> Self {
+        match root {
+            SessionsRoot::Any => Self::Any,
+            SessionsRoot::Cwd => Self::Cwd(normalize_path(context.current_dir())),
+            SessionsRoot::Checkout => Self::Checkout(checkout_root(context.current_dir())),
+            SessionsRoot::Repo => Self::Repo(repo_roots(context.current_dir())),
         }
     }
 
@@ -487,18 +479,18 @@ impl ScopeFilter {
             Self::Cwd(current_dir) => cwd
                 .map(|session_cwd| normalize_path(Path::new(session_cwd)) == *current_dir)
                 .unwrap_or(false),
-            Self::Checkout(worktree_root) => cwd
+            Self::Checkout(checkout_root) => cwd
                 .map(|session_cwd| {
-                    path_is_equal_or_child(&normalize_path(Path::new(session_cwd)), worktree_root)
+                    let session_cwd = normalize_path(Path::new(session_cwd));
+                    path_is_equal_or_child(&session_cwd, checkout_root)
                 })
                 .unwrap_or(false),
-            Self::Repo(repo_common_dir) => cwd
+            Self::Repo(repo_roots) => cwd
                 .map(|session_cwd| {
-                    let session_path = Path::new(session_cwd);
-                    find_worktree_root(session_path)
-                        .and_then(|session_root| find_git_common_dir(&session_root))
-                        .map(|session_common_dir| session_common_dir == *repo_common_dir)
-                        .unwrap_or(false)
+                    let session_cwd = normalize_path(Path::new(session_cwd));
+                    repo_roots
+                        .iter()
+                        .any(|repo_root| path_is_equal_or_child(&session_cwd, repo_root))
                 })
                 .unwrap_or(false),
         }
@@ -640,28 +632,37 @@ fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn find_git_common_dir(checkout_root: &Path) -> Option<PathBuf> {
+fn checkout_root(current_dir: &Path) -> PathBuf {
+    find_worktree_root(current_dir).unwrap_or_else(|| normalize_path(current_dir))
+}
+
+fn repo_roots(current_dir: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(checkout_root)
-        .arg("rev-parse")
-        .arg("--git-common-dir")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return Some(normalize_path(&checkout_root.join(".git")));
+        .arg(current_dir)
+        .arg("worktree")
+        .arg("list")
+        .arg("--porcelain")
+        .output();
+    if let Ok(output) = output
+        && output.status.success()
+        && let Ok(stdout) = String::from_utf8(output.stdout)
+    {
+        let roots = parse_git_worktree_roots(&stdout);
+        if !roots.is_empty() {
+            return roots;
+        }
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let common_dir = stdout.trim();
-    if common_dir.is_empty() {
-        return None;
-    }
-    let common_path = Path::new(common_dir);
-    if common_path.is_absolute() {
-        Some(normalize_path(common_path))
-    } else {
-        Some(normalize_path(&checkout_root.join(common_path)))
-    }
+    vec![checkout_root(current_dir)]
+}
+
+fn parse_git_worktree_roots(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .map(|path| normalize_path(&path))
+        .collect()
 }
 
 fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
@@ -671,6 +672,8 @@ fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
 #[derive(Debug, Serialize)]
 struct SessionRecord {
     session_id: String,
+    #[serde(skip)]
+    display_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -683,14 +686,22 @@ struct SessionRecord {
     thread_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_branch: Option<String>,
-    #[serde(skip)]
-    title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     updated_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recency_at_ms: Option<i64>,
+}
+
+impl SessionRecord {
+    fn display_title(&self) -> &str {
+        self.display_title.as_deref().unwrap_or("Untitled session")
+    }
+
+    fn branch(&self) -> &str {
+        self.git_branch.as_deref().unwrap_or("-")
+    }
 }
 
 /// Picker display row for one session.
@@ -702,22 +713,9 @@ pub(crate) struct SessionPickerChoice {
 
 impl SessionPickerChoice {
     fn from_record(record: SessionRecord) -> Self {
-        let provider = record.provider.unwrap_or_else(|| "-".to_owned());
-        let branch = record.git_branch.unwrap_or_else(|| "-".to_owned());
-        let recency = record
-            .recency_at_ms
-            .map(format_recency)
-            .unwrap_or_else(|| "-".to_owned());
-        let title = record
-            .title
-            .as_deref()
-            .and_then(non_empty_trimmed)
-            .map(truncate_picker_title)
-            .unwrap_or_else(|| "Untitled Codex session".to_owned());
-        let short_session_id = short_session_id(&record.session_id);
         Self {
-            session_id: record.session_id,
-            label: format!("{title}\n{recency}  {branch}  {provider}  id={short_session_id}"),
+            session_id: record.session_id.clone(),
+            label: human_session_row(&record),
         }
     }
 
@@ -728,51 +726,136 @@ impl SessionPickerChoice {
     }
 }
 
-fn non_empty_trimmed(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
+fn human_session_row(record: &SessionRecord) -> String {
+    let context = record
+        .cwd
+        .as_deref()
+        .map(session_context_from_cwd)
+        .unwrap_or_else(|| "-".to_owned());
+    format!(
+        "{}\n  {}  {}  {}  id={}",
+        record.display_title(),
+        format_recency_at_ms(record.recency_at_ms),
+        record.branch(),
+        context,
+        short_session_id(&record.session_id)
+    )
+}
+
+fn session_context_from_cwd(cwd: &str) -> String {
+    let leaf = Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(cwd);
+    truncate_middle(leaf, SESSION_CONTEXT_MAX_CHARS)
+}
+
+fn display_title_from_session_fields(
+    title: Option<&str>,
+    preview: Option<&str>,
+    first_user_message: Option<&str>,
+) -> Option<String> {
+    [title, preview, first_user_message]
+        .into_iter()
+        .flatten()
+        .find_map(normalize_display_title)
+}
+
+fn normalize_display_title(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
     }
+    Some(truncate_end(&compact, SESSION_TITLE_MAX_CHARS))
+}
+
+fn truncate_end(value: &str, max_chars: usize) -> String {
+    let character_count = value.chars().count();
+    if character_count <= max_chars {
+        return value.to_owned();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("{}…", value.chars().take(keep).collect::<String>())
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let character_count = value.chars().count();
+    if character_count <= max_chars {
+        return value.to_owned();
+    }
+    let side = max_chars.saturating_sub(1) / 2;
+    let prefix = value.chars().take(side).collect::<String>();
+    let suffix = value
+        .chars()
+        .rev()
+        .take(side)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}…{suffix}")
 }
 
 fn short_session_id(session_id: &str) -> String {
-    let mut chars = session_id.chars();
-    let prefix: String = chars.by_ref().take(8).collect();
-    if chars.next().is_some() {
-        format!("{prefix}...")
-    } else {
-        prefix
-    }
+    truncate_end(session_id, 8)
 }
 
-fn truncate_picker_title(title: &str) -> String {
-    const MAX_TITLE_CHARS: usize = 92;
-    let mut chars = title.chars();
-    let prefix: String = chars.by_ref().take(MAX_TITLE_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{prefix}...")
-    } else {
-        prefix
+fn format_recency_at_ms(recency_at_ms: Option<i64>) -> String {
+    let Some(recency_at_ms) = recency_at_ms else {
+        return "-".to_owned();
+    };
+    if recency_at_ms < 0 {
+        return "-".to_owned();
     }
-}
-
-fn format_recency(recency_at_ms: i64) -> String {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok());
-    let Some(now_ms) = now_ms else {
-        return format!("updated={recency_at_ms}");
-    };
-    let elapsed_ms = now_ms.saturating_sub(recency_at_ms);
-    let elapsed_seconds = elapsed_ms / 1000;
-    match elapsed_seconds {
-        seconds if seconds < 60 => "now".to_owned(),
-        seconds if seconds < 60 * 60 => format!("{}m ago", seconds / 60),
-        seconds if seconds < 60 * 60 * 48 => format!("{}h ago", seconds / (60 * 60)),
-        seconds => format!("{}d ago", seconds / (60 * 60 * 24)),
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let recency_at_ms = recency_at_ms as u128;
+    if now_ms >= recency_at_ms {
+        let duration = format_duration_ms(now_ms - recency_at_ms);
+        if duration == "now" {
+            duration
+        } else {
+            format!("{duration} ago")
+        }
+    } else {
+        let duration = format_duration_ms(recency_at_ms - now_ms);
+        if duration == "now" {
+            duration
+        } else {
+            format!("in {duration}")
+        }
+    }
+}
+
+fn format_duration_ms(duration_ms: u128) -> String {
+    let seconds = duration_ms / 1_000;
+    if seconds < 60 {
+        return "now".to_owned();
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    if hours < 48 {
+        return format!("{hours}h");
+    }
+    let days = hours / 24;
+    format!("{days}d")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_duration_ms;
+
+    #[test]
+    fn duration_format_uses_now_without_suffix_for_subminute_values() {
+        assert_eq!(format_duration_ms(0), "now");
+        assert_eq!(format_duration_ms(59_000), "now");
+        assert_eq!(format_duration_ms(60_000), "1m");
     }
 }
 

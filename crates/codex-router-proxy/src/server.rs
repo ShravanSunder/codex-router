@@ -64,6 +64,7 @@ use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RouteBandAccountHolds;
 use crate::account_selection::RouteBandReservationBooks;
 use crate::account_selection::RouteBandWeightedSelectors;
+use crate::account_selection::SqliteActiveClientLeaseReporter;
 use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
 use crate::credential_runtime::ProxyRuntimeCredentialResources;
 use crate::credential_runtime::ProxyRuntimeCredentialResourcesOpenError;
@@ -872,7 +873,11 @@ impl LoopbackProtocolConnectionHandler {
             Arc::clone(&self.active_reservations),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
-        );
+        )
+        .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
+            state_store.clone(),
+            self.affinity_record_tasks.clone(),
+        )));
         let credential_resolver = self
             .credential_factory
             .resolver_for_state(state_store.clone());
@@ -953,7 +958,11 @@ impl LoopbackProtocolConnectionHandler {
             Arc::clone(&self.active_reservations),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
-        );
+        )
+        .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
+            state_store.clone(),
+            self.affinity_record_tasks.clone(),
+        )));
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,

@@ -1709,10 +1709,11 @@ mod async_forwarding_tests {
                 .or_insert_with(ReservationBook::default)
                 .reserve_next_at(selected_account.clone(), 8, 1)
         };
-        let active_reservation_guard = ActiveReservationGuard::new(
+        let active_reservation_guard = ActiveReservationGuard::new_with_active_client_leases(
             active_reservations.clone(),
             "responses".to_owned(),
             reservation_handle,
+            None,
         );
         let affinity_secret = RouterAffinityHashSecret::new(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

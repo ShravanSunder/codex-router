@@ -19,6 +19,17 @@ pub fn usage_url(base_url: &str) -> String {
     }
 }
 
+/// Creates the reset-credit URL for a ChatGPT backend base URL.
+#[must_use]
+pub fn reset_credits_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.contains("/backend-api") {
+        format!("{base_url}/wham/rate-limit-reset-credits")
+    } else {
+        format!("{base_url}/api/codex/rate-limit-reset-credits")
+    }
+}
+
 /// Stored Codex auth secret shape.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct StoredAuth {
@@ -225,6 +236,7 @@ impl LiveQuotaClient {
 #[cfg(test)]
 mod tests {
     use super::LiveQuotaError;
+    use super::reset_credits_url;
     use super::usage_auth_from_auth_text;
     use super::usage_url;
 
@@ -237,6 +249,18 @@ mod tests {
         assert_eq!(
             usage_url("https://example.test"),
             "https://example.test/api/codex/usage"
+        );
+    }
+
+    #[test]
+    fn reset_credits_url_matches_chatgpt_backend_shape() {
+        assert_eq!(
+            reset_credits_url("https://chatgpt.com/backend-api"),
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+        );
+        assert_eq!(
+            reset_credits_url("https://example.test"),
+            "https://example.test/api/codex/rate-limit-reset-credits"
         );
     }
 

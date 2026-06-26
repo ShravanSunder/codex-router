@@ -34,6 +34,7 @@ mkdir -p "${router_root}"
 
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
   quota status \
+  --no-refresh \
   --router-root "${router_root}" \
   --format plain \
   --now-unix-seconds 10000 \
@@ -71,6 +72,7 @@ json_output="${smoke_root}/quota-status.json"
 
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
   quota status \
+  --no-refresh \
   --router-root "${router_root}" \
   --format table \
   --now-unix-seconds 10000 \
@@ -78,6 +80,7 @@ json_output="${smoke_root}/quota-status.json"
 
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
   quota status \
+  --no-refresh \
   --router-root "${router_root}" \
   --format plain \
   --now-unix-seconds 10000 \
@@ -85,6 +88,7 @@ json_output="${smoke_root}/quota-status.json"
 
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
   quota status \
+  --no-refresh \
   --router-root "${router_root}" \
   --format json \
   --now-unix-seconds 10000 \

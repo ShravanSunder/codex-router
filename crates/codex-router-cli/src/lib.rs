@@ -2541,15 +2541,15 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
         );
         assert_eq!(
             lines[2],
-            "responses route\tpreferred by quota: snapshot\twhy: fallback by quota: needs refresh limiting window: 5h 75% left"
+            "responses route\tnext: snapshot\twhy: fallback by quota: needs refresh limiting window: 5h 75% left"
         );
         assert_eq!(lines.len(), 3);
         assert!(output.stderr.is_empty());
@@ -2634,15 +2634,15 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
         );
         assert_eq!(
             lines[2],
-            "responses route\tpreferred by quota: primary\twhy: preferred by quota: safest quota limiting window: 5h 25% left"
+            "responses route\tnext: primary\twhy: preferred by quota: safest quota limiting window: 5h 25% left"
         );
         assert_eq!(lines.len(), 3);
         assert!(!output.stdout.contains("acct_primary"));
@@ -3701,7 +3701,7 @@ exit 42
         assert!(
             status_output
                 .stdout
-                .contains("responses route\tpreferred by quota: partial")
+                .contains("responses route\tnext: partial")
         );
         assert!(!status_output.stdout.contains("partial-quota-token"));
         assert!(status_output.stderr.is_empty());
@@ -3791,7 +3791,7 @@ exit 42
         assert!(
             status_output
                 .stdout
-                .contains("responses route\tpreferred by quota: missing-reset")
+                .contains("responses route\tnext: missing-reset")
         );
         assert!(!status_output.stdout.contains("missing-reset-quota-token"));
         assert!(status_output.stderr.is_empty());
@@ -3827,7 +3827,7 @@ exit 42
         let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
         let address = must_ok(listener.local_addr());
         let server_thread = thread::spawn(move || {
-            for _request_index in 0..2 {
+            for _request_index in 0..4 {
                 let (mut stream, _peer_address) = match listener.accept() {
                     Ok(connection) => connection,
                     Err(error) => panic!("quota mock should accept: {error}"),
@@ -3841,9 +3841,19 @@ exit 42
                     Err(error) => panic!("quota mock should read request: {error}"),
                 };
                 let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-                assert!(request.starts_with("GET /api/codex/usage HTTP/1.1\r\n"));
+                let is_usage_request = request.starts_with("GET /api/codex/usage HTTP/1.1\r\n");
+                let is_reset_credits_request =
+                    request.starts_with("GET /api/codex/rate-limit-reset-credits HTTP/1.1\r\n");
+                assert!(
+                    is_usage_request || is_reset_credits_request,
+                    "unexpected quota mock request: {request}"
+                );
                 assert!(request.contains("authorization: Bearer quota-http-access-token\r\n"));
-                let body = r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}},"reset_credits":{"available":1}}"#;
+                let body = if is_usage_request {
+                    r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}},"reset_credits":{"available":1}}"#
+                } else {
+                    r#"{"reset_credits":{"available":1}}"#
+                };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
@@ -3926,6 +3936,7 @@ exit 42
             "responses",
             format!("http://{address}"),
             SecretString::new("timeout-token-canary"),
+            None,
         )) {
             Ok(response) => panic!("hanging quota endpoint should time out: {response:?}"),
             Err(error) => error,
@@ -4460,7 +4471,7 @@ exit 42
             Err(error) => panic!("sessions command should parse: {error}"),
         };
 
-        assert_eq!(command.scope, crate::sessions::SessionsScope::Cwd);
+        assert_eq!(command.root, crate::sessions::SessionsRoot::Cwd);
         assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
         assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
         assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);
@@ -4491,7 +4502,7 @@ exit 42
             Err(error) => panic!("sessions command should parse: {error}"),
         };
 
-        assert_eq!(command.scope, crate::sessions::SessionsScope::Any);
+        assert_eq!(command.root, crate::sessions::SessionsRoot::Any);
         assert_eq!(command.provider, crate::sessions::SessionsProvider::Current);
         assert_eq!(command.source, crate::sessions::SessionsSource::Subagents);
         assert_eq!(command.sort, crate::sessions::SessionsSort::Created);
@@ -4517,10 +4528,10 @@ exit 42
             };
 
         assert_eq!(
-            checkout_command.scope,
-            crate::sessions::SessionsScope::Checkout
+            checkout_command.root,
+            crate::sessions::SessionsRoot::Checkout
         );
-        assert_eq!(repo_command.scope, crate::sessions::SessionsScope::Repo);
+        assert_eq!(repo_command.root, crate::sessions::SessionsRoot::Repo);
     }
 
     #[test]
@@ -4818,8 +4829,8 @@ exit 42
     }
 
     #[test]
-    fn sessions_list_table_renders_metadata_without_prompt_leak() {
-        const PROMPT_CANARY: &str = "TABLE_CANARY_SHOULD_NOT_LEAK";
+    fn sessions_list_table_renders_human_title_and_metadata() {
+        const SESSION_TITLE: &str = "Fix session table display";
         let test_root = TestRoot::new("sessions-table");
         must_ok(fs::create_dir(test_root.path()));
         let codex_home = test_root.path().join("codex-home");
@@ -4828,7 +4839,7 @@ exit 42
         must_ok(fs::create_dir(&project));
         create_codex_state_db_with_thread_rows(
             &codex_home.join("state_5.sqlite"),
-            PROMPT_CANARY,
+            SESSION_TITLE,
             &[CodexStateThreadFixture::new(
                 "thread-table",
                 &project,
@@ -4851,10 +4862,8 @@ exit 42
             .with_current_dir(project),
         );
 
-        assert!(output.stdout.contains("thread-table"));
-        assert!(output.stdout.contains("codex-router"));
+        assert!(output.stdout.contains(SESSION_TITLE));
         assert!(output.stdout.contains("main"));
-        assert!(!output.stdout.contains(PROMPT_CANARY));
     }
 
     #[test]
@@ -5102,7 +5111,7 @@ exit 42
             picker.offered_labels[0]
         );
         assert!(
-            picker.offered_labels[0].contains("main  codex-router  id=thread-n..."),
+            picker.offered_labels[0].contains("main  project  id=thread-…"),
             "interactive picker should show compact metadata on the second line, got {:?}",
             picker.offered_labels[0]
         );

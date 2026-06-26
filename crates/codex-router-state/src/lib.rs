@@ -24,6 +24,7 @@ mod tests {
     use codex_router_core::affinity::AffinityKeyHash;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::AffinityKey;
+    use codex_router_core::ids::ReservationId;
     use codex_router_core::routes::RouteBand;
     use rusqlite::Connection;
 
@@ -351,6 +352,97 @@ mod tests {
         };
 
         assert_eq!(observations, vec![first_observation, second_observation]);
+    }
+
+    #[tokio::test]
+    async fn async_active_client_leases_count_release_and_prune() {
+        let temp_dir = TestTempDir::new("async_active_client_leases");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let alpha = account_id("acct_active_alpha");
+        let beta = account_id("acct_active_beta");
+
+        if let Err(error) = store
+            .record_active_client_acquired(
+                "responses",
+                &ReservationId::new("reservation_alpha_1"),
+                &alpha,
+                1_000,
+            )
+            .await
+        {
+            panic!("alpha first lease should persist: {error}");
+        }
+        if let Err(error) = store
+            .record_active_client_acquired(
+                "responses",
+                &ReservationId::new("reservation_alpha_2"),
+                &alpha,
+                1_005,
+            )
+            .await
+        {
+            panic!("alpha second lease should persist: {error}");
+        }
+        if let Err(error) = store
+            .record_active_client_acquired(
+                "responses",
+                &ReservationId::new("reservation_beta_1"),
+                &beta,
+                1_006,
+            )
+            .await
+        {
+            panic!("beta lease should persist: {error}");
+        }
+
+        let counts = match store
+            .active_client_counts_for_route_band("responses", 1_010, 100)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => panic!("active client counts should load: {error}"),
+        };
+        assert_eq!(
+            counts,
+            vec![
+                crate::sqlite::ActiveClientCount::new(alpha.clone(), 2),
+                crate::sqlite::ActiveClientCount::new(beta.clone(), 1),
+            ]
+        );
+
+        if let Err(error) = store
+            .record_active_client_released("responses", &ReservationId::new("reservation_alpha_1"))
+            .await
+        {
+            panic!("alpha lease should release: {error}");
+        }
+        let counts = match store
+            .active_client_counts_for_route_band("responses", 1_010, 100)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => panic!("active client counts should reload: {error}"),
+        };
+        assert_eq!(
+            counts,
+            vec![
+                crate::sqlite::ActiveClientCount::new(alpha, 1),
+                crate::sqlite::ActiveClientCount::new(beta, 1),
+            ]
+        );
+
+        let counts = match store
+            .active_client_counts_for_route_band("responses", 1_200, 100)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => panic!("stale active client counts should prune: {error}"),
+        };
+        assert!(counts.is_empty());
     }
 
     #[tokio::test]
