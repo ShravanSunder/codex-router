@@ -307,10 +307,23 @@ impl ActiveReservationGuardInner {
             if let Some(active_client_leases) = self.active_client_leases.as_ref() {
                 active_client_leases.record_released(&self.route_band, &self.reservation_handle);
             }
+            let account_hash = telemetry_hash(self.reservation_handle.account_id().as_str());
+            let transport =
+                if self.reservation_handle.headroom_cost() == WEBSOCKET_ACTIVE_LOAD_PRESSURE {
+                    "websocket"
+                } else {
+                    "http_sse"
+                };
+            crate::telemetry::record_active_clients(
+                account_hash.clone(),
+                &self.route_band,
+                transport,
+                0,
+            );
             let span = tracing::info_span!(
                 "codex_router.account_reservation_released",
                 route_band = self.route_band.as_str(),
-                account.hash = telemetry_hash(self.reservation_handle.account_id().as_str()),
+                account.hash = account_hash,
                 reservation.hash =
                     telemetry_hash(self.reservation_handle.reservation_id().as_str()),
             );
@@ -1008,6 +1021,7 @@ fn select_from_burn_down_assessment(
     let weighted_candidates = assessment.weighted_candidates();
     if weighted_candidates.is_empty() {
         account_holds.remove(route_band);
+        crate::telemetry::record_account_rejected(route_band, "no_eligible_accounts");
         tracing::warn!(
             route_band,
             reason = "no_eligible_accounts",
@@ -1204,10 +1218,23 @@ fn reserve_selected_account(
             headroom_cost,
         );
     }
+    let account_hash = telemetry_hash(selected.account_id().as_str());
+    let transport = if headroom_cost == WEBSOCKET_ACTIVE_LOAD_PRESSURE {
+        "websocket"
+    } else {
+        "http_sse"
+    };
+    crate::telemetry::record_account_selected(
+        account_hash.clone(),
+        route_band,
+        transport,
+        selected.selection_reason(),
+    );
+    crate::telemetry::record_active_clients(account_hash.clone(), route_band, transport, 1);
     let span = tracing::info_span!(
         "codex_router.account_reserved",
         route_band,
-        account.hash = telemetry_hash(selected.account_id().as_str()),
+        account.hash = account_hash,
         selection.reason = selected.selection_reason(),
         active.headroom_cost = headroom_cost,
         reservation.hash = telemetry_hash(reservation_handle.reservation_id().as_str()),

@@ -5,10 +5,12 @@ use std::path::Path;
 use std::process::Command;
 
 use opentelemetry::KeyValue;
+use opentelemetry::global;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::Protocol;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use sha2::Digest;
 use sha2::Sha256;
@@ -24,6 +26,7 @@ const OBSERVABILITY_MARKER_ENV: &str = "CODEX_ROUTER_OBSERVABILITY_MARKER";
 #[derive(Debug)]
 pub(crate) struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
 }
 
 impl Drop for TelemetryGuard {
@@ -31,6 +34,10 @@ impl Drop for TelemetryGuard {
         if let Some(tracer_provider) = self.tracer_provider.take() {
             let _ = tracer_provider.force_flush();
             let _ = tracer_provider.shutdown();
+        }
+        if let Some(meter_provider) = self.meter_provider.take() {
+            let _ = meter_provider.force_flush();
+            let _ = meter_provider.shutdown();
         }
     }
 }
@@ -53,6 +60,7 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
         );
         return TelemetryGuard {
             tracer_provider: None,
+            meter_provider: None,
         };
     };
 
@@ -70,9 +78,24 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
             );
             return TelemetryGuard {
                 tracer_provider: None,
+                meter_provider: None,
             };
         }
     };
+    let meter_provider = match build_meter_provider(&endpoint) {
+        Ok(provider) => Some(provider),
+        Err(error) => {
+            tracing::warn!(
+                error.kind = "otel_metrics_init_failed",
+                error = %sanitize_error(&error.to_string()),
+                "codex_router.telemetry_metrics_init_failed"
+            );
+            None
+        }
+    };
+    if let Some(meter_provider) = meter_provider.clone() {
+        global::set_meter_provider(meter_provider);
+    }
     let tracer = tracer_provider.tracer(SERVICE_NAME);
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     let _ = tracing_subscriber::registry()
@@ -89,6 +112,7 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
 
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
+        meter_provider,
     }
 }
 
@@ -125,6 +149,20 @@ fn build_tracer_provider(
         .build())
 }
 
+fn build_meter_provider(
+    endpoint: &str,
+) -> Result<SdkMeterProvider, Box<dyn std::error::Error + Send + Sync>> {
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_http()
+        .with_endpoint(metric_endpoint(endpoint))
+        .with_protocol(Protocol::HttpBinary)
+        .build()?;
+    Ok(SdkMeterProvider::builder()
+        .with_resource(telemetry_resource())
+        .with_periodic_exporter(exporter)
+        .build())
+}
+
 fn telemetry_resource() -> Resource {
     Resource::builder()
         .with_service_name(SERVICE_NAME)
@@ -146,6 +184,15 @@ fn trace_endpoint(endpoint: &str) -> String {
         endpoint.to_owned()
     } else {
         format!("{endpoint}/v1/traces")
+    }
+}
+
+fn metric_endpoint(endpoint: &str) -> String {
+    let endpoint = endpoint.trim_end_matches('/');
+    if endpoint.ends_with("/v1/metrics") {
+        endpoint.to_owned()
+    } else {
+        format!("{endpoint}/v1/metrics")
     }
 }
 

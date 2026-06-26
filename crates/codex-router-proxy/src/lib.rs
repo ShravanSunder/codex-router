@@ -9,6 +9,7 @@ pub mod provider_error;
 pub mod routes;
 mod secret_store_factory;
 pub mod server;
+pub mod telemetry;
 pub mod upstream;
 pub mod websocket;
 

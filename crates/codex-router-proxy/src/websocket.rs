@@ -3161,8 +3161,20 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
         )
         .await
     {
-        Ok(()) => Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL),
-        Err(_error) => Message::text(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL),
+        Ok(()) => {
+            crate::telemetry::record_websocket_event(
+                RouteBand::Responses.as_str(),
+                "quota_reconnect",
+            );
+            Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL)
+        }
+        Err(_error) => {
+            crate::telemetry::record_websocket_event(
+                RouteBand::Responses.as_str(),
+                "quota_state_unavailable",
+            );
+            Message::text(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL)
+        }
     }
 }
 

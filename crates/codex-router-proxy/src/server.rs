@@ -912,6 +912,7 @@ impl LoopbackProtocolConnectionHandler {
         .with_local_peer_addr(local_peer_addr);
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
         {
+            crate::telemetry::record_websocket_event(RouteBand::Responses.as_str(), "open");
             let open_span = tracing::info_span!(
                 "codex_router.websocket_open",
                 route.path = sanitize_route_path_for_log(&path),
@@ -930,6 +931,7 @@ impl LoopbackProtocolConnectionHandler {
             .map_err(LoopbackRouterRuntimeError::WebSocket);
         match &result {
             Ok(()) => {
+                crate::telemetry::record_websocket_event(RouteBand::Responses.as_str(), "closed");
                 let span = tracing::info_span!(
                     "codex_router.websocket_closed",
                     route.path = sanitize_route_path_for_log(&path),
@@ -941,6 +943,7 @@ impl LoopbackProtocolConnectionHandler {
                 );
             }
             Err(error) => {
+                crate::telemetry::record_websocket_event(RouteBand::Responses.as_str(), "failed");
                 let span = tracing::warn_span!(
                     "codex_router.websocket_failed",
                     route.path = sanitize_route_path_for_log(&path),

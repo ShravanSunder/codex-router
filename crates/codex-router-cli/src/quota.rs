@@ -58,6 +58,8 @@ use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
+use opentelemetry::KeyValue;
+use opentelemetry::global;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::Digest;
@@ -586,6 +588,11 @@ where
                     error.class = QuotaRefreshErrorClass::AuthError.as_str(),
                     "codex_router.quota_refresh_failed"
                 );
+                record_quota_refresh_metric(
+                    "*",
+                    "failure",
+                    QuotaRefreshErrorClass::AuthError.as_str(),
+                );
                 writeln!(
                     stdout,
                     "refresh failed: account={} route_band=* error={error}",
@@ -630,6 +637,7 @@ where
                         error.class = error_class.as_str(),
                         "codex_router.quota_refresh_failed"
                     );
+                    record_quota_refresh_metric(route_band, "failure", error_class.as_str());
                     writeln!(
                         stdout,
                         "refresh failed: account={} route_band={} error={error}",
@@ -665,6 +673,11 @@ where
                         route_band,
                         error.class = QuotaRefreshErrorClass::ParseError.as_str(),
                         "codex_router.quota_refresh_failed"
+                    );
+                    record_quota_refresh_metric(
+                        route_band,
+                        "failure",
+                        QuotaRefreshErrorClass::ParseError.as_str(),
                     );
                     writeln!(
                         stdout,
@@ -742,6 +755,7 @@ where
                 reset_credits.available = response.reset_credits_available,
                 "codex_router.quota_refresh_succeeded"
             );
+            record_quota_refresh_metric(route_band, "success", "none");
             refreshed_count = refreshed_count.saturating_add(1);
         }
     }
@@ -1455,6 +1469,7 @@ fn quota_status_report(
                 })
         })
         .collect::<Vec<_>>();
+    emit_quota_status_metrics(USER_QUOTA_ROUTE_BAND, &rows);
 
     Ok(QuotaStatusReport {
         route_band: USER_QUOTA_ROUTE_BAND.to_owned(),
@@ -2592,6 +2607,113 @@ fn telemetry_hash(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
+    for row in rows {
+        let account_hash = telemetry_hash(row.account_id.as_str());
+        if row.preferred_next {
+            global::meter("codex-router")
+                .u64_counter("codex_router_account_selections_total")
+                .build()
+                .add(
+                    1,
+                    &[
+                        KeyValue::new("account.slot", account_hash.clone()),
+                        KeyValue::new("route_band", route_band.to_owned()),
+                        KeyValue::new("transport", "cli"),
+                        KeyValue::new("selection.reason", routing_reason_json(row.routing_reason)),
+                    ],
+                );
+        }
+        if let Some(active_clients) = row.active_clients_value {
+            global::meter("codex-router")
+                .u64_gauge("codex_router_active_clients")
+                .build()
+                .record(
+                    u64::from(active_clients),
+                    &[
+                        KeyValue::new("account.slot", account_hash.clone()),
+                        KeyValue::new("route_band", route_band.to_owned()),
+                        KeyValue::new("transport", "sqlx_mirror"),
+                    ],
+                );
+        }
+        for window in &row.windows {
+            global::meter("codex-router")
+                .u64_gauge("codex_router_quota_remaining_bucket")
+                .build()
+                .record(
+                    1,
+                    &[
+                        KeyValue::new("account.slot", account_hash.clone()),
+                        KeyValue::new("route_band", route_band.to_owned()),
+                        KeyValue::new(
+                            "quota.window",
+                            quota_window_label(window.window_seconds).to_owned(),
+                        ),
+                        KeyValue::new(
+                            "quota.remaining_bucket",
+                            quota_remaining_bucket(window.remaining_headroom),
+                        ),
+                    ],
+                );
+        }
+        for (window_label, pressure) in [("5h", row.short_pressure), ("weekly", row.long_pressure)]
+        {
+            global::meter("codex-router")
+                .u64_gauge("codex_router_quota_pressure_bucket")
+                .build()
+                .record(
+                    1,
+                    &[
+                        KeyValue::new("account.slot", account_hash.clone()),
+                        KeyValue::new("route_band", route_band.to_owned()),
+                        KeyValue::new("quota.window", window_label),
+                        KeyValue::new("quota.pressure_bucket", quota_pressure_bucket(pressure)),
+                    ],
+                );
+        }
+    }
+}
+
+fn record_quota_refresh_metric(
+    route_band: &str,
+    refresh_outcome: &'static str,
+    refresh_error_class: &'static str,
+) {
+    global::meter("codex-router")
+        .u64_counter("codex_router_quota_refresh_total")
+        .build()
+        .add(
+            1,
+            &[
+                KeyValue::new("route_band", route_band.to_owned()),
+                KeyValue::new("refresh.outcome", refresh_outcome),
+                KeyValue::new("refresh.error_class", refresh_error_class),
+            ],
+        );
+}
+
+fn quota_remaining_bucket(remaining_headroom: u32) -> &'static str {
+    match remaining_headroom {
+        0 => "empty",
+        1..=4 => "lt_5",
+        5..=24 => "lt_25",
+        25..=49 => "lt_50",
+        50..=74 => "lt_75",
+        _ => "gte_75",
+    }
+}
+
+fn quota_pressure_bucket(pressure: u32) -> &'static str {
+    match pressure {
+        0 => "none",
+        1..=24 => "low",
+        25..=49 => "medium",
+        50..=74 => "high",
+        _ => "critical",
+    }
 }
 
 const fn quota_window_status_from_selector_status(

@@ -1647,6 +1647,18 @@ mod tests {
             selected_accounts.first().map(String::as_str),
             Some("acct_ssdev")
         );
+        assert_eq!(
+            selected_accounts,
+            vec![
+                "acct_ssdev".to_owned(),
+                "acct_ssdev".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_ssdev".to_owned(),
+                "acct_ssdev".to_owned(),
+                "acct_ssdev".to_owned(),
+            ],
+            "six-session burn-down timeline should be deterministic"
+        );
         assert!(
             selected_accounts
                 .iter()
