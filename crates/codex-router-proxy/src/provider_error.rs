@@ -7,6 +7,8 @@ use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
 use thiserror::Error;
 
+const PROVIDER_ERROR_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderErrorClassification {
     Unknown,
@@ -40,6 +42,10 @@ pub trait AsyncProviderErrorObserver: Send + Sync {
 }
 
 pub fn classify_provider_error_envelope(body: &[u8]) -> ProviderErrorClassification {
+    if body.len() > PROVIDER_ERROR_ENVELOPE_MAX_BYTES {
+        return classify_provider_error_envelope_prefix(body);
+    }
+
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return ProviderErrorClassification::Unknown;
     };
@@ -115,6 +121,62 @@ fn is_quota_exhaustion_token(token: &str) -> bool {
     )
 }
 
+fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassification {
+    let Some(prefix) = body.get(..PROVIDER_ERROR_ENVELOPE_MAX_BYTES) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    let Ok(prefix) = std::str::from_utf8(prefix) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    let trimmed = prefix.trim_start();
+    if !(trimmed.starts_with('{')
+        && (trimmed.contains(r#""type":"error""#)
+            || trimmed.contains(r#""type": "error""#)
+            || trimmed.contains(r#""error":{"#)
+            || trimmed.contains(r#""error": {"#)))
+    {
+        return ProviderErrorClassification::Unknown;
+    }
+
+    let mut tokens = Vec::new();
+    push_prefix_field_values(trimmed, r#""code":"#, &mut tokens);
+    push_prefix_field_values(trimmed, r#""code": "#, &mut tokens);
+    push_prefix_field_values(trimmed, r#""type":"#, &mut tokens);
+    push_prefix_field_values(trimmed, r#""type": "#, &mut tokens);
+
+    if tokens
+        .iter()
+        .any(|token| token == "websocket_connection_limit_reached")
+    {
+        return ProviderErrorClassification::WebSocketConnectionLimit;
+    }
+    if tokens
+        .iter()
+        .any(|token| is_quota_exhaustion_token(token.as_str()))
+    {
+        return ProviderErrorClassification::AccountQuotaExhausted;
+    }
+
+    ProviderErrorClassification::Unknown
+}
+
+fn push_prefix_field_values(prefix: &str, marker: &str, tokens: &mut Vec<String>) {
+    let mut remaining = prefix;
+    while let Some(marker_index) = remaining.find(marker) {
+        let after_marker = &remaining[marker_index + marker.len()..];
+        let after_whitespace = after_marker.trim_start();
+        let Some(after_quote) = after_whitespace.strip_prefix('"') else {
+            remaining = after_marker;
+            continue;
+        };
+        let Some(end_index) = after_quote.find('"') else {
+            return;
+        };
+        tokens.push(after_quote[..end_index].to_owned());
+        remaining = &after_quote[end_index + 1..];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProviderErrorClassification;
@@ -168,6 +230,43 @@ mod tests {
         }"#;
 
         let classification = classify_provider_error_envelope(model_message);
+
+        assert_eq!(classification, ProviderErrorClassification::Unknown);
+    }
+
+    #[test]
+    fn oversized_provider_error_like_payload_is_classified_from_explicit_fields() {
+        let padding = "x".repeat(128 * 1024);
+        let envelope = format!(
+            r#"{{
+                "type":"error",
+                "error":{{
+                    "type":"usage_limit_reached",
+                    "code":"usage_limit_reached",
+                    "message":"{padding}"
+                }}
+            }}"#
+        );
+
+        let classification = classify_provider_error_envelope(envelope.as_bytes());
+
+        assert_eq!(
+            classification,
+            ProviderErrorClassification::AccountQuotaExhausted
+        );
+    }
+
+    #[test]
+    fn oversized_model_text_with_quota_words_is_not_classified() {
+        let padding = "x".repeat(128 * 1024);
+        let model_message = format!(
+            r#"{{
+                "type":"response.output_text.delta",
+                "delta":"usage_limit_reached {padding}"
+            }}"#
+        );
+
+        let classification = classify_provider_error_envelope(model_message.as_bytes());
 
         assert_eq!(classification, ProviderErrorClassification::Unknown);
     }

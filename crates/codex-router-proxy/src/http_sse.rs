@@ -52,6 +52,28 @@ use crate::routes::RouteKind;
 use crate::routes::classify_route;
 use crate::upstream::UpstreamRequestBuilder;
 
+const REQUEST_LOCAL_CREDENTIAL_ATTEMPT_LIMIT: usize = 16;
+
+fn credential_failure_or_selection_error(
+    error: HttpProxyError,
+    attempted_accounts: &[AccountId],
+) -> HttpProxyError {
+    if !attempted_accounts.is_empty()
+        && matches!(
+            error,
+            HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+            }
+        )
+    {
+        return HttpProxyError::ProviderCredential {
+            reason: CredentialResolverError::RefreshUnavailable,
+        };
+    }
+
+    error
+}
+
 /// Reports local audit append failures without exposing request or token material.
 pub trait AuditFailureReporter {
     /// Reports one redacted audit failure diagnostic.
@@ -100,6 +122,7 @@ pub struct HttpProxyRequest {
     websocket_upgrade: bool,
     headers: Vec<Header>,
     body: Vec<u8>,
+    excluded_accounts: Vec<AccountId>,
 }
 
 impl HttpProxyRequest {
@@ -112,6 +135,7 @@ impl HttpProxyRequest {
             websocket_upgrade: false,
             headers: Vec::new(),
             body: Vec::new(),
+            excluded_accounts: Vec::new(),
         }
     }
 
@@ -133,6 +157,19 @@ impl HttpProxyRequest {
     #[must_use]
     pub fn with_body(mut self, body: Vec<u8>) -> Self {
         self.body = body;
+        self
+    }
+
+    /// Excludes one account from request-local retry selection.
+    #[must_use]
+    pub fn with_excluded_account(mut self, account_id: AccountId) -> Self {
+        if !self
+            .excluded_accounts
+            .iter()
+            .any(|excluded_account_id| excluded_account_id == &account_id)
+        {
+            self.excluded_accounts.push(account_id);
+        }
         self
     }
 
@@ -158,6 +195,12 @@ impl HttpProxyRequest {
     #[must_use]
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// Returns accounts excluded by request-local retry state.
+    #[must_use]
+    pub fn excluded_accounts(&self) -> &[AccountId] {
+        &self.excluded_accounts
     }
 
     /// Returns first header value by normalized name.
@@ -877,46 +920,82 @@ where
         let route_kind = request_route_kind(&request)?;
         let route_band = route_kind.route_band();
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
-        let selected = self
-            .selector
-            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
-            .inspect_err(|_error| {
-                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
-            })?;
-        let account_hash = redacted_account_hash(selected.account_id());
-        let resolved = self
-            .credential_resolver
-            .resolve_provider_credentials(selected.account_id())
-            .map_err(|reason| {
-                self.emit_audit_event(http_credential_rejection_audit_event(
+        let mut selection_request = request;
+        let mut attempted_accounts = Vec::new();
+        loop {
+            let selected = match self.selector.select_upstream_account(
+                &selection_request,
+                token_generation,
+                affinity_secret.as_ref(),
+            ) {
+                Ok(selected) => selected,
+                Err(error) => {
+                    self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
+                    return Err(credential_failure_or_selection_error(
+                        error,
+                        &attempted_accounts,
+                    ));
+                }
+            };
+            if attempted_accounts
+                .iter()
+                .any(|account_id| account_id == selected.account_id())
+            {
+                return Err(HttpProxyError::ProviderCredential {
+                    reason: CredentialResolverError::RefreshUnavailable,
+                });
+            }
+            let account_hash = redacted_account_hash(selected.account_id());
+            let resolved = match self
+                .credential_resolver
+                .resolve_provider_credentials(selected.account_id())
+            {
+                Ok(resolved) => resolved,
+                Err(reason) => {
+                    self.emit_audit_event(http_credential_rejection_audit_event(
+                        audit_route_kind,
+                        account_hash.clone(),
+                    ));
+                    if selected.selection_reason() == "previous_response_affinity"
+                        || attempted_accounts.len() + 1 >= REQUEST_LOCAL_CREDENTIAL_ATTEMPT_LIMIT
+                    {
+                        return Err(HttpProxyError::ProviderCredential { reason });
+                    }
+                    tracing::warn!(
+                        account.hash = account_hash.as_str(),
+                        route.kind = ?audit_route_kind,
+                        "codex_router.http_streaming_credential_attempt_failed_retrying_next_account"
+                    );
+                    attempted_accounts.push(selected.account_id().clone());
+                    selection_request =
+                        selection_request.with_excluded_account(selected.account_id().clone());
+                    continue;
+                }
+            };
+            let upstream_request = self.proxy.build_upstream_request(
+                selection_request,
+                resolved.access_token().clone(),
+                resolved.chatgpt_account_id(),
+            )?;
+            let completion = StreamingHttpProxyCompletion {
+                affinity_secret,
+                account_id: selected.account_id().clone(),
+                route_band,
+                credential_generation: resolved.credential_generation(),
+                allowed_audit_event: allowed_audit_event(
+                    TransportKind::Http,
                     audit_route_kind,
-                    account_hash.clone(),
-                ));
-                HttpProxyError::ProviderCredential { reason }
-            })?;
-        let upstream_request = self.proxy.build_upstream_request(
-            request,
-            resolved.access_token().clone(),
-            resolved.chatgpt_account_id(),
-        )?;
-        let completion = StreamingHttpProxyCompletion {
-            affinity_secret,
-            account_id: selected.account_id().clone(),
-            route_band,
-            credential_generation: resolved.credential_generation(),
-            allowed_audit_event: allowed_audit_event(
-                TransportKind::Http,
-                audit_route_kind,
-                account_hash,
-            ),
-            active_reservation_guard: selected.active_reservation_guard().cloned(),
-            provider_error_observer: self.provider_error_observer.clone(),
-        };
+                    account_hash,
+                ),
+                active_reservation_guard: selected.active_reservation_guard().cloned(),
+                provider_error_observer: self.provider_error_observer.clone(),
+            };
 
-        Ok(PreparedStreamingHttpProxyRequest {
-            upstream_request,
-            completion,
-        })
+            return Ok(PreparedStreamingHttpProxyRequest {
+                upstream_request,
+                completion,
+            });
+        }
     }
 }
 
@@ -964,48 +1043,87 @@ where
         let route_kind = request_route_kind(&request)?;
         let route_band = route_kind.route_band();
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
-        let selected = self
-            .selector
-            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
-            .await
-            .inspect_err(|_error| {
-                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
-            })?;
-        let account_hash = redacted_account_hash(selected.account_id());
-        let resolved = self
-            .credential_resolver
-            .resolve_provider_credentials(selected.account_id())
-            .await
-            .map_err(|reason| {
-                self.emit_audit_event(http_credential_rejection_audit_event(
+        let mut selection_request = request;
+        let mut attempted_accounts = Vec::new();
+        loop {
+            let selected = match self
+                .selector
+                .select_upstream_account(
+                    &selection_request,
+                    token_generation,
+                    affinity_secret.as_ref(),
+                )
+                .await
+            {
+                Ok(selected) => selected,
+                Err(error) => {
+                    self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
+                    return Err(credential_failure_or_selection_error(
+                        error,
+                        &attempted_accounts,
+                    ));
+                }
+            };
+            if attempted_accounts
+                .iter()
+                .any(|account_id| account_id == selected.account_id())
+            {
+                return Err(HttpProxyError::ProviderCredential {
+                    reason: CredentialResolverError::RefreshUnavailable,
+                });
+            }
+            let account_hash = redacted_account_hash(selected.account_id());
+            let resolved = match self
+                .credential_resolver
+                .resolve_provider_credentials(selected.account_id())
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(reason) => {
+                    self.emit_audit_event(http_credential_rejection_audit_event(
+                        audit_route_kind,
+                        account_hash.clone(),
+                    ));
+                    if selected.selection_reason() == "previous_response_affinity"
+                        || attempted_accounts.len() + 1 >= REQUEST_LOCAL_CREDENTIAL_ATTEMPT_LIMIT
+                    {
+                        return Err(HttpProxyError::ProviderCredential { reason });
+                    }
+                    tracing::warn!(
+                        account.hash = account_hash.as_str(),
+                        route.kind = ?audit_route_kind,
+                        "codex_router.async_http_streaming_credential_attempt_failed_retrying_next_account"
+                    );
+                    attempted_accounts.push(selected.account_id().clone());
+                    selection_request =
+                        selection_request.with_excluded_account(selected.account_id().clone());
+                    continue;
+                }
+            };
+            let upstream_request = self.proxy.build_upstream_request(
+                selection_request,
+                resolved.access_token().clone(),
+                resolved.chatgpt_account_id(),
+            )?;
+            let completion = StreamingHttpProxyCompletion {
+                affinity_secret,
+                account_id: selected.account_id().clone(),
+                route_band,
+                credential_generation: resolved.credential_generation(),
+                allowed_audit_event: allowed_audit_event(
+                    TransportKind::Http,
                     audit_route_kind,
-                    account_hash.clone(),
-                ));
-                HttpProxyError::ProviderCredential { reason }
-            })?;
-        let upstream_request = self.proxy.build_upstream_request(
-            request,
-            resolved.access_token().clone(),
-            resolved.chatgpt_account_id(),
-        )?;
-        let completion = StreamingHttpProxyCompletion {
-            affinity_secret,
-            account_id: selected.account_id().clone(),
-            route_band,
-            credential_generation: resolved.credential_generation(),
-            allowed_audit_event: allowed_audit_event(
-                TransportKind::Http,
-                audit_route_kind,
-                account_hash,
-            ),
-            active_reservation_guard: selected.active_reservation_guard().cloned(),
-            provider_error_observer: self.provider_error_observer.clone(),
-        };
+                    account_hash,
+                ),
+                active_reservation_guard: selected.active_reservation_guard().cloned(),
+                provider_error_observer: self.provider_error_observer.clone(),
+            };
 
-        Ok(PreparedStreamingHttpProxyRequest {
-            upstream_request,
-            completion,
-        })
+            return Ok(PreparedStreamingHttpProxyRequest {
+                upstream_request,
+                completion,
+            });
+        }
     }
 
     /// Prepares one sanitized upstream HTTP/SSE request with a Hyper-owned body
@@ -1066,42 +1184,78 @@ where
             }
         };
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
-        let selected = self
-            .selector
-            .select_upstream_account(&request, token_generation, affinity_secret.as_ref())
-            .inspect_err(|_error| {
-                self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
-            })?;
-        let account_hash = redacted_account_hash(selected.account_id());
-        let resolved = self
-            .credential_resolver
-            .resolve_provider_credentials(selected.account_id())
-            .map_err(|reason| {
-                self.emit_audit_event(http_credential_rejection_audit_event(
-                    audit_route_kind,
-                    account_hash.clone(),
-                ));
-                HttpProxyError::ProviderCredential { reason }
-            })?;
+        let mut selection_request = request;
+        let mut attempted_accounts = Vec::new();
+        loop {
+            let selected = match self.selector.select_upstream_account(
+                &selection_request,
+                token_generation,
+                affinity_secret.as_ref(),
+            ) {
+                Ok(selected) => selected,
+                Err(error) => {
+                    self.emit_audit_event(http_selection_rejection_audit_event(audit_route_kind));
+                    return Err(credential_failure_or_selection_error(
+                        error,
+                        &attempted_accounts,
+                    ));
+                }
+            };
+            if attempted_accounts
+                .iter()
+                .any(|account_id| account_id == selected.account_id())
+            {
+                return Err(HttpProxyError::ProviderCredential {
+                    reason: CredentialResolverError::RefreshUnavailable,
+                });
+            }
+            let account_hash = redacted_account_hash(selected.account_id());
+            let resolved = match self
+                .credential_resolver
+                .resolve_provider_credentials(selected.account_id())
+            {
+                Ok(resolved) => resolved,
+                Err(reason) => {
+                    self.emit_audit_event(http_credential_rejection_audit_event(
+                        audit_route_kind,
+                        account_hash.clone(),
+                    ));
+                    if selected.selection_reason() == "previous_response_affinity"
+                        || attempted_accounts.len() + 1 >= REQUEST_LOCAL_CREDENTIAL_ATTEMPT_LIMIT
+                    {
+                        return Err(HttpProxyError::ProviderCredential { reason });
+                    }
+                    tracing::warn!(
+                        account.hash = account_hash.as_str(),
+                        route.kind = ?audit_route_kind,
+                        "codex_router.http_credential_attempt_failed_retrying_next_account"
+                    );
+                    attempted_accounts.push(selected.account_id().clone());
+                    selection_request =
+                        selection_request.with_excluded_account(selected.account_id().clone());
+                    continue;
+                }
+            };
 
-        let response = self.proxy.handle(
-            request,
-            resolved.access_token().clone(),
-            resolved.chatgpt_account_id(),
-        )?;
-        self.record_buffered_response_owner(
-            &response,
-            affinity_secret.as_ref(),
-            selected.account_id(),
-            resolved.credential_generation(),
-        )?;
-        self.emit_audit_event(allowed_audit_event(
-            TransportKind::Http,
-            audit_route_kind,
-            account_hash,
-        ));
+            let response = self.proxy.handle(
+                selection_request,
+                resolved.access_token().clone(),
+                resolved.chatgpt_account_id(),
+            )?;
+            self.record_buffered_response_owner(
+                &response,
+                affinity_secret.as_ref(),
+                selected.account_id(),
+                resolved.credential_generation(),
+            )?;
+            self.emit_audit_event(allowed_audit_event(
+                TransportKind::Http,
+                audit_route_kind,
+                account_hash,
+            ));
 
-        Ok(response)
+            return Ok(response);
+        }
     }
 }
 

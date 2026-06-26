@@ -1079,6 +1079,105 @@ mod tests {
     }
 
     #[test]
+    fn http_proxy_routes_around_request_local_credential_failure_before_upstream_egress() {
+        let first_account_id = account_id("acct_first");
+        let second_account_id = account_id("acct_second");
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"ok".to_vec(),
+        ));
+        let selector = QuotaAwareAccountSelector::new(vec![
+            QuotaAwareAccountState::new(
+                first_account_id.clone(),
+                90,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                second_account_id,
+                80,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ]);
+        let resolver =
+            FailFirstProviderCredentialResolver::new(first_account_id, "second-account-token");
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+
+        let response = must_ok(
+            service.handle_request(
+                HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+            ),
+        );
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            resolver.take_recorded(),
+            vec!["acct_first".to_owned(), "acct_second".to_owned()]
+        );
+        let recorded = upstream.take_recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].headers().values("authorization"),
+            vec!["Bearer second-account-token"]
+        );
+    }
+
+    #[test]
+    fn http_proxy_reports_credential_failure_when_all_request_local_credentials_fail() {
+        let first_account_id = account_id("acct_first");
+        let second_account_id = account_id("acct_second");
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"should-not-send".to_vec(),
+        ));
+        let selector = QuotaAwareAccountSelector::new(vec![
+            QuotaAwareAccountState::new(
+                first_account_id,
+                90,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                second_account_id,
+                80,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ]);
+        let resolver =
+            RejectingProviderCredentialResolver::new(CredentialResolverError::RefreshUnavailable);
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+
+        let error = match service.handle_request(
+            HttpProxyRequest::new(Method::Post, "/v1/responses")
+                .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                .with_body(br#"{"model":"gpt-5"}"#.to_vec()),
+        ) {
+            Ok(response) => panic!("all credential failures should fail closed: {response:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            HttpProxyError::ProviderCredential {
+                reason: CredentialResolverError::RefreshUnavailable
+            }
+        );
+        assert_eq!(
+            resolver.take_recorded(),
+            vec!["acct_first".to_owned(), "acct_second".to_owned()]
+        );
+        assert!(upstream.take_recorded().is_empty());
+    }
+
+    #[test]
     fn authenticated_http_proxy_audits_selection_rejection_after_local_auth() {
         let temp_dir = ProxyTestTempDir::new("http_selection_rejection_audit");
         let audit_path = temp_dir.path().join("audit").join("events.jsonl");
@@ -7601,6 +7700,58 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ExclusionAwareAsyncSelector {
+        accounts: Arc<Vec<AccountId>>,
+        recorded: Arc<Mutex<Vec<(String, TokenGeneration)>>>,
+    }
+
+    impl ExclusionAwareAsyncSelector {
+        fn new(accounts: Vec<AccountId>) -> Self {
+            Self {
+                accounts: Arc::new(accounts),
+                recorded: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn take_recorded(&self) -> Vec<(String, TokenGeneration)> {
+            lock_test_mutex(&self.recorded, "exclusion-aware async selector records")
+                .drain(..)
+                .collect()
+        }
+    }
+
+    impl AsyncAccountDecisionSelector for ExclusionAwareAsyncSelector {
+        fn select_upstream_account<'a>(
+            &'a self,
+            request: &'a HttpProxyRequest,
+            token_generation: TokenGeneration,
+            _affinity_secret: Option<&'a RouterAffinityHashSecret>,
+        ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
+            Box::pin(async move {
+                let selected_account_id = self
+                    .accounts
+                    .iter()
+                    .find(|account_id| {
+                        !request
+                            .excluded_accounts()
+                            .iter()
+                            .any(|excluded_account_id| excluded_account_id == *account_id)
+                    })
+                    .cloned()
+                    .ok_or(HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+                    })?;
+                lock_test_mutex(&self.recorded, "exclusion-aware async selector records")
+                    .push((selected_account_id.as_str().to_owned(), token_generation));
+                Ok(SelectedAccountDecision::new(
+                    selected_account_id,
+                    "test_selection",
+                ))
+            })
+        }
+    }
+
     struct RejectingSelector {
         reason: QuotaAwareAccountSelectorError,
         recorded: RefCell<Vec<(String, TokenGeneration)>>,
@@ -7730,6 +7881,90 @@ mod tests {
                 .borrow_mut()
                 .push(account_id.as_str().to_owned());
             Err(self.reason.clone())
+        }
+    }
+
+    struct FailFirstProviderCredentialResolver {
+        failing_account_id: AccountId,
+        access_token: SecretString,
+        recorded: RefCell<Vec<String>>,
+    }
+
+    impl FailFirstProviderCredentialResolver {
+        fn new(failing_account_id: AccountId, access_token: &str) -> Self {
+            Self {
+                failing_account_id,
+                access_token: SecretString::new(access_token),
+                recorded: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn take_recorded(&self) -> Vec<String> {
+            self.recorded.take()
+        }
+    }
+
+    impl ProviderCredentialResolver for FailFirstProviderCredentialResolver {
+        fn resolve_provider_credentials(
+            &self,
+            account_id: &codex_router_core::ids::AccountId,
+        ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+            self.recorded
+                .borrow_mut()
+                .push(account_id.as_str().to_owned());
+            if account_id == &self.failing_account_id {
+                return Err(CredentialResolverError::RefreshUnavailable);
+            }
+
+            Ok(ResolvedProviderCredential::new(
+                account_id.clone(),
+                self.access_token.clone(),
+                1,
+            ))
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailFirstAsyncProviderCredentialResolver {
+        failing_account_id: AccountId,
+        access_token: SecretString,
+        recorded: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FailFirstAsyncProviderCredentialResolver {
+        fn new(failing_account_id: AccountId, access_token: &str) -> Self {
+            Self {
+                failing_account_id,
+                access_token: SecretString::new(access_token),
+                recorded: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn take_recorded(&self) -> Vec<String> {
+            lock_test_mutex(&self.recorded, "async fail-first credential records")
+                .drain(..)
+                .collect()
+        }
+    }
+
+    impl AsyncProviderCredentialResolver for FailFirstAsyncProviderCredentialResolver {
+        fn resolve_provider_credentials<'a>(
+            &'a self,
+            account_id: &'a codex_router_core::ids::AccountId,
+        ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
+            Box::pin(async move {
+                lock_test_mutex(&self.recorded, "async fail-first credential records")
+                    .push(account_id.as_str().to_owned());
+                if account_id == &self.failing_account_id {
+                    return Err(CredentialResolverError::RefreshUnavailable);
+                }
+
+                Ok(ResolvedProviderCredential::new(
+                    account_id.clone(),
+                    self.access_token.clone(),
+                    1,
+                ))
+            })
         }
     }
 
@@ -7922,6 +8157,92 @@ mod tests {
         assert_eq!(headers.value("x-codex-router-token"), None);
     }
 
+    #[test]
+    fn authenticated_websocket_router_routes_around_request_local_credential_failure() {
+        let first_account_id = account_id("acct_first");
+        let second_account_id = account_id("acct_second");
+        let protocol_router = WebSocketProtocolRouter::new();
+        let selector = QuotaAwareAccountSelector::new(vec![
+            QuotaAwareAccountState::new(
+                first_account_id.clone(),
+                90,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                second_account_id,
+                80,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ]);
+        let resolver =
+            FailFirstProviderCredentialResolver::new(first_account_id, "second-websocket-token");
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+        let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
+
+        let decision = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+            frame,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => panic!("websocket should route around failed credentials: {error:?}"),
+        };
+
+        assert_eq!(
+            resolver.take_recorded(),
+            vec!["acct_first".to_owned(), "acct_second".to_owned()]
+        );
+        let WebSocketFirstFrameDecision::OpenUpstream { headers, .. } = decision;
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer second-websocket-token"]
+        );
+    }
+
+    #[test]
+    fn authenticated_websocket_router_reports_credential_failure_when_all_credentials_fail() {
+        let first_account_id = account_id("acct_first");
+        let second_account_id = account_id("acct_second");
+        let protocol_router = WebSocketProtocolRouter::new();
+        let selector = QuotaAwareAccountSelector::new(vec![
+            QuotaAwareAccountState::new(
+                first_account_id,
+                90,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                second_account_id,
+                80,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ]);
+        let resolver =
+            RejectingProviderCredentialResolver::new(CredentialResolverError::RefreshUnavailable);
+        let auth_gate = local_auth_gate();
+        let router =
+            AuthenticatedWebSocketRouter::new(&auth_gate, &selector, &resolver, &protocol_router)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+        let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
+
+        let error = match router.route_first_frame(
+            WebSocketHandshakeRequest::new()
+                .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+            frame,
+        ) {
+            Ok(decision) => panic!("all credential failures should fail closed: {decision:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, WebSocketCloseReason::ProviderCredential);
+        assert_eq!(
+            resolver.take_recorded(),
+            vec!["acct_first".to_owned(), "acct_second".to_owned()]
+        );
+    }
+
     #[tokio::test]
     async fn async_authenticated_websocket_router_selects_after_local_auth_and_first_frame() {
         let protocol_router = WebSocketProtocolRouter::new();
@@ -7968,6 +8289,61 @@ mod tests {
             vec!["Bearer selected-upstream-token"],
         );
         assert_eq!(headers.value("x-codex-router-token"), None);
+    }
+
+    #[tokio::test]
+    async fn async_authenticated_websocket_router_routes_around_request_local_credential_failure() {
+        let first_account_id = account_id("acct_first");
+        let second_account_id = account_id("acct_second");
+        let protocol_router = WebSocketProtocolRouter::new();
+        let selector = ExclusionAwareAsyncSelector::new(vec![
+            first_account_id.clone(),
+            second_account_id.clone(),
+        ]);
+        let resolver = FailFirstAsyncProviderCredentialResolver::new(
+            first_account_id.clone(),
+            "second-async-websocket-token",
+        );
+        let auth_gate = local_auth_gate();
+        let router = AsyncAuthenticatedWebSocketRouter::new(
+            &auth_gate,
+            &selector,
+            &resolver,
+            &protocol_router,
+        )
+        .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+        let frame = WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec());
+
+        let decision = match router
+            .route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                frame,
+            )
+            .await
+        {
+            Ok(decision) => decision,
+            Err(error) => {
+                panic!("async websocket should route around failed credentials: {error:?}")
+            }
+        };
+
+        assert_eq!(
+            selector.take_recorded(),
+            vec![
+                ("acct_first".to_owned(), TokenGeneration::new(1)),
+                ("acct_second".to_owned(), TokenGeneration::new(1)),
+            ]
+        );
+        assert_eq!(
+            resolver.take_recorded(),
+            vec!["acct_first".to_owned(), "acct_second".to_owned()]
+        );
+        let WebSocketFirstFrameDecision::OpenUpstream { headers, .. } = decision;
+        assert_eq!(
+            headers.values("authorization"),
+            vec!["Bearer second-async-websocket-token"]
+        );
     }
 
     #[test]
@@ -8390,7 +8766,10 @@ mod tests {
         );
         assert_eq!(
             selector.take_recorded(),
-            vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
+            vec![
+                ("/v1/responses".to_owned(), TokenGeneration::new(1)),
+                ("/v1/responses".to_owned(), TokenGeneration::new(1)),
+            ]
         );
     }
 

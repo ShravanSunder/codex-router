@@ -1794,7 +1794,10 @@ fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
 fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     match error {
         HttpProxyError::LocalAuth { .. } => empty_response(StatusCode::UNAUTHORIZED),
-        HttpProxyError::Selection { .. } => all_accounts_exhausted_response(),
+        HttpProxyError::Selection {
+            reason: crate::account_selection::QuotaAwareAccountSelectorError::NoEligibleAccounts,
+        } => all_accounts_exhausted_response(),
+        HttpProxyError::Selection { .. } => quota_state_unavailable_response(),
         HttpProxyError::ProviderCredential { .. } | HttpProxyError::Upstream { .. } => {
             empty_response(StatusCode::BAD_GATEWAY)
         }
@@ -1814,6 +1817,17 @@ fn all_accounts_exhausted_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBod
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(box_body_from_bytes(
             crate::websocket::ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL
+                .as_bytes()
+                .to_vec(),
+        ))
+        .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
+}
+
+fn quota_state_unavailable_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    HttpResponse::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(box_body_from_bytes(
+            crate::websocket::ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL
                 .as_bytes()
                 .to_vec(),
         ))
@@ -1964,6 +1978,26 @@ mod tests {
                 Ok(())
             })
         }
+    }
+
+    #[tokio::test]
+    async fn state_unavailable_selection_response_is_not_all_accounts_exhausted() {
+        let response = http_error_response(HttpProxyError::Selection {
+            reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
+        });
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap_or_else(|error| panic!("router error body should collect: {error}"))
+            .to_bytes();
+        let rendered = String::from_utf8(body.to_vec())
+            .unwrap_or_else(|error| panic!("router error body should be utf-8: {error}"));
+
+        assert!(rendered.contains("codex_router_quota_state_unavailable"));
+        assert!(!rendered.contains("codex_router_all_accounts_exhausted"));
     }
 
     impl RecordingAsyncAffinityOwnerRecorder {

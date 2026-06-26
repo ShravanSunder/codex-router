@@ -511,11 +511,12 @@ impl QuotaAwareAccountSelector {
 impl AccountDecisionSelector for QuotaAwareAccountSelector {
     fn select_upstream_account(
         &self,
-        _request: &HttpProxyRequest,
+        request: &HttpProxyRequest,
         _token_generation: TokenGeneration,
         _affinity_secret: Option<&RouterAffinityHashSecret>,
     ) -> Result<SelectedAccountDecision, HttpProxyError> {
-        select_from_account_states(&self.accounts, &self.weighted_selector)
+        let selectable_accounts = quota_states_excluding_attempted(&self.accounts, request);
+        select_from_account_states(&selectable_accounts, &self.weighted_selector)
     }
 }
 
@@ -706,6 +707,7 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
+        let selector_inputs = selector_inputs_excluding_attempted(selector_inputs, request);
         let selector_accounts = selector_inputs
             .iter()
             .map(account_input_from_selector_input)
@@ -763,6 +765,15 @@ where
                     });
                 }
             };
+            if request
+                .excluded_accounts()
+                .iter()
+                .any(|account_id| account_id == owner.account_id())
+            {
+                return Err(HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+                });
+            }
             return select_affinity_owner(
                 route_band,
                 owner.account_id(),
@@ -806,6 +817,7 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
+            let selector_inputs = selector_inputs_excluding_attempted(selector_inputs, request);
             let active_reservation_book = active_reservation_book_for_route_band(
                 &self.active_reservations,
                 route_band.as_str(),
@@ -877,6 +889,15 @@ where
                     })?;
 
             if let Some(owner_account_id) = affinity_owner_account_id {
+                if request
+                    .excluded_accounts()
+                    .iter()
+                    .any(|account_id| account_id == &owner_account_id)
+                {
+                    return Err(HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+                    });
+                }
                 let selected = select_affinity_owner(
                     route_band,
                     &owner_account_id,
@@ -971,6 +992,45 @@ fn select_from_account_states(
                 reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
             })?;
     select_from_account_states_with_selector(accounts, &mut weighted_selector)
+}
+
+fn quota_states_excluding_attempted(
+    accounts: &[QuotaAwareAccountState],
+    request: &HttpProxyRequest,
+) -> Vec<QuotaAwareAccountState> {
+    if request.excluded_accounts().is_empty() {
+        return accounts.to_vec();
+    }
+
+    accounts
+        .iter()
+        .filter(|account| {
+            !request
+                .excluded_accounts()
+                .iter()
+                .any(|excluded_account_id| excluded_account_id == &account.account_id)
+        })
+        .cloned()
+        .collect()
+}
+
+fn selector_inputs_excluding_attempted(
+    selector_inputs: Vec<SelectorQuotaInput>,
+    request: &HttpProxyRequest,
+) -> Vec<SelectorQuotaInput> {
+    if request.excluded_accounts().is_empty() {
+        return selector_inputs;
+    }
+
+    selector_inputs
+        .into_iter()
+        .filter(|input| {
+            !request
+                .excluded_accounts()
+                .iter()
+                .any(|excluded_account_id| excluded_account_id == input.account_id())
+        })
+        .collect()
 }
 
 fn select_from_account_states_with_selector(
@@ -1765,6 +1825,34 @@ mod tests {
             assert_eq!(selected.account_id(), &strong_account_id);
             assert_ne!(selected.account_id(), &weak_account_id);
         }
+    }
+
+    #[test]
+    fn request_local_attempt_ledger_excludes_previously_attempted_account() {
+        let first_account_id = account_id("acct_first");
+        let second_account_id = account_id("acct_second");
+        let selector = QuotaAwareAccountSelector::new(vec![
+            QuotaAwareAccountState::new(
+                first_account_id.clone(),
+                90,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                second_account_id.clone(),
+                80,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ]);
+        let request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses")
+                .with_excluded_account(first_account_id.clone());
+
+        let selected = selector
+            .select_upstream_account(&request, TokenGeneration::new(1), None)
+            .unwrap_or_else(|error| panic!("selection should choose unattempted account: {error}"));
+
+        assert_eq!(selected.account_id(), &second_account_id);
+        assert_ne!(selected.account_id(), &first_account_id);
     }
 
     #[test]
