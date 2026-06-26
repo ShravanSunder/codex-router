@@ -54,16 +54,14 @@ use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
-use codex_router_state::repositories::AccountStateRepository;
-use codex_router_state::repositories::QuotaSnapshotRepository;
-use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
-use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
 use thiserror::Error;
 
 use crate::ArgumentParser;
@@ -545,14 +543,13 @@ where
     R: ProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
-    let state = SqliteStateStore::open(state_db)?;
     let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(QuotaCommandError::Runtime)?;
     let quota_history_state =
         quota_history_runtime.block_on(AsyncSqliteStateStore::open(state_db))?;
-    let accounts = AccountStateRepository::list_accounts(&state)?;
+    let accounts = quota_history_runtime.block_on(quota_history_state.list_accounts())?;
     let mut refreshed_count = 0_u64;
     let mut failed_count = 0_u64;
     for account in accounts
@@ -566,12 +563,13 @@ where
             Err(error) => {
                 failed_count = failed_count.saturating_add(DEFAULT_ROUTE_BANDS.len() as u64);
                 for route_band in DEFAULT_ROUTE_BANDS {
-                    SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
-                        &state,
-                        account.account_id(),
-                        route_band,
-                        observed_unix_seconds,
-                        QuotaRefreshErrorClass::AuthError,
+                    quota_history_runtime.block_on(
+                        quota_history_state.record_refresh_failure_preserving_selector_windows(
+                            account.account_id(),
+                            route_band,
+                            observed_unix_seconds,
+                            QuotaRefreshErrorClass::AuthError,
+                        ),
                     )?;
                     append_failure_quota_history_observations(
                         &quota_history_runtime,
@@ -582,6 +580,12 @@ where
                         QuotaRefreshErrorClass::AuthError,
                     )?;
                 }
+                tracing::warn!(
+                    account.hash = telemetry_hash(account.account_id().as_str()),
+                    route_band = "*",
+                    error.class = QuotaRefreshErrorClass::AuthError.as_str(),
+                    "codex_router.quota_refresh_failed"
+                );
                 writeln!(
                     stdout,
                     "refresh failed: account={} route_band=* error={error}",
@@ -603,12 +607,14 @@ where
                 Ok(response) => response,
                 Err(error) => {
                     failed_count = failed_count.saturating_add(1);
-                    SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
-                        &state,
-                        account.account_id(),
-                        route_band,
-                        observed_unix_seconds,
-                        quota_refresh_error_class(&error),
+                    let error_class = quota_refresh_error_class(&error);
+                    quota_history_runtime.block_on(
+                        quota_history_state.record_refresh_failure_preserving_selector_windows(
+                            account.account_id(),
+                            route_band,
+                            observed_unix_seconds,
+                            error_class,
+                        ),
                     )?;
                     append_failure_quota_history_observations(
                         &quota_history_runtime,
@@ -616,8 +622,14 @@ where
                         account,
                         route_band,
                         observed_unix_seconds,
-                        quota_refresh_error_class(&error),
+                        error_class,
                     )?;
+                    tracing::warn!(
+                        account.hash = telemetry_hash(account.account_id().as_str()),
+                        route_band,
+                        error.class = error_class.as_str(),
+                        "codex_router.quota_refresh_failed"
+                    );
                     writeln!(
                         stdout,
                         "refresh failed: account={} route_band={} error={error}",
@@ -632,12 +644,13 @@ where
                 Some(effective_window) => effective_window,
                 None => {
                     failed_count = failed_count.saturating_add(1);
-                    SelectorQuotaRepository::record_refresh_failure_preserving_selector_windows(
-                        &state,
-                        account.account_id(),
-                        route_band,
-                        observed_unix_seconds,
-                        QuotaRefreshErrorClass::ParseError,
+                    quota_history_runtime.block_on(
+                        quota_history_state.record_refresh_failure_preserving_selector_windows(
+                            account.account_id(),
+                            route_band,
+                            observed_unix_seconds,
+                            QuotaRefreshErrorClass::ParseError,
+                        ),
                     )?;
                     append_failure_quota_history_observations(
                         &quota_history_runtime,
@@ -647,6 +660,12 @@ where
                         observed_unix_seconds,
                         QuotaRefreshErrorClass::ParseError,
                     )?;
+                    tracing::warn!(
+                        account.hash = telemetry_hash(account.account_id().as_str()),
+                        route_band,
+                        error.class = QuotaRefreshErrorClass::ParseError.as_str(),
+                        "codex_router.quota_refresh_failed"
+                    );
                     writeln!(
                         stdout,
                         "refresh failed: account={} route_band={} error=missing provider quota windows",
@@ -674,7 +693,7 @@ where
             } else {
                 snapshot
             };
-            QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot)?;
+            quota_history_runtime.block_on(quota_history_state.upsert_quota_snapshot(&snapshot))?;
             let mut selector_windows = Vec::new();
             for window in &response.windows {
                 let status = if window.remaining_headroom == 0 {
@@ -707,14 +726,22 @@ where
                     response.reset_credits_available,
                 )?;
             }
-            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
-                &state,
-                account.account_id(),
-                route_band,
-                &selector_windows,
-                observed_unix_seconds,
-                stale_after_unix_seconds(observed_unix_seconds),
+            quota_history_runtime.block_on(
+                quota_history_state.record_refresh_success_and_replace_selector_windows(
+                    account.account_id(),
+                    route_band,
+                    &selector_windows,
+                    observed_unix_seconds,
+                    stale_after_unix_seconds(observed_unix_seconds),
+                ),
             )?;
+            tracing::info!(
+                account.hash = telemetry_hash(account.account_id().as_str()),
+                route_band,
+                windows = selector_windows.len(),
+                reset_credits.available = response.reset_credits_available,
+                "codex_router.quota_refresh_succeeded"
+            );
             refreshed_count = refreshed_count.saturating_add(1);
         }
     }
@@ -1162,8 +1189,17 @@ fn render_quota_status(
     now_unix_seconds: u64,
     auto_refresh: bool,
 ) -> Result<(), QuotaCommandError> {
+    if format == QuotaStatusFormat::Json && auto_refresh {
+        return render_quota_status_json_with_refresh(
+            stdout,
+            router_root,
+            all_limits,
+            now_unix_seconds,
+        );
+    }
+
     render_quota_status_once(stdout, &router_root, format, all_limits, now_unix_seconds)?;
-    if !auto_refresh || format == QuotaStatusFormat::Json {
+    if !auto_refresh {
         return Ok(());
     }
 
@@ -1193,6 +1229,53 @@ fn render_quota_status(
     }
 }
 
+fn render_quota_status_json_with_refresh(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    all_limits: bool,
+    now_unix_seconds: u64,
+) -> Result<(), QuotaCommandError> {
+    let cached_report = load_quota_status_report(&router_root, all_limits, now_unix_seconds, true)?;
+    let refresh_result = match refresh_quota(
+        &mut Vec::new(),
+        router_root.clone(),
+        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+    ) {
+        Ok(()) => JsonQuotaRefreshResult {
+            route_result: "ok",
+            error: None,
+        },
+        Err(error) => JsonQuotaRefreshResult {
+            route_result: "error",
+            error: Some(error.to_string()),
+        },
+    };
+    let updated_report = if refresh_result.route_result == "ok" {
+        Some(load_quota_status_report(
+            &router_root,
+            all_limits,
+            current_unix_seconds(),
+            true,
+        )?)
+    } else {
+        None
+    };
+    let json_report = JsonQuotaStatusRefreshReport {
+        route_result: "ok",
+        cached: JsonQuotaStatusReport::from_report(&cached_report),
+        refresh: refresh_result,
+        updated: updated_report
+            .as_ref()
+            .map(JsonQuotaStatusReport::from_report),
+    };
+    serde_json::to_writer_pretty(&mut *stdout, &json_report).map_err(|error| {
+        QuotaCommandError::Stdout(std::io::Error::other(format!(
+            "failed to serialize quota status json: {error}"
+        )))
+    })?;
+    writeln!(stdout).map_err(QuotaCommandError::Stdout)
+}
+
 fn render_quota_status_once(
     stdout: &mut impl Write,
     router_root: &Path,
@@ -1200,25 +1283,8 @@ fn render_quota_status_once(
     all_limits: bool,
     now_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
-    let state_db_path = router_root.join("state.sqlite");
-    let state = SqliteStateStore::open(&state_db_path)?;
-    let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(QuotaCommandError::Runtime)?;
-    let quota_history_state =
-        quota_history_runtime.block_on(AsyncSqliteStateStore::open(&state_db_path))?;
-    let accounts = AccountStateRepository::list_accounts(&state)?;
     let unicode_bars = format != QuotaStatusFormat::Plain;
-    let report = quota_status_report(
-        &state,
-        &quota_history_runtime,
-        &quota_history_state,
-        &accounts,
-        all_limits,
-        now_unix_seconds,
-        unicode_bars,
-    )?;
+    let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
     match format {
         QuotaStatusFormat::Table => write_quota_table(stdout, report.rows()),
         QuotaStatusFormat::Plain => write_quota_plain(stdout, report.rows()),
@@ -1226,8 +1292,31 @@ fn render_quota_status_once(
     }
 }
 
+fn load_quota_status_report(
+    router_root: &Path,
+    all_limits: bool,
+    now_unix_seconds: u64,
+    unicode_bars: bool,
+) -> Result<QuotaStatusReport, QuotaCommandError> {
+    let state_db_path = router_root.join("state.sqlite");
+    let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(QuotaCommandError::Runtime)?;
+    let quota_history_state =
+        quota_history_runtime.block_on(AsyncSqliteStateStore::open(&state_db_path))?;
+    let accounts = quota_history_runtime.block_on(quota_history_state.list_accounts())?;
+    quota_status_report(
+        &quota_history_runtime,
+        &quota_history_state,
+        &accounts,
+        all_limits,
+        now_unix_seconds,
+        unicode_bars,
+    )
+}
+
 fn quota_status_report(
-    state: &SqliteStateStore,
     quota_history_runtime: &tokio::runtime::Runtime,
     quota_history_state: &AsyncSqliteStateStore,
     accounts: &[AccountRecord],
@@ -1235,39 +1324,50 @@ fn quota_status_report(
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
-    let selector_inputs = SelectorQuotaRepository::selector_inputs_for_route_band(
-        state,
-        USER_QUOTA_ROUTE_BAND,
-        now_unix_seconds,
+    let selector_inputs = quota_history_runtime.block_on(
+        quota_history_state.selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds),
     )?;
-    let refresh_statuses = SelectorQuotaRepository::quota_refresh_statuses_for_route_band(
-        state,
-        USER_QUOTA_ROUTE_BAND,
+    let refresh_statuses = quota_history_runtime.block_on(
+        quota_history_state.quota_refresh_statuses_for_route_band(USER_QUOTA_ROUTE_BAND),
     )?;
     let refresh_statuses = refresh_statuses
         .into_iter()
         .map(|status| (status.account_id().clone(), status))
         .collect::<HashMap<_, _>>();
-    let active_client_counts =
+    let active_client_counts_result =
         quota_history_runtime.block_on(quota_history_state.active_client_counts_for_route_band(
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
             ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
-        ))?;
-    let active_client_counts = active_client_counts
-        .into_iter()
-        .map(|count| (count.account_id().clone(), count.active_clients()))
-        .collect::<HashMap<_, _>>();
+        ));
+    let active_client_mirror_source = if active_client_counts_result.is_ok() {
+        "sqlx_mirror"
+    } else {
+        "unavailable"
+    };
+    let active_client_counts = active_client_counts_result.as_ref().ok().map(|counts| {
+        counts
+            .iter()
+            .map(|count| {
+                (
+                    count.account_id().clone(),
+                    ActiveClientMirrorLoad {
+                        count: count.active_clients(),
+                        pressure: count.active_pressure(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    });
     let mut status_inputs = Vec::new();
     let mut burn_down_inputs = Vec::new();
     for account in accounts {
         let selector_input = selector_inputs
             .iter()
             .find(|input| input.account_id() == account.account_id());
-        let snapshot = QuotaSnapshotRepository::load_snapshot_for_route_band(
-            state,
-            account.account_id(),
-            USER_QUOTA_ROUTE_BAND,
+        let snapshot = quota_history_runtime.block_on(
+            quota_history_state
+                .load_quota_snapshot_for_route_band(account.account_id(), USER_QUOTA_ROUTE_BAND),
         )?;
         let reset_credits_available = snapshot
             .as_ref()
@@ -1287,9 +1387,24 @@ fn quota_status_report(
             now_unix_seconds,
             &mut display_windows,
         )?;
+        let active_clients =
+            active_client_counts
+                .as_ref()
+                .map_or(ActiveClientMirrorStatus::Unavailable, |counts| {
+                    let load = counts
+                        .get(account.account_id())
+                        .copied()
+                        .unwrap_or(ActiveClientMirrorLoad::EMPTY);
+                    ActiveClientMirrorStatus::MirrorFresh {
+                        count: load.count,
+                        pressure: load.pressure,
+                        max_age_seconds: ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
+                    }
+                });
         burn_down_inputs.push(burn_down_input_from_display_windows(
             account,
             &display_windows,
+            active_clients.pressure_for_selection(),
         ));
         status_inputs.push(QuotaStatusAccountInput {
             account_label: account.label().to_owned(),
@@ -1300,10 +1415,7 @@ fn quota_status_report(
                 refresh_statuses.get(account.account_id()),
                 now_unix_seconds,
             ),
-            active_clients: active_client_counts
-                .get(account.account_id())
-                .copied()
-                .unwrap_or(0),
+            active_clients,
             windows: display_windows,
         });
     }
@@ -1315,6 +1427,17 @@ fn quota_status_report(
     ));
     let selected_pool = assessment.selected_pool();
     let preferred_next_account_id = assessment.preferred_next().cloned();
+    let preferred_next_hash = preferred_next_account_id
+        .as_ref()
+        .map(|account_id| telemetry_hash(account_id.as_str()))
+        .unwrap_or_else(|| "none".to_owned());
+    tracing::info!(
+        route_band = USER_QUOTA_ROUTE_BAND,
+        selected_pool = selected_pool_json(selected_pool),
+        preferred.account_hash = preferred_next_hash.as_str(),
+        active_client.source = active_client_mirror_source,
+        "codex_router.quota_status_selection"
+    );
     let rows = status_inputs
         .iter()
         .filter_map(|input| {
@@ -1402,7 +1525,7 @@ fn write_quota_plain(
             row.pace.replace('\n', " "),
             row.burn.replace('\n', " "),
             row.updated.replace('\n', " "),
-            row.active_clients,
+            row.active_clients.replace('\n', " "),
             row.reset_credits_available,
             row.routing.replace('\n', " "),
             row.next_use,
@@ -1490,7 +1613,7 @@ struct QuotaStatusAccountInput {
     account_id: AccountId,
     reset_credits_available: Option<u32>,
     updated: String,
-    active_clients: u32,
+    active_clients: ActiveClientMirrorStatus,
     windows: Vec<DisplayQuotaWindow>,
 }
 
@@ -1505,7 +1628,8 @@ struct QuotaStatusRow {
     burn: String,
     updated: String,
     active_clients: String,
-    active_clients_value: u32,
+    active_clients_value: Option<u32>,
+    active_clients_source: &'static str,
     reset_credits_available: String,
     reset_credits_available_value: Option<u32>,
     routing: String,
@@ -1552,7 +1676,8 @@ impl QuotaStatusRow {
             burn: format_burn_cell(assessment),
             updated: input.updated.clone(),
             active_clients: format_active_clients(input.active_clients),
-            active_clients_value: input.active_clients,
+            active_clients_value: input.active_clients.count(),
+            active_clients_source: input.active_clients.source(),
             reset_credits_available: format_reset_credits(input.reset_credits_available),
             reset_credits_available_value: input.reset_credits_available,
             routing: format_routing_cell(assessment),
@@ -1674,6 +1799,7 @@ fn quota_run_rate_observation_from_history(
 fn burn_down_input_from_display_windows(
     account: &AccountRecord,
     windows: &[DisplayQuotaWindow],
+    active_pressure: u32,
 ) -> BurnDownAccountInput {
     let facts = windows
         .iter()
@@ -1692,6 +1818,7 @@ fn burn_down_input_from_display_windows(
     BurnDownAccountInput::new(account.account_id().clone(), account.label(), facts)
         .with_account_enabled(account.status() == AccountStatus::Enabled)
         .with_active_credential(account.active_credential_generation().is_some())
+        .with_active_load_pressure(active_pressure)
 }
 
 fn format_window_cell(
@@ -1737,11 +1864,70 @@ fn format_reset_credits(reset_credits_available: Option<u32>) -> String {
     )
 }
 
-fn format_active_clients(active_clients: u32) -> String {
-    if active_clients == 1 {
-        "1 client".to_owned()
-    } else {
-        format!("{active_clients} clients")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveClientMirrorStatus {
+    MirrorFresh {
+        count: u32,
+        pressure: u32,
+        max_age_seconds: u64,
+    },
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActiveClientMirrorLoad {
+    count: u32,
+    pressure: u32,
+}
+
+impl ActiveClientMirrorLoad {
+    const EMPTY: Self = Self {
+        count: 0,
+        pressure: 0,
+    };
+}
+
+impl ActiveClientMirrorStatus {
+    const fn count(self) -> Option<u32> {
+        match self {
+            Self::MirrorFresh { count, .. } => Some(count),
+            Self::Unavailable => None,
+        }
+    }
+
+    const fn pressure_for_selection(self) -> u32 {
+        match self {
+            Self::MirrorFresh { pressure, .. } => pressure,
+            Self::Unavailable => 0,
+        }
+    }
+
+    const fn source(self) -> &'static str {
+        match self {
+            Self::MirrorFresh { .. } => "sqlx_mirror",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+fn format_active_clients(active_clients: ActiveClientMirrorStatus) -> String {
+    match active_clients {
+        ActiveClientMirrorStatus::MirrorFresh {
+            count,
+            pressure: _,
+            max_age_seconds,
+        } => {
+            let count_text = if count == 1 {
+                "1 client".to_owned()
+            } else {
+                format!("{count} clients")
+            };
+            format!(
+                "{count_text}\nmirror <= {}",
+                format_duration(max_age_seconds)
+            )
+        }
+        ActiveClientMirrorStatus::Unavailable => "unknown\nmirror unavailable".to_owned(),
     }
 }
 
@@ -1962,12 +2148,26 @@ fn format_percent(value: u32) -> String {
 }
 
 #[derive(Serialize)]
+struct JsonQuotaStatusRefreshReport {
+    route_result: &'static str,
+    cached: JsonQuotaStatusReport,
+    refresh: JsonQuotaRefreshResult,
+    updated: Option<JsonQuotaStatusReport>,
+}
+
+#[derive(Serialize)]
+struct JsonQuotaRefreshResult {
+    route_result: &'static str,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
 struct JsonQuotaStatusReport {
     route_result: &'static str,
     route_band: String,
     selected_pool: &'static str,
     selected_pool_reason: &'static str,
-    preferred_next_account_id: Option<String>,
+    preferred_next_account_hash: Option<String>,
     weighted_candidates: Vec<JsonWeightedCandidate>,
     accounts: Vec<JsonQuotaStatusAccount>,
 }
@@ -1979,15 +2179,15 @@ impl JsonQuotaStatusReport {
             route_band: report.route_band.clone(),
             selected_pool: selected_pool_json(report.selected_pool),
             selected_pool_reason: selected_pool_reason_json(report.selected_pool),
-            preferred_next_account_id: report
+            preferred_next_account_hash: report
                 .preferred_next_account_id
                 .as_ref()
-                .map(|account_id| account_id.as_str().to_owned()),
+                .map(|account_id| telemetry_hash(account_id.as_str())),
             weighted_candidates: report
                 .weighted_candidates
                 .iter()
                 .map(|(account_id, routing_weight)| JsonWeightedCandidate {
-                    account_id: account_id.as_str().to_owned(),
+                    account_hash: telemetry_hash(account_id.as_str()),
                     routing_weight: *routing_weight,
                 })
                 .collect(),
@@ -2002,13 +2202,13 @@ impl JsonQuotaStatusReport {
 
 #[derive(Serialize)]
 struct JsonWeightedCandidate {
-    account_id: String,
+    account_hash: String,
     routing_weight: u32,
 }
 
 #[derive(Serialize)]
 struct JsonQuotaStatusAccount {
-    account_id: String,
+    account_hash: String,
     safe_account_label: String,
     availability: &'static str,
     freshness: &'static str,
@@ -2025,7 +2225,8 @@ struct JsonQuotaStatusAccount {
     routing_weight: Option<u32>,
     preferred_next: bool,
     reset_credits_available: Option<u32>,
-    active_clients: u32,
+    active_clients: Option<u32>,
+    active_clients_source: &'static str,
     updated: String,
     window_slots: JsonWindowSlots,
     windows: Vec<JsonQuotaWindow>,
@@ -2034,7 +2235,7 @@ struct JsonQuotaStatusAccount {
 impl JsonQuotaStatusAccount {
     fn from_row(row: &QuotaStatusRow, now_unix_seconds: u64) -> Self {
         Self {
-            account_id: row.account_id.as_str().to_owned(),
+            account_hash: telemetry_hash(row.account_id.as_str()),
             safe_account_label: row.account_label.clone(),
             availability: availability_json(row.availability),
             freshness: freshness_json(row.freshness),
@@ -2054,6 +2255,7 @@ impl JsonQuotaStatusAccount {
             preferred_next: row.preferred_next,
             reset_credits_available: row.reset_credits_available_value,
             active_clients: row.active_clients_value,
+            active_clients_source: row.active_clients_source,
             updated: row.updated.clone(),
             window_slots: JsonWindowSlots::from_windows(&row.windows, now_unix_seconds),
             windows: row
@@ -2380,6 +2582,16 @@ fn format_duration(seconds: u64) -> String {
     } else {
         format!("{seconds}s")
     }
+}
+
+fn telemetry_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 const fn quota_window_status_from_selector_status(

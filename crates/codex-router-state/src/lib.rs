@@ -62,6 +62,39 @@ mod tests {
     }
 
     #[test]
+    fn production_state_storage_does_not_use_rusqlite() {
+        let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sqlite.rs");
+        let source = fs::read_to_string(&source_path)
+            .unwrap_or_else(|error| panic!("state sqlite source should be readable: {error}"));
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(source.as_str());
+        let lines = production_source.lines().collect::<Vec<_>>();
+        let forbidden_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let references_rusqlite = line.contains("rusqlite::")
+                    || line.contains("use rusqlite")
+                    || line.contains("&rusqlite");
+                let fenced_by_fixture_feature =
+                    index > 0 && lines[index - 1].contains("sync-rusqlite-fixtures");
+                (references_rusqlite && !fenced_by_fixture_feature).then_some(format!(
+                    "{}:{}",
+                    index + 1,
+                    line.trim()
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            forbidden_lines.is_empty(),
+            "production state storage must be SQLx-only; forbidden rusqlite lines: {forbidden_lines:?}"
+        );
+    }
+
+    #[test]
     fn sqlite_migration_roundtrips_account_and_quota_snapshot() {
         let temp_dir = TestTempDir::new("migration_roundtrip");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -70,7 +103,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 7);
+        assert_eq!(store.schema_version(), 8);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -355,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_active_client_leases_count_release_and_prune() {
+    async fn sqlx_active_client_leases_count_release_and_prune() {
         let temp_dir = TestTempDir::new("async_active_client_leases");
         let database_path = temp_dir.path().join("state.sqlite");
         let store = match AsyncSqliteStateStore::open(&database_path).await {
@@ -368,9 +401,11 @@ mod tests {
         if let Err(error) = store
             .record_active_client_acquired(
                 "responses",
+                "process-a",
                 &ReservationId::new("reservation_alpha_1"),
                 &alpha,
                 1_000,
+                2,
             )
             .await
         {
@@ -379,9 +414,11 @@ mod tests {
         if let Err(error) = store
             .record_active_client_acquired(
                 "responses",
+                "process-a",
                 &ReservationId::new("reservation_alpha_2"),
                 &alpha,
                 1_005,
+                8,
             )
             .await
         {
@@ -390,9 +427,11 @@ mod tests {
         if let Err(error) = store
             .record_active_client_acquired(
                 "responses",
+                "process-a",
                 &ReservationId::new("reservation_beta_1"),
                 &beta,
                 1_006,
+                8,
             )
             .await
         {
@@ -409,13 +448,17 @@ mod tests {
         assert_eq!(
             counts,
             vec![
-                crate::sqlite::ActiveClientCount::new(alpha.clone(), 2),
-                crate::sqlite::ActiveClientCount::new(beta.clone(), 1),
+                crate::sqlite::ActiveClientCount::new(alpha.clone(), 2, 10),
+                crate::sqlite::ActiveClientCount::new(beta.clone(), 1, 8),
             ]
         );
 
         if let Err(error) = store
-            .record_active_client_released("responses", &ReservationId::new("reservation_alpha_1"))
+            .record_active_client_released(
+                "responses",
+                "process-a",
+                &ReservationId::new("reservation_alpha_1"),
+            )
             .await
         {
             panic!("alpha lease should release: {error}");
@@ -430,8 +473,8 @@ mod tests {
         assert_eq!(
             counts,
             vec![
-                crate::sqlite::ActiveClientCount::new(alpha, 1),
-                crate::sqlite::ActiveClientCount::new(beta, 1),
+                crate::sqlite::ActiveClientCount::new(alpha, 1, 8),
+                crate::sqlite::ActiveClientCount::new(beta, 1, 8),
             ]
         );
 
@@ -443,6 +486,79 @@ mod tests {
             Err(error) => panic!("stale active client counts should prune: {error}"),
         };
         assert!(counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sqlx_active_client_leases_do_not_collide_across_process_runs() {
+        let temp_dir = TestTempDir::new("async_active_client_process_collision");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_active_shared");
+        let reservation_id = ReservationId::new("reservation_1");
+
+        if let Err(error) = store
+            .record_active_client_acquired(
+                "responses",
+                "process-a",
+                &reservation_id,
+                &account,
+                1_000,
+                2,
+            )
+            .await
+        {
+            panic!("process-a lease should persist: {error}");
+        }
+        if let Err(error) = store
+            .record_active_client_acquired(
+                "responses",
+                "process-b",
+                &reservation_id,
+                &account,
+                1_001,
+                8,
+            )
+            .await
+        {
+            panic!("process-b lease should persist without overwriting process-a: {error}");
+        }
+
+        let counts = match store
+            .active_client_counts_for_route_band("responses", 1_010, 100)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => panic!("active client counts should load: {error}"),
+        };
+        assert_eq!(
+            counts,
+            vec![crate::sqlite::ActiveClientCount::new(
+                account.clone(),
+                2,
+                10
+            )]
+        );
+
+        if let Err(error) = store
+            .record_active_client_released("responses", "process-a", &reservation_id)
+            .await
+        {
+            panic!("process-a release should not delete process-b lease: {error}");
+        }
+        let counts = match store
+            .active_client_counts_for_route_band("responses", 1_010, 100)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => panic!("active client counts should reload: {error}"),
+        };
+        assert_eq!(
+            counts,
+            vec![crate::sqlite::ActiveClientCount::new(account, 1, 8)]
+        );
     }
 
     #[tokio::test]
@@ -783,7 +899,7 @@ mod tests {
             Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 7);
+        assert_eq!(store.schema_version(), 8);
         let selector_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -842,7 +958,7 @@ mod tests {
             Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 7);
+        assert_eq!(store.schema_version(), 8);
         let responses_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -876,7 +992,7 @@ mod tests {
             Err(error) => panic!("v6 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 7);
+        assert_eq!(store.schema_version(), 8);
         let account_id = account_id("acct_v6_reset_credits");
         let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
             &store,

@@ -26,8 +26,13 @@ hyper-tungstenite.workspace = true
 hyper-util.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.0", features = ["sync-rusqlite-fixtures"] }
+codex-router-state = { path = "../codex-router-state", version = "0.1.0", features = ["sync-rusqlite-fixtures"] }

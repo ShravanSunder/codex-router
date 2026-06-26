@@ -37,7 +37,9 @@ use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup;
 use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
+#[cfg(test)]
 use codex_router_state::repositories::AffinityRepository;
+#[cfg(test)]
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::AsyncAffinityRepository;
 use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
@@ -45,6 +47,8 @@ use codex_router_state::sqlite::AsyncSelectorQuotaRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
+use sha2::Digest;
+use sha2::Sha256;
 use thiserror::Error;
 use tokio_util::task::TaskTracker;
 
@@ -81,6 +85,7 @@ pub trait ActiveClientLeaseReporter: Send + Sync {
         route_band: &str,
         reservation_handle: &ReservationHandle,
         acquired_unix_seconds: u64,
+        active_pressure: u32,
     );
 
     /// Records one released client lease.
@@ -92,13 +97,18 @@ pub trait ActiveClientLeaseReporter: Send + Sync {
 pub struct SqliteActiveClientLeaseReporter {
     state: AsyncSqliteStateStore,
     tasks: TaskTracker,
+    process_run_id: String,
 }
 
 impl SqliteActiveClientLeaseReporter {
     /// Creates a SQLx-backed active client lease reporter.
     #[must_use]
-    pub const fn new(state: AsyncSqliteStateStore, tasks: TaskTracker) -> Self {
-        Self { state, tasks }
+    pub fn new(state: AsyncSqliteStateStore, tasks: TaskTracker) -> Self {
+        Self {
+            state,
+            tasks,
+            process_run_id: new_process_run_id(),
+        }
     }
 }
 
@@ -108,31 +118,64 @@ impl ActiveClientLeaseReporter for SqliteActiveClientLeaseReporter {
         route_band: &str,
         reservation_handle: &ReservationHandle,
         acquired_unix_seconds: u64,
+        active_pressure: u32,
     ) {
         let state = self.state.clone();
         let route_band = route_band.to_owned();
+        let process_run_id = self.process_run_id.clone();
         let reservation_id = reservation_handle.reservation_id().clone();
         let account_id = reservation_handle.account_id().clone();
         self.tasks.spawn(async move {
-            let _result = state
+            let result = state
                 .record_active_client_acquired(
                     &route_band,
+                    &process_run_id,
                     &reservation_id,
                     &account_id,
                     acquired_unix_seconds,
+                    active_pressure,
                 )
                 .await;
+            match result {
+                Ok(()) => tracing::info!(
+                    route_band = route_band.as_str(),
+                    account.hash = telemetry_hash(account_id.as_str()),
+                    reservation.hash = telemetry_hash(reservation_id.as_str()),
+                    "codex_router.active_client_mirror_acquired"
+                ),
+                Err(_error) => tracing::warn!(
+                    route_band = route_band.as_str(),
+                    account.hash = telemetry_hash(account_id.as_str()),
+                    reservation.hash = telemetry_hash(reservation_id.as_str()),
+                    error.class = "state_unavailable",
+                    "codex_router.active_client_mirror_failed"
+                ),
+            }
         });
     }
 
     fn record_released(&self, route_band: &str, reservation_handle: &ReservationHandle) {
         let state = self.state.clone();
         let route_band = route_band.to_owned();
+        let process_run_id = self.process_run_id.clone();
         let reservation_id = reservation_handle.reservation_id().clone();
         self.tasks.spawn(async move {
-            let _result = state
-                .record_active_client_released(&route_band, &reservation_id)
+            let result = state
+                .record_active_client_released(&route_band, &process_run_id, &reservation_id)
                 .await;
+            match result {
+                Ok(()) => tracing::info!(
+                    route_band = route_band.as_str(),
+                    reservation.hash = telemetry_hash(reservation_id.as_str()),
+                    "codex_router.active_client_mirror_released"
+                ),
+                Err(_error) => tracing::warn!(
+                    route_band = route_band.as_str(),
+                    reservation.hash = telemetry_hash(reservation_id.as_str()),
+                    error.class = "state_unavailable",
+                    "codex_router.active_client_mirror_failed"
+                ),
+            }
         });
     }
 }
@@ -202,13 +245,14 @@ impl ActiveReservationGuard {
                 &self.inner.route_band,
                 &reservation_handle,
                 reserved_unix_seconds,
+                reservation_handle.headroom_cost(),
             );
         }
         let span = tracing::info_span!(
             "codex_router.account_rereserved",
             route_band = self.inner.route_band.as_str(),
-            account.id = reservation_handle.account_id().as_str(),
-            reservation.id = reservation_handle.reservation_id().as_str(),
+            account.hash = telemetry_hash(reservation_handle.account_id().as_str()),
+            reservation.hash = telemetry_hash(reservation_handle.reservation_id().as_str()),
         );
         let _span_guard = span.enter();
         tracing::info!("codex_router.account_rereserved");
@@ -266,8 +310,9 @@ impl ActiveReservationGuardInner {
             let span = tracing::info_span!(
                 "codex_router.account_reservation_released",
                 route_band = self.route_band.as_str(),
-                account.id = self.reservation_handle.account_id().as_str(),
-                reservation.id = self.reservation_handle.reservation_id().as_str(),
+                account.hash = telemetry_hash(self.reservation_handle.account_id().as_str()),
+                reservation.hash =
+                    telemetry_hash(self.reservation_handle.reservation_id().as_str()),
             );
             let _span_guard = span.enter();
             tracing::info!("codex_router.account_reservation_released");
@@ -455,7 +500,8 @@ impl AccountDecisionSelector for QuotaAwareAccountSelector {
     }
 }
 
-/// Selector that hydrates account state from repositories at request time.
+/// Test fixture selector that hydrates account state from synchronous repositories.
+#[cfg(test)]
 pub struct RepositoryBackedAccountSelector<'a, R>
 where
     R: AffinityRepository + SelectorQuotaRepository,
@@ -481,6 +527,7 @@ where
     clock: UnixClock,
 }
 
+#[cfg(test)]
 impl<'a, R> RepositoryBackedAccountSelector<'a, R>
 where
     R: AffinityRepository + SelectorQuotaRepository,
@@ -620,6 +667,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<R> AccountDecisionSelector for RepositoryBackedAccountSelector<'_, R>
 where
     R: AffinityRepository + SelectorQuotaRepository,
@@ -927,20 +975,14 @@ fn select_from_account_states_with_selector(
 
 fn select_from_burn_down_assessment_without_hold(
     assessment: &BurnDownRouteBandAssessmentResult,
-    weighted_selector: &mut WeightedDeficitSelector,
+    _weighted_selector: &mut WeightedDeficitSelector,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
     if assessment.selected_pool() == SelectedPool::None {
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
         });
     }
-    let weighted_candidates = assessment.weighted_candidates();
-    let selected_account_id =
-        weighted_selector
-            .select(weighted_candidates, 1)
-            .ok_or(HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-            })?;
+    let selected_account_id = strict_preferred_account_id(assessment)?;
     let selected_assessment = assessment
         .accounts()
         .iter()
@@ -958,7 +1000,7 @@ fn select_from_burn_down_assessment_without_hold(
 fn select_from_burn_down_assessment(
     route_band: &str,
     assessment: &BurnDownRouteBandAssessmentResult,
-    weighted_selector: &mut WeightedDeficitSelector,
+    _weighted_selector: &mut WeightedDeficitSelector,
     account_holds: &mut HashMap<String, AccountHold>,
     minimum_account_hold_cooldown_seconds: u64,
     now_unix_seconds: u64,
@@ -966,6 +1008,11 @@ fn select_from_burn_down_assessment(
     let weighted_candidates = assessment.weighted_candidates();
     if weighted_candidates.is_empty() {
         account_holds.remove(route_band);
+        tracing::warn!(
+            route_band,
+            reason = "no_eligible_accounts",
+            "codex_router.account_selection_rejected"
+        );
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
         });
@@ -977,11 +1024,7 @@ fn select_from_burn_down_assessment(
         weighted_candidates,
         minimum_account_hold_cooldown_seconds,
         now_unix_seconds,
-    ) && held_account_allowed_by_weighted_choice(
-        weighted_selector,
-        weighted_candidates,
-        &held_account_id,
-    ) && weighted_selector.record_selection(weighted_candidates, &held_account_id)
+    ) && Some(&held_account_id) == assessment.preferred_next()
     {
         return Ok(SelectedAccountDecision::new(
             held_account_id,
@@ -989,12 +1032,7 @@ fn select_from_burn_down_assessment(
         ));
     }
 
-    let selected_account_id =
-        weighted_selector
-            .select(weighted_candidates, 1)
-            .ok_or(HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-            })?;
+    let selected_account_id = strict_preferred_account_id(assessment)?;
     let selected_assessment = assessment
         .accounts()
         .iter()
@@ -1007,35 +1045,35 @@ fn select_from_burn_down_assessment(
         AccountHold::new(selected_account_id.clone(), now_unix_seconds),
     );
 
+    let selected_reason = selection_reason_for_assessment(selected_assessment);
+    tracing::info!(
+        route_band,
+        account.hash = telemetry_hash(selected_account_id.as_str()),
+        selection.reason = selected_reason.as_str(),
+        "codex_router.account_selected"
+    );
+
     Ok(SelectedAccountDecision::new(
         selected_account_id,
-        selection_reason_for_assessment(selected_assessment),
+        selected_reason,
     ))
 }
 
-fn held_account_allowed_by_weighted_choice(
-    weighted_selector: &WeightedDeficitSelector,
-    weighted_candidates: &[(AccountId, u32)],
-    held_account_id: &AccountId,
-) -> bool {
-    let mut projected_selector = weighted_selector.clone();
-    if projected_selector.select(weighted_candidates, 1).as_ref() == Some(held_account_id) {
-        return true;
-    }
-
-    let held_weight = weighted_candidates
-        .iter()
-        .find_map(|(account_id, weight)| (account_id == held_account_id).then_some(*weight));
-    let Some(held_weight) = held_weight else {
-        return false;
-    };
-    let best_weight = weighted_candidates
-        .iter()
-        .map(|(_account_id, weight)| *weight)
-        .max()
-        .unwrap_or(0);
-
-    best_weight.saturating_sub(held_weight) < WEBSOCKET_ACTIVE_LOAD_PRESSURE
+fn strict_preferred_account_id(
+    assessment: &BurnDownRouteBandAssessmentResult,
+) -> Result<AccountId, HttpProxyError> {
+    assessment
+        .preferred_next()
+        .cloned()
+        .or_else(|| {
+            assessment
+                .weighted_candidates()
+                .first()
+                .map(|(account_id, _weight)| account_id.clone())
+        })
+        .ok_or(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
+        })
 }
 
 fn reusable_held_account_id(
@@ -1059,6 +1097,7 @@ fn reusable_held_account_id(
     }
 }
 
+#[cfg(test)]
 fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAccountInput {
     let windows = input
         .windows()
@@ -1158,15 +1197,20 @@ fn reserve_selected_account(
             now_unix_seconds,
         );
     if let Some(active_client_leases) = active_client_leases {
-        active_client_leases.record_acquired(route_band, &reservation_handle, now_unix_seconds);
+        active_client_leases.record_acquired(
+            route_band,
+            &reservation_handle,
+            now_unix_seconds,
+            headroom_cost,
+        );
     }
     let span = tracing::info_span!(
         "codex_router.account_reserved",
         route_band,
-        account.id = selected.account_id().as_str(),
+        account.hash = telemetry_hash(selected.account_id().as_str()),
         selection.reason = selected.selection_reason(),
         active.headroom_cost = headroom_cost,
-        reservation.id = reservation_handle.reservation_id().as_str(),
+        reservation.hash = telemetry_hash(reservation_handle.reservation_id().as_str()),
     );
     let _span_guard = span.enter();
     tracing::info!("codex_router.account_reserved");
@@ -1451,6 +1495,23 @@ fn selection_reason_for_assessment(assessment: &BurnDownAccountAssessment) -> St
     assessment.routing_reason().as_str().to_owned()
 }
 
+fn telemetry_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn new_process_run_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("pid{}-{nanos}", std::process::id())
+}
+
 fn current_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1459,12 +1520,18 @@ fn current_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::AccountDecisionSelector;
     use super::ActiveClientLeaseReporter;
     use super::ActiveReservationGuard;
+    use super::QuotaAwareAccountSelector;
+    use super::QuotaAwareAccountState;
     use super::RouteBandReservationBooks;
     use codex_router_core::ids::AccountId;
+    use codex_router_core::ids::TokenGeneration;
+    use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_selection::reservation::ReservationHandle;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -1475,6 +1542,7 @@ mod tests {
             reservation_id: String,
             account_id: String,
             acquired_unix_seconds: u64,
+            active_pressure: u32,
         },
         Released {
             route_band: String,
@@ -1502,6 +1570,7 @@ mod tests {
             route_band: &str,
             reservation_handle: &ReservationHandle,
             acquired_unix_seconds: u64,
+            active_pressure: u32,
         ) {
             self.events
                 .lock()
@@ -1511,6 +1580,7 @@ mod tests {
                     reservation_id: reservation_handle.reservation_id().as_str().to_owned(),
                     account_id: reservation_handle.account_id().as_str().to_owned(),
                     acquired_unix_seconds,
+                    active_pressure,
                 });
         }
 
@@ -1560,6 +1630,7 @@ mod tests {
                     reservation_id: "reservation_2".to_owned(),
                     account_id: "acct_selected".to_owned(),
                     acquired_unix_seconds: 2,
+                    active_pressure: 8,
                 },
                 LeaseEvent::Released {
                     route_band: "responses".to_owned(),
@@ -1567,5 +1638,118 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn strict_quota_selection_does_not_rotate_to_weak_account_by_deficit() {
+        let weak_account_id = account_id("acct_weekly_low");
+        let strong_account_id = account_id("acct_weekly_healthy");
+        let selector = QuotaAwareAccountSelector::new(vec![
+            QuotaAwareAccountState::new(
+                weak_account_id.clone(),
+                23,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                strong_account_id.clone(),
+                76,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ]);
+
+        for _attempt in 0..200 {
+            let selected = selector
+                .select_upstream_account(
+                    &crate::http_sse::HttpProxyRequest::new(
+                        crate::routes::Method::Post,
+                        "/v1/responses",
+                    ),
+                    TokenGeneration::new(1),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("selection should succeed: {error}"));
+
+            assert_eq!(selected.account_id(), &strong_account_id);
+            assert_ne!(selected.account_id(), &weak_account_id);
+        }
+    }
+
+    #[test]
+    fn account_hold_cooldown_does_not_keep_materially_weaker_account() {
+        let weak_account_id = account_id("acct_weekly_low");
+        let strong_account_id = account_id("acct_weekly_healthy");
+        let account_inputs = vec![
+            codex_router_selection::burn_down::BurnDownAccountInput::new(
+                weak_account_id.clone(),
+                "weak",
+                vec![
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(98)
+                    .with_reset_unix_seconds(18_000),
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(23)
+                    .with_reset_unix_seconds(604_800),
+                ],
+            ),
+            codex_router_selection::burn_down::BurnDownAccountInput::new(
+                strong_account_id.clone(),
+                "strong",
+                vec![
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(76)
+                    .with_reset_unix_seconds(18_000),
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(76)
+                    .with_reset_unix_seconds(604_800),
+                ],
+            ),
+        ];
+        let assessment = codex_router_selection::burn_down::assess_route_band(
+            codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput::new(
+                codex_router_core::routes::RouteBand::Responses,
+                10_000,
+                account_inputs,
+            ),
+        );
+        let mut holds = HashMap::from([(
+            "responses".to_owned(),
+            super::AccountHold::new(weak_account_id.clone(), 9_990),
+        )]);
+        let mut weighted_selector =
+            codex_router_selection::weighted_deficit::WeightedDeficitSelector::default();
+
+        let selected = super::select_from_burn_down_assessment(
+            "responses",
+            &assessment,
+            &mut weighted_selector,
+            &mut holds,
+            120,
+            10_000,
+        )
+        .unwrap_or_else(|error| panic!("selection should succeed: {error}"));
+
+        assert_eq!(selected.account_id(), &strong_account_id);
+        assert_ne!(selected.account_id(), &weak_account_id);
+        assert_eq!(
+            holds.get("responses").map(|hold| hold.account_id.as_str()),
+            Some(strong_account_id.as_str())
+        );
+    }
+
+    fn account_id(value: &str) -> AccountId {
+        AccountId::new(value)
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
     }
 }

@@ -1,17 +1,22 @@
 //! SQLite metadata store.
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 
 use codex_router_core::affinity::AffinityKeyHash;
 use codex_router_core::ids::AccountId;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use codex_router_core::ids::AffinityKey;
 use codex_router_core::ids::ReservationId;
 use codex_router_core::routes::RouteBand;
 use futures_util::future::BoxFuture;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use rusqlite::Connection;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use rusqlite::OptionalExtension;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use rusqlite::params;
 use sqlx::Row;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -32,12 +37,16 @@ use crate::quota_snapshot::QuotaRefreshStatusView;
 use crate::quota_snapshot::QuotaSnapshotSource;
 use crate::quota_snapshot::SelectorQuotaInput;
 use crate::quota_snapshot::SelectorQuotaWindowStatus;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::AccountStateRepository;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::AffinityRepository;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::QuotaSnapshotRepository;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
@@ -103,7 +112,7 @@ const ASYNC_V1_SCHEMA_STATEMENTS: &[&str] = &[
         created_unix_seconds INTEGER NOT NULL,
         PRIMARY KEY (affinity_key_hash, route_band, account_id)
     )",
-    "PRAGMA user_version = 7",
+    "PRAGMA user_version = 8",
 ];
 const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS quota_history_observations (
@@ -130,10 +139,12 @@ const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
 const ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS active_client_leases (
         route_band TEXT NOT NULL,
+        process_run_id TEXT NOT NULL,
         reservation_id TEXT NOT NULL,
         account_id TEXT NOT NULL,
         acquired_unix_seconds INTEGER NOT NULL,
-        PRIMARY KEY (route_band, reservation_id)
+        active_pressure INTEGER NOT NULL,
+        PRIMARY KEY (route_band, process_run_id, reservation_id)
     )",
     "CREATE INDEX IF NOT EXISTS active_client_leases_account_lookup
         ON active_client_leases (
@@ -146,15 +157,17 @@ const ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS: &[&str] = &[
 pub struct ActiveClientCount {
     account_id: AccountId,
     active_clients: u32,
+    active_pressure: u32,
 }
 
 impl ActiveClientCount {
     /// Creates an active client count row.
     #[must_use]
-    pub const fn new(account_id: AccountId, active_clients: u32) -> Self {
+    pub const fn new(account_id: AccountId, active_clients: u32, active_pressure: u32) -> Self {
         Self {
             account_id,
             active_clients,
+            active_pressure,
         }
     }
 
@@ -168,6 +181,12 @@ impl ActiveClientCount {
     #[must_use]
     pub const fn active_clients(&self) -> u32 {
         self.active_clients
+    }
+
+    /// Returns summed active pressure units.
+    #[must_use]
+    pub const fn active_pressure(&self) -> u32 {
+        self.active_pressure
     }
 }
 
@@ -211,11 +230,13 @@ pub enum StateStoreError {
 }
 
 /// SQLite-backed metadata repository.
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 pub struct SqliteStateStore {
     database_path: PathBuf,
     connection: Connection,
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl fmt::Debug for SqliteStateStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -366,7 +387,34 @@ impl AsyncSqliteStateStore {
         Ok(())
     }
 
-    async fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
+    /// Inserts or updates account metadata through the async state pool.
+    pub async fn upsert_account(&self, account: &AccountRecord) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "INSERT INTO accounts (account_id, label, status, active_credential_generation)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id) DO UPDATE SET
+               label = excluded.label,
+               status = excluded.status,
+               active_credential_generation = excluded.active_credential_generation",
+        )
+        .bind(account.account_id().as_str())
+        .bind(account.label())
+        .bind(account.status().as_str())
+        .bind(
+            account
+                .active_credential_generation()
+                .map(u64_to_i64)
+                .transpose()?,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Lists account metadata in deterministic selector order through the async state pool.
+    pub async fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
         let rows = sqlx::query(
             "SELECT account_id, label, status, active_credential_generation
                FROM accounts
@@ -387,6 +435,93 @@ impl AsyncSqliteStateStore {
         }
 
         Ok(accounts)
+    }
+
+    /// Inserts or updates a persisted quota snapshot through the async state pool.
+    pub async fn upsert_quota_snapshot(
+        &self,
+        snapshot: &PersistedQuotaSnapshot,
+    ) -> Result<(), StateStoreError> {
+        let observed_unix_seconds = u64_to_i64(snapshot.observed_unix_seconds())?;
+        let remaining_headroom = u32_to_i64(snapshot.remaining_headroom());
+        let reset_unix_seconds = snapshot.reset_unix_seconds().map(u64_to_i64).transpose()?;
+        let reset_credits_available = snapshot.reset_credits_available().map(u32_to_i64);
+        let stale_penalty = if snapshot.stale_penalty() {
+            1_i64
+        } else {
+            0_i64
+        };
+
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query(
+            "INSERT INTO quota_snapshots (
+               account_id, source, observed_unix_seconds, route_band,
+               remaining_headroom, reset_unix_seconds,
+               reset_credits_available, stale_penalty
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(account_id, route_band) DO UPDATE SET
+               source = excluded.source,
+               observed_unix_seconds = excluded.observed_unix_seconds,
+               remaining_headroom = excluded.remaining_headroom,
+               reset_unix_seconds = excluded.reset_unix_seconds,
+               reset_credits_available = excluded.reset_credits_available,
+               stale_penalty = excluded.stale_penalty",
+        )
+        .bind(snapshot.account_id().as_str())
+        .bind(snapshot.source().as_str())
+        .bind(observed_unix_seconds)
+        .bind(snapshot.route_band())
+        .bind(remaining_headroom)
+        .bind(reset_unix_seconds)
+        .bind(reset_credits_available)
+        .bind(stale_penalty)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        if selector_route_band(snapshot.route_band()) {
+            let selector_window = selector_window_from_snapshot(snapshot);
+            insert_selector_window_in_async_transaction(&mut transaction, &selector_window).await?;
+        }
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Loads a persisted quota snapshot for one route band through the async state pool.
+    pub async fn load_quota_snapshot_for_route_band(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+    ) -> Result<Option<PersistedQuotaSnapshot>, StateStoreError> {
+        let row = sqlx::query(
+            "SELECT account_id, source, observed_unix_seconds, route_band,
+                    remaining_headroom, reset_unix_seconds,
+                    reset_credits_available, stale_penalty
+               FROM quota_snapshots
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        parse_quota_snapshot_row(QuotaSnapshotSqlRow {
+            account_id_value: row.get::<String, _>(0),
+            source_value: row.get::<String, _>(1),
+            observed_unix_seconds: row.get::<i64, _>(2),
+            route_band: row.get::<String, _>(3),
+            remaining_headroom: row.get::<i64, _>(4),
+            reset_unix_seconds: row.get::<Option<i64>, _>(5),
+            reset_credits_available: row.get::<Option<i64>, _>(6),
+            stale_penalty: row.get::<i64, _>(7),
+        })
+        .map(Some)
     }
 
     /// Loads account metadata through the async state connection pool.
@@ -616,6 +751,157 @@ impl AsyncSqliteStateStore {
         )))
     }
 
+    /// Inserts or updates one selector quota window through the async state pool.
+    pub async fn upsert_selector_quota_window(
+        &self,
+        window: &PersistedSelectorQuotaWindow,
+    ) -> Result<(), StateStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        insert_selector_window_in_async_transaction(&mut transaction, window).await?;
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Atomically records a successful refresh and replaces selector windows.
+    pub async fn record_refresh_success_and_replace_selector_windows(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+        windows: &[PersistedSelectorQuotaWindow],
+        last_success_unix_seconds: u64,
+        stale_after_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        let last_success = u64_to_i64(last_success_unix_seconds)?;
+        let stale_after = u64_to_i64(stale_after_unix_seconds)?;
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query(
+            "DELETE FROM selector_quota_windows
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        for window in windows {
+            insert_selector_window_in_async_transaction(&mut transaction, window).await?;
+        }
+        sqlx::query(
+            "INSERT INTO quota_refresh_status (
+               account_id, route_band, last_success_unix_seconds,
+               last_attempt_unix_seconds, last_error_class,
+               stale_after_unix_seconds
+             )
+             VALUES (?1, ?2, ?3, ?3, NULL, ?4)
+             ON CONFLICT(account_id, route_band) DO UPDATE SET
+               last_success_unix_seconds = excluded.last_success_unix_seconds,
+               last_attempt_unix_seconds = excluded.last_attempt_unix_seconds,
+               last_error_class = excluded.last_error_class,
+               stale_after_unix_seconds = excluded.stale_after_unix_seconds",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .bind(last_success)
+        .bind(stale_after)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Atomically records a failed refresh while preserving selector windows.
+    pub async fn record_refresh_failure_preserving_selector_windows(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+        last_attempt_unix_seconds: u64,
+        last_error_class: QuotaRefreshErrorClass,
+    ) -> Result<(), StateStoreError> {
+        let last_attempt = u64_to_i64(last_attempt_unix_seconds)?;
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query(
+            "INSERT INTO quota_refresh_status (
+               account_id, route_band, last_success_unix_seconds,
+               last_attempt_unix_seconds, last_error_class,
+               stale_after_unix_seconds
+             )
+             VALUES (?1, ?2, NULL, ?3, ?4, ?3)
+             ON CONFLICT(account_id, route_band) DO UPDATE SET
+               last_attempt_unix_seconds = excluded.last_attempt_unix_seconds,
+               last_error_class = excluded.last_error_class,
+               stale_after_unix_seconds =
+                 CASE
+                   WHEN quota_refresh_status.stale_after_unix_seconds IS NULL
+                     THEN excluded.stale_after_unix_seconds
+                   WHEN quota_refresh_status.stale_after_unix_seconds < excluded.stale_after_unix_seconds
+                     THEN quota_refresh_status.stale_after_unix_seconds
+                   ELSE excluded.stale_after_unix_seconds
+                 END",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .bind(last_attempt)
+        .bind(last_error_class.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Loads refresh status view rows for one route band through the async state pool.
+    pub async fn quota_refresh_statuses_for_route_band(
+        &self,
+        route_band: &str,
+    ) -> Result<Vec<QuotaRefreshStatusView>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT
+               accounts.account_id,
+               quota_refresh_status.last_success_unix_seconds,
+               quota_refresh_status.last_attempt_unix_seconds,
+               quota_refresh_status.last_error_class,
+               quota_refresh_status.stale_after_unix_seconds,
+               CASE
+                 WHEN quota_refresh_status.account_id IS NULL THEN 0
+                 ELSE 1
+               END
+             FROM accounts
+             LEFT JOIN quota_refresh_status
+               ON quota_refresh_status.account_id = accounts.account_id
+              AND quota_refresh_status.route_band = ?1
+             WHERE quota_refresh_status.account_id IS NOT NULL
+                OR EXISTS (
+                     SELECT 1 FROM selector_quota_windows
+                      WHERE selector_quota_windows.account_id = accounts.account_id
+                        AND selector_quota_windows.route_band = ?1
+                   )
+             ORDER BY accounts.account_id",
+        )
+        .bind(route_band)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let mut statuses = Vec::new();
+        for row in rows {
+            statuses.push(parse_quota_refresh_status_row(
+                route_band,
+                row.get::<String, _>(0),
+                row.get::<Option<i64>, _>(1),
+                row.get::<Option<i64>, _>(2),
+                row.get::<Option<String>, _>(3),
+                row.get::<Option<i64>, _>(4),
+                row.get::<i64, _>(5),
+            )?);
+        }
+
+        Ok(statuses)
+    }
+
     async fn load_selector_windows(
         &self,
         account_id: &AccountId,
@@ -840,23 +1126,29 @@ impl AsyncSqliteStateStore {
     pub async fn record_active_client_acquired(
         &self,
         route_band: &str,
+        process_run_id: &str,
         reservation_id: &ReservationId,
         account_id: &AccountId,
         acquired_unix_seconds: u64,
+        active_pressure: u32,
     ) -> Result<(), StateStoreError> {
         sqlx::query(
             "INSERT INTO active_client_leases (
-               route_band, reservation_id, account_id, acquired_unix_seconds
+               route_band, process_run_id, reservation_id, account_id,
+               acquired_unix_seconds, active_pressure
              )
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(route_band, reservation_id) DO UPDATE SET
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(route_band, process_run_id, reservation_id) DO UPDATE SET
                account_id = excluded.account_id,
-               acquired_unix_seconds = excluded.acquired_unix_seconds",
+               acquired_unix_seconds = excluded.acquired_unix_seconds,
+               active_pressure = excluded.active_pressure",
         )
         .bind(route_band)
+        .bind(process_run_id)
         .bind(reservation_id.as_str())
         .bind(account_id.as_str())
         .bind(u64_to_i64(acquired_unix_seconds)?)
+        .bind(u32_to_i64(active_pressure))
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -868,13 +1160,15 @@ impl AsyncSqliteStateStore {
     pub async fn record_active_client_released(
         &self,
         route_band: &str,
+        process_run_id: &str,
         reservation_id: &ReservationId,
     ) -> Result<(), StateStoreError> {
         sqlx::query(
             "DELETE FROM active_client_leases
-              WHERE route_band = ?1 AND reservation_id = ?2",
+              WHERE route_band = ?1 AND process_run_id = ?2 AND reservation_id = ?3",
         )
         .bind(route_band)
+        .bind(process_run_id)
         .bind(reservation_id.as_str())
         .execute(&self.pool)
         .await
@@ -902,7 +1196,9 @@ impl AsyncSqliteStateStore {
         .map_err(sqlx_error)?;
 
         let rows = sqlx::query(
-            "SELECT account_id, COUNT(*) AS active_clients
+            "SELECT account_id,
+                    COUNT(*) AS active_clients,
+                    SUM(active_pressure) AS active_pressure
                FROM active_client_leases
               WHERE route_band = ?1
               GROUP BY account_id
@@ -918,13 +1214,19 @@ impl AsyncSqliteStateStore {
             let account_id_value = row.get::<String, _>(0);
             let active_clients =
                 i64_to_u32(row.get::<i64, _>(1), &account_id_value, "active_clients")?;
+            let active_pressure =
+                i64_to_u32(row.get::<i64, _>(2), &account_id_value, "active_pressure")?;
             let account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
                 StateStoreError::CorruptAccount {
                     account_id: account_id_value,
                     field: "account_id",
                 }
             })?;
-            counts.push(ActiveClientCount::new(account_id, active_clients));
+            counts.push(ActiveClientCount::new(
+                account_id,
+                active_clients,
+                active_pressure,
+            ));
         }
 
         Ok(counts)
@@ -933,6 +1235,7 @@ impl AsyncSqliteStateStore {
     async fn migrate(&self) -> Result<(), StateStoreError> {
         match self.schema_version().await? {
             0 => self.apply_v1().await,
+            7 => self.apply_v8().await,
             CURRENT_SCHEMA_VERSION => Ok(()),
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -969,6 +1272,111 @@ impl AsyncSqliteStateStore {
         }
 
         Ok(())
+    }
+
+    async fn apply_v8(&self) -> Result<(), StateStoreError> {
+        if !self.table_exists("active_client_leases").await? {
+            self.ensure_active_client_schema().await?;
+            sqlx::query("PRAGMA user_version = 8")
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+            return Ok(());
+        }
+
+        if self
+            .table_has_column("active_client_leases", "process_run_id")
+            .await?
+        {
+            sqlx::query("PRAGMA user_version = 8")
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+            return Ok(());
+        }
+
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query("DROP INDEX IF EXISTS active_client_leases_account_lookup")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        sqlx::query(
+            "CREATE TABLE active_client_leases_v8 (
+                route_band TEXT NOT NULL,
+                process_run_id TEXT NOT NULL,
+                reservation_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                acquired_unix_seconds INTEGER NOT NULL,
+                active_pressure INTEGER NOT NULL,
+                PRIMARY KEY (route_band, process_run_id, reservation_id)
+            )",
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO active_client_leases_v8 (
+                route_band, process_run_id, reservation_id, account_id,
+                acquired_unix_seconds, active_pressure
+             )
+             SELECT
+                route_band, 'legacy', reservation_id, account_id,
+                acquired_unix_seconds, 8
+             FROM active_client_leases",
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        sqlx::query("DROP TABLE active_client_leases")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        sqlx::query("ALTER TABLE active_client_leases_v8 RENAME TO active_client_leases")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS active_client_leases_account_lookup
+                ON active_client_leases (
+                    route_band, account_id, acquired_unix_seconds
+                )",
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        sqlx::query("PRAGMA user_version = 8")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    async fn table_exists(&self, table_name: &str) -> Result<bool, StateStoreError> {
+        sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")
+            .bind(table_name)
+            .fetch_optional(&self.pool)
+            .await
+            .map(|row| row.is_some())
+            .map_err(sqlx_error)
+    }
+
+    async fn table_has_column(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<bool, StateStoreError> {
+        let rows = match table_name {
+            "active_client_leases" => sqlx::query("PRAGMA table_info(\"active_client_leases\")")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(sqlx_error)?,
+            _ => Vec::new(),
+        };
+        Ok(rows
+            .iter()
+            .any(|row| row.get::<String, _>("name") == column_name))
     }
 }
 
@@ -1120,6 +1528,7 @@ impl AsyncAffinityRepository for AsyncSqliteStateStore {
     }
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl SqliteStateStore {
     /// Opens a SQLite state database and applies migrations.
     pub fn open(database_path: &Path) -> Result<Self, StateStoreError> {
@@ -2005,31 +2414,40 @@ impl SqliteStateStore {
                 self.apply_v4()?;
                 self.apply_v5()?;
                 self.apply_v6()?;
-                self.apply_v7()
+                self.apply_v7()?;
+                self.apply_v8()
             }
             2 => {
                 self.apply_v3()?;
                 self.apply_v4()?;
                 self.apply_v5()?;
                 self.apply_v6()?;
-                self.apply_v7()
+                self.apply_v7()?;
+                self.apply_v8()
             }
             3 => {
                 self.apply_v4()?;
                 self.apply_v5()?;
                 self.apply_v6()?;
-                self.apply_v7()
+                self.apply_v7()?;
+                self.apply_v8()
             }
             4 => {
                 self.apply_v5()?;
                 self.apply_v6()?;
-                self.apply_v7()
+                self.apply_v7()?;
+                self.apply_v8()
             }
             5 => {
                 self.apply_v6()?;
-                self.apply_v7()
+                self.apply_v7()?;
+                self.apply_v8()
             }
-            6 => self.apply_v7(),
+            6 => {
+                self.apply_v7()?;
+                self.apply_v8()
+            }
+            7 => self.apply_v8(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -2095,7 +2513,7 @@ impl SqliteStateStore {
                     PRIMARY KEY (affinity_key_hash, route_band, account_id)
                 );
 
-                PRAGMA user_version = 7;
+                PRAGMA user_version = 8;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -2267,8 +2685,119 @@ impl SqliteStateStore {
 
         Ok(())
     }
+
+    fn apply_v8(&self) -> Result<(), StateStoreError> {
+        if !self.table_exists("active_client_leases")? {
+            self.connection
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS active_client_leases (
+                        route_band TEXT NOT NULL,
+                        process_run_id TEXT NOT NULL,
+                        reservation_id TEXT NOT NULL,
+                        account_id TEXT NOT NULL,
+                        acquired_unix_seconds INTEGER NOT NULL,
+                        active_pressure INTEGER NOT NULL,
+                        PRIMARY KEY (route_band, process_run_id, reservation_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS active_client_leases_account_lookup
+                        ON active_client_leases (
+                            route_band, account_id, acquired_unix_seconds
+                        );
+
+                    PRAGMA user_version = 8;
+                    ",
+                )
+                .map_err(sqlite_error)?;
+            return Ok(());
+        }
+
+        if self.table_has_column("active_client_leases", "process_run_id")? {
+            self.connection
+                .execute_batch("PRAGMA user_version = 8;")
+                .map_err(sqlite_error)?;
+            return Ok(());
+        }
+
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error)?;
+        transaction
+            .execute_batch(
+                "
+                DROP INDEX IF EXISTS active_client_leases_account_lookup;
+
+                CREATE TABLE active_client_leases_v8 (
+                    route_band TEXT NOT NULL,
+                    process_run_id TEXT NOT NULL,
+                    reservation_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    acquired_unix_seconds INTEGER NOT NULL,
+                    active_pressure INTEGER NOT NULL,
+                    PRIMARY KEY (route_band, process_run_id, reservation_id)
+                );
+
+                INSERT OR IGNORE INTO active_client_leases_v8 (
+                    route_band, process_run_id, reservation_id, account_id,
+                    acquired_unix_seconds, active_pressure
+                )
+                SELECT
+                    route_band, 'legacy', reservation_id, account_id,
+                    acquired_unix_seconds, 8
+                FROM active_client_leases;
+
+                DROP TABLE active_client_leases;
+                ALTER TABLE active_client_leases_v8 RENAME TO active_client_leases;
+
+                CREATE INDEX IF NOT EXISTS active_client_leases_account_lookup
+                    ON active_client_leases (
+                        route_band, account_id, acquired_unix_seconds
+                    );
+
+                PRAGMA user_version = 8;
+                ",
+            )
+            .map_err(sqlite_error)?;
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, StateStoreError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                )",
+                params![table_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists != 0)
+            .map_err(sqlite_error)
+    }
+
+    fn table_has_column(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<bool, StateStoreError> {
+        let query = format!("PRAGMA table_info({})", sqlite_identifier(table_name));
+        let mut statement = self.connection.prepare(&query).map_err(sqlite_error)?;
+        let mut rows = statement.query([]).map_err(sqlite_error)?;
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            let name: String = row.get("name").map_err(sqlite_error)?;
+            if name == column_name {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl AccountStateRepository for SqliteStateStore {
     fn upsert_account(&self, account: &AccountRecord) -> Result<(), StateStoreError> {
         self.upsert_account(account)
@@ -2286,6 +2815,7 @@ impl AccountStateRepository for SqliteStateStore {
     }
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl QuotaSnapshotRepository for SqliteStateStore {
     fn upsert_snapshot(&self, snapshot: &PersistedQuotaSnapshot) -> Result<(), StateStoreError> {
         self.upsert_quota_snapshot(snapshot)
@@ -2307,6 +2837,7 @@ impl QuotaSnapshotRepository for SqliteStateStore {
     }
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl SelectorQuotaRepository for SqliteStateStore {
     fn upsert_selector_window(
         &self,
@@ -2363,6 +2894,7 @@ impl SelectorQuotaRepository for SqliteStateStore {
     }
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl AffinityRepository for SqliteStateStore {
     fn pin_account(
         &self,
@@ -2496,6 +3028,7 @@ impl AffinityRepository for SqliteStateStore {
     }
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 fn sqlite_error(error: rusqlite::Error) -> StateStoreError {
     StateStoreError::Sqlite {
         message: error.to_string(),
@@ -2508,6 +3041,40 @@ fn sqlx_error(error: sqlx::Error) -> StateStoreError {
     }
 }
 
+async fn insert_selector_window_in_async_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    window: &PersistedSelectorQuotaWindow,
+) -> Result<(), StateStoreError> {
+    sqlx::query(
+        "INSERT INTO selector_quota_windows (
+           account_id, route_band, limit_window_seconds, status,
+           remaining_headroom, reset_unix_seconds, effective,
+           observed_unix_seconds
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(account_id, route_band, limit_window_seconds) DO UPDATE SET
+           status = excluded.status,
+           remaining_headroom = excluded.remaining_headroom,
+           reset_unix_seconds = excluded.reset_unix_seconds,
+           effective = excluded.effective,
+           observed_unix_seconds = excluded.observed_unix_seconds",
+    )
+    .bind(window.account_id().as_str())
+    .bind(window.route_band())
+    .bind(u64_to_i64(window.limit_window_seconds())?)
+    .bind(window.status().as_str())
+    .bind(u32_to_i64(window.remaining_headroom()))
+    .bind(window.reset_unix_seconds().map(u64_to_i64).transpose()?)
+    .bind(if window.effective() { 1_i64 } else { 0_i64 })
+    .bind(u64_to_i64(window.observed_unix_seconds())?)
+    .execute(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?;
+
+    Ok(())
+}
+
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 fn insert_selector_window_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     window: &PersistedSelectorQuotaWindow,
@@ -2581,6 +3148,110 @@ fn parse_refresh_error_class(value: &str) -> Result<QuotaRefreshErrorClass, Stat
         account_id: "<quota-refresh-status>".to_owned(),
         field: "last_error_class",
     })
+}
+
+fn parse_quota_refresh_status_row(
+    route_band: &str,
+    account_id_value: String,
+    last_success_unix_seconds: Option<i64>,
+    last_attempt_unix_seconds: Option<i64>,
+    last_error_class: Option<String>,
+    stale_after_unix_seconds: Option<i64>,
+    has_recorded_status: i64,
+) -> Result<QuotaRefreshStatusView, StateStoreError> {
+    let account_id =
+        AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
+            account_id: account_id_value.clone(),
+            field: "account_id",
+        })?;
+    if has_recorded_status == 0 {
+        return Ok(QuotaRefreshStatusView::legacy_missing_refresh_status(
+            account_id, route_band,
+        ));
+    }
+
+    Ok(QuotaRefreshStatusView::recorded(
+        account_id,
+        route_band,
+        last_success_unix_seconds
+            .map(|value| i64_to_u64(value, &account_id_value, "last_success_unix_seconds"))
+            .transpose()?,
+        last_attempt_unix_seconds
+            .map(|value| i64_to_u64(value, &account_id_value, "last_attempt_unix_seconds"))
+            .transpose()?,
+        last_error_class
+            .as_deref()
+            .map(parse_refresh_error_class)
+            .transpose()?,
+        stale_after_unix_seconds
+            .map(|value| i64_to_u64(value, &account_id_value, "stale_after_unix_seconds"))
+            .transpose()?,
+    ))
+}
+
+struct QuotaSnapshotSqlRow {
+    account_id_value: String,
+    source_value: String,
+    observed_unix_seconds: i64,
+    route_band: String,
+    remaining_headroom: i64,
+    reset_unix_seconds: Option<i64>,
+    reset_credits_available: Option<i64>,
+    stale_penalty: i64,
+}
+
+fn parse_quota_snapshot_row(
+    row: QuotaSnapshotSqlRow,
+) -> Result<PersistedQuotaSnapshot, StateStoreError> {
+    let parsed_account_id = AccountId::new(row.account_id_value.clone()).map_err(|_| {
+        StateStoreError::CorruptQuotaSnapshot {
+            account_id: row.account_id_value.clone(),
+            field: "account_id",
+        }
+    })?;
+    let source = QuotaSnapshotSource::parse(&row.source_value).ok_or_else(|| {
+        StateStoreError::CorruptQuotaSnapshot {
+            account_id: row.account_id_value.clone(),
+            field: "source",
+        }
+    })?;
+    let observed = i64_to_u64(row.observed_unix_seconds, &row.account_id_value, "observed")?;
+    let remaining = i64_to_u32(
+        row.remaining_headroom,
+        &row.account_id_value,
+        "remaining_headroom",
+    )?;
+    let reset = row
+        .reset_unix_seconds
+        .map(|value| i64_to_u64(value, &row.account_id_value, "reset_unix_seconds"))
+        .transpose()?;
+    let reset_credits = row
+        .reset_credits_available
+        .map(|value| i64_to_u32(value, &row.account_id_value, "reset_credits_available"))
+        .transpose()?;
+    let stale = match row.stale_penalty {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(StateStoreError::CorruptQuotaSnapshot {
+                account_id: row.account_id_value,
+                field: "stale_penalty",
+            });
+        }
+    };
+
+    let mut snapshot = PersistedQuotaSnapshot::new(parsed_account_id, source)
+        .with_observed_unix_seconds(observed)
+        .with_route_band(row.route_band, remaining)
+        .with_stale_penalty(stale);
+    if let Some(reset) = reset {
+        snapshot = snapshot.with_reset_unix_seconds(reset);
+    }
+    if let Some(reset_credits) = reset_credits {
+        snapshot = snapshot.with_reset_credits_available(reset_credits);
+    }
+
+    Ok(snapshot)
 }
 
 fn parse_quota_history_observation_row(
@@ -2843,6 +3514,7 @@ async fn invalidate_credential_mutation_quota_async(
     Ok(())
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 fn invalidate_credential_mutation_quota_sync(
     transaction: &rusqlite::Transaction<'_>,
     account_id: &AccountId,
@@ -2928,6 +3600,11 @@ fn i64_to_u64_account_generation(
         account_id: account_id.to_owned(),
         field,
     })
+}
+
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
+fn sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn i64_to_u32(value: i64, account_id: &str, field: &'static str) -> Result<u32, StateStoreError> {

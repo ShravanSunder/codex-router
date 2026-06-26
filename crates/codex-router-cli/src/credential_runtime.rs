@@ -2,17 +2,17 @@
 
 use std::path::Path;
 
+use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
+use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
 use codex_router_auth::resolver::ProviderCredentialResolver;
-use codex_router_auth::resolver::RefreshLeaseRegistry;
 use codex_router_auth::resolver::ResolvedProviderCredential;
-use codex_router_auth::resolver::RouterCredentialResolver;
 use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_core::ids::AccountId;
 use codex_router_secret_store::model::SecretStoreError;
-use codex_router_state::sqlite::SqliteStateStore;
+use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use thiserror::Error;
 
@@ -28,6 +28,9 @@ pub enum CliCredentialResolverOpenError {
     /// Secret store failed to open.
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
+    /// Tokio runtime failed to initialize.
+    #[error(transparent)]
+    Runtime(#[from] std::io::Error),
 }
 
 /// CLI-owned credential resolver adapter.
@@ -36,11 +39,12 @@ pub struct CliCredentialResolver<C = OpenAiOAuthRefreshClient>
 where
     C: CredentialRefreshClient + Clone,
 {
-    state_store: SqliteStateStore,
+    runtime: tokio::runtime::Runtime,
+    state_store: AsyncSqliteStateStore,
     secret_store: CliRuntimeSecretStore,
     fallback_now_unix_seconds: u64,
     refresh_client: C,
-    refresh_leases: RefreshLeaseRegistry,
+    refresh_leases: AsyncRefreshLeaseRegistry,
 }
 
 impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
@@ -50,12 +54,17 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
         secret_root: &Path,
         now_unix_seconds: u64,
     ) -> Result<Self, CliCredentialResolverOpenError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let state_store = runtime.block_on(AsyncSqliteStateStore::open(state_db_path))?;
         Ok(Self {
-            state_store: SqliteStateStore::open(state_db_path)?,
+            runtime,
+            state_store,
             secret_store: open_cli_secret_store(secret_root)?,
             fallback_now_unix_seconds: now_unix_seconds,
             refresh_client: OpenAiOAuthRefreshClient::new(),
-            refresh_leases: RefreshLeaseRegistry::new(),
+            refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
     }
 }
@@ -71,31 +80,37 @@ where
         now_unix_seconds: u64,
         refresh_client: C,
     ) -> Result<Self, CliCredentialResolverOpenError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let state_store = runtime.block_on(AsyncSqliteStateStore::open(state_db_path))?;
         Ok(Self {
-            state_store: SqliteStateStore::open(state_db_path)?,
+            runtime,
+            state_store,
             secret_store: open_cli_secret_store(secret_root)?,
             fallback_now_unix_seconds: now_unix_seconds,
             refresh_client,
-            refresh_leases: RefreshLeaseRegistry::new(),
+            refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
     }
 }
 
 impl<C> ProviderCredentialResolver for CliCredentialResolver<C>
 where
-    C: CredentialRefreshClient + Clone,
+    C: CredentialRefreshClient + Clone + Send + 'static,
 {
     fn resolve_provider_credentials(
         &self,
         account_id: &AccountId,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        RouterCredentialResolver::new_with_refresh_leases(
-            &self.state_store,
-            &self.secret_store,
+        let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
+            self.state_store.clone(),
+            self.secret_store.clone(),
             self.refresh_client.clone(),
-            current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds),
+            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
             self.refresh_leases.clone(),
-        )
-        .resolve_provider_credentials(account_id)
+        );
+        self.runtime
+            .block_on(resolver.resolve_provider_credentials(account_id))
     }
 }

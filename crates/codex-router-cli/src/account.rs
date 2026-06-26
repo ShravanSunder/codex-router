@@ -18,7 +18,10 @@ use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
+#[cfg(test)]
 use codex_router_state::repositories::AccountStateRepository;
+use codex_router_state::sqlite::AsyncSqliteStateStore;
+#[cfg(test)]
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
@@ -212,6 +215,9 @@ pub enum AccountCommandError {
     /// State-store operation failed.
     #[error(transparent)]
     StateStore(#[from] StateStoreError),
+    /// Tokio runtime failed to initialize.
+    #[error(transparent)]
+    Runtime(#[from] std::io::Error),
     /// Stdout write failed.
     #[error("failed to write stdout: {0}")]
     Stdout(std::io::Error),
@@ -329,7 +335,10 @@ fn import_codex_auth_text(
     let imported_auth = ImportedCodexAuth::parse(auth_text)?;
 
     create_router_root(&router_root)?;
-    let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
+    let runtime = account_command_runtime()?;
+    let state = runtime.block_on(AsyncSqliteStateStore::open(
+        &router_root.join("state.sqlite"),
+    ))?;
     let secrets = FileSecretStore::open(router_root.join("secrets"))?;
 
     let mut request = AccountImportRequest::new(
@@ -341,7 +350,9 @@ fn import_codex_auth_text(
     if let Some(chatgpt_account_id) = imported_auth.chatgpt_account_id {
         request = request.with_chatgpt_account_id(chatgpt_account_id);
     }
-    import_codex_auth_from_request(&state, &secrets, request)?;
+    runtime.block_on(import_codex_auth_from_request_async(
+        &state, &secrets, request,
+    ))?;
 
     match output_mode {
         AccountImportOutputMode::Import => {
@@ -505,6 +516,7 @@ impl AccountImportRequest {
 }
 
 /// Imports an already-parsed Codex OAuth auth record into router-owned state.
+#[cfg(test)]
 pub fn import_codex_auth_from_request(
     state: &SqliteStateStore,
     secrets: &impl SecretStore,
@@ -534,9 +546,46 @@ pub fn import_codex_auth_from_request(
     Ok(())
 }
 
+/// Imports an already-parsed Codex OAuth auth record into router-owned SQLx state.
+pub async fn import_codex_auth_from_request_async(
+    state: &AsyncSqliteStateStore,
+    secrets: &impl SecretStore,
+    request: AccountImportRequest,
+) -> Result<(), AccountCommandError> {
+    let active_credential_generation = state
+        .next_credential_generation(&request.account_id)
+        .await?;
+    let disabled_account = AccountRecord::new(
+        request.account_id.clone(),
+        request.label.clone(),
+        AccountStatus::Disabled,
+    );
+    state.upsert_account(&disabled_account).await?;
+    let bundle_key =
+        account_credential_bundle_key(&request.account_id, active_credential_generation)?;
+    let mut bundle =
+        AccountCredentialBundle::imported_codex_auth(request.access_token, request.refresh_token);
+    if let Some(chatgpt_account_id) = request.chatgpt_account_id {
+        bundle = bundle.with_chatgpt_account_id(chatgpt_account_id);
+    }
+    secrets.write_secret(&bundle_key, &bundle.to_secret_string()?)?;
+    state
+        .activate_account_credential_generation_and_invalidate_quota(
+            &request.account_id,
+            active_credential_generation,
+            AccountStatus::Enabled,
+        )
+        .await?;
+
+    Ok(())
+}
+
 fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), AccountCommandError> {
-    let state = SqliteStateStore::open(&router_root.join("state.sqlite"))?;
-    let accounts = AccountStateRepository::list_accounts(&state)?;
+    let runtime = account_command_runtime()?;
+    let state = runtime.block_on(AsyncSqliteStateStore::open(
+        &router_root.join("state.sqlite"),
+    ))?;
+    let accounts = runtime.block_on(state.list_accounts())?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header(["account", "status"]);
@@ -546,6 +595,13 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
     writeln!(stdout, "{table}").map_err(AccountCommandError::Stdout)?;
 
     Ok(())
+}
+
+fn account_command_runtime() -> Result<tokio::runtime::Runtime, AccountCommandError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(AccountCommandError::Runtime)
 }
 
 fn create_router_root(router_root: &Path) -> Result<(), AccountCommandError> {

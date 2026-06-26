@@ -2539,10 +2539,16 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let askluna =
-            AccountRecord::new(account_id("acct_askluna"), "askluna", AccountStatus::Enabled);
-        let matches =
-            AccountRecord::new(account_id("acct_matches"), "matches", AccountStatus::Enabled);
+        let askluna = AccountRecord::new(
+            account_id("acct_askluna"),
+            "askluna",
+            AccountStatus::Enabled,
+        );
+        let matches = AccountRecord::new(
+            account_id("acct_matches"),
+            "matches",
+            AccountStatus::Enabled,
+        );
         let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
         persist_account_with_selector_window_specs(
             &state,

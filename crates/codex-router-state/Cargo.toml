@@ -8,12 +8,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+sync-rusqlite-fixtures = ["dep:rusqlite"]
+
 [dependencies]
 codex-router-core.workspace = true
 futures-util.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, optional = true }
 sqlx.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 tokio.workspace = true

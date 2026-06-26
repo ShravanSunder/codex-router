@@ -120,6 +120,13 @@ for forbidden in "acct_" "pp" "bottleneck" "access-token" "refresh-token" "autho
   fi
 done
 
+for forbidden in "acct_askluna" "acct_matches" "acct_ssdev" "access-token" "refresh-token" "authorization" "X-Codex-Router-Token"; do
+  if grep -q "${forbidden}" "${json_output}"; then
+    echo "json quota status leaked forbidden text: ${forbidden}" >&2
+    exit 1
+  fi
+done
+
 python3 - "${json_output}" <<'PY'
 import json
 import sys

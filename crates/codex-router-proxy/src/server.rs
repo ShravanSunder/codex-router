@@ -1483,15 +1483,15 @@ fn sanitize_route_path_for_log(path: &str) -> &'static str {
 
 fn websocket_runtime_error_kind(error: &LoopbackRouterRuntimeError) -> &'static str {
     match error {
-        LoopbackRouterRuntimeError::WebSocket(crate::websocket::WebSocketTunnelError::Transport(
-            _,
-        )) => "websocket_transport",
-        LoopbackRouterRuntimeError::WebSocket(crate::websocket::WebSocketTunnelError::Handshake) => {
-            "websocket_handshake"
-        }
-        LoopbackRouterRuntimeError::WebSocket(crate::websocket::WebSocketTunnelError::CloseReason(
-            _,
-        )) => "websocket_close_before_upstream",
+        LoopbackRouterRuntimeError::WebSocket(
+            crate::websocket::WebSocketTunnelError::Transport(_),
+        ) => "websocket_transport",
+        LoopbackRouterRuntimeError::WebSocket(
+            crate::websocket::WebSocketTunnelError::Handshake,
+        ) => "websocket_handshake",
+        LoopbackRouterRuntimeError::WebSocket(
+            crate::websocket::WebSocketTunnelError::CloseReason(_),
+        ) => "websocket_close_before_upstream",
         LoopbackRouterRuntimeError::WebSocket(
             crate::websocket::WebSocketTunnelError::ConnectionTracking(_),
         ) => "websocket_connection_tracking",

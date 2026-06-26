@@ -15,6 +15,7 @@ use codex_router_secret_store::account_tokens::account_credential_bundle_key;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use serde::Deserialize;
@@ -300,11 +301,13 @@ struct RefreshTokenErrorResponse {
 }
 
 /// Shared per-account refresh leases for resolver single-flight behavior.
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 #[derive(Clone, Debug, Default)]
 pub struct RefreshLeaseRegistry {
     leases: Arc<Mutex<HashMap<AccountId, Arc<Mutex<()>>>>>,
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl RefreshLeaseRegistry {
     /// Creates an empty refresh lease registry.
     #[must_use]
@@ -352,6 +355,7 @@ impl AsyncRefreshLeaseRegistry {
 }
 
 /// Resolves provider credentials through router-owned state and secret stores.
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 #[derive(Debug)]
 pub struct RouterCredentialResolver<'a, S, C>
 where
@@ -367,6 +371,7 @@ where
     refresh_commit_failpoint: Option<RefreshCommitFailpoint>,
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl<'a, S, C> RouterCredentialResolver<'a, S, C>
 where
     S: SecretStore,
@@ -502,6 +507,7 @@ where
     }
 }
 
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 impl<S, C> ProviderCredentialResolver for RouterCredentialResolver<'_, S, C>
 where
     S: SecretStore,

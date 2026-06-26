@@ -1198,6 +1198,7 @@ mod tests {
     use codex_router_auth::resolver::ProviderCredentialResolver;
     use codex_router_auth::resolver::RouterCredentialResolver;
     use codex_router_core::ids::AccountId;
+    use codex_router_core::ids::ReservationId;
     use codex_router_core::redaction::SecretString;
     use codex_router_proxy::server::LoopbackBindAddress;
     use codex_router_proxy::server::LoopbackRouterRuntime;
@@ -2549,7 +2550,7 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients mirror <= 2h\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
         );
         assert_eq!(
             lines[2],
@@ -2642,7 +2643,7 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
         );
         assert_eq!(
             lines[2],
@@ -2723,6 +2724,7 @@ exit 42
                 path_to_str(&router_root),
                 "--format",
                 "json",
+                "--no-refresh",
                 "--now-unix-seconds",
                 "11000",
             ],
@@ -2734,13 +2736,21 @@ exit 42
         assert_eq!(parsed["route_band"], "responses");
         assert_eq!(parsed["selected_pool"], "usable");
         assert_eq!(parsed["selected_pool_reason"], "usable_available");
-        assert_eq!(parsed["preferred_next_account_id"], "acct_primary");
         assert_eq!(
-            parsed["weighted_candidates"][0]["account_id"],
-            "acct_primary"
+            parsed["preferred_next_account_hash"].as_str().map(str::len),
+            Some(16)
+        );
+        assert_eq!(
+            parsed["weighted_candidates"][0]["account_hash"]
+                .as_str()
+                .map(str::len),
+            Some(16)
         );
         assert_eq!(parsed["weighted_candidates"][0]["routing_weight"], 1);
-        assert_eq!(parsed["accounts"][0]["account_id"], "acct_primary");
+        assert_eq!(
+            parsed["accounts"][0]["account_hash"].as_str().map(str::len),
+            Some(16)
+        );
         assert_eq!(parsed["accounts"][0]["safe_account_label"], "primary");
         assert_eq!(parsed["accounts"][0]["availability"], "usable");
         assert_eq!(parsed["accounts"][0]["freshness"], "fresh");
@@ -2749,7 +2759,13 @@ exit 42
             "preferred_highest_weight"
         );
         assert_eq!(parsed["accounts"][0]["preferred_next"], true);
+        assert!(!output.stdout.contains("acct_primary"));
         assert_eq!(parsed["accounts"][0]["reset_credits_available"], 1);
+        assert_eq!(parsed["accounts"][0]["active_clients"], 0);
+        assert_eq!(
+            parsed["accounts"][0]["active_clients_source"],
+            "sqlx_mirror"
+        );
         assert_eq!(parsed["accounts"][0]["next_use"], "preferred by quota");
         assert_eq!(parsed["accounts"][0]["short_pressure"], 25);
         assert_eq!(parsed["accounts"][0]["long_pressure"], 20);
@@ -2787,6 +2803,248 @@ exit 42
         assert!(!output.stdout.contains("authorization"));
         assert!(!output.stdout.contains("bottleneck"));
         assert!(!output.stdout.contains("pp"));
+        assert!(output.stderr.is_empty());
+
+        let auto_output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "json",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(Vec::new()),
+        );
+        let auto_parsed: serde_json::Value = must_ok(serde_json::from_str(&auto_output.stdout));
+        assert_eq!(auto_parsed["route_result"], "ok");
+        assert_eq!(auto_parsed["cached"]["route_band"], "responses");
+        assert_eq!(auto_parsed["cached"]["selected_pool"], "usable");
+        assert_eq!(auto_parsed["refresh"]["route_result"], "error");
+        assert!(auto_parsed["refresh"]["error"].as_str().is_some());
+        assert_eq!(auto_parsed["updated"], serde_json::Value::Null);
+        assert!(!auto_output.stdout.contains("acct_primary"));
+    }
+
+    #[test]
+    fn quota_status_selection_uses_active_client_pressure() {
+        let test_root = TestRoot::new("quota-status-active-pressure");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state_path = router_root.join("state.sqlite");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let busy_account =
+            AccountRecord::new(account_id("acct_busy"), "busy", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        let idle_account =
+            AccountRecord::new(account_id("acct_idle"), "idle", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &busy_account,
+        ));
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &idle_account,
+        ));
+        for account in [&busy_account, &idle_account] {
+            let five_hour_window = PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                "responses",
+                18_000,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(80)
+            .with_reset_unix_seconds(20_000)
+            .with_effective(true)
+            .with_observed_unix_seconds(10_000);
+            let weekly_window = PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                "responses",
+                604_800,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(80)
+            .with_reset_unix_seconds(614_800)
+            .with_observed_unix_seconds(10_000);
+            must_ok(
+                SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                    &state,
+                    account.account_id(),
+                    "responses",
+                    &[five_hour_window, weekly_window],
+                    10_000,
+                    20_000,
+                ),
+            );
+        }
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        let async_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+        must_ok(runtime.block_on(async_state.record_active_client_acquired(
+            "responses",
+            "test-process",
+            &ReservationId::new("reservation_busy"),
+            busy_account.account_id(),
+            10_900,
+            8,
+        )));
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "json",
+                "--no-refresh",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let parsed: serde_json::Value = must_ok(serde_json::from_str(&output.stdout));
+        assert_eq!(
+            parsed["preferred_next_account_hash"].as_str().map(str::len),
+            Some(16)
+        );
+        assert_eq!(parsed["accounts"][0]["safe_account_label"], "busy");
+        assert_eq!(parsed["accounts"][0]["active_clients"], 1);
+        assert_eq!(
+            parsed["accounts"][0]["active_clients_source"],
+            "sqlx_mirror"
+        );
+        assert_eq!(parsed["accounts"][0]["preferred_next"], false);
+        assert_eq!(parsed["accounts"][1]["safe_account_label"], "idle");
+        assert_eq!(parsed["accounts"][1]["active_clients"], 0);
+        assert_eq!(
+            parsed["accounts"][1]["active_clients_source"],
+            "sqlx_mirror"
+        );
+        assert_eq!(parsed["accounts"][1]["preferred_next"], true);
+        assert!(!output.stdout.contains("acct_busy"));
+        assert!(!output.stdout.contains("acct_idle"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_marks_active_client_mirror_unavailable_when_rows_are_corrupt() {
+        let test_root = TestRoot::new("quota-status-active-unavailable");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state_path = router_root.join("state.sqlite");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account = AccountRecord::new(
+            account_id("acct_primary"),
+            "primary",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        let five_hour_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(20_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(10_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account.account_id().clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(614_800)
+        .with_observed_unix_seconds(10_000);
+        must_ok(
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                account.account_id(),
+                "responses",
+                &[five_hour_window, weekly_window],
+                10_000,
+                20_000,
+            ),
+        );
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        let async_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+        drop(async_state);
+        runtime.block_on(async {
+            let pool = must_ok(
+                sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect(&format!("sqlite://{}", state_path.display()))
+                    .await,
+            );
+            must_ok(
+                sqlx::query(
+                    "INSERT INTO active_client_leases (
+                       route_band, process_run_id, reservation_id, account_id,
+                       acquired_unix_seconds, active_pressure
+                     )
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .bind("responses")
+                .bind("process-corrupt")
+                .bind("reservation_corrupt")
+                .bind("")
+                .bind(10_900_i64)
+                .bind(8_i64)
+                .execute(&pool)
+                .await,
+            );
+            pool.close().await;
+        });
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "json",
+                "--no-refresh",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        let parsed: serde_json::Value = must_ok(serde_json::from_str(&output.stdout));
+        assert_eq!(
+            parsed["accounts"][0]["account_hash"].as_str().map(str::len),
+            Some(16)
+        );
+        assert!(!output.stdout.contains("acct_primary"));
+        assert_eq!(
+            parsed["accounts"][0]["active_clients"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            parsed["accounts"][0]["active_clients_source"],
+            "unavailable"
+        );
         assert!(output.stderr.is_empty());
     }
 
@@ -5161,15 +5419,12 @@ exit 42
             .parent()
             .and_then(Path::parent)
             .unwrap_or_else(|| panic!("cli crate should have workspace root parent"));
-        let diff = match ProcessCommand::new("git")
-            .args(["diff", "--unified=0", "origin/main...HEAD", "--", "crates"])
-            .current_dir(workspace_root)
-            .output()
-        {
-            Ok(diff) if diff.status.success() => diff,
-            _ => return,
-        };
-        let diff_text = String::from_utf8_lossy(&diff.stdout);
+        let committed_diff = git_diff_text(
+            workspace_root,
+            &["diff", "--unified=0", "origin/main...HEAD", "--", "crates"],
+        );
+        let worktree_diff = git_diff_text(workspace_root, &["diff", "--unified=0", "--", "crates"]);
+        let diff_text = format!("{committed_diff}\n{worktree_diff}");
         let added_rusqlite_lines = diff_text
             .lines()
             .filter(|line| {
@@ -5184,6 +5439,18 @@ exit 42
             added_rusqlite_lines.is_empty(),
             "new or extended SQL in this implementation must be SQLx-only; added rusqlite lines: {added_rusqlite_lines:?}"
         );
+    }
+
+    fn git_diff_text(workspace_root: &Path, args: &[&str]) -> String {
+        let output = match ProcessCommand::new("git")
+            .args(args)
+            .current_dir(workspace_root)
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            _ => return String::new(),
+        };
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     #[test]

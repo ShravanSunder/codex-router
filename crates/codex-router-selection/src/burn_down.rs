@@ -4,8 +4,6 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::safe_account_label;
 use codex_router_core::routes::RouteBand;
 
-use crate::weighted_deficit::WeightedDeficitSelector;
-
 /// Fixed v1 short quota window in seconds.
 pub const V1_SHORT_WINDOW_SECONDS: u64 = 18_000;
 /// Fixed v1 weekly quota window in seconds.
@@ -672,10 +670,9 @@ pub fn assess_route_band(
         .iter()
         .map(|(account, weight)| (account.account_id.clone(), *weight))
         .collect::<Vec<_>>();
-    let preferred_next = {
-        let mut selector = WeightedDeficitSelector::default();
-        selector.select(&weighted_candidates, 1)
-    };
+    let preferred_next = weighted_candidates
+        .first()
+        .map(|(account_id, _weight)| account_id.clone());
     if let Some(preferred_next) = &preferred_next {
         for account in &mut accounts {
             account.preferred_next = &account.account_id == preferred_next;
@@ -1285,6 +1282,17 @@ mod tests {
         assert_eq!(
             account_assessment(&assessment, "acct_b").routing_reason(),
             RoutingReason::HeldReserve
+        );
+    }
+
+    #[test]
+    fn preferred_next_matches_first_strict_candidate_without_smooth_selector() {
+        let source = include_str!("burn_down.rs");
+        let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        assert!(
+            !production_source.contains("WeightedDeficitSelector"),
+            "burn-down preferred_next must be the first strict candidate, not a smooth weighted selector"
         );
     }
 
