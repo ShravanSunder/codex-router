@@ -144,6 +144,7 @@ pub struct ActiveReservationGuard {
 }
 
 impl ActiveReservationGuard {
+    #[cfg(test)]
     pub(crate) fn new(
         active_reservations: RouteBandReservationBooks,
         route_band: String,
@@ -196,10 +197,26 @@ impl ActiveReservationGuard {
                 self.inner.reservation_handle.headroom_cost(),
                 reserved_unix_seconds,
             );
-        Some(Self::new(
+        if let Some(active_client_leases) = self.inner.active_client_leases.as_ref() {
+            active_client_leases.record_acquired(
+                &self.inner.route_band,
+                &reservation_handle,
+                reserved_unix_seconds,
+            );
+        }
+        let span = tracing::info_span!(
+            "codex_router.account_rereserved",
+            route_band = self.inner.route_band.as_str(),
+            account.id = reservation_handle.account_id().as_str(),
+            reservation.id = reservation_handle.reservation_id().as_str(),
+        );
+        let _span_guard = span.enter();
+        tracing::info!("codex_router.account_rereserved");
+        Some(Self::new_with_active_client_leases(
             Arc::clone(&self.inner.active_reservations),
             self.inner.route_band.clone(),
             reservation_handle,
+            self.inner.active_client_leases.clone(),
         ))
     }
 }
@@ -246,6 +263,14 @@ impl ActiveReservationGuardInner {
             if let Some(active_client_leases) = self.active_client_leases.as_ref() {
                 active_client_leases.record_released(&self.route_band, &self.reservation_handle);
             }
+            let span = tracing::info_span!(
+                "codex_router.account_reservation_released",
+                route_band = self.route_band.as_str(),
+                account.id = self.reservation_handle.account_id().as_str(),
+                reservation.id = self.reservation_handle.reservation_id().as_str(),
+            );
+            let _span_guard = span.enter();
+            tracing::info!("codex_router.account_reservation_released");
         }
     }
 }
@@ -1135,6 +1160,16 @@ fn reserve_selected_account(
     if let Some(active_client_leases) = active_client_leases {
         active_client_leases.record_acquired(route_band, &reservation_handle, now_unix_seconds);
     }
+    let span = tracing::info_span!(
+        "codex_router.account_reserved",
+        route_band,
+        account.id = selected.account_id().as_str(),
+        selection.reason = selected.selection_reason(),
+        active.headroom_cost = headroom_cost,
+        reservation.id = reservation_handle.reservation_id().as_str(),
+    );
+    let _span_guard = span.enter();
+    tracing::info!("codex_router.account_reserved");
     Ok(selected.with_active_reservation_guard(
         ActiveReservationGuard::new_with_active_client_leases(
             active_reservations_guard_source,
@@ -1420,4 +1455,117 @@ fn current_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveClientLeaseReporter;
+    use super::ActiveReservationGuard;
+    use super::RouteBandReservationBooks;
+    use codex_router_core::ids::AccountId;
+    use codex_router_selection::reservation::ReservationBook;
+    use codex_router_selection::reservation::ReservationHandle;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum LeaseEvent {
+        Acquired {
+            route_band: String,
+            reservation_id: String,
+            account_id: String,
+            acquired_unix_seconds: u64,
+        },
+        Released {
+            route_band: String,
+            reservation_id: String,
+        },
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingLeaseReporter {
+        events: Mutex<Vec<LeaseEvent>>,
+    }
+
+    impl RecordingLeaseReporter {
+        fn events(&self) -> Vec<LeaseEvent> {
+            self.events
+                .lock()
+                .unwrap_or_else(|error| panic!("events lock should be available: {error}"))
+                .clone()
+        }
+    }
+
+    impl ActiveClientLeaseReporter for RecordingLeaseReporter {
+        fn record_acquired(
+            &self,
+            route_band: &str,
+            reservation_handle: &ReservationHandle,
+            acquired_unix_seconds: u64,
+        ) {
+            self.events
+                .lock()
+                .unwrap_or_else(|error| panic!("events lock should be available: {error}"))
+                .push(LeaseEvent::Acquired {
+                    route_band: route_band.to_owned(),
+                    reservation_id: reservation_handle.reservation_id().as_str().to_owned(),
+                    account_id: reservation_handle.account_id().as_str().to_owned(),
+                    acquired_unix_seconds,
+                });
+        }
+
+        fn record_released(&self, route_band: &str, reservation_handle: &ReservationHandle) {
+            self.events
+                .lock()
+                .unwrap_or_else(|error| panic!("events lock should be available: {error}"))
+                .push(LeaseEvent::Released {
+                    route_band: route_band.to_owned(),
+                    reservation_id: reservation_handle.reservation_id().as_str().to_owned(),
+                });
+        }
+    }
+
+    #[test]
+    fn active_reservation_rereserve_keeps_external_lease_reporter() {
+        let account_id = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let active_reservations = RouteBandReservationBooks::default();
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default)
+                .reserve_next_at(account_id, 8, 1)
+        };
+        let reporter = Arc::new(RecordingLeaseReporter::default());
+        let guard = ActiveReservationGuard::new_with_active_client_leases(
+            Arc::clone(&active_reservations),
+            "responses".to_owned(),
+            reservation_handle,
+            Some(reporter.clone()),
+        );
+
+        let rereserved = guard
+            .reserve_again_at(2)
+            .unwrap_or_else(|| panic!("re-reservation should succeed"));
+        drop(rereserved);
+
+        assert_eq!(
+            reporter.events(),
+            vec![
+                LeaseEvent::Acquired {
+                    route_band: "responses".to_owned(),
+                    reservation_id: "reservation_2".to_owned(),
+                    account_id: "acct_selected".to_owned(),
+                    acquired_unix_seconds: 2,
+                },
+                LeaseEvent::Released {
+                    route_band: "responses".to_owned(),
+                    reservation_id: "reservation_2".to_owned(),
+                },
+            ]
+        );
+    }
 }

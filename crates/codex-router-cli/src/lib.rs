@@ -30,6 +30,7 @@ pub mod profile;
 pub mod quota;
 mod secret_store_factory;
 pub mod sessions;
+mod telemetry;
 pub mod token;
 
 use account::AccountCommand;
@@ -54,6 +55,9 @@ const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 
 /// Runs the process CLI.
 pub fn run() {
+    let _telemetry_guard = telemetry::init_from_env();
+    let run_span = telemetry::run_span();
+    let _run_span_guard = run_span.enter();
     let context = CliContext::from_process();
     let args = std::env::args_os();
     let mut stdout = std::io::stdout();

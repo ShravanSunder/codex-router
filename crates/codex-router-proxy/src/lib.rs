@@ -2531,6 +2531,64 @@ mod tests {
         assert_eq!(second.selection_reason(), "account_hold_cooldown");
     }
 
+    #[test]
+    fn repository_backed_selector_keeps_preferring_healthiest_quota_account() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_prefers_healthiest_quota");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let askluna =
+            AccountRecord::new(account_id("acct_askluna"), "askluna", AccountStatus::Enabled);
+        let matches =
+            AccountRecord::new(account_id("acct_matches"), "matches", AccountStatus::Enabled);
+        let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &askluna,
+            "responses",
+            &[(18_000, 98, true), (604_800, 23, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &matches,
+            "responses",
+            &[(18_000, 99, true), (604_800, 34, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &ssdev,
+            "responses",
+            &[(18_000, 78, true), (604_800, 76, false)],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new_with_runtime(
+            &state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            0,
+            Arc::new(test_unix_seconds),
+        );
+
+        for request_index in 0..80 {
+            let selected = match selector.select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            ) {
+                Ok(selected) => selected,
+                Err(error) => panic!("request {request_index} should select account: {error}"),
+            };
+            assert_eq!(
+                selected.account_id(),
+                ssdev.account_id(),
+                "request {request_index} should not spend weak weekly accounts while ssdev is healthiest",
+            );
+            assert_eq!(selected.selection_reason(), "preferred_weekly_healthier");
+        }
+    }
+
     #[tokio::test]
     async fn async_repository_backed_selector_reuses_held_account_inside_cooldown() {
         let temp_dir = ProxyTestTempDir::new("async_repository_selector_hold_cooldown");

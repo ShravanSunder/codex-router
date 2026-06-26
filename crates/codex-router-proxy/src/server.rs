@@ -908,10 +908,52 @@ impl LoopbackProtocolConnectionHandler {
         )))
         .with_local_peer_addr(local_peer_addr);
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
-        tunnel
+        {
+            let open_span = tracing::info_span!(
+                "codex_router.websocket_open",
+                route.path = sanitize_route_path_for_log(&path),
+                peer.present = local_peer_addr.is_some(),
+            );
+            let _open_span_guard = open_span.enter();
+            tracing::info!(
+                route.path = sanitize_route_path_for_log(&path),
+                peer.present = local_peer_addr.is_some(),
+                "codex_router.websocket_open"
+            );
+        }
+        let result = tunnel
             .handle_upgraded_connection(local_websocket, handshake, upstream_url.as_str())
             .await
-            .map_err(LoopbackRouterRuntimeError::WebSocket)
+            .map_err(LoopbackRouterRuntimeError::WebSocket);
+        match &result {
+            Ok(()) => {
+                let span = tracing::info_span!(
+                    "codex_router.websocket_closed",
+                    route.path = sanitize_route_path_for_log(&path),
+                );
+                let _span_guard = span.enter();
+                tracing::info!(
+                    route.path = sanitize_route_path_for_log(&path),
+                    "codex_router.websocket_closed"
+                );
+            }
+            Err(error) => {
+                let span = tracing::warn_span!(
+                    "codex_router.websocket_failed",
+                    route.path = sanitize_route_path_for_log(&path),
+                    error.kind = websocket_runtime_error_kind(error),
+                    error = %sanitize_error_for_log(error),
+                );
+                let _span_guard = span.enter();
+                tracing::warn!(
+                    route.path = sanitize_route_path_for_log(&path),
+                    error.kind = websocket_runtime_error_kind(error),
+                    error = %sanitize_error_for_log(error),
+                    "codex_router.websocket_failed"
+                );
+            }
+        }
+        result
     }
 
     async fn handle_hyper_http_request(
@@ -1427,6 +1469,50 @@ fn spawn_async_provider_error_observation(
 
 fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
     Box::new(error)
+}
+
+fn sanitize_route_path_for_log(path: &str) -> &'static str {
+    if path.ends_with("/responses") {
+        "/v1/responses"
+    } else if path.ends_with("/models") {
+        "/v1/models"
+    } else {
+        "other"
+    }
+}
+
+fn websocket_runtime_error_kind(error: &LoopbackRouterRuntimeError) -> &'static str {
+    match error {
+        LoopbackRouterRuntimeError::WebSocket(crate::websocket::WebSocketTunnelError::Transport(
+            _,
+        )) => "websocket_transport",
+        LoopbackRouterRuntimeError::WebSocket(crate::websocket::WebSocketTunnelError::Handshake) => {
+            "websocket_handshake"
+        }
+        LoopbackRouterRuntimeError::WebSocket(crate::websocket::WebSocketTunnelError::CloseReason(
+            _,
+        )) => "websocket_close_before_upstream",
+        LoopbackRouterRuntimeError::WebSocket(
+            crate::websocket::WebSocketTunnelError::ConnectionTracking(_),
+        ) => "websocket_connection_tracking",
+        LoopbackRouterRuntimeError::WebSocket(_) => "websocket_other",
+        LoopbackRouterRuntimeError::HyperConnection(_) => "hyper_connection",
+        LoopbackRouterRuntimeError::HyperBody(_) => "hyper_body",
+        _ => "router_runtime",
+    }
+}
+
+fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
+    let rendered_error = error.to_string();
+    if rendered_error.contains("BadRecordMac") {
+        "websocket transport failed: BadRecordMac".to_owned()
+    } else if rendered_error.contains("FirstFrameTimeout") {
+        "websocket closed before upstream open: FirstFrameTimeout".to_owned()
+    } else if rendered_error.contains("FirstFrameTooLarge") {
+        "websocket closed before upstream open: FirstFrameTooLarge".to_owned()
+    } else {
+        websocket_runtime_error_kind(error).to_owned()
+    }
 }
 
 fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
