@@ -460,10 +460,56 @@ main() {
         scripts/check-release-runtime-guardrails.py "$row_id"
       exit $?
       ;;
-    AR-WS-PASSTHROUGH|AR-WS-ACTIVE-TURN|AR-HTTP-PASSTHROUGH|AR-CLI-UX|AR-SESSIONS|AR-SCHEMA|AR-E2E-ACCOUNTS)
-      receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
-      printf 'proof row %s failed; harness for this account-router row is not implemented yet; receipt: %s\n' "$row_id" "$receipt" >&2
-      exit 1
+    AR-WS-PASSTHROUGH)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "WebSocket first-frame pass-through tests prove large/malformed/future Codex-owned frames are forwarded without router payload policy." \
+        "cargo test -p codex-router-proxy websocket_first_frame_forwards_large_malformed_payload_without_router_policy -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket_first_response_create_frame_selects_and_forwards_unchanged -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket_first_future_json_payload_selects_and_forwards_unchanged -- --nocapture"
+      ;;
+    AR-WS-ACTIVE-TURN)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "WebSocket active-turn reservation tests prove completion releases load and later same-socket request-like frames re-reserve the pinned account." \
+        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::response_completed_releases_active_reservation_before_socket_closes -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::same_socket_request_after_completion_reserves_pinned_account_again -- --nocapture"
+      ;;
+    AR-HTTP-PASSTHROUGH)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "HTTP/SSE pass-through tests prove request bodies stream before EOF and response streams are forwarded while bounded metadata is observed." \
+        "cargo test -p codex-router-proxy upstream::hyper_http_upstream_transport_streams_request_body_before_eof -- --nocapture" \
+        "cargo test -p codex-router-proxy assembled_loopback_router_runtime_streams_sse_before_upstream_eof -- --nocapture" \
+        "cargo test -p codex-router-proxy http_proxy_preserves_responses_body_bytes_without_interpreting_unknown_fields -- --nocapture"
+      ;;
+    AR-CLI-UX)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "CLI UX tests and help smoke prove normal help/defaults hide internal token/import/live/proof noise and expose installed-app commands." \
+        "cargo test -p codex-router-cli process_binary_path_is_skipped_before_command_parse -- --nocapture" \
+        "cargo test -p codex-router-cli account_login_defaults_to_device_auth_method -- --nocapture" \
+        "cargo test -p codex-router-cli account_list_renders_friendly_table_without_account_ids -- --nocapture" \
+        "cargo test -p codex-router-cli quota_command_defaults_to_status -- --nocapture" \
+        "cargo run -q -p codex-router-cli -- --help | grep -F 'sessions --repo' >/dev/null" \
+        "! cargo run -q -p codex-router-cli -- --help | grep -E -- '--state-db|--secret-root|import-codex-auth|live quota|--scope|--allow-plaintext-file-secrets' >/dev/null"
+      ;;
+    AR-SESSIONS)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Sessions tests prove cwd default, checkout/repo/any root flags, provider/source filters, picker launch, and SQLx read-only state boundary." \
+        "cargo test -p codex-router-cli sessions_ -- --nocapture"
+      ;;
+    AR-SCHEMA)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "State/default-root tests prove current schema migrations, reset-credit migration, unsupported schema fail-closed behavior, and ~/.codex-router defaults." \
+        "cargo test -p codex-router-state sqlite_migration_roundtrips_account_and_quota_snapshot -- --nocapture" \
+        "cargo test -p codex-router-state v6_migration_adds_reset_credits_without_losing_existing_quota -- --nocapture" \
+        "cargo test -p codex-router-state unsupported_schema_version_fails_closed_on_open -- --nocapture" \
+        "cargo test -p codex-router-cli serve_command_defaults_to_home_router_paths_and_provider_upstream -- --nocapture" \
+        "cargo test -p codex-router-cli account_list_command_defaults_to_home_router_root -- --nocapture" \
+        "cargo test -p codex-router-cli quota_status_command_defaults_to_home_router_root -- --nocapture"
+      ;;
+    AR-E2E-ACCOUNTS)
+      mark_row_pass "$row_id" "$layer" "$owner" \
+        "Installed-Codex smoke proves WebSocket account-token selection and three concurrent WebSocket clients share one router without transport degradation." \
+        "tests/smoke/installed_codex_mock.sh --transport websocket --scenario serial" \
+        "tests/smoke/installed_codex_mock.sh --transport websocket --scenario concurrent"
       ;;
     U-01)
       mark_row_pass "$row_id" "$layer" "$owner" \
