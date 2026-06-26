@@ -4105,6 +4105,146 @@ mod tests {
     }
 
     #[test]
+    fn assembled_loopback_router_runtime_returns_safe_error_for_unreplayable_http_quota_error() {
+        let temp_dir = ProxyTestTempDir::new("assembled_runtime_unreplayable_http_quota");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match FileSecretStore::open(&secret_path) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let primary = AccountRecord::new(
+            account_id("acct_primary_unreplayable_quota"),
+            "primary-unreplayable-quota",
+            AccountStatus::Enabled,
+        );
+        let fallback = AccountRecord::new(
+            account_id("acct_fallback_unreplayable_quota"),
+            "fallback-unreplayable-quota",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &primary, 90, "primary-token");
+        persist_account_with_snapshot_and_token(&state, &secrets, &fallback, 80, "fallback-token");
+
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock upstream address should read: {error}"),
+        };
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock upstream should accept first connection: {error}"),
+            };
+            let request = read_test_http_request(&mut stream);
+            let authorization = request
+                .lines()
+                .find(|line| line.starts_with("authorization: "))
+                .unwrap_or("<missing>")
+                .to_owned();
+            let body_exceeded_replay_limit =
+                request.contains("\"unreplayable_padding\":\"") && request.len() > 2 * 1024 * 1024;
+            if let Err(error) = upstream_sender.send((authorization, body_exceeded_replay_limit)) {
+                panic!("mock upstream authorization should record: {error}");
+            }
+            let quota_body = br#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+            if let Err(error) = write!(
+                stream,
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                quota_body.len()
+            ) {
+                panic!("mock upstream should write quota response headers: {error}");
+            }
+            if let Err(error) = stream.write_all(quota_body) {
+                panic!("mock upstream should write quota response body: {error}");
+            }
+        });
+        let endpoint = match UpstreamEndpoint::new(format!("http://{upstream_address}/v1")) {
+            Ok(endpoint) => endpoint,
+            Err(error) => panic!("mock upstream endpoint should validate: {error}"),
+        };
+        let bind_address = match LoopbackBindAddress::new("127.0.0.1", 0) {
+            Ok(address) => address,
+            Err(error) => panic!("router bind address should validate: {error}"),
+        };
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path.clone(),
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = match LoopbackRouterRuntime::start(config) {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("router runtime should start: {error}"),
+        };
+        let router_address = runtime.local_addr();
+        let unreplayable_body = format!(
+            r#"{{"model":"gpt-5","unreplayable_padding":"{}"}}"#,
+            "x".repeat(2 * 1024 * 1024)
+        );
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses?retry=true HTTP/1.1\r\n",
+                unreplayable_body.as_bytes(),
+            )
+        });
+
+        let handled = match runtime.serve_http_connections(1) {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve one client connection: {error}"),
+        };
+        assert_eq!(handled, 1);
+        let response = match client_thread.join() {
+            Ok(response) => response,
+            Err(error) => panic!("client thread panicked: {error:?}"),
+        };
+
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(response.contains("codex_router_quota_state_unavailable"));
+        assert!(!response.contains("codex_router_all_accounts_exhausted"));
+        assert!(!response.contains("usage_limit_reached"));
+        let first = upstream_receiver
+            .recv()
+            .unwrap_or_else(|error| panic!("first upstream auth should record: {error}"));
+        assert_eq!(first.0, "authorization: Bearer primary-token");
+        assert!(first.1);
+        assert!(
+            upstream_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+
+        match upstream_thread.join() {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        let runtime_state = must_ok(SqliteStateStore::open(&database_path));
+        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("fallback should remain selectable: {error}"));
+        assert_eq!(selected_after_retry.account_id(), fallback.account_id());
+    }
+
+    #[test]
     fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can_serve() {
         let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_quota_retry_chain");
         let database_path = temp_dir.path().join("state.sqlite");

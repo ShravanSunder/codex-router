@@ -1019,7 +1019,7 @@ impl LoopbackProtocolConnectionHandler {
                 }
                 Err(PrecommitHttpQuotaResponse::AccountQuotaExhausted) => {
                     if replayable_request.is_none() {
-                        return all_accounts_exhausted_response();
+                        return quota_state_unavailable_response();
                     }
                     tracing::info!(
                         attempt = attempt_index + 1,
