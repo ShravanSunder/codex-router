@@ -462,6 +462,7 @@ mod tests {
                 "responses",
                 "process-a",
                 &ReservationId::new("reservation_alpha_1"),
+                1_010,
             )
             .await
         {
@@ -547,7 +548,7 @@ mod tests {
         );
 
         if let Err(error) = store
-            .record_active_client_released("responses", "process-a", &reservation_id)
+            .record_active_client_released("responses", "process-a", &reservation_id, 1_010)
             .await
         {
             panic!("process-a release should not delete process-b lease: {error}");
@@ -588,7 +589,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("session acquire should persist: {error}"));
         store
-            .record_active_client_released_at("responses", "process-a", &reservation_id, 1_100)
+            .record_active_client_released("responses", "process-a", &reservation_id, 1_100)
             .await
             .unwrap_or_else(|error| panic!("session release should persist: {error}"));
 
@@ -629,6 +630,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlx_active_session_release_timestamp_bounds_rollup_interval() {
+        let temp_dir = TestTempDir::new("async_active_session_release_timestamp");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_release_timestamp");
+        let reservation_id = ReservationId::new("reservation_release_timestamp");
+
+        store
+            .record_active_client_acquired(
+                "responses",
+                "process-release",
+                &reservation_id,
+                &account,
+                1_000,
+                8,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("session acquire should persist: {error}"));
+        store
+            .record_active_client_released("responses", "process-release", &reservation_id, 1_100)
+            .await
+            .unwrap_or_else(|error| panic!("session release should persist: {error}"));
+        store
+            .refresh_active_session_rollups_for_interval("responses", 1_000, 1_300, 300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should refresh: {error}"));
+
+        let rollups = store
+            .active_session_rollups_for_route_band("responses", 1_000, 1_300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should load: {error}"));
+        let active_session_seconds = rollups
+            .iter()
+            .map(crate::sqlite::ActiveSessionRollup::active_session_seconds)
+            .sum::<u64>();
+        assert_eq!(active_session_seconds, 100);
+    }
+
+    #[tokio::test]
     async fn sqlx_active_session_rollups_clip_partial_buckets_and_overlap() {
         let temp_dir = TestTempDir::new("async_active_session_rollups");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -649,11 +692,11 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("second acquire should persist: {error}"));
         store
-            .record_active_client_released_at("responses", "process-a", &first, 220)
+            .record_active_client_released("responses", "process-a", &first, 220)
             .await
             .unwrap_or_else(|error| panic!("first release should persist: {error}"));
         store
-            .record_active_client_released_at("responses", "process-a", &second, 260)
+            .record_active_client_released("responses", "process-a", &second, 260)
             .await
             .unwrap_or_else(|error| panic!("second release should persist: {error}"));
 
@@ -836,12 +879,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("session acquire should persist: {error}"));
         store
-            .record_active_client_released_at(
-                "responses",
-                "process-retention",
-                &reservation_id,
-                700,
-            )
+            .record_active_client_released("responses", "process-retention", &reservation_id, 700)
             .await
             .unwrap_or_else(|error| panic!("session release should persist: {error}"));
         store
@@ -874,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selection_projection_uses_session_count_not_legacy_pressure_for_candidate_burn() {
+    async fn selection_projection_refreshes_session_rollups_for_candidate_burn() {
         let temp_dir = TestTempDir::new("selection_projection_session_count");
         let database_path = temp_dir.path().join("state.sqlite");
         let store = match AsyncSqliteStateStore::open(&database_path).await {
@@ -930,7 +968,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("historical session should acquire: {error}"));
         store
-            .record_active_client_released_at(
+            .record_active_client_released(
                 "responses",
                 "process-projection-history",
                 &historical_session,
@@ -938,10 +976,6 @@ mod tests {
             )
             .await
             .unwrap_or_else(|error| panic!("historical session should release: {error}"));
-        store
-            .refresh_active_session_rollups_for_interval("responses", 100, 3_700, 300)
-            .await
-            .unwrap_or_else(|error| panic!("rollups should refresh: {error}"));
         for index in 0..2 {
             let current_session =
                 ReservationId::new(format!("reservation_projection_current_{index}"));
@@ -974,6 +1008,70 @@ mod tests {
         assert_eq!(
             weekly_window.burn_rate_confidence(),
             QuotaRunRateConfidence::Normal
+        );
+    }
+
+    #[tokio::test]
+    async fn selection_projection_downgrades_zero_active_session_history() {
+        let temp_dir = TestTempDir::new("selection_projection_zero_active_history");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_projection_zero_active");
+        let account_record =
+            AccountRecord::new(account.clone(), "zero-active", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        store
+            .upsert_account(&account_record)
+            .await
+            .unwrap_or_else(|error| panic!("account should persist: {error}"));
+        store
+            .upsert_selector_quota_window(
+                &PersistedSelectorQuotaWindow::new(
+                    account.clone(),
+                    "responses",
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    SelectorQuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(45)
+                .with_reset_unix_seconds(100_000)
+                .with_effective(true)
+                .with_observed_unix_seconds(3_700),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("selector window should persist: {error}"));
+        for (observed_unix_seconds, remaining_headroom) in [(100, 50), (1_900, 48), (3_700, 45)] {
+            store
+                .append_quota_history_observation(&quota_history_observation(
+                    account.clone(),
+                    "responses",
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    observed_unix_seconds,
+                    remaining_headroom,
+                    Some(100_000),
+                ))
+                .await
+                .unwrap_or_else(|error| panic!("quota history should persist: {error}"));
+        }
+
+        let projection = project_route_band_selection_inputs(&store, "responses", 3_900, 7_200)
+            .await
+            .unwrap_or_else(|error| panic!("selection projection should load: {error}"));
+
+        assert_eq!(projection.accounts().len(), 1);
+        let projected_account = &projection.accounts()[0];
+        let weekly_window = projected_account
+            .windows()
+            .iter()
+            .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+            .unwrap_or_else(|| panic!("weekly selector window should project"));
+        assert_eq!(weekly_window.burn_rate_basis_points_per_hour(), Some(500));
+        assert_eq!(
+            weekly_window.burn_rate_confidence(),
+            QuotaRunRateConfidence::Low,
+            "quota burn with zero active-session history must not keep normal confidence"
         );
     }
 

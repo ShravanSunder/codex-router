@@ -1977,8 +1977,8 @@ mod tests {
         assert_eq!(active_pressure, 8);
     }
 
-    #[test]
-    fn repository_backed_selector_weights_weekly_pressure_over_short_window_headroom() {
+    #[tokio::test]
+    async fn repository_backed_selector_weights_weekly_pressure_over_short_window_headroom() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_weekly_pressure");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = match SqliteStateStore::open(&database_path) {
@@ -2007,6 +2007,30 @@ mod tests {
             "responses",
             &[(18_000, 50, true), (604_800, 50, false)],
         );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let now = test_unix_seconds();
+        let weekly_reset = selector_reset_seconds(604_800);
+        append_history_series_with_reset(
+            &async_state,
+            short_rich_weekly_poor.account_id(),
+            "responses",
+            604_800,
+            weekly_reset,
+            &[(now - 7_200, 20), (now - 3_600, 12), (now, 5)],
+        )
+        .await;
+        append_history_series_with_reset(
+            &async_state,
+            weekly_healthy.account_id(),
+            "responses",
+            604_800,
+            weekly_reset,
+            &[(now - 7_200, 52), (now - 3_600, 51), (now, 50)],
+        )
+        .await;
 
         let selector = RepositoryBackedAccountSelector::new(&state);
         let selected = match selector.select_upstream_account(

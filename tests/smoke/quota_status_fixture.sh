@@ -150,6 +150,19 @@ assert by_label["ssdev"]["availability"] in {"usable", "reserve"}
 assert "weighted_candidates" not in payload
 assert "routing_weight" not in by_label["ssdev"]
 assert by_label["ssdev"]["weekly_quota_risk"] == 3
+assert "weekly_survival_margin_basis_points" in by_label["ssdev"]
+assert "weekly_projected_exhaustion_unix_seconds" in by_label["ssdev"]
+assert by_label["ssdev"]["short_guard_result"] in {"pass", "held", "unknown"}
+assert "current_active_sessions" in by_label["ssdev"]
+assert by_label["ssdev"]["active_session_source"] in {"sqlx_mirror", "unavailable"}
+assert by_label["ssdev"]["weekly_burn_rate_confidence"] in {
+    "unknown",
+    "insufficient",
+    "low",
+    "normal",
+    "stale",
+}
+assert "hard_block_reason" in by_label["ssdev"]
 assert "routing_weight" not in by_label["matches"]
 assert by_label["matches"]["weekly_quota_risk"] == 32
 
@@ -166,6 +179,7 @@ for account in payload["accounts"]:
         "available_same_pool",
         "held_reserve",
         "held_unknown",
+        "held_short_window_guard",
         "unknown_fallback_preferred",
         "unknown_fallback_available",
         "excluded_disabled",

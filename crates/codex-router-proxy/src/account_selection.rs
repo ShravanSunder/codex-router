@@ -92,21 +92,23 @@ pub trait ActiveClientLeaseReporter: Send + Sync {
 }
 
 /// SQLx-backed active client lease reporter.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SqliteActiveClientLeaseReporter {
     state: AsyncSqliteStateStore,
     tasks: TaskTracker,
     process_run_id: String,
+    clock: UnixClock,
 }
 
 impl SqliteActiveClientLeaseReporter {
     /// Creates a SQLx-backed active client lease reporter.
     #[must_use]
-    pub fn new(state: AsyncSqliteStateStore, tasks: TaskTracker) -> Self {
+    pub fn new(state: AsyncSqliteStateStore, tasks: TaskTracker, clock: UnixClock) -> Self {
         Self {
             state,
             tasks,
             process_run_id: new_process_run_id(),
+            clock,
         }
     }
 }
@@ -158,9 +160,15 @@ impl ActiveClientLeaseReporter for SqliteActiveClientLeaseReporter {
         let route_band = route_band.to_owned();
         let process_run_id = self.process_run_id.clone();
         let reservation_id = reservation_handle.reservation_id().clone();
+        let released_unix_seconds = (self.clock)();
         self.tasks.spawn(async move {
             let result = state
-                .record_active_client_released(&route_band, &process_run_id, &reservation_id)
+                .record_active_client_released(
+                    &route_band,
+                    &process_run_id,
+                    &reservation_id,
+                    released_unix_seconds,
+                )
                 .await;
             match result {
                 Ok(()) => tracing::info!(
@@ -1609,14 +1617,23 @@ mod tests {
     use super::QuotaAwareAccountSelector;
     use super::QuotaAwareAccountState;
     use super::RouteBandReservationBooks;
+    use super::SqliteActiveClientLeaseReporter;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_selection::reservation::ReservationHandle;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
     use std::collections::HashMap;
+    use std::env;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use tokio_util::task::TaskTracker;
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum LeaseEvent {
@@ -1720,6 +1737,43 @@ mod tests {
                     reservation_id: "reservation_2".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_active_client_lease_reporter_records_release_clock_timestamp() {
+        let database_path = proxy_test_database_path("sqlite_active_client_release_clock");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("async state store should open and migrate: {error}"));
+        let tasks = TaskTracker::new();
+        let reporter =
+            SqliteActiveClientLeaseReporter::new(store.clone(), tasks.clone(), Arc::new(|| 1_100));
+        let account_id = account_id("acct_release_clock");
+        let mut reservation_book = ReservationBook::default();
+        let reservation_handle = reservation_book.reserve_next_at(account_id, 1, 1_000);
+
+        reporter.record_acquired("responses", &reservation_handle, 1_000, 1);
+        wait_for_active_client_count(&store, "responses", 1, 1_050).await;
+        reporter.record_released("responses", &reservation_handle);
+        tasks.close();
+        tasks.wait().await;
+
+        store
+            .refresh_active_session_rollups_for_interval("responses", 1_000, 1_300, 300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should refresh: {error}"));
+        let active_session_seconds = store
+            .active_session_rollups_for_route_band("responses", 1_000, 1_300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should load: {error}"))
+            .iter()
+            .map(|rollup| rollup.active_session_seconds())
+            .sum::<u64>();
+
+        assert_eq!(
+            active_session_seconds, 100,
+            "release must use the reporter clock timestamp instead of epoch zero"
         );
     }
 
@@ -1862,5 +1916,36 @@ mod tests {
     fn account_id(value: &str) -> AccountId {
         AccountId::new(value)
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
+    }
+
+    fn proxy_test_database_path(name: &str) -> PathBuf {
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!(
+            "codex-router-proxy-{name}-{}-{counter}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    async fn wait_for_active_client_count(
+        store: &AsyncSqliteStateStore,
+        route_band: &str,
+        expected_count: u32,
+        now_unix_seconds: u64,
+    ) {
+        for _attempt in 0..50 {
+            let counts = store
+                .active_client_counts_for_route_band(route_band, now_unix_seconds, 7_200)
+                .await
+                .unwrap_or_else(|error| panic!("active client count should load: {error}"));
+            let actual_count = counts
+                .iter()
+                .map(|count| count.active_clients())
+                .sum::<u32>();
+            if actual_count == expected_count {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("active client count did not reach {expected_count}");
     }
 }

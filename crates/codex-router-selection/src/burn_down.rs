@@ -381,6 +381,7 @@ pub struct BurnDownAccountAssessment {
     near_zero_retirement_candidate: bool,
     current_active_sessions: u32,
     weekly_reset_unix_seconds: Option<u64>,
+    weekly_projected_exhaustion_unix_seconds: Option<u64>,
     weekly_survives_to_reset: bool,
     weekly_survival_margin_basis_points: Option<i64>,
     weekly_burn_rate_confidence: QuotaRunRateConfidence,
@@ -477,6 +478,30 @@ impl BurnDownAccountAssessment {
     pub const fn preferred_next(&self) -> bool {
         self.preferred_next
     }
+
+    /// Returns current active sessions used for selection.
+    #[must_use]
+    pub const fn current_active_sessions_for_selection(&self) -> u32 {
+        self.current_active_sessions
+    }
+
+    /// Returns weekly survival margin in basis points.
+    #[must_use]
+    pub const fn weekly_survival_margin_basis_points(&self) -> Option<i64> {
+        self.weekly_survival_margin_basis_points
+    }
+
+    /// Returns projected weekly exhaustion time.
+    #[must_use]
+    pub const fn weekly_projected_exhaustion_unix_seconds(&self) -> Option<u64> {
+        self.weekly_projected_exhaustion_unix_seconds
+    }
+
+    /// Returns weekly burn-rate confidence.
+    #[must_use]
+    pub const fn weekly_burn_rate_confidence(&self) -> QuotaRunRateConfidence {
+        self.weekly_burn_rate_confidence
+    }
 }
 
 /// Account availability class.
@@ -548,6 +573,8 @@ pub enum QuotaEvidenceReason {
     UnknownQuotaWindow,
     /// A window is missing reset time.
     MissingResetTime,
+    /// Short-window flow guard blocks new work.
+    ShortWindowGuard,
     /// Account is disabled.
     AccountDisabled,
     /// Account lacks active credentials.
@@ -573,6 +600,8 @@ pub enum RoutingReason {
     HeldReserve,
     /// Unknown account held behind known accounts.
     HeldUnknown,
+    /// Account is held because its short-window quota would stall before reset.
+    HeldShortWindowGuard,
     /// Preferred fallback account that needs refresh.
     UnknownFallbackPreferred,
     /// Non-preferred fallback account in the unknown pool.
@@ -609,6 +638,7 @@ impl RoutingReason {
             Self::ExcludedMissingCredential => "excluded_missing_credential",
             Self::BlockedWindowExhausted => "blocked_window_exhausted",
             Self::BlockedWindowIneligible => "blocked_window_ineligible",
+            Self::HeldShortWindowGuard => "held_short_window_guard",
         }
     }
 
@@ -631,6 +661,7 @@ impl RoutingReason {
             Self::ExcludedMissingCredential => "blocked: missing credential",
             Self::BlockedWindowExhausted => "blocked: quota empty",
             Self::BlockedWindowIneligible => "blocked: quota ineligible",
+            Self::HeldShortWindowGuard => "held: 5h guard",
         }
     }
 }
@@ -807,6 +838,7 @@ fn assess_account(
         near_zero_retirement_candidate: false,
         current_active_sessions: input.current_active_sessions,
         weekly_reset_unix_seconds: None,
+        weekly_projected_exhaustion_unix_seconds: None,
         weekly_survives_to_reset: false,
         weekly_survival_margin_basis_points: None,
         weekly_burn_rate_confidence: QuotaRunRateConfidence::Unknown,
@@ -957,6 +989,35 @@ fn assess_account(
     let weekly_window = windows
         .iter()
         .find(|window| !is_short_window(window.window_seconds, policy));
+    if short_window_fails_guard(&windows, policy) {
+        return BurnDownAccountAssessment {
+            availability: AccountAvailability::Blocked,
+            freshness: freshness_for_windows(&windows),
+            limiting_window: limiting_window(&windows),
+            quota_evidence_reason: QuotaEvidenceReason::ShortWindowGuard,
+            short_pressure,
+            long_pressure,
+            short_salvage,
+            long_salvage,
+            projected_burn_pressure,
+            routing_reason: RoutingReason::HeldShortWindowGuard,
+            routing_weight: None,
+            near_zero_retirement_candidate,
+            current_active_sessions: input.current_active_sessions,
+            weekly_reset_unix_seconds: weekly_window.and_then(|window| window.reset_unix_seconds),
+            weekly_projected_exhaustion_unix_seconds: weekly_window
+                .and_then(|window| window.projected_exhaustion_unix_seconds),
+            weekly_survives_to_reset: weekly_window.is_some_and(weekly_window_survives_to_reset),
+            weekly_survival_margin_basis_points: weekly_window
+                .and_then(|window| window.survival_margin_basis_points),
+            weekly_burn_rate_confidence: weekly_window
+                .map_or(QuotaRunRateConfidence::Unknown, |window| {
+                    window.burn_rate_confidence
+                }),
+            salvage_sort_key: salvage_sort_key(&windows, short_salvage, long_salvage, policy),
+            ..base
+        };
+    }
 
     BurnDownAccountAssessment {
         availability,
@@ -972,6 +1033,8 @@ fn assess_account(
         near_zero_retirement_candidate,
         current_active_sessions: input.current_active_sessions,
         weekly_reset_unix_seconds: weekly_window.and_then(|window| window.reset_unix_seconds),
+        weekly_projected_exhaustion_unix_seconds: weekly_window
+            .and_then(|window| window.projected_exhaustion_unix_seconds),
         weekly_survives_to_reset: weekly_window.is_some_and(weekly_window_survives_to_reset),
         weekly_survival_margin_basis_points: weekly_window
             .and_then(|window| window.survival_margin_basis_points),
@@ -1100,6 +1163,29 @@ fn long_window_requires_reserve(
                 && (window.pressure >= policy.reserve_pressure_threshold
                     || window.remaining_headroom <= policy.reserve_headroom_threshold)
         })
+}
+
+fn short_window_fails_guard(windows: &[WindowAssessment], policy: BurnDownRouteBandPolicy) -> bool {
+    windows
+        .iter()
+        .filter(|window| is_short_window(window.window_seconds, policy))
+        .any(short_window_fails_survival_guard)
+}
+
+fn short_window_fails_survival_guard(window: &WindowAssessment) -> bool {
+    if let Some(survival_margin_basis_points) = window.survival_margin_basis_points {
+        return survival_margin_basis_points < SHORT_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS;
+    }
+
+    match (
+        window.projected_exhaustion_unix_seconds,
+        window.reset_unix_seconds,
+    ) {
+        (Some(projected_exhaustion_unix_seconds), Some(reset_unix_seconds)) => {
+            projected_exhaustion_unix_seconds < reset_unix_seconds && !window.near_reset
+        }
+        _ => false,
+    }
 }
 
 fn freshness_for_windows(windows: &[WindowAssessment]) -> QuotaEvidenceFreshness {
@@ -1282,6 +1368,7 @@ fn routing_reason_for_account(
     match account.quota_evidence_reason {
         QuotaEvidenceReason::WindowExhausted => return RoutingReason::BlockedWindowExhausted,
         QuotaEvidenceReason::WindowIneligible => return RoutingReason::BlockedWindowIneligible,
+        QuotaEvidenceReason::ShortWindowGuard => return RoutingReason::HeldShortWindowGuard,
         QuotaEvidenceReason::Ok
         | QuotaEvidenceReason::NeedsQuotaProbe
         | QuotaEvidenceReason::MissingExpectedWindow
@@ -1388,7 +1475,38 @@ fn compare_weekly_survival(
         (true, true) => compare_surviving_weekly_accounts(left, right),
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
-        (false, false) => std::cmp::Ordering::Equal,
+        (false, false) => compare_weekly_non_survivors(left, right),
+    }
+}
+
+fn compare_weekly_non_survivors(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    compare_latest_projected_weekly_runout(left, right)
+        .then_with(|| compare_weekly_survival_margin(left, right))
+        .then_with(|| {
+            confidence_rank(right.weekly_burn_rate_confidence)
+                .cmp(&confidence_rank(left.weekly_burn_rate_confidence))
+        })
+        .then_with(|| {
+            left.current_active_sessions
+                .cmp(&right.current_active_sessions)
+        })
+}
+
+fn compare_latest_projected_weekly_runout(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    match (
+        left.weekly_projected_exhaustion_unix_seconds,
+        right.weekly_projected_exhaustion_unix_seconds,
+    ) {
+        (Some(left_runout), Some(right_runout)) => right_runout.cmp(&left_runout),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     }
 }
 
@@ -1807,6 +1925,89 @@ mod tests {
     }
 
     #[test]
+    fn short_window_guard_holds_account_projected_to_stall_before_reset_f1() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 2, 4 * 3_600, 100),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 4 * 86_400, 20),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 30, 4 * 3_600, 100),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 4 * 86_400, 20),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_b"),
+            "F1: A fails the 5h flow guard even though its weekly quota is healthier"
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_a").routing_reason(),
+            RoutingReason::HeldShortWindowGuard
+        );
+        assert_account(&assessment, "acct_a", AccountAvailability::Blocked, None);
+    }
+
+    #[test]
+    fn short_window_guard_allows_near_reset_within_buffer_f2() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 2, 10 * 60, 100),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 4 * 86_400, 20),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 30, 4 * 3_600, 100),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 4 * 86_400, 20),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_a"),
+            "F2: A can remain eligible because the 5h reset is near and inside the safety buffer"
+        );
+    }
+
+    #[test]
+    fn weekly_non_survivor_fallback_uses_latest_projected_runout_w6() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 10, 20 * 3_600, 100),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 20, 60 * 3_600, 67),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_b"),
+            "W6: when no weekly account survives, choose latest projected runout before margin"
+        );
+    }
+
+    #[test]
     fn preferred_next_matches_first_strict_candidate_without_smooth_selector() {
         let source = include_str!("burn_down.rs");
         let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
@@ -2187,7 +2388,7 @@ mod tests {
     }
 
     #[test]
-    fn near_zero_projected_runout_retires_account_from_new_selection() {
+    fn near_zero_projected_short_runout_is_held_by_flow_guard() {
         let assessment = assess_route_band(input(vec![
             account(
                 "acct_fast",
@@ -2210,15 +2411,10 @@ mod tests {
             assessment.preferred_next().map(AccountId::as_str),
             Some("acct_slow")
         );
-        assert_account(
-            &assessment,
-            "acct_fast",
-            AccountAvailability::Retiring,
-            None,
-        );
+        assert_account(&assessment, "acct_fast", AccountAvailability::Blocked, None);
         assert_eq!(
             account_assessment(&assessment, "acct_fast").routing_reason(),
-            RoutingReason::RetiringNearZero
+            RoutingReason::HeldShortWindowGuard
         );
     }
 

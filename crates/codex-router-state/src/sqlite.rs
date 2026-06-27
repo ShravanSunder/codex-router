@@ -1424,17 +1424,6 @@ impl AsyncSqliteStateStore {
         route_band: &str,
         process_run_id: &str,
         reservation_id: &ReservationId,
-    ) -> Result<(), StateStoreError> {
-        self.record_active_client_released_at(route_band, process_run_id, reservation_id, 0)
-            .await
-    }
-
-    /// Releases one active client lease at an explicit timestamp.
-    pub async fn record_active_client_released_at(
-        &self,
-        route_band: &str,
-        process_run_id: &str,
-        reservation_id: &ReservationId,
         released_unix_seconds: u64,
     ) -> Result<(), StateStoreError> {
         let lease = sqlx::query(

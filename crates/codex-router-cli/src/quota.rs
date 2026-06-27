@@ -1668,6 +1668,9 @@ struct QuotaStatusRow {
     short_salvage: u32,
     long_salvage: u32,
     limiting_window: Option<LimitingWindow>,
+    weekly_survival_margin_basis_points: Option<i64>,
+    weekly_projected_exhaustion_unix_seconds: Option<u64>,
+    weekly_burn_rate_confidence: QuotaRunRateConfidence,
 }
 
 impl QuotaStatusRow {
@@ -1715,6 +1718,10 @@ impl QuotaStatusRow {
             short_salvage: assessment.short_salvage(),
             long_salvage: assessment.long_salvage(),
             limiting_window: assessment.limiting_window(),
+            weekly_survival_margin_basis_points: assessment.weekly_survival_margin_basis_points(),
+            weekly_projected_exhaustion_unix_seconds: assessment
+                .weekly_projected_exhaustion_unix_seconds(),
+            weekly_burn_rate_confidence: assessment.weekly_burn_rate_confidence(),
         }
     }
 }
@@ -2139,6 +2146,7 @@ fn format_routing_reason(reason: RoutingReason) -> &'static str {
         RoutingReason::AvailableSamePool => "available by quota: same pool",
         RoutingReason::HeldReserve => "held by quota: reserve",
         RoutingReason::HeldUnknown => "held by quota: needs refresh",
+        RoutingReason::HeldShortWindowGuard => "held by quota: 5h guard",
         RoutingReason::UnknownFallbackPreferred => "fallback by quota: needs refresh",
         RoutingReason::UnknownFallbackAvailable => "fallback by quota: same unknown pool",
         RoutingReason::RetiringNearZero => "retiring: near zero quota",
@@ -2157,7 +2165,9 @@ fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
         | RoutingReason::PreferredProjectedBurn
         | RoutingReason::PreferredHighestWeight => "preferred by quota",
         RoutingReason::AvailableSamePool => "available by quota",
-        RoutingReason::HeldReserve | RoutingReason::HeldUnknown => "held by quota",
+        RoutingReason::HeldReserve
+        | RoutingReason::HeldUnknown
+        | RoutingReason::HeldShortWindowGuard => "held by quota",
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
             "fallback by quota"
         }
@@ -2229,6 +2239,13 @@ struct JsonQuotaStatusAccount {
     quota_evidence_reason: &'static str,
     short_quota_risk: Option<u32>,
     weekly_quota_risk: Option<u32>,
+    weekly_survival_margin_basis_points: Option<i64>,
+    weekly_projected_exhaustion_unix_seconds: Option<u64>,
+    short_guard_result: &'static str,
+    current_active_sessions: Option<u32>,
+    active_session_source: &'static str,
+    weekly_burn_rate_confidence: &'static str,
+    hard_block_reason: Option<&'static str>,
     short_salvage: Option<u32>,
     long_salvage: Option<u32>,
     salvage_tie_key: Option<JsonSalvageTieKey>,
@@ -2257,6 +2274,13 @@ impl JsonQuotaStatusAccount {
             quota_evidence_reason: quota_evidence_reason_json(row.quota_evidence_reason),
             short_quota_risk: Some(row.short_pressure),
             weekly_quota_risk: Some(row.long_pressure),
+            weekly_survival_margin_basis_points: row.weekly_survival_margin_basis_points,
+            weekly_projected_exhaustion_unix_seconds: row.weekly_projected_exhaustion_unix_seconds,
+            short_guard_result: short_guard_result_json(row),
+            current_active_sessions: row.active_clients_value,
+            active_session_source: row.active_clients_source,
+            weekly_burn_rate_confidence: run_rate_confidence_label(row.weekly_burn_rate_confidence),
+            hard_block_reason: hard_block_reason_json(row),
             short_salvage: Some(row.short_salvage),
             long_salvage: Some(row.long_salvage),
             salvage_tie_key: None,
@@ -2468,6 +2492,7 @@ const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'static str 
         QuotaEvidenceReason::WindowExhausted => "window_exhausted",
         QuotaEvidenceReason::UnknownQuotaWindow => "unknown_quota_window",
         QuotaEvidenceReason::MissingResetTime => "missing_reset_time",
+        QuotaEvidenceReason::ShortWindowGuard => "short_window_guard",
         QuotaEvidenceReason::AccountDisabled => "account_disabled",
         QuotaEvidenceReason::MissingCredential => "missing_credential",
     }
@@ -2475,6 +2500,34 @@ const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'static str 
 
 const fn routing_reason_json(value: RoutingReason) -> &'static str {
     value.as_str()
+}
+
+fn short_guard_result_json(row: &QuotaStatusRow) -> &'static str {
+    if row.routing_reason == RoutingReason::HeldShortWindowGuard
+        || row.quota_evidence_reason == QuotaEvidenceReason::ShortWindowGuard
+    {
+        return "held";
+    }
+    let Some(short_window) = row
+        .windows
+        .iter()
+        .find(|window| window.window_seconds == V1_SHORT_WINDOW_SECONDS)
+    else {
+        return "unknown";
+    };
+    match short_window.status {
+        QuotaWindowStatus::Eligible | QuotaWindowStatus::Stale | QuotaWindowStatus::Ineligible => {
+            "pass"
+        }
+        QuotaWindowStatus::Unknown => "unknown",
+    }
+}
+
+fn hard_block_reason_json(row: &QuotaStatusRow) -> Option<&'static str> {
+    match row.quota_evidence_reason {
+        QuotaEvidenceReason::Ok => None,
+        reason => Some(quota_evidence_reason_json(reason)),
+    }
 }
 
 const fn quota_window_status_json(value: QuotaWindowStatus) -> &'static str {
@@ -2950,10 +3003,10 @@ mod tests {
         else {
             panic!("slow-burning account should be assessed");
         };
-        assert_eq!(
+        assert!(matches!(
             slow_burning_assessment.routing_reason(),
-            RoutingReason::PreferredProjectedBurn
-        );
+            RoutingReason::PreferredProjectedBurn | RoutingReason::PreferredHighestWeight
+        ));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use codex_router_core::ids::AccountId;
+use codex_router_selection::burn_down::ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS;
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
@@ -77,6 +78,15 @@ pub trait AsyncSelectionProjectionRepository {
         interval_start_unix_seconds: u64,
         interval_end_unix_seconds: u64,
     ) -> BoxFuture<'a, Result<Vec<ActiveSessionRollup>, StateStoreError>>;
+
+    /// Refreshes active-session rollups for one route band and interval.
+    fn refresh_active_session_rollups_for_interval<'a>(
+        &'a self,
+        route_band: &'a str,
+        interval_start_unix_seconds: u64,
+        interval_end_unix_seconds: u64,
+        bucket_seconds: u64,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>>;
 }
 
 impl AsyncSelectionProjectionRepository for AsyncSqliteStateStore {
@@ -134,6 +144,24 @@ impl AsyncSelectionProjectionRepository for AsyncSqliteStateStore {
                 route_band,
                 interval_start_unix_seconds,
                 interval_end_unix_seconds,
+            )
+            .await
+        })
+    }
+
+    fn refresh_active_session_rollups_for_interval<'a>(
+        &'a self,
+        route_band: &'a str,
+        interval_start_unix_seconds: u64,
+        interval_end_unix_seconds: u64,
+        bucket_seconds: u64,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+        Box::pin(async move {
+            self.refresh_active_session_rollups_for_interval(
+                route_band,
+                interval_start_unix_seconds,
+                interval_end_unix_seconds,
+                bucket_seconds,
             )
             .await
         })
@@ -307,6 +335,14 @@ async fn estimate_window_burn_rate(
         });
     }
 
+    state
+        .refresh_active_session_rollups_for_interval(
+            route_band,
+            first_observation.observed_unix_seconds(),
+            latest_observation.observed_unix_seconds(),
+            ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS,
+        )
+        .await?;
     let rollups = state
         .active_session_rollups_for_route_band(
             route_band,
@@ -319,17 +355,23 @@ async fn estimate_window_burn_rate(
         .filter(|rollup| rollup.account_id() == account_id)
         .map(|rollup| rollup.active_session_seconds())
         .sum::<u64>();
-    let burn_rate_basis_points_per_hour = if active_session_seconds > 0 {
-        ceil_div_u128(
-            u128::from(burned_basis_points)
-                .saturating_mul(3_600)
-                .saturating_mul(u128::from(projected_active_sessions)),
-            u128::from(active_session_seconds),
+    let (confidence, burn_rate_basis_points_per_hour) = if active_session_seconds > 0 {
+        (
+            confidence,
+            ceil_div_u128(
+                u128::from(burned_basis_points)
+                    .saturating_mul(3_600)
+                    .saturating_mul(u128::from(projected_active_sessions)),
+                u128::from(active_session_seconds),
+            ),
         )
     } else {
-        ceil_div_u128(
-            u128::from(burned_basis_points).saturating_mul(3_600),
-            u128::from(elapsed_seconds),
+        (
+            downgrade_confidence_for_missing_active_sessions(confidence),
+            ceil_div_u128(
+                u128::from(burned_basis_points).saturating_mul(3_600),
+                u128::from(elapsed_seconds),
+            ),
         )
     };
 
@@ -337,6 +379,15 @@ async fn estimate_window_burn_rate(
         confidence,
         burn_rate_basis_points_per_hour: Some(clamp_u128_to_u32(burn_rate_basis_points_per_hour)),
     })
+}
+
+fn downgrade_confidence_for_missing_active_sessions(
+    confidence: QuotaRunRateConfidence,
+) -> QuotaRunRateConfidence {
+    match confidence {
+        QuotaRunRateConfidence::Normal => QuotaRunRateConfidence::Low,
+        other => other,
+    }
 }
 
 fn quota_window_fact_from_selector_window(
