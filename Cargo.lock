@@ -326,6 +326,7 @@ name = "codex-router-state"
 version = "0.1.0"
 dependencies = [
  "codex-router-core",
+ "codex-router-selection",
  "futures-util",
  "rusqlite",
  "sqlx",

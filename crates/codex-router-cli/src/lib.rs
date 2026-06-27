@@ -2644,7 +2644,7 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tquota risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
         );
         assert_eq!(
             lines[2],
@@ -2652,6 +2652,7 @@ exit 42
         );
         assert_eq!(lines.len(), 3);
         assert!(!output.stdout.contains("acct_primary"));
+        assert!(!output.stdout.contains("score"));
         assert!(!output.stdout.contains("pp"));
         assert!(!output.stdout.contains("bottleneck"));
         assert!(output.stderr.is_empty());
@@ -2741,13 +2742,7 @@ exit 42
             parsed["preferred_next_account_hash"].as_str().map(str::len),
             Some(16)
         );
-        assert_eq!(
-            parsed["weighted_candidates"][0]["account_hash"]
-                .as_str()
-                .map(str::len),
-            Some(16)
-        );
-        assert_eq!(parsed["weighted_candidates"][0]["routing_weight"], 1);
+        assert!(parsed.get("weighted_candidates").is_none());
         assert_eq!(
             parsed["accounts"][0]["account_hash"].as_str().map(str::len),
             Some(16)
@@ -2759,6 +2754,7 @@ exit 42
             parsed["accounts"][0]["routing_reason"],
             "preferred_highest_weight"
         );
+        assert!(parsed["accounts"][0].get("routing_weight").is_none());
         assert_eq!(parsed["accounts"][0]["preferred_next"], true);
         assert!(!output.stdout.contains("acct_primary"));
         assert_eq!(parsed["accounts"][0]["reset_credits_available"], 1);
@@ -2768,8 +2764,8 @@ exit 42
             "sqlx_mirror"
         );
         assert_eq!(parsed["accounts"][0]["next_use"], "preferred by quota");
-        assert_eq!(parsed["accounts"][0]["short_pressure"], 25);
-        assert_eq!(parsed["accounts"][0]["long_pressure"], 20);
+        assert_eq!(parsed["accounts"][0]["short_quota_risk"], 25);
+        assert_eq!(parsed["accounts"][0]["weekly_quota_risk"], 20);
         assert_eq!(parsed["accounts"][0]["limiting_window"], "5h");
         assert_eq!(
             parsed["accounts"][0]["window_slots"]["5h"]["evidence_state"],
@@ -2831,8 +2827,8 @@ exit 42
     }
 
     #[test]
-    fn quota_status_selection_uses_active_client_pressure() {
-        let test_root = TestRoot::new("quota-status-active-pressure");
+    fn quota_status_selection_uses_active_session_count() {
+        let test_root = TestRoot::new("quota-status-active-session-count");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
         must_ok(fs::create_dir_all(&router_root));

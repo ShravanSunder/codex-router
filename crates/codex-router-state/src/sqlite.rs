@@ -298,6 +298,18 @@ impl ActiveSessionRollup {
             max_concurrent_sessions,
         }
     }
+
+    /// Returns the account id.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns active session seconds.
+    #[must_use]
+    pub const fn active_session_seconds(&self) -> u64 {
+        self.active_session_seconds
+    }
 }
 
 impl ActiveClientCount {
@@ -4084,14 +4096,14 @@ fn compute_active_session_rollups(
             ActiveSessionEventKind::Released
             | ActiveSessionEventKind::Retired
             | ActiveSessionEventKind::StalePurged => {
-                if let Some(start_event) = open_sessions.remove(&key) {
-                    if event.event_unix_seconds > start_event.event_unix_seconds {
-                        completed_intervals.push(ActiveSessionInterval {
-                            account_id: start_event.account_id,
-                            start_unix_seconds: start_event.event_unix_seconds,
-                            end_unix_seconds: event.event_unix_seconds,
-                        });
-                    }
+                if let Some(start_event) = open_sessions.remove(&key)
+                    && event.event_unix_seconds > start_event.event_unix_seconds
+                {
+                    completed_intervals.push(ActiveSessionInterval {
+                        account_id: start_event.account_id,
+                        start_unix_seconds: start_event.event_unix_seconds,
+                        end_unix_seconds: event.event_unix_seconds,
+                    });
                 }
             }
         }

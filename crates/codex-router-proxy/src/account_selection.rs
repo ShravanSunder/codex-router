@@ -28,22 +28,23 @@ use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::burn_down::assess_route_band;
 use codex_router_selection::reservation::ReservationBook;
 use codex_router_selection::reservation::ReservationHandle;
-use codex_router_selection::run_rate::QuotaRunRateConfidence;
-use codex_router_selection::run_rate::QuotaRunRateEstimator;
-use codex_router_selection::run_rate::QuotaRunRateObservation;
 use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
+#[cfg(test)]
 use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup;
+#[cfg(test)]
 use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
+#[cfg(test)]
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
+#[cfg(test)]
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 #[cfg(test)]
 use codex_router_state::repositories::AffinityRepository;
 #[cfg(test)]
 use codex_router_state::repositories::SelectorQuotaRepository;
+use codex_router_state::selection_projection::AsyncSelectionProjectionRepository;
+use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts;
 use codex_router_state::sqlite::AsyncAffinityRepository;
-use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
-use codex_router_state::sqlite::AsyncSelectorQuotaRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
@@ -72,8 +73,6 @@ pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 const HTTP_ACTIVE_LOAD_PRESSURE: u32 = 2;
 const WEBSOCKET_ACTIVE_LOAD_PRESSURE: u32 = 8;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
-const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 604_800;
-const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
@@ -536,7 +535,7 @@ where
 /// Async selector that hydrates account state from repositories at request time.
 pub struct AsyncRepositoryBackedAccountSelector<'a, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
+    R: AsyncAffinityRepository + AsyncSelectionProjectionRepository + Sync,
 {
     state_repository: &'a R,
     weighted_selectors: RouteBandWeightedSelectors,
@@ -601,7 +600,7 @@ where
 
 impl<'a, R> AsyncRepositoryBackedAccountSelector<'a, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
+    R: AsyncAffinityRepository + AsyncSelectionProjectionRepository + Sync,
 {
     /// Creates an async repository-backed selector.
     #[must_use]
@@ -796,7 +795,7 @@ where
 
 impl<R> AsyncAccountDecisionSelector for AsyncRepositoryBackedAccountSelector<'_, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
+    R: AsyncAffinityRepository + AsyncSelectionProjectionRepository + Sync,
 {
     fn select_upstream_account<'a>(
         &'a self,
@@ -808,32 +807,27 @@ where
             let route_kind = route_kind_for_request(request)?;
             let route_band = route_kind.route_band();
             let now_unix_seconds = (self.clock)();
-            let selector_inputs = AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
-                self.state_repository,
-                route_band.as_str(),
-                now_unix_seconds,
-            )
-            .await
-            .map_err(|_error| HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::StateUnavailable,
-            })?;
-            let selector_inputs = selector_inputs_excluding_attempted(selector_inputs, request);
             let active_reservation_book = active_reservation_book_for_route_band(
                 &self.active_reservations,
                 route_band.as_str(),
                 now_unix_seconds,
             )?;
-            let selector_accounts = account_inputs_from_selector_inputs_with_history(
+            let active_session_overrides = active_reservation_book
+                .as_ref()
+                .map(active_session_counts_by_account);
+            let projection = project_route_band_selection_inputs_with_active_counts(
                 self.state_repository,
                 route_band.as_str(),
                 now_unix_seconds,
-                &selector_inputs,
-                active_reservation_book.as_ref(),
+                ACTIVE_RESERVATION_MAX_AGE_SECONDS,
+                active_session_overrides.as_ref(),
             )
             .await
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
+            let selector_accounts =
+                projected_accounts_excluding_attempted(projection.accounts(), request);
             let assessment_input = BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
@@ -1014,6 +1008,7 @@ fn quota_states_excluding_attempted(
         .collect()
 }
 
+#[cfg(test)]
 fn selector_inputs_excluding_attempted(
     selector_inputs: Vec<SelectorQuotaInput>,
     request: &HttpProxyRequest,
@@ -1031,6 +1026,37 @@ fn selector_inputs_excluding_attempted(
                 .any(|excluded_account_id| excluded_account_id == input.account_id())
         })
         .collect()
+}
+
+fn projected_accounts_excluding_attempted(
+    accounts: &[BurnDownAccountInput],
+    request: &HttpProxyRequest,
+) -> Vec<BurnDownAccountInput> {
+    if request.excluded_accounts().is_empty() {
+        return accounts.to_vec();
+    }
+
+    accounts
+        .iter()
+        .filter(|account| {
+            !request
+                .excluded_accounts()
+                .iter()
+                .any(|excluded_account_id| excluded_account_id == account.account_id())
+        })
+        .cloned()
+        .collect()
+}
+
+fn active_session_counts_by_account(book: &ReservationBook) -> HashMap<AccountId, u32> {
+    // The selector only needs counts for accounts already represented in the book.
+    // Probe by walking reservations through the public account-specific counter below.
+    let mut counts = HashMap::new();
+    for account_id in book.account_ids() {
+        counts.insert(account_id.clone(), book.active_session_count(account_id));
+    }
+
+    counts
 }
 
 fn select_from_account_states_with_selector(
@@ -1192,49 +1218,6 @@ fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAcco
         .with_active_credential(input.active_credential_generation().is_some())
 }
 
-async fn account_inputs_from_selector_inputs_with_history<R>(
-    state_repository: &R,
-    route_band: &str,
-    now_unix_seconds: u64,
-    selector_inputs: &[SelectorQuotaInput],
-    active_reservation_book: Option<&ReservationBook>,
-) -> Result<Vec<BurnDownAccountInput>, StateStoreError>
-where
-    R: AsyncQuotaHistoryRepository + Sync,
-{
-    let mut account_inputs = Vec::new();
-    for input in selector_inputs {
-        let mut windows = Vec::new();
-        for window in input.windows() {
-            let mut fact = quota_window_fact_from_selector_window(window);
-            if let Some(projected_exhaustion_unix_seconds) = projected_exhaustion_from_history(
-                state_repository,
-                input,
-                route_band,
-                window,
-                now_unix_seconds,
-            )
-            .await?
-            {
-                fact =
-                    fact.with_projected_exhaustion_unix_seconds(projected_exhaustion_unix_seconds);
-            }
-            windows.push(fact);
-        }
-        let active_load_pressure = active_reservation_book
-            .map(|book| book.active_load_pressure(input.account_id()))
-            .unwrap_or(0);
-        account_inputs.push(
-            BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
-                .with_account_enabled(input.account_status() == AccountStatus::Enabled)
-                .with_active_credential(input.active_credential_generation().is_some())
-                .with_active_load_pressure(active_load_pressure),
-        );
-    }
-
-    Ok(account_inputs)
-}
-
 fn active_reservation_book_for_route_band(
     active_reservations: &RouteBandReservationBooks,
     route_band: &str,
@@ -1349,26 +1332,22 @@ pub async fn route_band_has_selectable_alternative<R>(
     now_unix_seconds: u64,
 ) -> Result<bool, StateStoreError>
 where
-    R: AsyncSelectorQuotaRepository + AsyncQuotaHistoryRepository + Sync,
+    R: AsyncSelectionProjectionRepository + Sync,
 {
-    let selector_inputs = AsyncSelectorQuotaRepository::selector_inputs_for_route_band(
+    let projection = project_route_band_selection_inputs_with_active_counts(
         state_repository,
         route_band.as_str(),
         now_unix_seconds,
-    )
-    .await?;
-    let filtered_inputs = selector_inputs
-        .into_iter()
-        .filter(|input| input.account_id() != excluded_account_id)
-        .collect::<Vec<_>>();
-    let account_inputs = account_inputs_from_selector_inputs_with_history(
-        state_repository,
-        route_band.as_str(),
-        now_unix_seconds,
-        &filtered_inputs,
+        ACTIVE_RESERVATION_MAX_AGE_SECONDS,
         None,
     )
     .await?;
+    let account_inputs = projection
+        .accounts()
+        .iter()
+        .filter(|input| input.account_id() != excluded_account_id)
+        .cloned()
+        .collect::<Vec<_>>();
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         route_band,
         now_unix_seconds,
@@ -1391,6 +1370,7 @@ fn active_client_count_for_handle(
     })
 }
 
+#[cfg(test)]
 fn quota_window_fact_from_selector_window(
     window: &PersistedSelectorQuotaWindow,
 ) -> QuotaWindowFact {
@@ -1406,57 +1386,6 @@ fn quota_window_fact_from_selector_window(
     }
 
     fact
-}
-
-async fn projected_exhaustion_from_history<R>(
-    state_repository: &R,
-    input: &SelectorQuotaInput,
-    route_band: &str,
-    window: &PersistedSelectorQuotaWindow,
-    now_unix_seconds: u64,
-) -> Result<Option<u64>, StateStoreError>
-where
-    R: AsyncQuotaHistoryRepository + Sync,
-{
-    let Some(reset_unix_seconds) = window.reset_unix_seconds() else {
-        return Ok(None);
-    };
-    let history = AsyncQuotaHistoryRepository::quota_history_observations_for_window(
-        state_repository,
-        input.account_id(),
-        route_band,
-        window.limit_window_seconds(),
-        now_unix_seconds.saturating_sub(QUOTA_HISTORY_LOOKBACK_SECONDS),
-        now_unix_seconds,
-    )
-    .await?;
-    let observations = history
-        .iter()
-        .filter_map(|observation| {
-            observation
-                .reset_unix_seconds()
-                .map(|history_reset_unix_seconds| {
-                    QuotaRunRateObservation::new(
-                        observation.observed_unix_seconds(),
-                        history_reset_unix_seconds,
-                        observation.remaining_headroom(),
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
-    let estimate = QuotaRunRateEstimator::new(QUOTA_HISTORY_FRESHNESS_SECONDS).estimate(
-        now_unix_seconds,
-        reset_unix_seconds,
-        &observations,
-    );
-    if !matches!(
-        estimate.confidence(),
-        QuotaRunRateConfidence::Low | QuotaRunRateConfidence::Normal
-    ) {
-        return Ok(None);
-    }
-
-    Ok(estimate.projected_exhaustion_unix_seconds(now_unix_seconds))
 }
 
 fn route_kind_for_request(
@@ -1633,6 +1562,7 @@ const fn quota_window_status_from_freshness(freshness: SnapshotFreshness) -> Quo
     }
 }
 
+#[cfg(test)]
 const fn quota_window_status_from_selector_status(
     status: SelectorQuotaWindowStatus,
 ) -> QuotaWindowStatus {

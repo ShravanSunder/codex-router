@@ -136,6 +136,18 @@ impl BurnDownAccountInput {
     pub const fn account_id(&self) -> &AccountId {
         &self.account_id
     }
+
+    /// Returns the account windows.
+    #[must_use]
+    pub fn windows(&self) -> &[QuotaWindowFact] {
+        &self.windows
+    }
+
+    /// Returns current active sessions.
+    #[must_use]
+    pub const fn current_active_sessions(&self) -> u32 {
+        self.current_active_sessions
+    }
 }
 
 /// Pure fact for one provider quota window.
@@ -232,6 +244,18 @@ impl QuotaWindowFact {
     #[must_use]
     pub const fn window_seconds(&self) -> u64 {
         self.window_seconds
+    }
+
+    /// Returns burn rate in basis points per hour when available.
+    #[must_use]
+    pub const fn burn_rate_basis_points_per_hour(&self) -> Option<u32> {
+        self.burn_rate_basis_points_per_hour
+    }
+
+    /// Returns burn-rate confidence.
+    #[must_use]
+    pub const fn burn_rate_confidence(&self) -> QuotaRunRateConfidence {
+        self.burn_rate_confidence
     }
 }
 
@@ -1381,19 +1405,21 @@ fn compare_surviving_weekly_accounts(
                 .cmp(&right.weekly_reset_unix_seconds.unwrap_or(u64::MAX))
         })
         .then_with(|| compare_weekly_survival_margin(left, right))
-        .then_with(|| {
-            left.current_active_sessions
-                .cmp(&right.current_active_sessions)
-        })
-        .then_with(|| {
-            if left.weekly_survival_margin_basis_points.is_some()
-                && right.weekly_survival_margin_basis_points.is_some()
-            {
-                left.account_id.cmp(&right.account_id)
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
+        .then_with(|| compare_known_margin_active_count(left, right))
+}
+
+fn compare_known_margin_active_count(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    if left.weekly_survival_margin_basis_points.is_none()
+        || right.weekly_survival_margin_basis_points.is_none()
+    {
+        return std::cmp::Ordering::Equal;
+    }
+
+    left.current_active_sessions
+        .cmp(&right.current_active_sessions)
 }
 
 fn compare_weekly_survival_margin(
@@ -2129,6 +2155,34 @@ mod tests {
                 .preferred_next()
                 .map(AccountId::as_str),
             "S2: legacy active_pressure/headroom cost must not affect quota selection"
+        );
+    }
+
+    #[test]
+    fn unknown_survival_margin_does_not_route_to_weaker_account_for_lower_active_count() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_healthier",
+                vec![
+                    window(FIVE_HOURS, 60, 4 * 3_600),
+                    window(WEEKLY, 60, 3 * 86_400),
+                ],
+            )
+            .with_current_active_sessions(2),
+            account(
+                "acct_weaker_idle",
+                vec![
+                    window(FIVE_HOURS, 98, 4 * 3_600),
+                    window(WEEKLY, 23, 3 * 86_400),
+                ],
+            )
+            .with_current_active_sessions(0),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_healthier"),
+            "unknown-margin active count must not beat healthier raw weekly quota"
         );
     }
 
