@@ -103,7 +103,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 8);
+        assert_eq!(store.schema_version(), 9);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -562,6 +562,314 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlx_active_session_events_retain_completed_sessions_after_release() {
+        let temp_dir = TestTempDir::new("async_active_session_events");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_completed_session");
+        let reservation_id = ReservationId::new("reservation_completed_1");
+
+        store
+            .record_active_client_acquired(
+                "responses",
+                "process-a",
+                &reservation_id,
+                &account,
+                1_000,
+                8,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("session acquire should persist: {error}"));
+        store
+            .record_active_client_released_at("responses", "process-a", &reservation_id, 1_100)
+            .await
+            .unwrap_or_else(|error| panic!("session release should persist: {error}"));
+
+        let counts = store
+            .active_client_counts_for_route_band("responses", 1_100, 300)
+            .await
+            .unwrap_or_else(|error| panic!("active counts should load: {error}"));
+        assert!(
+            counts.is_empty(),
+            "released sessions should not remain active"
+        );
+
+        let events = store
+            .active_session_events_for_route_band("responses")
+            .await
+            .unwrap_or_else(|error| panic!("active session events should load: {error}"));
+        assert_eq!(
+            events,
+            vec![
+                crate::sqlite::ActiveSessionEvent::new(
+                    account.clone(),
+                    "responses",
+                    "process-a",
+                    reservation_id.clone(),
+                    crate::sqlite::ActiveSessionEventKind::Acquired,
+                    1_000,
+                ),
+                crate::sqlite::ActiveSessionEvent::new(
+                    account,
+                    "responses",
+                    "process-a",
+                    reservation_id,
+                    crate::sqlite::ActiveSessionEventKind::Released,
+                    1_100,
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlx_active_session_rollups_clip_partial_buckets_and_overlap() {
+        let temp_dir = TestTempDir::new("async_active_session_rollups");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_rollup_session");
+        let first = ReservationId::new("reservation_rollup_1");
+        let second = ReservationId::new("reservation_rollup_2");
+
+        store
+            .record_active_client_acquired("responses", "process-a", &first, &account, 100, 8)
+            .await
+            .unwrap_or_else(|error| panic!("first acquire should persist: {error}"));
+        store
+            .record_active_client_acquired("responses", "process-a", &second, &account, 160, 8)
+            .await
+            .unwrap_or_else(|error| panic!("second acquire should persist: {error}"));
+        store
+            .record_active_client_released_at("responses", "process-a", &first, 220)
+            .await
+            .unwrap_or_else(|error| panic!("first release should persist: {error}"));
+        store
+            .record_active_client_released_at("responses", "process-a", &second, 260)
+            .await
+            .unwrap_or_else(|error| panic!("second release should persist: {error}"));
+
+        store
+            .refresh_active_session_rollups_for_interval("responses", 120, 240, 300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should refresh: {error}"));
+        let rollups = store
+            .active_session_rollups_for_route_band("responses", 120, 240)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should load: {error}"));
+
+        assert_eq!(
+            rollups,
+            vec![crate::sqlite::ActiveSessionRollup::new(
+                account,
+                "responses",
+                0,
+                300,
+                180,
+                2,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlx_active_session_stale_prune_records_terminal_event_and_rollup() {
+        let temp_dir = TestTempDir::new("async_active_session_stale_prune");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_stale_session");
+        let reservation_id = ReservationId::new("reservation_stale_1");
+
+        store
+            .record_active_client_acquired(
+                "responses",
+                "process-stale",
+                &reservation_id,
+                &account,
+                100,
+                8,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("session acquire should persist: {error}"));
+
+        let counts = store
+            .active_client_counts_for_route_band("responses", 1_000, 300)
+            .await
+            .unwrap_or_else(|error| panic!("active counts should prune stale leases: {error}"));
+        assert!(counts.is_empty(), "stale lease should no longer be active");
+
+        let events = store
+            .active_session_events_for_route_band("responses")
+            .await
+            .unwrap_or_else(|error| panic!("active session events should load: {error}"));
+        assert_eq!(
+            events,
+            vec![
+                crate::sqlite::ActiveSessionEvent::new(
+                    account.clone(),
+                    "responses",
+                    "process-stale",
+                    reservation_id.clone(),
+                    crate::sqlite::ActiveSessionEventKind::Acquired,
+                    100,
+                ),
+                crate::sqlite::ActiveSessionEvent::new(
+                    account.clone(),
+                    "responses",
+                    "process-stale",
+                    reservation_id,
+                    crate::sqlite::ActiveSessionEventKind::StalePurged,
+                    1_000,
+                ),
+            ]
+        );
+
+        store
+            .refresh_active_session_rollups_for_interval("responses", 0, 1_200, 300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should refresh: {error}"));
+        let rollups = store
+            .active_session_rollups_for_route_band("responses", 0, 1_200)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should load: {error}"));
+        assert_eq!(
+            rollups,
+            vec![
+                crate::sqlite::ActiveSessionRollup::new(
+                    account.clone(),
+                    "responses",
+                    0,
+                    300,
+                    200,
+                    1,
+                ),
+                crate::sqlite::ActiveSessionRollup::new(
+                    account.clone(),
+                    "responses",
+                    300,
+                    600,
+                    300,
+                    1,
+                ),
+                crate::sqlite::ActiveSessionRollup::new(
+                    account.clone(),
+                    "responses",
+                    600,
+                    900,
+                    300,
+                    1,
+                ),
+                crate::sqlite::ActiveSessionRollup::new(account, "responses", 900, 1_200, 100, 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlx_v8_migration_preserves_current_leases_without_synthetic_session_history() {
+        let temp_dir = TestTempDir::new("async_v8_active_session_migration");
+        let database_path = temp_dir.path().join("state.sqlite");
+        create_v8_database_with_current_active_lease(&database_path);
+
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async v8 state store should migrate to v9: {error}"),
+        };
+
+        assert_eq!(
+            store
+                .schema_version()
+                .await
+                .unwrap_or_else(|error| panic!("schema version should load: {error}")),
+            9
+        );
+        assert_eq!(
+            store
+                .active_client_counts_for_route_band("responses", 150, 300)
+                .await
+                .unwrap_or_else(|error| panic!("active lease should survive migration: {error}")),
+            vec![crate::sqlite::ActiveClientCount::new(
+                account_id("acct_v8_active_lease"),
+                1,
+                8,
+            )]
+        );
+        assert!(
+            store
+                .active_session_events_for_route_band("responses")
+                .await
+                .unwrap_or_else(|error| panic!("session history should load: {error}"))
+                .is_empty(),
+            "v9 migration must not synthesize completed session history from current leases"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlx_active_session_rollup_retention_purges_old_buckets() {
+        let temp_dir = TestTempDir::new("async_active_session_rollup_retention");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_rollup_retention");
+        let reservation_id = ReservationId::new("reservation_retention_1");
+
+        store
+            .record_active_client_acquired(
+                "responses",
+                "process-retention",
+                &reservation_id,
+                &account,
+                0,
+                8,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("session acquire should persist: {error}"));
+        store
+            .record_active_client_released_at(
+                "responses",
+                "process-retention",
+                &reservation_id,
+                700,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("session release should persist: {error}"));
+        store
+            .refresh_active_session_rollups_for_interval("responses", 0, 900, 300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should refresh: {error}"));
+
+        store
+            .purge_active_session_rollups_before(600)
+            .await
+            .unwrap_or_else(|error| panic!("old rollups should purge: {error}"));
+        let rollups = store
+            .active_session_rollups_for_route_band("responses", 0, 900)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should load after purge: {error}"));
+        assert_eq!(
+            rollups,
+            vec![
+                crate::sqlite::ActiveSessionRollup::new(
+                    account.clone(),
+                    "responses",
+                    300,
+                    600,
+                    300,
+                    1,
+                ),
+                crate::sqlite::ActiveSessionRollup::new(account, "responses", 600, 900, 100, 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn async_quota_exhaustion_marks_route_band_windows_ineligible() {
         let temp_dir = TestTempDir::new("async_quota_exhaustion");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -1015,7 +1323,7 @@ mod tests {
             Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 8);
+        assert_eq!(store.schema_version(), 9);
         let selector_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -1074,7 +1382,7 @@ mod tests {
             Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 8);
+        assert_eq!(store.schema_version(), 9);
         let responses_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -1108,7 +1416,7 @@ mod tests {
             Err(error) => panic!("v6 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 8);
+        assert_eq!(store.schema_version(), 9);
         let account_id = account_id("acct_v6_reset_credits");
         let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
             &store,
@@ -2089,6 +2397,99 @@ mod tests {
             ",
         ) {
             panic!("raw v6 database should initialize: {error}");
+        }
+    }
+
+    fn create_v8_database_with_current_active_lease(database_path: &Path) {
+        let connection = match Connection::open(database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("raw v8 database should open: {error}"),
+        };
+        if let Err(error) = connection.execute_batch(
+            "
+            CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                active_credential_generation INTEGER
+            );
+
+            CREATE TABLE quota_snapshots (
+                account_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                route_band TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                reset_credits_available INTEGER,
+                stale_penalty INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE affinity_pins (
+                affinity_key TEXT PRIMARY KEY NOT NULL,
+                account_id TEXT NOT NULL
+            );
+
+            CREATE TABLE selector_quota_windows (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                limit_window_seconds INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                effective INTEGER NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band, limit_window_seconds)
+            );
+
+            CREATE TABLE quota_refresh_status (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                last_success_unix_seconds INTEGER,
+                last_attempt_unix_seconds INTEGER,
+                last_error_class TEXT,
+                stale_after_unix_seconds INTEGER,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE previous_response_affinity_owners (
+                affinity_key_hash TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                credential_generation INTEGER NOT NULL,
+                source_transport TEXT NOT NULL,
+                created_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (affinity_key_hash, route_band, account_id)
+            );
+
+            CREATE TABLE active_client_leases (
+                route_band TEXT NOT NULL,
+                process_run_id TEXT NOT NULL,
+                reservation_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                acquired_unix_seconds INTEGER NOT NULL,
+                active_pressure INTEGER NOT NULL,
+                PRIMARY KEY (route_band, process_run_id, reservation_id)
+            );
+
+            CREATE INDEX active_client_leases_account_lookup
+                ON active_client_leases (
+                    route_band, account_id, acquired_unix_seconds
+                );
+
+            INSERT INTO active_client_leases (
+                route_band, process_run_id, reservation_id, account_id,
+                acquired_unix_seconds, active_pressure
+            ) VALUES (
+                'responses', 'process-v8', 'reservation-v8',
+                'acct_v8_active_lease', 100, 8
+            );
+
+            PRAGMA user_version = 8;
+            ",
+        ) {
+            panic!("raw v8 database should initialize: {error}");
         }
     }
 }

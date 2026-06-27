@@ -1,5 +1,6 @@
 //! SQLite metadata store.
 
+use std::collections::BTreeMap;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use std::fmt;
 use std::path::Path;
@@ -21,6 +22,7 @@ use rusqlite::params;
 use sqlx::Row;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::SqliteRow;
 use thiserror::Error;
 
 use crate::account::AccountRecord;
@@ -46,7 +48,7 @@ use crate::repositories::QuotaSnapshotRepository;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const WEEKLY_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 604_800;
 const SUSPECT_EXHAUSTED_TTL_SECONDS: u64 = 300;
@@ -114,7 +116,7 @@ const ASYNC_V1_SCHEMA_STATEMENTS: &[&str] = &[
         created_unix_seconds INTEGER NOT NULL,
         PRIMARY KEY (affinity_key_hash, route_band, account_id)
     )",
-    "PRAGMA user_version = 8",
+    "PRAGMA user_version = 9",
 ];
 const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS quota_history_observations (
@@ -163,6 +165,30 @@ const ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS: &[&str] =
         expires_unix_seconds INTEGER,
         PRIMARY KEY (account_id, route_band)
     )"];
+const ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS active_session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        process_run_id TEXT NOT NULL,
+        reservation_id TEXT NOT NULL,
+        event_kind TEXT NOT NULL,
+        event_unix_seconds INTEGER NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
+        ON active_session_events (
+            route_band, account_id, event_unix_seconds
+        )",
+    "CREATE TABLE IF NOT EXISTS active_session_rollups (
+        account_id TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        bucket_start_unix_seconds INTEGER NOT NULL,
+        bucket_end_unix_seconds INTEGER NOT NULL,
+        active_session_seconds INTEGER NOT NULL,
+        max_concurrent_sessions INTEGER NOT NULL,
+        PRIMARY KEY (account_id, route_band, bucket_start_unix_seconds, bucket_end_unix_seconds)
+    )",
+];
 
 /// Active client count for one account and route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +196,108 @@ pub struct ActiveClientCount {
     account_id: AccountId,
     active_clients: u32,
     active_pressure: u32,
+}
+
+/// Durable active-session event kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActiveSessionEventKind {
+    /// Session was acquired.
+    Acquired,
+    /// Session was released.
+    Released,
+    /// Session was retired.
+    Retired,
+    /// Session was stale-purged.
+    StalePurged,
+}
+
+impl ActiveSessionEventKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Acquired => "acquired",
+            Self::Released => "released",
+            Self::Retired => "retired",
+            Self::StalePurged => "stale_purged",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StateStoreError> {
+        match value {
+            "acquired" => Ok(Self::Acquired),
+            "released" => Ok(Self::Released),
+            "retired" => Ok(Self::Retired),
+            "stale_purged" => Ok(Self::StalePurged),
+            _ => Err(StateStoreError::Sqlite {
+                message: "corrupt active session event kind".to_owned(),
+            }),
+        }
+    }
+}
+
+/// Durable active-session event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveSessionEvent {
+    account_id: AccountId,
+    route_band: String,
+    process_run_id: String,
+    reservation_id: ReservationId,
+    event_kind: ActiveSessionEventKind,
+    event_unix_seconds: u64,
+}
+
+impl ActiveSessionEvent {
+    /// Creates a durable active-session event.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        route_band: impl Into<String>,
+        process_run_id: impl Into<String>,
+        reservation_id: ReservationId,
+        event_kind: ActiveSessionEventKind,
+        event_unix_seconds: u64,
+    ) -> Self {
+        Self {
+            account_id,
+            route_band: route_band.into(),
+            process_run_id: process_run_id.into(),
+            reservation_id,
+            event_kind,
+            event_unix_seconds,
+        }
+    }
+}
+
+/// Persisted active-session rollup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveSessionRollup {
+    account_id: AccountId,
+    route_band: String,
+    bucket_start_unix_seconds: u64,
+    bucket_end_unix_seconds: u64,
+    active_session_seconds: u64,
+    max_concurrent_sessions: u32,
+}
+
+impl ActiveSessionRollup {
+    /// Creates an active-session rollup.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        route_band: impl Into<String>,
+        bucket_start_unix_seconds: u64,
+        bucket_end_unix_seconds: u64,
+        active_session_seconds: u64,
+        max_concurrent_sessions: u32,
+    ) -> Self {
+        Self {
+            account_id,
+            route_band: route_band.into(),
+            bucket_start_unix_seconds,
+            bucket_end_unix_seconds,
+            active_session_seconds,
+            max_concurrent_sessions,
+        }
+    }
 }
 
 impl ActiveClientCount {
@@ -305,6 +433,7 @@ impl AsyncSqliteStateStore {
         store.ensure_quota_history_schema().await?;
         store.ensure_active_client_schema().await?;
         store.ensure_route_band_account_state_schema().await?;
+        store.ensure_active_session_history_schema().await?;
 
         Ok(store)
     }
@@ -1264,6 +1393,16 @@ impl AsyncSqliteStateStore {
         .await
         .map_err(sqlx_error)?;
 
+        self.append_active_session_event(
+            account_id,
+            route_band,
+            process_run_id,
+            reservation_id,
+            ActiveSessionEventKind::Acquired,
+            acquired_unix_seconds,
+        )
+        .await?;
+
         Ok(())
     }
 
@@ -1274,6 +1413,49 @@ impl AsyncSqliteStateStore {
         process_run_id: &str,
         reservation_id: &ReservationId,
     ) -> Result<(), StateStoreError> {
+        self.record_active_client_released_at(route_band, process_run_id, reservation_id, 0)
+            .await
+    }
+
+    /// Releases one active client lease at an explicit timestamp.
+    pub async fn record_active_client_released_at(
+        &self,
+        route_band: &str,
+        process_run_id: &str,
+        reservation_id: &ReservationId,
+        released_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        let lease = sqlx::query(
+            "SELECT account_id
+               FROM active_client_leases
+              WHERE route_band = ?1 AND process_run_id = ?2 AND reservation_id = ?3",
+        )
+        .bind(route_band)
+        .bind(process_run_id)
+        .bind(reservation_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        if let Some(row) = lease {
+            let account_id_value = row.get::<String, _>(0);
+            let account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
+                StateStoreError::CorruptAccount {
+                    account_id: account_id_value,
+                    field: "account_id",
+                }
+            })?;
+            self.append_active_session_event(
+                &account_id,
+                route_band,
+                process_run_id,
+                reservation_id,
+                ActiveSessionEventKind::Released,
+                released_unix_seconds,
+            )
+            .await?;
+        }
+
         sqlx::query(
             "DELETE FROM active_client_leases
               WHERE route_band = ?1 AND process_run_id = ?2 AND reservation_id = ?3",
@@ -1281,6 +1463,165 @@ impl AsyncSqliteStateStore {
         .bind(route_band)
         .bind(process_run_id)
         .bind(reservation_id.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Loads active-session events for one route band.
+    pub async fn active_session_events_for_route_band(
+        &self,
+        route_band: &str,
+    ) -> Result<Vec<ActiveSessionEvent>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT account_id, route_band, process_run_id, reservation_id,
+                    event_kind, event_unix_seconds
+               FROM active_session_events
+              WHERE route_band = ?1
+              ORDER BY event_unix_seconds, id",
+        )
+        .bind(route_band)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        rows.into_iter().map(parse_active_session_event).collect()
+    }
+
+    /// Refreshes persisted active-session rollups for one interval.
+    pub async fn refresh_active_session_rollups_for_interval(
+        &self,
+        route_band: &str,
+        interval_start_unix_seconds: u64,
+        interval_end_unix_seconds: u64,
+        bucket_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        if interval_end_unix_seconds <= interval_start_unix_seconds || bucket_seconds == 0 {
+            return Ok(());
+        }
+
+        let events = self
+            .active_session_events_for_route_band(route_band)
+            .await?;
+        let rollups = compute_active_session_rollups(
+            route_band,
+            &events,
+            interval_start_unix_seconds,
+            interval_end_unix_seconds,
+            bucket_seconds,
+        );
+
+        let delete_start = interval_start_unix_seconds
+            .saturating_sub(interval_start_unix_seconds % bucket_seconds);
+        let delete_end = interval_end_unix_seconds.div_ceil(bucket_seconds) * bucket_seconds;
+        sqlx::query(
+            "DELETE FROM active_session_rollups
+              WHERE route_band = ?1
+                AND bucket_start_unix_seconds >= ?2
+                AND bucket_start_unix_seconds < ?3",
+        )
+        .bind(route_band)
+        .bind(u64_to_i64(delete_start)?)
+        .bind(u64_to_i64(delete_end)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        for rollup in rollups {
+            sqlx::query(
+                "INSERT INTO active_session_rollups (
+                   account_id, route_band, bucket_start_unix_seconds,
+                   bucket_end_unix_seconds, active_session_seconds,
+                   max_concurrent_sessions
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(account_id, route_band, bucket_start_unix_seconds, bucket_end_unix_seconds)
+                 DO UPDATE SET
+                   active_session_seconds = excluded.active_session_seconds,
+                   max_concurrent_sessions = excluded.max_concurrent_sessions",
+            )
+            .bind(rollup.account_id.as_str())
+            .bind(&rollup.route_band)
+            .bind(u64_to_i64(rollup.bucket_start_unix_seconds)?)
+            .bind(u64_to_i64(rollup.bucket_end_unix_seconds)?)
+            .bind(u64_to_i64(rollup.active_session_seconds)?)
+            .bind(u32_to_i64(rollup.max_concurrent_sessions))
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_error)?;
+        }
+
+        Ok(())
+    }
+
+    /// Loads active-session rollups for one route band and interval.
+    pub async fn active_session_rollups_for_route_band(
+        &self,
+        route_band: &str,
+        interval_start_unix_seconds: u64,
+        interval_end_unix_seconds: u64,
+    ) -> Result<Vec<ActiveSessionRollup>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT account_id, route_band, bucket_start_unix_seconds,
+                    bucket_end_unix_seconds, active_session_seconds,
+                    max_concurrent_sessions
+               FROM active_session_rollups
+              WHERE route_band = ?1
+                AND bucket_end_unix_seconds > ?2
+                AND bucket_start_unix_seconds < ?3
+              ORDER BY account_id, bucket_start_unix_seconds",
+        )
+        .bind(route_band)
+        .bind(u64_to_i64(interval_start_unix_seconds)?)
+        .bind(u64_to_i64(interval_end_unix_seconds)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        rows.into_iter().map(parse_active_session_rollup).collect()
+    }
+
+    /// Purges persisted active-session rollup buckets that end before the cutoff.
+    pub async fn purge_active_session_rollups_before(
+        &self,
+        cutoff_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "DELETE FROM active_session_rollups
+              WHERE bucket_end_unix_seconds < ?1",
+        )
+        .bind(u64_to_i64(cutoff_unix_seconds)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    async fn append_active_session_event(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+        process_run_id: &str,
+        reservation_id: &ReservationId,
+        event_kind: ActiveSessionEventKind,
+        event_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "INSERT INTO active_session_events (
+               account_id, route_band, process_run_id, reservation_id,
+               event_kind, event_unix_seconds
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .bind(process_run_id)
+        .bind(reservation_id.as_str())
+        .bind(event_kind.as_str())
+        .bind(u64_to_i64(event_unix_seconds)?)
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -1296,6 +1637,37 @@ impl AsyncSqliteStateStore {
         max_age_seconds: u64,
     ) -> Result<Vec<ActiveClientCount>, StateStoreError> {
         let oldest_allowed = now_unix_seconds.saturating_sub(max_age_seconds);
+        let stale_rows = sqlx::query(
+            "SELECT account_id, process_run_id, reservation_id
+               FROM active_client_leases
+              WHERE route_band = ?1 AND acquired_unix_seconds < ?2
+              ORDER BY acquired_unix_seconds, account_id, process_run_id, reservation_id",
+        )
+        .bind(route_band)
+        .bind(u64_to_i64(oldest_allowed)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        for row in stale_rows {
+            let account_id_value = row.get::<String, _>(0);
+            let account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
+                StateStoreError::CorruptAccount {
+                    account_id: account_id_value,
+                    field: "account_id",
+                }
+            })?;
+            self.append_active_session_event(
+                &account_id,
+                route_band,
+                &row.get::<String, _>(1),
+                &ReservationId::new(row.get::<String, _>(2)),
+                ActiveSessionEventKind::StalePurged,
+                now_unix_seconds,
+            )
+            .await?;
+        }
+
         sqlx::query(
             "DELETE FROM active_client_leases
               WHERE route_band = ?1 AND acquired_unix_seconds < ?2",
@@ -1346,7 +1718,11 @@ impl AsyncSqliteStateStore {
     async fn migrate(&self) -> Result<(), StateStoreError> {
         match self.schema_version().await? {
             0 => self.apply_v1().await,
-            7 => self.apply_v8().await,
+            7 => {
+                self.apply_v8().await?;
+                self.apply_v9().await
+            }
+            8 => self.apply_v9().await,
             CURRENT_SCHEMA_VERSION => Ok(()),
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -1387,6 +1763,17 @@ impl AsyncSqliteStateStore {
 
     async fn ensure_route_band_account_state_schema(&self) -> Result<(), StateStoreError> {
         for statement in ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS {
+            sqlx::query(*statement)
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_active_session_history_schema(&self) -> Result<(), StateStoreError> {
+        for statement in ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS {
             sqlx::query(*statement)
                 .execute(&self.pool)
                 .await
@@ -1471,6 +1858,16 @@ impl AsyncSqliteStateStore {
             .await
             .map_err(sqlx_error)?;
         transaction.commit().await.map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
+    async fn apply_v9(&self) -> Result<(), StateStoreError> {
+        self.ensure_active_session_history_schema().await?;
+        sqlx::query("PRAGMA user_version = 9")
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_error)?;
 
         Ok(())
     }
@@ -2537,7 +2934,8 @@ impl SqliteStateStore {
                 self.apply_v5()?;
                 self.apply_v6()?;
                 self.apply_v7()?;
-                self.apply_v8()
+                self.apply_v8()?;
+                self.apply_v9()
             }
             2 => {
                 self.apply_v3()?;
@@ -2545,31 +2943,40 @@ impl SqliteStateStore {
                 self.apply_v5()?;
                 self.apply_v6()?;
                 self.apply_v7()?;
-                self.apply_v8()
+                self.apply_v8()?;
+                self.apply_v9()
             }
             3 => {
                 self.apply_v4()?;
                 self.apply_v5()?;
                 self.apply_v6()?;
                 self.apply_v7()?;
-                self.apply_v8()
+                self.apply_v8()?;
+                self.apply_v9()
             }
             4 => {
                 self.apply_v5()?;
                 self.apply_v6()?;
                 self.apply_v7()?;
-                self.apply_v8()
+                self.apply_v8()?;
+                self.apply_v9()
             }
             5 => {
                 self.apply_v6()?;
                 self.apply_v7()?;
-                self.apply_v8()
+                self.apply_v8()?;
+                self.apply_v9()
             }
             6 => {
                 self.apply_v7()?;
-                self.apply_v8()
+                self.apply_v8()?;
+                self.apply_v9()
             }
-            7 => self.apply_v8(),
+            7 => {
+                self.apply_v8()?;
+                self.apply_v9()
+            }
+            8 => self.apply_v9(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -2635,7 +3042,37 @@ impl SqliteStateStore {
                     PRIMARY KEY (affinity_key_hash, route_band, account_id)
                 );
 
-                PRAGMA user_version = 8;
+                CREATE TABLE IF NOT EXISTS active_session_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    process_run_id TEXT NOT NULL,
+                    reservation_id TEXT NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    event_unix_seconds INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
+                    ON active_session_events (
+                        route_band, account_id, event_unix_seconds
+                    );
+
+                CREATE TABLE IF NOT EXISTS active_session_rollups (
+                    account_id TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    bucket_start_unix_seconds INTEGER NOT NULL,
+                    bucket_end_unix_seconds INTEGER NOT NULL,
+                    active_session_seconds INTEGER NOT NULL,
+                    max_concurrent_sessions INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id,
+                        route_band,
+                        bucket_start_unix_seconds,
+                        bucket_end_unix_seconds
+                    )
+                );
+
+                PRAGMA user_version = 9;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -2883,6 +3320,48 @@ impl SqliteStateStore {
             )
             .map_err(sqlite_error)?;
         transaction.commit().map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn apply_v9(&self) -> Result<(), StateStoreError> {
+        self.connection
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS active_session_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    process_run_id TEXT NOT NULL,
+                    reservation_id TEXT NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    event_unix_seconds INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
+                    ON active_session_events (
+                        route_band, account_id, event_unix_seconds
+                    );
+
+                CREATE TABLE IF NOT EXISTS active_session_rollups (
+                    account_id TEXT NOT NULL,
+                    route_band TEXT NOT NULL,
+                    bucket_start_unix_seconds INTEGER NOT NULL,
+                    bucket_end_unix_seconds INTEGER NOT NULL,
+                    active_session_seconds INTEGER NOT NULL,
+                    max_concurrent_sessions INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id,
+                        route_band,
+                        bucket_start_unix_seconds,
+                        bucket_end_unix_seconds
+                    )
+                );
+
+                PRAGMA user_version = 9;
+                ",
+            )
+            .map_err(sqlite_error)?;
 
         Ok(())
     }
@@ -3492,6 +3971,204 @@ fn parse_quota_history_observation_row(
     }
 
     Ok(observation)
+}
+
+fn parse_active_session_event(row: SqliteRow) -> Result<ActiveSessionEvent, StateStoreError> {
+    let account_id_value = row.get::<String, _>(0);
+    let account_id =
+        AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
+            account_id: account_id_value.clone(),
+            field: "account_id",
+        })?;
+    let event_kind_value = row.get::<String, _>(4);
+    let event_kind = ActiveSessionEventKind::parse(&event_kind_value)?;
+
+    Ok(ActiveSessionEvent::new(
+        account_id,
+        row.get::<String, _>(1),
+        row.get::<String, _>(2),
+        ReservationId::new(row.get::<String, _>(3)),
+        event_kind,
+        i64_to_u64(
+            row.get::<i64, _>(5),
+            &account_id_value,
+            "event_unix_seconds",
+        )?,
+    ))
+}
+
+fn parse_active_session_rollup(row: SqliteRow) -> Result<ActiveSessionRollup, StateStoreError> {
+    let account_id_value = row.get::<String, _>(0);
+    let account_id =
+        AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
+            account_id: account_id_value.clone(),
+            field: "account_id",
+        })?;
+
+    Ok(ActiveSessionRollup::new(
+        account_id,
+        row.get::<String, _>(1),
+        i64_to_u64(
+            row.get::<i64, _>(2),
+            &account_id_value,
+            "bucket_start_unix_seconds",
+        )?,
+        i64_to_u64(
+            row.get::<i64, _>(3),
+            &account_id_value,
+            "bucket_end_unix_seconds",
+        )?,
+        i64_to_u64(
+            row.get::<i64, _>(4),
+            &account_id_value,
+            "active_session_seconds",
+        )?,
+        i64_to_u32(
+            row.get::<i64, _>(5),
+            &account_id_value,
+            "max_concurrent_sessions",
+        )?,
+    ))
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ActiveSessionKey {
+    route_band: String,
+    process_run_id: String,
+    reservation_id: String,
+}
+
+impl ActiveSessionKey {
+    fn from_event(event: &ActiveSessionEvent) -> Self {
+        Self {
+            route_band: event.route_band.clone(),
+            process_run_id: event.process_run_id.clone(),
+            reservation_id: event.reservation_id.as_str().to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveSessionInterval {
+    account_id: AccountId,
+    start_unix_seconds: u64,
+    end_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RollupKey {
+    account_id: AccountId,
+    bucket_start_unix_seconds: u64,
+    bucket_end_unix_seconds: u64,
+}
+
+fn compute_active_session_rollups(
+    route_band: &str,
+    events: &[ActiveSessionEvent],
+    interval_start_unix_seconds: u64,
+    interval_end_unix_seconds: u64,
+    bucket_seconds: u64,
+) -> Vec<ActiveSessionRollup> {
+    if interval_end_unix_seconds <= interval_start_unix_seconds || bucket_seconds == 0 {
+        return Vec::new();
+    }
+
+    let mut open_sessions = BTreeMap::<ActiveSessionKey, ActiveSessionEvent>::new();
+    let mut completed_intervals = Vec::<ActiveSessionInterval>::new();
+    for event in events.iter().filter(|event| event.route_band == route_band) {
+        let key = ActiveSessionKey::from_event(event);
+        match event.event_kind {
+            ActiveSessionEventKind::Acquired => {
+                open_sessions.insert(key, event.clone());
+            }
+            ActiveSessionEventKind::Released
+            | ActiveSessionEventKind::Retired
+            | ActiveSessionEventKind::StalePurged => {
+                if let Some(start_event) = open_sessions.remove(&key) {
+                    if event.event_unix_seconds > start_event.event_unix_seconds {
+                        completed_intervals.push(ActiveSessionInterval {
+                            account_id: start_event.account_id,
+                            start_unix_seconds: start_event.event_unix_seconds,
+                            end_unix_seconds: event.event_unix_seconds,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for start_event in open_sessions.into_values() {
+        if interval_end_unix_seconds > start_event.event_unix_seconds {
+            completed_intervals.push(ActiveSessionInterval {
+                account_id: start_event.account_id,
+                start_unix_seconds: start_event.event_unix_seconds,
+                end_unix_seconds: interval_end_unix_seconds,
+            });
+        }
+    }
+
+    let delete_start =
+        interval_start_unix_seconds.saturating_sub(interval_start_unix_seconds % bucket_seconds);
+    let delete_end = interval_end_unix_seconds.div_ceil(bucket_seconds) * bucket_seconds;
+    let mut bucket_segments = BTreeMap::<RollupKey, Vec<(u64, u64)>>::new();
+    for session in completed_intervals {
+        let clipped_start = session.start_unix_seconds.max(interval_start_unix_seconds);
+        let clipped_end = session.end_unix_seconds.min(interval_end_unix_seconds);
+        if clipped_end <= clipped_start {
+            continue;
+        }
+
+        let mut bucket_start = clipped_start.saturating_sub(clipped_start % bucket_seconds);
+        while bucket_start < clipped_end && bucket_start < delete_end {
+            let bucket_end = bucket_start.saturating_add(bucket_seconds);
+            let segment_start = clipped_start.max(bucket_start).max(delete_start);
+            let segment_end = clipped_end.min(bucket_end).min(delete_end);
+            if segment_end > segment_start {
+                bucket_segments
+                    .entry(RollupKey {
+                        account_id: session.account_id.clone(),
+                        bucket_start_unix_seconds: bucket_start,
+                        bucket_end_unix_seconds: bucket_end,
+                    })
+                    .or_default()
+                    .push((segment_start, segment_end));
+            }
+            bucket_start = bucket_end;
+        }
+    }
+
+    bucket_segments
+        .into_iter()
+        .map(|(key, segments)| {
+            let active_session_seconds =
+                segments.iter().map(|(start, end)| end - start).sum::<u64>();
+            ActiveSessionRollup::new(
+                key.account_id,
+                route_band,
+                key.bucket_start_unix_seconds,
+                key.bucket_end_unix_seconds,
+                active_session_seconds,
+                max_concurrent_sessions(&segments),
+            )
+        })
+        .collect()
+}
+
+fn max_concurrent_sessions(segments: &[(u64, u64)]) -> u32 {
+    let mut edges = Vec::with_capacity(segments.len() * 2);
+    for (start, end) in segments {
+        edges.push((*start, 1_i32));
+        edges.push((*end, -1_i32));
+    }
+    edges.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+    let mut current = 0_i32;
+    let mut maximum = 0_i32;
+    for (_, delta) in edges {
+        current += delta;
+        maximum = maximum.max(current);
+    }
+
+    u32::try_from(maximum).unwrap_or_default()
 }
 
 fn parse_previous_response_owner_row(
