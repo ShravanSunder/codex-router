@@ -164,12 +164,15 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::WebSocket;
     use tokio_tungstenite::tungstenite::accept_hdr;
+    use tokio_tungstenite::tungstenite::accept_hdr_with_config;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::client::connect_with_config;
     use tokio_tungstenite::tungstenite::connect;
     use tokio_tungstenite::tungstenite::handshake::server::Request;
     use tokio_tungstenite::tungstenite::handshake::server::Response;
     use tokio_tungstenite::tungstenite::http::HeaderValue;
     use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
     use tokio_util::task::TaskTracker;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -184,6 +187,12 @@ mod tests {
         ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
             Ok(test_affinity_secret())
         }
+    }
+
+    fn unbounded_test_websocket_config() -> WebSocketConfig {
+        WebSocketConfig::default()
+            .max_message_size(None)
+            .max_frame_size(None)
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5222,10 +5231,14 @@ mod tests {
             if let Err(error) = client.send(Message::text(first_frame)) {
                 panic!("local websocket client should send first frame: {error}");
             }
-            match client.read() {
+            let response = match client.read() {
                 Ok(message) => message.to_string(),
                 Err(error) => panic!("local websocket client should read response: {error}"),
+            };
+            if let Err(error) = client.close(None) {
+                panic!("local websocket client should close cleanly: {error}");
             }
+            response
         });
 
         let handled = match runtime.serve_protocol_connections(1) {
@@ -5315,18 +5328,22 @@ mod tests {
                 Ok(connection) => connection,
                 Err(error) => panic!("mock websocket upstream should accept: {error}"),
             };
-            let mut websocket = match accept_hdr(stream, |request: &Request, response: Response| {
-                let authorization = request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("<missing>")
-                    .to_owned();
-                if let Err(error) = upstream_sender.send((authorization, String::new())) {
-                    panic!("mock websocket upstream headers should record: {error}");
-                }
-                Ok(response)
-            }) {
+            let mut websocket = match accept_hdr_with_config(
+                stream,
+                |request: &Request, response: Response| {
+                    let authorization = request
+                        .headers()
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("<missing>")
+                        .to_owned();
+                    if let Err(error) = upstream_sender.send((authorization, String::new())) {
+                        panic!("mock websocket upstream headers should record: {error}");
+                    }
+                    Ok(response)
+                },
+                Some(unbounded_test_websocket_config()),
+            ) {
                 Ok(websocket) => websocket,
                 Err(error) => panic!("mock websocket upstream handshake should accept: {error}"),
             };
@@ -5368,7 +5385,7 @@ mod tests {
         let router_address = runtime.local_addr();
         let client_first_frame = {
             let mut frame = String::from(r#"{"type":"response.create","input":""#);
-            frame.extend(std::iter::repeat_n('x', 1024 * 1024));
+            frame.extend(std::iter::repeat_n('x', (16 * 1024 * 1024) + 1));
             frame
         };
         let expected_first_frame = client_first_frame.clone();
@@ -5382,17 +5399,22 @@ mod tests {
                 "Authorization",
                 HeaderValue::from_static("Bearer current-token"),
             );
-            let (mut client, _response) = match connect(request) {
-                Ok(connection) => connection,
-                Err(error) => panic!("local websocket client should connect: {error}"),
-            };
+            let (mut client, _response) =
+                match connect_with_config(request, Some(unbounded_test_websocket_config()), 0) {
+                    Ok(connection) => connection,
+                    Err(error) => panic!("local websocket client should connect: {error}"),
+                };
             if let Err(error) = client.send(Message::text(client_first_frame)) {
                 panic!("local websocket client should send first frame: {error}");
             }
-            match client.read() {
+            let response = match client.read() {
                 Ok(message) => message.to_string(),
                 Err(error) => panic!("local websocket client should read response: {error}"),
+            };
+            if let Err(error) = client.close(None) {
+                panic!("local websocket client should close cleanly: {error}");
             }
+            response
         });
 
         let handled = match runtime.serve_protocol_connections(1) {

@@ -46,16 +46,16 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::Message;
 #[cfg(test)]
 use tokio_tungstenite::tungstenite::WebSocket;
 #[cfg(test)]
-use tokio_tungstenite::tungstenite::accept_hdr;
+use tokio_tungstenite::tungstenite::accept_hdr_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 #[cfg(test)]
-use tokio_tungstenite::tungstenite::connect;
+use tokio_tungstenite::tungstenite::client::connect_with_config;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
 #[cfg(test)]
 use tokio_tungstenite::tungstenite::handshake::server::Request;
@@ -63,6 +63,7 @@ use tokio_tungstenite::tungstenite::handshake::server::Request;
 use tokio_tungstenite::tungstenite::handshake::server::Response;
 use tokio_tungstenite::tungstenite::http::HeaderName;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -98,6 +99,12 @@ const WEBSOCKET_REQUEST_LOCAL_CREDENTIAL_ATTEMPT_LIMIT: usize = 16;
 const CODEX_WEBSOCKET_RECONNECT_SIGNAL: &str = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}"#;
 pub(crate) const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"codex_router_quota_exhausted","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
 pub(crate) const ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL: &str = r#"{"type":"error","status":503,"error":{"type":"codex_router_quota_state_unavailable","code":"codex_router_quota_state_unavailable","message":"codex-router cannot safely rotate accounts because quota state is unavailable."}}"#;
+
+pub(crate) fn router_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(None)
+        .max_frame_size(None)
+}
 
 fn credential_failure_or_websocket_selection_close_reason(
     error: HttpProxyError,
@@ -3332,7 +3339,8 @@ where
 
         let mut upstream_request = upstream_url.into_client_request()?;
         apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
-        let (mut upstream_websocket, _response) = connect(upstream_request)?;
+        let (mut upstream_websocket, _response) =
+            connect_with_config(upstream_request, Some(router_websocket_config()), 0)?;
         upstream_websocket.send(message_from_frame(first_frame)?)?;
         forward_upstream_response(
             &mut upstream_websocket,
@@ -3557,7 +3565,7 @@ where
                 local_websocket.close(None).await?;
                 return Ok(());
             }
-            connection = connect_async(upstream_request) => connection?,
+            connection = connect_async_with_config(upstream_request, Some(router_websocket_config()), false) => connection?,
         };
         let upstream_first_message = message_from_frame(first_frame)?;
         tokio::select! {
@@ -4452,12 +4460,13 @@ fn accept_local_websocket<F>(
 where
     F: FnOnce(&Request),
 {
-    accept_hdr(
+    accept_hdr_with_config(
         local_stream,
         move |request: &Request, response: Response| {
             on_request(request);
             Ok(response)
         },
+        Some(router_websocket_config()),
     )
     .map_err(|_error| WebSocketTunnelError::Handshake)
 }

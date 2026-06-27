@@ -111,6 +111,7 @@ use crate::websocket::WebSocketHandshakeRequest;
 use crate::websocket::WebSocketProtocolRouter;
 use crate::websocket::WebSocketRegistrySnapshot;
 use crate::websocket::WebSocketRevocationRegistry;
+use crate::websocket::router_websocket_config;
 
 #[cfg(test)]
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
@@ -832,10 +833,11 @@ impl LoopbackProtocolConnectionHandler {
         if let Some(response) = self.preflight_hyper_websocket_request(&request, &path) {
             return response;
         }
-        let (upgrade_response, websocket) = match hyper_tungstenite::upgrade(&mut request, None) {
-            Ok(upgrade) => upgrade,
-            Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
-        };
+        let (upgrade_response, websocket) =
+            match hyper_tungstenite::upgrade(&mut request, Some(router_websocket_config())) {
+                Ok(upgrade) => upgrade,
+                Err(_error) => return empty_response(StatusCode::BAD_REQUEST),
+            };
         let task_context = Arc::clone(&self);
         let upgrade_task = tokio::spawn(async move {
             match websocket.await {
