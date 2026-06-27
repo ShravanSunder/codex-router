@@ -1,5 +1,6 @@
 //! Reset-aware quota burn-down assessment.
 
+use crate::run_rate::QuotaRunRateConfidence;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::safe_account_label;
 use codex_router_core::routes::RouteBand;
@@ -8,9 +9,24 @@ use codex_router_core::routes::RouteBand;
 pub const V1_SHORT_WINDOW_SECONDS: u64 = 18_000;
 /// Fixed v1 weekly quota window in seconds.
 pub const V1_WEEKLY_WINDOW_SECONDS: u64 = 604_800;
+/// Fixed v1 weekly survival safety buffer in basis points.
+pub const WEEKLY_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS: i64 = 200;
+/// Fixed v1 short-window survival safety buffer in basis points.
+pub const SHORT_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS: i64 = 100;
+/// Fixed v1 short-window near-reset threshold.
+pub const SHORT_NEAR_RESET_THRESHOLD_SECONDS: u64 = 1_800;
+/// Fixed v1 same-pool reset tolerance.
+pub const SAME_POOL_RESET_TOLERANCE_SECONDS: u64 = 7_200;
+/// Fixed v1 same-pool survival margin tolerance in basis points.
+pub const SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS: i64 = 500;
+/// Fixed v1 active-session imbalance threshold.
+pub const ACTIVE_SESSION_IMBALANCE_THRESHOLD: u32 = 2;
+/// Fixed v1 usage-limit suspect TTL.
+pub const USAGE_LIMIT_SUSPECT_TTL_SECONDS: u64 = 300;
+/// Fixed v1 active-session rollup bucket size.
+pub const ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS: u64 = 300;
 
 const DEFAULT_SHORT_WINDOW_CUTOFF_SECONDS: u64 = 86_400;
-const DEFAULT_SHORT_NEAR_RESET_MAX_SECONDS: u64 = 1_800;
 const DEFAULT_LONG_NEAR_RESET_MAX_SECONDS: u64 = 43_200;
 const DEFAULT_RESERVE_PRESSURE_THRESHOLD: u32 = 25;
 const DEFAULT_RESERVE_HEADROOM_THRESHOLD: u32 = 10;
@@ -65,6 +81,7 @@ pub struct BurnDownAccountInput {
     account_enabled: bool,
     has_active_credential: bool,
     active_load_pressure: u32,
+    current_active_sessions: u32,
 }
 
 impl BurnDownAccountInput {
@@ -82,6 +99,7 @@ impl BurnDownAccountInput {
             account_enabled: true,
             has_active_credential: true,
             active_load_pressure: 0,
+            current_active_sessions: 0,
         }
     }
 
@@ -106,6 +124,13 @@ impl BurnDownAccountInput {
         self
     }
 
+    /// Sets current active sessions for measured active-balancing decisions.
+    #[must_use]
+    pub const fn with_current_active_sessions(mut self, current_active_sessions: u32) -> Self {
+        self.current_active_sessions = current_active_sessions;
+        self
+    }
+
     /// Returns the account id.
     #[must_use]
     pub const fn account_id(&self) -> &AccountId {
@@ -123,6 +148,8 @@ pub struct QuotaWindowFact {
     observed_unix_seconds: u64,
     effective: bool,
     projected_exhaustion_unix_seconds: Option<u64>,
+    burn_rate_basis_points_per_hour: Option<u32>,
+    burn_rate_confidence: QuotaRunRateConfidence,
 }
 
 impl QuotaWindowFact {
@@ -137,6 +164,8 @@ impl QuotaWindowFact {
             observed_unix_seconds: 0,
             effective: false,
             projected_exhaustion_unix_seconds: None,
+            burn_rate_basis_points_per_hour: None,
+            burn_rate_confidence: QuotaRunRateConfidence::Unknown,
         }
     }
 
@@ -175,6 +204,27 @@ impl QuotaWindowFact {
         projected_exhaustion_unix_seconds: u64,
     ) -> Self {
         self.projected_exhaustion_unix_seconds = Some(projected_exhaustion_unix_seconds);
+        self
+    }
+
+    /// Sets estimated burn rate in basis points per hour.
+    #[must_use]
+    pub const fn with_burn_rate_basis_points_per_hour(
+        mut self,
+        burn_rate_basis_points_per_hour: u32,
+    ) -> Self {
+        self.burn_rate_basis_points_per_hour = Some(burn_rate_basis_points_per_hour);
+        self.burn_rate_confidence = QuotaRunRateConfidence::Normal;
+        self
+    }
+
+    /// Sets burn-rate confidence.
+    #[must_use]
+    pub const fn with_burn_rate_confidence(
+        mut self,
+        burn_rate_confidence: QuotaRunRateConfidence,
+    ) -> Self {
+        self.burn_rate_confidence = burn_rate_confidence;
         self
     }
 
@@ -305,6 +355,11 @@ pub struct BurnDownAccountAssessment {
     routing_reason: RoutingReason,
     preferred_next: bool,
     near_zero_retirement_candidate: bool,
+    current_active_sessions: u32,
+    weekly_reset_unix_seconds: Option<u64>,
+    weekly_survives_to_reset: bool,
+    weekly_survival_margin_basis_points: Option<i64>,
+    weekly_burn_rate_confidence: QuotaRunRateConfidence,
     salvage_sort_key: Option<SalvageSortKey>,
 }
 
@@ -609,6 +664,9 @@ struct WindowAssessment {
     surplus: u32,
     time_left_seconds: Option<u64>,
     near_reset: bool,
+    burn_rate_basis_points_per_hour: Option<u32>,
+    burn_rate_confidence: QuotaRunRateConfidence,
+    survival_margin_basis_points: Option<i64>,
 }
 
 /// Assesses a route band.
@@ -723,6 +781,11 @@ fn assess_account(
         routing_reason: RoutingReason::UnknownFallbackAvailable,
         preferred_next: false,
         near_zero_retirement_candidate: false,
+        current_active_sessions: input.current_active_sessions,
+        weekly_reset_unix_seconds: None,
+        weekly_survives_to_reset: false,
+        weekly_survival_margin_basis_points: None,
+        weekly_burn_rate_confidence: QuotaRunRateConfidence::Unknown,
         salvage_sort_key: None,
     };
 
@@ -843,15 +906,13 @@ fn assess_account(
         policy
             .long_pressure_multiplier
             .saturating_mul(long_pressure)
-            .saturating_add(short_pressure)
-            .saturating_add(input.active_load_pressure),
+            .saturating_add(short_pressure),
     );
     let projected_burn_pressure = windows
         .iter()
         .map(|window| window.projected_pressure)
         .max()
         .unwrap_or(0)
-        .saturating_add(input.active_load_pressure)
         .min(100);
     let risk_adjusted_weight = i64::from(usable_headroom) - i64::from(risk_penalty)
         + i64::from(short_salvage)
@@ -869,6 +930,9 @@ fn assess_account(
     let near_zero_retirement_candidate = windows
         .iter()
         .any(|window| window_requires_near_zero_retirement(window, now_unix_seconds));
+    let weekly_window = windows
+        .iter()
+        .find(|window| !is_short_window(window.window_seconds, policy));
 
     BurnDownAccountAssessment {
         availability,
@@ -882,6 +946,15 @@ fn assess_account(
         projected_burn_pressure,
         routing_weight: Some(routing_weight),
         near_zero_retirement_candidate,
+        current_active_sessions: input.current_active_sessions,
+        weekly_reset_unix_seconds: weekly_window.and_then(|window| window.reset_unix_seconds),
+        weekly_survives_to_reset: weekly_window.is_some_and(weekly_window_survives_to_reset),
+        weekly_survival_margin_basis_points: weekly_window
+            .and_then(|window| window.survival_margin_basis_points),
+        weekly_burn_rate_confidence: weekly_window
+            .map_or(QuotaRunRateConfidence::Unknown, |window| {
+                window.burn_rate_confidence
+            }),
         salvage_sort_key: salvage_sort_key(&windows, short_salvage, long_salvage, policy),
         routing_reason: RoutingReason::AvailableSamePool,
         ..base
@@ -961,6 +1034,7 @@ fn assess_window(
     let near_reset = time_left_seconds.is_some_and(|time_left_seconds| {
         time_left_seconds <= near_reset_seconds(window.window_seconds, policy)
     });
+    let survival_margin_basis_points = survival_margin_basis_points(window, time_left_seconds);
 
     WindowAssessment {
         window_seconds: window.window_seconds,
@@ -973,6 +1047,9 @@ fn assess_window(
         surplus,
         time_left_seconds,
         near_reset,
+        burn_rate_basis_points_per_hour: window.burn_rate_basis_points_per_hour,
+        burn_rate_confidence: window.burn_rate_confidence,
+        survival_margin_basis_points,
     }
 }
 
@@ -1268,12 +1345,156 @@ fn candidate_priority_cmp(
     right: &BurnDownAccountAssessment,
     right_weight: u32,
 ) -> std::cmp::Ordering {
-    right_weight
-        .cmp(&left_weight)
+    compare_weekly_survival(left, right)
+        .then_with(|| right_weight.cmp(&left_weight))
         .then_with(|| left.long_pressure.cmp(&right.long_pressure))
         .then_with(|| left.short_pressure.cmp(&right.short_pressure))
         .then_with(|| compare_salvage_key(left, right))
         .then_with(|| left.account_id.cmp(&right.account_id))
+}
+
+fn compare_weekly_survival(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    match (
+        left.weekly_survives_to_reset,
+        right.weekly_survives_to_reset,
+    ) {
+        (true, true) => compare_surviving_weekly_accounts(left, right),
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_surviving_weekly_accounts(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    confidence_rank(right.weekly_burn_rate_confidence)
+        .cmp(&confidence_rank(left.weekly_burn_rate_confidence))
+        .then_with(|| compare_same_pool_active_imbalance(left, right))
+        .then_with(|| {
+            left.weekly_reset_unix_seconds
+                .unwrap_or(u64::MAX)
+                .cmp(&right.weekly_reset_unix_seconds.unwrap_or(u64::MAX))
+        })
+        .then_with(|| compare_weekly_survival_margin(left, right))
+        .then_with(|| {
+            left.current_active_sessions
+                .cmp(&right.current_active_sessions)
+        })
+        .then_with(|| {
+            if left.weekly_survival_margin_basis_points.is_some()
+                && right.weekly_survival_margin_basis_points.is_some()
+            {
+                left.account_id.cmp(&right.account_id)
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+}
+
+fn compare_weekly_survival_margin(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    match (
+        left.weekly_survival_margin_basis_points,
+        right.weekly_survival_margin_basis_points,
+    ) {
+        (Some(left_margin), Some(right_margin)) => right_margin.cmp(&left_margin),
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_same_pool_active_imbalance(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    if !same_effective_weekly_pool(left, right) {
+        return std::cmp::Ordering::Equal;
+    }
+
+    let active_delta = left
+        .current_active_sessions
+        .abs_diff(right.current_active_sessions);
+    if active_delta < ACTIVE_SESSION_IMBALANCE_THRESHOLD {
+        return std::cmp::Ordering::Equal;
+    }
+
+    left.current_active_sessions
+        .cmp(&right.current_active_sessions)
+}
+
+fn same_effective_weekly_pool(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> bool {
+    if left.weekly_burn_rate_confidence != right.weekly_burn_rate_confidence {
+        return false;
+    }
+    let Some(left_reset) = left.weekly_reset_unix_seconds else {
+        return false;
+    };
+    let Some(right_reset) = right.weekly_reset_unix_seconds else {
+        return false;
+    };
+    if left_reset.abs_diff(right_reset) > SAME_POOL_RESET_TOLERANCE_SECONDS {
+        return false;
+    }
+
+    let Some(left_margin) = left.weekly_survival_margin_basis_points else {
+        return false;
+    };
+    let Some(right_margin) = right.weekly_survival_margin_basis_points else {
+        return false;
+    };
+
+    left_margin.abs_diff(right_margin) <= SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS as u64
+}
+
+const fn confidence_rank(confidence: QuotaRunRateConfidence) -> u8 {
+    match confidence {
+        QuotaRunRateConfidence::Normal => 4,
+        QuotaRunRateConfidence::Low => 3,
+        QuotaRunRateConfidence::Insufficient => 2,
+        QuotaRunRateConfidence::Unknown => 1,
+        QuotaRunRateConfidence::Stale => 0,
+    }
+}
+
+fn weekly_window_survives_to_reset(window: &WindowAssessment) -> bool {
+    if let Some(survival_margin_basis_points) = window.survival_margin_basis_points {
+        return survival_margin_basis_points >= WEEKLY_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS;
+    }
+
+    match (
+        window.projected_exhaustion_unix_seconds,
+        window.reset_unix_seconds,
+    ) {
+        (Some(projected_exhaustion_unix_seconds), Some(reset_unix_seconds)) => {
+            projected_exhaustion_unix_seconds >= reset_unix_seconds
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+fn survival_margin_basis_points(
+    window: &QuotaWindowFact,
+    time_left_seconds: Option<u64>,
+) -> Option<i64> {
+    let burn_rate_basis_points_per_hour = u128::from(window.burn_rate_basis_points_per_hour?);
+    let time_left_seconds = u128::from(time_left_seconds?);
+    let projected_burn_basis_points = burn_rate_basis_points_per_hour
+        .saturating_mul(time_left_seconds)
+        .div_ceil(3_600);
+    let remaining_basis_points = i128::from(window.remaining_headroom) * 100;
+    let margin = remaining_basis_points - i128::try_from(projected_burn_basis_points).ok()?;
+
+    Some(margin.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
 }
 
 const fn is_short_window(window_seconds: u64, policy: BurnDownRouteBandPolicy) -> bool {
@@ -1283,7 +1504,7 @@ const fn is_short_window(window_seconds: u64, policy: BurnDownRouteBandPolicy) -
 const fn near_reset_seconds(window_seconds: u64, policy: BurnDownRouteBandPolicy) -> u64 {
     let tenth = window_seconds / 10;
     if is_short_window(window_seconds, policy) {
-        min_u64(DEFAULT_SHORT_NEAR_RESET_MAX_SECONDS, tenth)
+        min_u64(SHORT_NEAR_RESET_THRESHOLD_SECONDS, tenth)
     } else {
         min_u64(DEFAULT_LONG_NEAR_RESET_MAX_SECONDS, tenth)
     }
@@ -1344,6 +1565,18 @@ mod tests {
     const WEEKLY: u64 = V1_WEEKLY_WINDOW_SECONDS;
 
     #[test]
+    fn default_policy_constants_match_spec_r0() {
+        assert_eq!(WEEKLY_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS, 200);
+        assert_eq!(SHORT_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS, 100);
+        assert_eq!(SHORT_NEAR_RESET_THRESHOLD_SECONDS, 1_800);
+        assert_eq!(SAME_POOL_RESET_TOLERANCE_SECONDS, 7_200);
+        assert_eq!(SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS, 500);
+        assert_eq!(ACTIVE_SESSION_IMBALANCE_THRESHOLD, 2);
+        assert_eq!(USAGE_LIMIT_SUSPECT_TTL_SECONDS, 300);
+        assert_eq!(ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS, 300);
+    }
+
+    #[test]
     fn scenario_a_uses_low_short_window_when_reset_is_near_and_weekly_is_healthy() {
         let assessment = assess_route_band(input(vec![
             account(
@@ -1379,6 +1612,171 @@ mod tests {
         assert_eq!(
             account_assessment(&assessment, "acct_b").routing_reason(),
             RoutingReason::HeldReserve
+        );
+    }
+
+    #[test]
+    fn weekly_survival_prefers_soon_reset_survivor_over_far_reset_reserve_w1() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 20, 24 * 3_600, 50),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 34, 96 * 3_600, 50),
+                ],
+            ),
+            account(
+                "acct_c",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 7 * 86_400, 50),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_a"),
+            "W1: A survives its soon reset; B and C are far-reset reserve/failures"
+        );
+    }
+
+    #[test]
+    fn weekly_survival_prefers_earliest_reset_when_all_survive_w3() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 60, 48 * 3_600, 50),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 70, 96 * 3_600, 50),
+                ],
+            ),
+            account(
+                "acct_c",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 90, 7 * 86_400, 50),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_a"),
+            "W3: all weekly windows survive, so the earliest reset should win"
+        );
+    }
+
+    #[test]
+    fn known_weekly_survivor_beats_unknown_burn_account_w4() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window(WEEKLY, 20, 24 * 3_600),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 34, 96 * 3_600, 20),
+                ],
+            ),
+            account(
+                "acct_c",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 7 * 86_400, 20),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_b"),
+            "W4: known survivor confidence beats unknown-burn soon reset"
+        );
+    }
+
+    #[test]
+    fn same_weekly_pool_uses_active_session_imbalance_before_far_reset_reserve_a5() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 19, 45 * 3_600, 0),
+                ],
+            )
+            .with_current_active_sessions(6),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 18, 46 * 3_600, 0),
+                ],
+            )
+            .with_current_active_sessions(0),
+            account(
+                "acct_c",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 34, 107 * 3_600, 20),
+                ],
+            )
+            .with_current_active_sessions(0),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_b"),
+            "A5: same low-weekly reset pool shares sessions before far-reset reserve"
+        );
+    }
+
+    #[test]
+    fn confidence_tier_gates_before_active_count_tie_a6() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 48 * 3_600, 50)
+                        .with_burn_rate_confidence(QuotaRunRateConfidence::Normal),
+                ],
+            )
+            .with_current_active_sessions(4),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 48 * 3_600, 50)
+                        .with_burn_rate_confidence(QuotaRunRateConfidence::Low),
+                ],
+            )
+            .with_current_active_sessions(0),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_a"),
+            "A6: higher confidence tier gates before active-count balancing"
         );
     }
 
@@ -1659,7 +2057,7 @@ mod tests {
     }
 
     #[test]
-    fn active_load_pressure_shifts_selection_away_from_loaded_account() {
+    fn legacy_active_load_pressure_does_not_change_projected_burn() {
         let assessment = assess_route_band(input(vec![
             account(
                 "acct_a",
@@ -1680,15 +2078,57 @@ mod tests {
 
         assert_eq!(
             assessment.preferred_next().map(AccountId::as_str),
-            Some("acct_b")
+            Some("acct_a")
         );
         assert_eq!(
-            account_assessment(&assessment, "acct_b").routing_reason(),
-            RoutingReason::PreferredProjectedBurn
+            account_assessment(&assessment, "acct_a").projected_burn_pressure(),
+            account_assessment(&assessment, "acct_b").projected_burn_pressure(),
+            "legacy active pressure must not be treated as projected quota burn"
         );
-        assert!(
-            account_assessment(&assessment, "acct_a").projected_burn_pressure()
-                > account_assessment(&assessment, "acct_b").projected_burn_pressure()
+    }
+
+    #[test]
+    fn legacy_active_load_pressure_does_not_change_selection_s2() {
+        let without_legacy_pressure = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 70, 4 * 3_600),
+                    window(WEEKLY, 70, 5 * 86_400),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 70, 4 * 3_600),
+                    window(WEEKLY, 70, 5 * 86_400),
+                ],
+            ),
+        ]));
+        let with_legacy_pressure = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 70, 4 * 3_600),
+                    window(WEEKLY, 70, 5 * 86_400),
+                ],
+            )
+            .with_active_load_pressure(100),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 70, 4 * 3_600),
+                    window(WEEKLY, 70, 5 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            with_legacy_pressure.preferred_next().map(AccountId::as_str),
+            without_legacy_pressure
+                .preferred_next()
+                .map(AccountId::as_str),
+            "S2: legacy active_pressure/headroom cost must not affect quota selection"
         );
     }
 
@@ -1860,8 +2300,7 @@ mod tests {
     }
 
     #[test]
-    fn six_session_burn_down_keeps_weak_weekly_account_out_and_uses_active_load() {
-        let mut active_load = std::collections::HashMap::<&'static str, u32>::new();
+    fn six_session_selection_stays_in_same_weekly_pool_before_far_reset_reserve_a5_s1() {
         let mut selected_accounts = Vec::new();
 
         for _session_start in 0..6 {
@@ -1872,68 +2311,62 @@ mod tests {
                         window(FIVE_HOURS, 98, 4 * 3_600),
                         window(WEEKLY, 23, 3 * 86_400),
                     ],
-                )
-                .with_active_load_pressure(*active_load.get("acct_askluna").unwrap_or(&0)),
+                ),
                 account(
                     "acct_matches",
                     vec![
                         window(FIVE_HOURS, 99, 4 * 3_600),
                         window(WEEKLY, 34, 3 * 86_400),
                     ],
-                )
-                .with_active_load_pressure(*active_load.get("acct_matches").unwrap_or(&0)),
+                ),
                 account(
                     "acct_ssdev",
                     vec![
                         window(FIVE_HOURS, 78, 3 * 3_600),
                         window(WEEKLY, 76, 5 * 86_400),
                     ],
-                )
-                .with_active_load_pressure(*active_load.get("acct_ssdev").unwrap_or(&0)),
+                ),
             ]));
             let selected = assessment
                 .preferred_next()
                 .unwrap_or_else(|| panic!("session start should have a quota candidate"))
                 .as_str();
             selected_accounts.push(selected.to_owned());
-            active_load
-                .entry(match selected {
-                    "acct_askluna" => "acct_askluna",
-                    "acct_matches" => "acct_matches",
-                    "acct_ssdev" => "acct_ssdev",
-                    other => panic!("unexpected selected account: {other}"),
-                })
-                .and_modify(|load| *load = load.saturating_add(35).min(100))
-                .or_insert(35);
         }
 
         assert_eq!(
             selected_accounts.first().map(String::as_str),
-            Some("acct_ssdev")
+            Some("acct_matches")
         );
         assert_eq!(
             selected_accounts,
             vec![
-                "acct_ssdev".to_owned(),
-                "acct_ssdev".to_owned(),
                 "acct_matches".to_owned(),
-                "acct_ssdev".to_owned(),
-                "acct_ssdev".to_owned(),
-                "acct_ssdev".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
             ],
-            "six-session burn-down timeline should be deterministic"
+            "without measured active-session input, strict quota selection is deterministic"
         );
         assert!(
             selected_accounts
                 .iter()
                 .any(|account| account == "acct_matches"),
-            "active load should send one of six session starts to the next healthier account: {selected_accounts:?}"
+            "same low-weekly reset pool should be used before far-reset reserve: {selected_accounts:?}"
         );
         assert!(
             selected_accounts
                 .iter()
                 .all(|account| account != "acct_askluna"),
             "weak weekly quota account must not be selected while healthier accounts exist: {selected_accounts:?}"
+        );
+        assert!(
+            selected_accounts
+                .iter()
+                .all(|account| account != "acct_ssdev"),
+            "far-reset reserve must not be selected while same-pool account can serve: {selected_accounts:?}"
         );
     }
 
@@ -1992,6 +2425,31 @@ mod tests {
     ) -> QuotaWindowFact {
         window(window_seconds, remaining_headroom, resets_in_seconds)
             .with_projected_exhaustion_unix_seconds(NOW + projected_runout_in_seconds)
+    }
+
+    fn window_with_burn_rate_basis_points_per_hour(
+        window_seconds: u64,
+        remaining_headroom: u32,
+        resets_in_seconds: u64,
+        burn_rate_basis_points_per_hour: u32,
+    ) -> QuotaWindowFact {
+        if burn_rate_basis_points_per_hour == 0 {
+            return window(window_seconds, remaining_headroom, resets_in_seconds)
+                .with_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour);
+        }
+
+        let remaining_basis_points = u64::from(remaining_headroom) * 100;
+        let runout_seconds = remaining_basis_points
+            .saturating_mul(3_600)
+            .checked_div(u64::from(burn_rate_basis_points_per_hour))
+            .unwrap_or(u64::MAX);
+        projected_window(
+            window_seconds,
+            remaining_headroom,
+            resets_in_seconds,
+            runout_seconds,
+        )
+        .with_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour)
     }
 
     fn account_assessment<'a>(
