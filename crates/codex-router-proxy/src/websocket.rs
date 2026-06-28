@@ -1431,7 +1431,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -1440,15 +1440,15 @@ mod async_forwarding_tests {
         );
         let active_turn_reservation =
             ActiveTurnReservationState::new(Some(active_reservation_guard));
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
-        assert_eq!(active_pressure(), 8);
+        assert_eq!(active_sessions(), 1);
 
         let affinity_secret = RouterAffinityHashSecret::new(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -1487,22 +1487,22 @@ mod async_forwarding_tests {
             .await
             .unwrap_or_else(|_elapsed| panic!("recorder should be entered"));
         assert_eq!(
-            active_pressure(),
+            active_sessions(),
             0,
-            "completion must release active pressure before affinity persistence can block"
+            "completion must release the active session before affinity persistence can block"
         );
 
         active_turn_reservation.reserve_if_idle(2);
         assert_eq!(
-            active_pressure(),
-            8,
+            active_sessions(),
+            1,
             "a new same-socket turn must be able to reserve while affinity persistence is blocked"
         );
         recorder_release.notify_one();
         record_task
             .await
             .unwrap_or_else(|error| panic!("record task should finish: {error}"));
-        assert_eq!(active_pressure(), 8);
+        assert_eq!(active_sessions(), 1);
     }
 
     #[derive(Clone, Debug)]
@@ -2013,7 +2013,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new_with_active_client_leases(
             active_reservations.clone(),
@@ -2032,15 +2032,15 @@ mod async_forwarding_tests {
             active_reservation_guard: Some(active_reservation_guard),
         };
 
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
-        assert_eq!(active_pressure(), 8);
+        assert_eq!(active_sessions(), 1);
 
         let router_task = async {
             forward_duplex_until_complete(
@@ -2080,12 +2080,12 @@ mod async_forwarding_tests {
             }
 
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .unwrap_or_else(|_elapsed| panic!("response.completed should release active load"));
+            .unwrap_or_else(|_elapsed| panic!("response.completed should release active session"));
 
             client_websocket
                 .send(Message::Ping(Bytes::from_static(b"still-open")))
@@ -2109,7 +2109,7 @@ mod async_forwarding_tests {
             router_result.is_ok(),
             "completion release should not close the websocket by itself, got {router_result:?}"
         );
-        assert_eq!(active_pressure(), 0);
+        assert_eq!(active_sessions(), 0);
     }
 
     #[tokio::test]
@@ -2138,7 +2138,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2155,13 +2155,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
 
         let router_task = async {
@@ -2182,7 +2182,7 @@ mod async_forwarding_tests {
             .await
         };
         let peer_task = async {
-            assert_eq!(active_pressure(), 8);
+            assert_eq!(active_sessions(), 1);
             client_websocket
                 .send(Message::text(r#"{"type":"response.create","turn":1}"#))
                 .await
@@ -2202,7 +2202,7 @@ mod async_forwarding_tests {
                 None => panic!("client should receive first completion"),
             }
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -2219,12 +2219,12 @@ mod async_forwarding_tests {
                 None => panic!("upstream should receive second request"),
             }
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 8 {
+                while active_sessions() != 1 {
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .unwrap_or_else(|_elapsed| panic!("second request should re-reserve active load"));
+            .unwrap_or_else(|_elapsed| panic!("second request should re-reserve active session"));
 
             upstream_websocket
                 .send(Message::text(r#"{"type":"response.completed","turn":2}"#))
@@ -2236,7 +2236,7 @@ mod async_forwarding_tests {
                 None => panic!("client should receive second completion"),
             }
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -2278,7 +2278,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2295,13 +2295,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
 
         let router_task = async {
@@ -2322,7 +2322,7 @@ mod async_forwarding_tests {
             .await
         };
         let peer_task = async {
-            assert_eq!(active_pressure(), 8);
+            assert_eq!(active_sessions(), 1);
             client_websocket
                 .send(Message::text(r#"{"type":"response.create","turn":1}"#))
                 .await
@@ -2342,9 +2342,9 @@ mod async_forwarding_tests {
                 None => panic!("client should receive first completion"),
             }
             assert_eq!(
-                active_pressure(),
+                active_sessions(),
                 0,
-                "completion must release active load synchronously before the next same-socket request"
+                "completion must release the active session synchronously before the next same-socket request"
             );
 
             client_websocket
@@ -2357,8 +2357,8 @@ mod async_forwarding_tests {
                 None => panic!("upstream should receive second request"),
             }
             assert_eq!(
-                active_pressure(),
-                8,
+                active_sessions(),
+                1,
                 "second same-socket request should acquire a fresh active reservation"
             );
             drop(upstream_websocket);
@@ -2402,7 +2402,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2415,13 +2415,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -2470,13 +2470,13 @@ mod async_forwarding_tests {
                 "single-account quota exhaustion must not leak to Codex while router can rotate"
             );
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
             .await
             .unwrap_or_else(|_elapsed| {
-                panic!("quota replacement should release exhausted account active load")
+                panic!("quota replacement should release exhausted account active session")
             });
             drop(upstream_websocket);
         };
@@ -2744,7 +2744,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2757,13 +2757,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -2821,9 +2821,9 @@ mod async_forwarding_tests {
                 );
             }
             assert_eq!(
-                active_pressure(),
+                active_sessions(),
                 0,
-                "old exhausted tunnel must not reacquire active load after reconnect signal"
+                "old exhausted tunnel must not reacquire active session after reconnect signal"
             );
             drop(upstream_websocket);
         };

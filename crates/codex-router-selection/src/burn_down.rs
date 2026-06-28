@@ -20,11 +20,15 @@ pub const SAME_POOL_RESET_TOLERANCE_SECONDS: u64 = 7_200;
 /// Fixed v1 same-pool survival margin tolerance in basis points.
 pub const SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS: i64 = 500;
 /// Fixed v1 active-session imbalance threshold.
-pub const ACTIVE_SESSION_IMBALANCE_THRESHOLD: u32 = 2;
+pub const ACTIVE_SESSION_IMBALANCE_THRESHOLD: u32 = 1;
 /// Fixed v1 usage-limit suspect TTL.
 pub const USAGE_LIMIT_SUSPECT_TTL_SECONDS: u64 = 300;
 /// Fixed v1 active-session rollup bucket size.
 pub const ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS: u64 = 300;
+/// Fixed v1 minimum runway for assigning a new session to a low-weekly drain account.
+pub const CONTROLLED_DRAIN_MIN_RUNWAY_SECONDS: u64 = 21_600;
+/// Fixed v1 reset horizon for treating low weekly quota as drainable instead of reserve.
+pub const CONTROLLED_DRAIN_RESET_HORIZON_SECONDS: u64 = 172_800;
 
 const DEFAULT_SHORT_WINDOW_CUTOFF_SECONDS: u64 = 86_400;
 const DEFAULT_LONG_NEAR_RESET_MAX_SECONDS: u64 = 43_200;
@@ -1160,9 +1164,32 @@ fn long_window_requires_reserve(
         .filter(|window| !is_short_window(window.window_seconds, policy))
         .any(|window| {
             !window.near_reset
+                && !long_window_can_controlled_drain(window)
                 && (window.pressure >= policy.reserve_pressure_threshold
                     || window.remaining_headroom <= policy.reserve_headroom_threshold)
         })
+}
+
+fn long_window_can_controlled_drain(window: &WindowAssessment) -> bool {
+    if !window.time_left_seconds.is_some_and(|time_left_seconds| {
+        time_left_seconds <= CONTROLLED_DRAIN_RESET_HORIZON_SECONDS
+    }) {
+        return false;
+    }
+
+    projected_runway_seconds(window)
+        .is_some_and(|runway_seconds| runway_seconds >= CONTROLLED_DRAIN_MIN_RUNWAY_SECONDS)
+}
+
+fn projected_runway_seconds(window: &WindowAssessment) -> Option<u64> {
+    let reset_unix_seconds = window.reset_unix_seconds?;
+    let time_left_seconds = window.time_left_seconds?;
+    let now_unix_seconds = reset_unix_seconds.saturating_sub(time_left_seconds);
+    Some(
+        window
+            .projected_exhaustion_unix_seconds?
+            .saturating_sub(now_unix_seconds),
+    )
 }
 
 fn short_window_fails_guard(windows: &[WindowAssessment], policy: BurnDownRouteBandPolicy) -> bool {
@@ -1488,7 +1515,8 @@ fn compare_weekly_non_survivors(
     left: &BurnDownAccountAssessment,
     right: &BurnDownAccountAssessment,
 ) -> std::cmp::Ordering {
-    compare_latest_projected_weekly_runout(left, right)
+    compare_same_pool_active_imbalance(left, right)
+        .then_with(|| compare_latest_projected_weekly_runout(left, right))
         .then_with(|| compare_weekly_survival_margin(left, right))
         .then_with(|| {
             confidence_rank(right.weekly_burn_rate_confidence)
@@ -1594,14 +1622,17 @@ fn same_effective_weekly_pool(
         return false;
     }
 
-    let Some(left_margin) = left.weekly_survival_margin_basis_points else {
-        return false;
-    };
-    let Some(right_margin) = right.weekly_survival_margin_basis_points else {
-        return false;
-    };
-
-    left_margin.abs_diff(right_margin) <= SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS as u64
+    match (
+        left.weekly_survival_margin_basis_points,
+        right.weekly_survival_margin_basis_points,
+    ) {
+        (Some(left_margin), Some(right_margin)) => {
+            left_margin.abs_diff(right_margin)
+                <= SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS as u64
+        }
+        (None, None) => left.long_pressure == right.long_pressure,
+        _ => false,
+    }
 }
 
 const fn confidence_rank(confidence: QuotaRunRateConfidence) -> u8 {
@@ -1720,7 +1751,7 @@ mod tests {
         assert_eq!(SHORT_NEAR_RESET_THRESHOLD_SECONDS, 1_800);
         assert_eq!(SAME_POOL_RESET_TOLERANCE_SECONDS, 7_200);
         assert_eq!(SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS, 500);
-        assert_eq!(ACTIVE_SESSION_IMBALANCE_THRESHOLD, 2);
+        assert_eq!(ACTIVE_SESSION_IMBALANCE_THRESHOLD, 1);
         assert_eq!(USAGE_LIMIT_SUSPECT_TTL_SECONDS, 300);
         assert_eq!(ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS, 300);
     }
@@ -2015,6 +2046,149 @@ mod tests {
             preferred_account.routing_reason(),
             RoutingReason::PreferredProjectedBurn,
             "W6 fallback should explain that the chosen non-survivor lasts longest"
+        );
+    }
+
+    #[test]
+    fn single_account_low_weekly_still_selects_when_no_alternative_exists_s3a() {
+        let assessment = assess_route_band(input(vec![account(
+            "acct_only",
+            vec![
+                window(FIVE_HOURS, 95, hours_minutes(4, 0)),
+                projected_window(WEEKLY, 4, hours_minutes(23, 0), hours_minutes(5, 0))
+                    .with_burn_rate_basis_points_per_hour(80),
+            ],
+        )]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Reserve);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_only"),
+            "S3a: a single configured account should remain selectable until it is truly exhausted"
+        );
+    }
+
+    #[test]
+    fn two_account_soon_reset_drain_beats_far_reset_reserve_when_runway_is_safe_s3b() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_near_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 8, hours_minutes(23, 30), hours_minutes(12, 0))
+                        .with_burn_rate_basis_points_per_hour(67),
+                ],
+            ),
+            account(
+                "acct_far_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 26, 84 * 3_600, 24 * 3_600)
+                        .with_burn_rate_basis_points_per_hour(108),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_near_reset"),
+            "S3b: safe near-reset quota should be drained before consuming far-reset reserve"
+        );
+    }
+
+    #[test]
+    fn two_account_drain_under_runway_guard_moves_to_far_reset_reserve_s3c() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_near_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 8, hours_minutes(23, 30), hours_minutes(5, 30))
+                        .with_burn_rate_basis_points_per_hour(145),
+                ],
+            ),
+            account(
+                "acct_far_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 26, 84 * 3_600, 24 * 3_600)
+                        .with_burn_rate_basis_points_per_hour(108),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Reserve);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_far_reset"),
+            "S3c: a near-reset drain account below the runway guard should not take new starts"
+        );
+    }
+
+    #[test]
+    fn same_reset_drain_pool_balances_active_sessions_before_runout_tiebreak_s3d() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_busy_near_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 19, hours_minutes(45, 0), hours_minutes(20, 0))
+                        .with_burn_rate_basis_points_per_hour(95),
+                ],
+            )
+            .with_current_active_sessions(6),
+            account(
+                "acct_idle_near_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 18, hours_minutes(46, 0), hours_minutes(19, 0))
+                        .with_burn_rate_basis_points_per_hour(95),
+                ],
+            )
+            .with_current_active_sessions(0),
+            account(
+                "acct_far_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 40, 5 * 86_400, 4 * 86_400)
+                        .with_burn_rate_basis_points_per_hour(42),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_idle_near_reset"),
+            "S3d: same reset drain pool should share active sessions before chasing a small runout edge"
+        );
+    }
+
+    #[test]
+    fn same_unknown_margin_pool_balances_one_active_session_s3e() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_busy",
+                vec![
+                    window(FIVE_HOURS, 50, hours_minutes(4, 0)),
+                    window(WEEKLY, 50, 4 * 86_400),
+                ],
+            )
+            .with_current_active_sessions(1),
+            account(
+                "acct_idle",
+                vec![
+                    window(FIVE_HOURS, 50, hours_minutes(4, 0)),
+                    window(WEEKLY, 50, 4 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_idle"),
+            "S3e: equal quota/reset accounts without burn history should still share active sessions"
         );
     }
 
@@ -2632,6 +2806,94 @@ mod tests {
     }
 
     #[test]
+    fn s4_low_weekly_drain_pool_then_far_reset_reserve_with_mutated_active_sessions() {
+        let mut askluna_active_sessions = 1;
+        let mut matches_active_sessions = 0;
+        let mut ssdev_active_sessions = 1;
+        let mut selected_accounts = Vec::new();
+        let mut selected_reasons = Vec::new();
+
+        for _session_start in 0..5 {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_askluna",
+                    vec![
+                        window(FIVE_HOURS, 99, hours_minutes(4, 46)),
+                        projected_window(WEEKLY, 4, hours_minutes(22, 49), hours_minutes(10, 15))
+                            .with_burn_rate_basis_points_per_hour(39),
+                    ],
+                )
+                .with_current_active_sessions(askluna_active_sessions),
+                account(
+                    "acct_matches",
+                    vec![
+                        window(FIVE_HOURS, 100, hours_minutes(4, 59)),
+                        projected_window(
+                            WEEKLY,
+                            8,
+                            hours_minutes(23, 56),
+                            matches_projected_weekly_runout(matches_active_sessions),
+                        )
+                        .with_burn_rate_basis_points_per_hour(53),
+                    ],
+                )
+                .with_current_active_sessions(matches_active_sessions),
+                account(
+                    "acct_ssdev",
+                    vec![
+                        window(FIVE_HOURS, 97, hours_minutes(4, 36)),
+                        projected_window(
+                            WEEKLY,
+                            26,
+                            84 * 3_600,
+                            ssdev_projected_weekly_runout(ssdev_active_sessions),
+                        )
+                        .with_burn_rate_basis_points_per_hour(105),
+                    ],
+                )
+                .with_current_active_sessions(ssdev_active_sessions),
+            ]));
+            let selected_account = assessment
+                .preferred_next()
+                .unwrap_or_else(|| panic!("session start should have a quota candidate"))
+                .as_str()
+                .to_owned();
+            selected_reasons.push((
+                selected_account.clone(),
+                account_assessment(&assessment, &selected_account).routing_reason(),
+            ));
+            match selected_account.as_str() {
+                "acct_askluna" => askluna_active_sessions += 1,
+                "acct_matches" => matches_active_sessions += 1,
+                "acct_ssdev" => ssdev_active_sessions += 1,
+                other => panic!("unexpected selected account: {other}"),
+            }
+            selected_accounts.push(selected_account);
+        }
+
+        assert_eq!(
+            selected_accounts,
+            vec![
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_ssdev".to_owned(),
+                "acct_ssdev".to_owned(),
+            ],
+            "S4: drain the near-reset B account while it has enough runway, then move new starts to far-reset reserve C: {selected_reasons:?}"
+        );
+        assert_eq!(askluna_active_sessions, 1, "A remains retiring only");
+        assert_eq!(
+            matches_active_sessions, 3,
+            "B accepts exactly three drain starts"
+        );
+        assert_eq!(
+            ssdev_active_sessions, 3,
+            "C takes the starts once B runway is unsafe"
+        );
+    }
+
+    #[test]
     fn account_assessment_uses_safe_display_label() {
         let assessment = assess_route_band(input(vec![BurnDownAccountInput::new(
             account_id("acct_secret"),
@@ -2711,6 +2973,29 @@ mod tests {
             runout_seconds,
         )
         .with_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour)
+    }
+
+    const fn hours_minutes(hours: u64, minutes: u64) -> u64 {
+        hours * 3_600 + minutes * 60
+    }
+
+    const fn matches_projected_weekly_runout(active_sessions: u32) -> u64 {
+        match active_sessions {
+            0 => hours_minutes(15, 5),
+            1 => hours_minutes(11, 18),
+            2 => hours_minutes(8, 42),
+            3 => hours_minutes(5, 28),
+            _ => hours_minutes(4, 12),
+        }
+    }
+
+    const fn ssdev_projected_weekly_runout(active_sessions: u32) -> u64 {
+        match active_sessions {
+            0 | 1 => 24 * 3_600,
+            2 => hours_minutes(18, 0),
+            3 => hours_minutes(14, 0),
+            _ => hours_minutes(10, 0),
+        }
     }
 
     fn account_assessment<'a>(

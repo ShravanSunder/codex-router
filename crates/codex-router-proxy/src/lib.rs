@@ -1844,8 +1844,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_repository_backed_selector_uses_distinct_http_and_websocket_reservation_weights()
-    {
+    async fn async_repository_backed_selector_counts_http_and_websocket_as_one_session_each() {
         let temp_dir = ProxyTestTempDir::new("async_repository_selector_distinct_load_weights");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = match SqliteStateStore::open(&database_path) {
@@ -1899,13 +1898,13 @@ mod tests {
             http_selection
                 .reservation_handle()
                 .map(ReservationHandle::headroom_cost),
-            Some(2)
+            Some(1)
         );
         assert_eq!(
             websocket_selection
                 .reservation_handle()
                 .map(ReservationHandle::headroom_cost),
-            Some(8)
+            Some(1)
         );
     }
 
@@ -1971,10 +1970,10 @@ mod tests {
 
         assert_eq!(selected.account_id(), alpha.account_id());
         let reservations = lock_test_mutex(&active_reservations, "active reservations");
-        let active_pressure = reservations
+        let active_sessions = reservations
             .get("responses")
-            .map_or(0, |book| book.active_load_pressure(alpha.account_id()));
-        assert_eq!(active_pressure, 8);
+            .map_or(0, |book| book.active_session_count(alpha.account_id()));
+        assert_eq!(active_sessions, 1);
     }
 
     #[tokio::test]
@@ -2939,6 +2938,175 @@ mod tests {
             "weak weekly quota account must not be selected while healthier accounts exist: {selected_accounts:?}"
         );
         assert_eq!(active_sessions.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_drains_near_reset_pool_then_far_reset_reserve_s4() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_s4_drain_pool");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let now = test_unix_seconds();
+        let askluna = AccountRecord::new(
+            account_id("acct_askluna"),
+            "askluna",
+            AccountStatus::Enabled,
+        );
+        let matches = AccountRecord::new(
+            account_id("acct_matches"),
+            "matches",
+            AccountStatus::Enabled,
+        );
+        let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &askluna,
+            "responses",
+            &[
+                (18_000, 99, true, now + hours_minutes(4, 46)),
+                (604_800, 4, false, now + hours_minutes(22, 49)),
+            ],
+        );
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &matches,
+            "responses",
+            &[
+                (18_000, 100, true, now + hours_minutes(4, 59)),
+                (604_800, 8, false, now + hours_minutes(23, 56)),
+            ],
+        );
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &ssdev,
+            "responses",
+            &[
+                (18_000, 97, true, now + hours_minutes(4, 36)),
+                (604_800, 26, false, now + 84 * 3_600),
+            ],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let history_start = now - 9_200;
+        let history_middle = now - 4_700;
+        let history_latest = now - 200;
+        let slow_history_start = now - 18_200;
+        let slow_history_middle = now - 9_200;
+        append_history_series_with_reset(
+            &async_state,
+            askluna.account_id(),
+            "responses",
+            604_800,
+            now + hours_minutes(22, 49),
+            &[
+                (slow_history_start, 5),
+                (slow_history_middle, 5),
+                (history_latest, 4),
+            ],
+        )
+        .await;
+        record_completed_active_session(
+            &async_state,
+            askluna.account_id(),
+            "process-history-askluna",
+            "reservation-history-askluna",
+            slow_history_start,
+            history_latest,
+        )
+        .await;
+        append_history_series_with_reset(
+            &async_state,
+            matches.account_id(),
+            "responses",
+            604_800,
+            now + hours_minutes(23, 56),
+            &[(history_start, 9), (history_middle, 9), (history_latest, 8)],
+        )
+        .await;
+        record_completed_active_session(
+            &async_state,
+            matches.account_id(),
+            "process-history-matches",
+            "reservation-history-matches",
+            history_start,
+            history_latest,
+        )
+        .await;
+        append_history_series_with_reset(
+            &async_state,
+            ssdev.account_id(),
+            "responses",
+            604_800,
+            now + 84 * 3_600,
+            &[
+                (history_start, 27),
+                (history_middle, 27),
+                (history_latest, 26),
+            ],
+        )
+        .await;
+        record_completed_active_session(
+            &async_state,
+            ssdev.account_id(),
+            "process-history-ssdev",
+            "reservation-history-ssdev",
+            history_start,
+            history_latest,
+        )
+        .await;
+        let active_reservations = RouteBandReservationBooks::default();
+        {
+            let mut reservations = lock_test_mutex(&active_reservations, "active reservations");
+            let book = reservations
+                .entry("responses".to_owned())
+                .or_insert_with(ReservationBook::default);
+            book.reserve_next_at(askluna.account_id().clone(), 1, now);
+            book.reserve_next_at(ssdev.account_id().clone(), 1, now);
+        }
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            active_reservations,
+            0,
+            Arc::new(move || now),
+        );
+        let mut selected_accounts = Vec::new();
+        let mut active_sessions = Vec::new();
+
+        for session_index in 0..5 {
+            let selected = match selector
+                .select_upstream_account(
+                    &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                        .with_websocket_upgrade(true),
+                    TokenGeneration::new(1),
+                    None,
+                )
+                .await
+            {
+                Ok(selected) => selected,
+                Err(error) => panic!("session {session_index} should select account: {error}"),
+            };
+            selected_accounts.push(selected.account_id().as_str().to_owned());
+            active_sessions.push(selected);
+        }
+
+        assert_eq!(
+            selected_accounts,
+            vec![
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_ssdev".to_owned(),
+                "acct_ssdev".to_owned(),
+            ],
+            "S4 runtime path should drain near-reset B before consuming far-reset C"
+        );
+        assert_eq!(active_sessions.len(), 5);
     }
 
     #[tokio::test]
@@ -4578,7 +4746,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_router_runtime_reuses_held_account_inside_cooldown() {
+    fn loopback_router_runtime_balances_active_account_inside_hold_cooldown() {
         let temp_dir = ProxyTestTempDir::new("runtime_cross_connection_balance");
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
@@ -4605,20 +4773,35 @@ mod tests {
         };
         let (upstream_sender, upstream_receiver) = mpsc::channel();
         let upstream_thread = thread::spawn(move || {
-            for _connection_index in 0..2 {
-                let (mut stream, _peer_address) = match upstream_listener.accept() {
-                    Ok(connection) => connection,
-                    Err(error) => panic!("mock upstream should accept: {error}"),
-                };
-                let request = read_test_http_request(&mut stream);
-                let authorization = request
-                    .lines()
-                    .find(|line| line.starts_with("authorization: "))
-                    .unwrap_or("<missing>")
-                    .to_owned();
-                if let Err(error) = upstream_sender.send(authorization) {
-                    panic!("mock upstream authorization should record: {error}");
-                }
+            let (mut first_stream, _first_peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock upstream should accept first connection: {error}"),
+            };
+            let first_request = read_test_http_request(&mut first_stream);
+            let first_authorization = first_request
+                .lines()
+                .find(|line| line.starts_with("authorization: "))
+                .unwrap_or("<missing>")
+                .to_owned();
+            if let Err(error) = upstream_sender.send(first_authorization) {
+                panic!("mock upstream first authorization should record: {error}");
+            }
+
+            let (mut second_stream, _second_peer_address) = match upstream_listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock upstream should accept second connection: {error}"),
+            };
+            let second_request = read_test_http_request(&mut second_stream);
+            let second_authorization = second_request
+                .lines()
+                .find(|line| line.starts_with("authorization: "))
+                .unwrap_or("<missing>")
+                .to_owned();
+            if let Err(error) = upstream_sender.send(second_authorization) {
+                panic!("mock upstream second authorization should record: {error}");
+            }
+
+            for stream in [&mut second_stream, &mut first_stream] {
                 if let Err(error) =
                     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
                 {
@@ -4650,6 +4833,7 @@ mod tests {
             Err(error) => panic!("router runtime should start: {error}"),
         };
         let router_address = runtime.local_addr();
+        let runtime_thread = thread::spawn(move || runtime.serve_protocol_connections(2));
         let first_client_thread = thread::spawn(move || {
             send_loopback_request(
                 router_address,
@@ -4657,6 +4841,10 @@ mod tests {
                 br#"{"model":"gpt-5","turn":1}"#,
             )
         });
+        let first_authorization = match upstream_receiver.recv() {
+            Ok(authorization) => authorization,
+            Err(error) => panic!("first upstream auth should record: {error}"),
+        };
         let second_client_thread = thread::spawn(move || {
             send_loopback_request(
                 router_address,
@@ -4665,9 +4853,10 @@ mod tests {
             )
         });
 
-        let handled = match runtime.serve_protocol_connections(2) {
-            Ok(handled) => handled,
-            Err(error) => panic!("router runtime should serve two connections: {error}"),
+        let handled = match runtime_thread.join() {
+            Ok(Ok(handled)) => handled,
+            Ok(Err(error)) => panic!("router runtime should serve two connections: {error}"),
+            Err(error) => panic!("router runtime thread panicked: {error:?}"),
         };
         assert_eq!(handled, 2);
         for client_thread in [first_client_thread, second_client_thread] {
@@ -4681,16 +4870,12 @@ mod tests {
             );
         }
 
-        let first_authorization = match upstream_receiver.recv() {
-            Ok(authorization) => authorization,
-            Err(error) => panic!("first upstream auth should record: {error}"),
-        };
         let second_authorization = match upstream_receiver.recv() {
             Ok(authorization) => authorization,
             Err(error) => panic!("second upstream auth should record: {error}"),
         };
         assert_eq!(first_authorization, "authorization: Bearer alpha-token");
-        assert_eq!(second_authorization, "authorization: Bearer alpha-token");
+        assert_eq!(second_authorization, "authorization: Bearer beta-token");
 
         match upstream_thread.join() {
             Ok(()) => {}
@@ -7462,6 +7647,45 @@ mod tests {
                 panic!("quota history should append: {error}");
             }
         }
+    }
+
+    async fn record_completed_active_session(
+        state: &AsyncSqliteStateStore,
+        account_id: &AccountId,
+        process_run_id: &str,
+        reservation_id: &str,
+        acquired_unix_seconds: u64,
+        released_unix_seconds: u64,
+    ) {
+        let reservation_id = ReservationId::new(reservation_id);
+        if let Err(error) = state
+            .record_active_client_acquired(
+                "responses",
+                process_run_id,
+                &reservation_id,
+                account_id,
+                acquired_unix_seconds,
+                1,
+            )
+            .await
+        {
+            panic!("historical active session should acquire: {error}");
+        }
+        if let Err(error) = state
+            .record_active_client_released(
+                "responses",
+                process_run_id,
+                &reservation_id,
+                released_unix_seconds,
+            )
+            .await
+        {
+            panic!("historical active session should release: {error}");
+        }
+    }
+
+    const fn hours_minutes(hours: u64, minutes: u64) -> u64 {
+        hours * 3_600 + minutes * 60
     }
 
     fn persist_account_with_selector_window_reset_specs(

@@ -1308,8 +1308,8 @@ fn render_quota_status_once(
     let unicode_bars = format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
     match format {
-        QuotaStatusFormat::Table => write_quota_table(stdout, report.rows()),
-        QuotaStatusFormat::Plain => write_quota_plain(stdout, report.rows()),
+        QuotaStatusFormat::Table => write_quota_table(stdout, &report),
+        QuotaStatusFormat::Plain => write_quota_plain(stdout, &report),
         QuotaStatusFormat::Json => write_quota_json(stdout, &report),
     }
 }
@@ -1481,6 +1481,7 @@ fn quota_status_report(
     emit_quota_status_metrics(USER_QUOTA_ROUTE_BAND, &rows);
 
     Ok(QuotaStatusReport {
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
         route_band: USER_QUOTA_ROUTE_BAND.to_owned(),
         selected_pool,
         preferred_next_account_id,
@@ -1491,8 +1492,10 @@ fn quota_status_report(
 
 fn write_quota_table(
     stdout: &mut impl Write,
-    rows: &[QuotaStatusRow],
+    report: &QuotaStatusReport,
 ) -> Result<(), QuotaCommandError> {
+    let rows = report.rows();
+    writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header([
@@ -1530,8 +1533,10 @@ fn write_quota_table(
 
 fn write_quota_plain(
     stdout: &mut impl Write,
-    rows: &[QuotaStatusRow],
+    report: &QuotaStatusReport,
 ) -> Result<(), QuotaCommandError> {
+    let rows = report.rows();
+    writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     writeln!(
         stdout,
         "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
@@ -1615,6 +1620,7 @@ fn write_quota_json(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QuotaStatusReport {
+    app_version: String,
     route_band: String,
     selected_pool: SelectedPool,
     preferred_next_account_id: Option<AccountId>,
@@ -2215,6 +2221,7 @@ struct JsonQuotaRefreshResult {
 #[derive(Serialize)]
 struct JsonQuotaStatusReport {
     route_result: &'static str,
+    app_version: String,
     route_band: String,
     selected_pool: &'static str,
     selected_pool_reason: &'static str,
@@ -2226,6 +2233,7 @@ impl JsonQuotaStatusReport {
     fn from_report(report: &QuotaStatusReport) -> Self {
         Self {
             route_result: "ok",
+            app_version: report.app_version.clone(),
             route_band: report.route_band.clone(),
             selected_pool: selected_pool_json(report.selected_pool),
             selected_pool_reason: selected_pool_reason_json(report.selected_pool),

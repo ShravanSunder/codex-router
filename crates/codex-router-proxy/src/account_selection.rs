@@ -70,8 +70,7 @@ const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
-const HTTP_ACTIVE_LOAD_PRESSURE: u32 = 2;
-const WEBSOCKET_ACTIVE_LOAD_PRESSURE: u32 = 8;
+const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -208,10 +207,27 @@ impl ActiveReservationGuard {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_active_client_leases(
         active_reservations: RouteBandReservationBooks,
         route_band: String,
         reservation_handle: ReservationHandle,
+        active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
+    ) -> Self {
+        Self::new_with_transport_and_active_client_leases(
+            active_reservations,
+            route_band,
+            reservation_handle,
+            "session",
+            active_client_leases,
+        )
+    }
+
+    pub(crate) fn new_with_transport_and_active_client_leases(
+        active_reservations: RouteBandReservationBooks,
+        route_band: String,
+        reservation_handle: ReservationHandle,
+        transport_label: &'static str,
         active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
     ) -> Self {
         Self {
@@ -219,6 +235,7 @@ impl ActiveReservationGuard {
                 active_reservations,
                 route_band,
                 reservation_handle,
+                transport_label,
                 active_client_leases,
                 released: AtomicBool::new(false),
             }),
@@ -244,7 +261,7 @@ impl ActiveReservationGuard {
             .or_insert_with(ReservationBook::default)
             .reserve_next_at(
                 self.inner.reservation_handle.account_id().clone(),
-                self.inner.reservation_handle.headroom_cost(),
+                ACTIVE_SESSION_RESERVATION_UNITS,
                 reserved_unix_seconds,
             );
         if let Some(active_client_leases) = self.inner.active_client_leases.as_ref() {
@@ -252,7 +269,7 @@ impl ActiveReservationGuard {
                 &self.inner.route_band,
                 &reservation_handle,
                 reserved_unix_seconds,
-                reservation_handle.headroom_cost(),
+                ACTIVE_SESSION_RESERVATION_UNITS,
             );
         }
         let span = tracing::info_span!(
@@ -263,10 +280,11 @@ impl ActiveReservationGuard {
         );
         let _span_guard = span.enter();
         tracing::info!("codex_router.account_rereserved");
-        Some(Self::new_with_active_client_leases(
+        Some(Self::new_with_transport_and_active_client_leases(
             Arc::clone(&self.inner.active_reservations),
             self.inner.route_band.clone(),
             reservation_handle,
+            self.inner.transport_label,
             self.inner.active_client_leases.clone(),
         ))
     }
@@ -295,6 +313,7 @@ struct ActiveReservationGuardInner {
     active_reservations: RouteBandReservationBooks,
     route_band: String,
     reservation_handle: ReservationHandle,
+    transport_label: &'static str,
     active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
     released: AtomicBool,
 }
@@ -321,16 +340,10 @@ impl ActiveReservationGuardInner {
                 active_client_leases.record_released(&self.route_band, &self.reservation_handle);
             }
             let account_hash = telemetry_hash(self.reservation_handle.account_id().as_str());
-            let transport =
-                if self.reservation_handle.headroom_cost() == WEBSOCKET_ACTIVE_LOAD_PRESSURE {
-                    "websocket"
-                } else {
-                    "http_sse"
-                };
             crate::telemetry::record_active_clients(
                 account_hash.clone(),
                 &self.route_band,
-                transport,
+                self.transport_label,
                 active_client_count,
             );
             let span = tracing::info_span!(
@@ -912,7 +925,7 @@ where
                     &self.active_reservations,
                     self.active_client_leases.as_ref(),
                     route_band.as_str(),
-                    active_load_pressure_for_request(request),
+                    transport_label_for_request(request),
                     now_unix_seconds,
                 );
             }
@@ -930,7 +943,7 @@ where
                 &self.active_reservations,
                 self.active_client_leases.as_ref(),
                 route_band.as_str(),
-                active_load_pressure_for_request(request),
+                transport_label_for_request(request),
                 now_unix_seconds,
             )
         })
@@ -1248,12 +1261,9 @@ fn reserve_selected_account(
     active_reservations: &RouteBandReservationBooks,
     active_client_leases: Option<&Arc<dyn ActiveClientLeaseReporter>>,
     route_band: &str,
-    headroom_cost: u32,
+    transport_label: &'static str,
     now_unix_seconds: u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
-    if headroom_cost == 0 {
-        return Ok(selected);
-    }
     let active_reservations_guard_source = Arc::clone(active_reservations);
     let mut active_reservations =
         active_reservations
@@ -1266,36 +1276,31 @@ fn reserve_selected_account(
         .or_insert_with(ReservationBook::default)
         .reserve_next_at(
             selected.account_id().clone(),
-            headroom_cost,
+            ACTIVE_SESSION_RESERVATION_UNITS,
             now_unix_seconds,
         );
     let active_client_count = active_reservations.get(route_band).map_or(0, |book| {
-        book.active_client_count(selected.account_id(), headroom_cost)
+        u64::from(book.active_session_count(selected.account_id()))
     });
     if let Some(active_client_leases) = active_client_leases {
         active_client_leases.record_acquired(
             route_band,
             &reservation_handle,
             now_unix_seconds,
-            headroom_cost,
+            ACTIVE_SESSION_RESERVATION_UNITS,
         );
     }
     let account_hash = telemetry_hash(selected.account_id().as_str());
-    let transport = if headroom_cost == WEBSOCKET_ACTIVE_LOAD_PRESSURE {
-        "websocket"
-    } else {
-        "http_sse"
-    };
     crate::telemetry::record_account_selected(
         account_hash.clone(),
         route_band,
-        transport,
+        transport_label,
         selected.selection_reason(),
     );
     crate::telemetry::record_active_clients(
         account_hash.clone(),
         route_band,
-        transport,
+        transport_label,
         active_client_count,
     );
     let span = tracing::info_span!(
@@ -1303,16 +1308,17 @@ fn reserve_selected_account(
         route_band,
         account.hash = account_hash,
         selection.reason = selected.selection_reason(),
-        active.headroom_cost = headroom_cost,
+        active.sessions = active_client_count,
         reservation.hash = telemetry_hash(reservation_handle.reservation_id().as_str()),
     );
     let _span_guard = span.enter();
     tracing::info!("codex_router.account_reserved");
     Ok(selected.with_active_reservation_guard(
-        ActiveReservationGuard::new_with_active_client_leases(
+        ActiveReservationGuard::new_with_transport_and_active_client_leases(
             active_reservations_guard_source,
             route_band.to_owned(),
             reservation_handle,
+            transport_label,
             active_client_leases.cloned(),
         ),
     ))
@@ -1370,12 +1376,9 @@ fn active_client_count_for_handle(
     reservation_handle: &ReservationHandle,
 ) -> Option<u64> {
     let active_reservations = active_reservations.lock().ok()?;
-    active_reservations.get(route_band).map(|book| {
-        book.active_client_count(
-            reservation_handle.account_id(),
-            reservation_handle.headroom_cost(),
-        )
-    })
+    active_reservations
+        .get(route_band)
+        .map(|book| u64::from(book.active_session_count(reservation_handle.account_id())))
 }
 
 #[cfg(test)]
@@ -1410,11 +1413,11 @@ fn route_kind_for_request(
     }
 }
 
-const fn active_load_pressure_for_request(request: &HttpProxyRequest) -> u32 {
+const fn transport_label_for_request(request: &HttpProxyRequest) -> &'static str {
     if request.websocket_upgrade() {
-        WEBSOCKET_ACTIVE_LOAD_PRESSURE
+        "websocket"
     } else {
-        HTTP_ACTIVE_LOAD_PRESSURE
+        "http_sse"
     }
 }
 
@@ -1707,7 +1710,7 @@ mod tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(account_id, 8, 1)
+                .reserve_next_at(account_id, super::ACTIVE_SESSION_RESERVATION_UNITS, 1)
         };
         let reporter = Arc::new(RecordingLeaseReporter::default());
         let guard = ActiveReservationGuard::new_with_active_client_leases(
@@ -1730,7 +1733,7 @@ mod tests {
                     reservation_id: "reservation_2".to_owned(),
                     account_id: "acct_selected".to_owned(),
                     acquired_unix_seconds: 2,
-                    active_pressure: 8,
+                    active_pressure: super::ACTIVE_SESSION_RESERVATION_UNITS,
                 },
                 LeaseEvent::Released {
                     route_band: "responses".to_owned(),
