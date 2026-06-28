@@ -912,6 +912,7 @@ impl LoopbackProtocolConnectionHandler {
         .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone())
         .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
             state_store.clone(),
+            Arc::clone(&self.active_reservations),
         )))
         .with_local_peer_addr(local_peer_addr);
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
@@ -1091,6 +1092,7 @@ impl LoopbackProtocolConnectionHandler {
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
             state_store.clone(),
+            Arc::clone(&self.active_reservations),
         )));
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
@@ -1875,11 +1877,18 @@ impl AsyncHttpAffinityOwnerRecorder for AsyncSqliteAffinityOwnerRecorder {
 #[derive(Clone, Debug)]
 struct AsyncSqliteProviderErrorObserver {
     state_store: AsyncSqliteStateStore,
+    active_reservations: RouteBandReservationBooks,
 }
 
 impl AsyncSqliteProviderErrorObserver {
-    const fn new(state_store: AsyncSqliteStateStore) -> Self {
-        Self { state_store }
+    fn new(
+        state_store: AsyncSqliteStateStore,
+        active_reservations: RouteBandReservationBooks,
+    ) -> Self {
+        Self {
+            state_store,
+            active_reservations,
+        }
     }
 }
 
@@ -1914,6 +1923,7 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
         Box::pin(async move {
             route_band_has_selectable_alternative(
                 &self.state_store,
+                Some(&self.active_reservations),
                 route_band,
                 &exhausted_account_id,
                 observed_unix_seconds,

@@ -89,7 +89,7 @@ use crate::local_auth::ProxyLocalAuthGate;
 use crate::local_auth::extract_presented_local_token_from_request;
 use crate::provider_error::AsyncProviderErrorObserver;
 use crate::provider_error::ProviderErrorClassification;
-use crate::provider_error::classify_provider_error_envelope;
+use crate::provider_error::classify_responses_websocket_error_envelope;
 
 use crate::routes::Method;
 
@@ -1190,6 +1190,7 @@ mod async_forwarding_tests {
     use super::forward_duplex_until_complete;
     use super::is_response_completed;
     use super::is_response_create;
+    use super::provider_error_classification_from_message;
     use super::record_forwarded_websocket_metadata;
     use super::websocket_affinity_owner_record;
     use bytes::Bytes;
@@ -1226,6 +1227,7 @@ mod async_forwarding_tests {
     use crate::http_sse::HttpProxyRequest;
     use crate::local_auth::ProxyLocalAuthGate;
     use crate::provider_error::AsyncProviderErrorObserver;
+    use crate::provider_error::ProviderErrorClassification;
     use crate::provider_error::ProviderErrorObservationError;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
@@ -1235,6 +1237,33 @@ mod async_forwarding_tests {
         account_id: AccountId,
         route_band: codex_router_core::routes::RouteBand,
         body: Vec<u8>,
+    }
+
+    #[test]
+    fn websocket_quota_classifier_ignores_non_error_json_with_nested_quota_token() {
+        let non_error_frame = Message::text(
+            r#"{"type":"response.output_text.delta","error":{"code":"usage_limit_reached"}}"#,
+        );
+
+        assert_eq!(
+            provider_error_classification_from_message(&non_error_frame),
+            ProviderErrorClassification::Unknown,
+            "WebSocket quota containment must only trigger on complete Responses error envelopes"
+        );
+    }
+
+    #[test]
+    fn websocket_quota_classifier_ignores_oversized_prefix_only_quota_token() {
+        let oversized_prefix_frame = Message::text(format!(
+            r#"{{"type":"error","error":{{"code":"usage_limit_reached","message":"{}"}}"#,
+            "x".repeat(70 * 1024)
+        ));
+
+        assert_eq!(
+            provider_error_classification_from_message(&oversized_prefix_frame),
+            ProviderErrorClassification::Unknown,
+            "WebSocket quota containment must not infer quota state from oversized or malformed text"
+        );
     }
 
     #[derive(Clone, Debug)]
@@ -2503,7 +2532,7 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
-    async fn oversized_upstream_usage_limit_frame_is_hidden_behind_codex_reconnect_signal() {
+    async fn oversized_upstream_usage_limit_frame_is_forwarded_without_quota_policy() {
         let (router_local_stream, client_stream) = duplex(256 * 1024);
         let (router_upstream_stream, upstream_stream) = duplex(256 * 1024);
         let router_local_websocket =
@@ -2569,16 +2598,13 @@ mod async_forwarding_tests {
                 .unwrap_or_else(|error| panic!("usage limit should send: {error}"));
             let client_message = match client_websocket.next().await {
                 Some(Ok(message)) => message,
-                Some(Err(error)) => panic!("client should receive reconnect signal: {error}"),
-                None => panic!("client should receive reconnect signal"),
+                Some(Err(error)) => panic!("client should receive oversized frame: {error}"),
+                None => panic!("client should receive oversized frame"),
             };
             assert_eq!(
                 client_message.to_string(),
-                super::CODEX_WEBSOCKET_RECONNECT_SIGNAL
-            );
-            assert!(
-                !client_message.to_string().contains("usage_limit_reached"),
-                "oversized quota exhaustion must not leak to Codex while router can rotate"
+                usage_limit_frame,
+                "oversized WebSocket text is Codex-owned payload and must pass through unchanged"
             );
             drop(upstream_websocket);
             usage_limit_frame
@@ -2587,22 +2613,23 @@ mod async_forwarding_tests {
         let (router_result, usage_limit_frame) = tokio::join!(router_task, peer_task);
         assert!(
             router_result.is_ok(),
-            "router should hide oversized provider quota exhaustion behind reconnect signal, got {router_result:?}"
+            "router should pass oversized WebSocket text through without quota policy, got {router_result:?}"
         );
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            provider_error_observer.observed.notified(),
-        )
-        .await
-        .unwrap_or_else(|_elapsed| panic!("provider error should be observed"));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                provider_error_observer.observed.notified(),
+            )
+            .await
+            .is_err(),
+            "oversized WebSocket text must not be observed as a provider quota error"
+        );
         assert_eq!(
             provider_error_observer.records(),
-            vec![RecordedProviderError {
-                account_id: selected_account,
-                route_band: codex_router_core::routes::RouteBand::Responses,
-                body: usage_limit_frame.as_bytes().to_vec(),
-            }]
+            Vec::<RecordedProviderError>::new(),
+            "oversized WebSocket text must not mark account quota"
         );
+        assert!(usage_limit_frame.contains("usage_limit_reached"));
     }
 
     #[tokio::test]
@@ -4442,7 +4469,7 @@ fn provider_error_classification_from_message(message: &Message) -> ProviderErro
     let Message::Text(text) = message else {
         return ProviderErrorClassification::Unknown;
     };
-    classify_provider_error_envelope(text.as_str().as_bytes())
+    classify_responses_websocket_error_envelope(text.as_str().as_bytes())
 }
 
 fn current_unix_seconds() -> u64 {

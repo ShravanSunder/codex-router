@@ -67,6 +67,39 @@ pub fn classify_provider_error_envelope(body: &[u8]) -> ProviderErrorClassificat
     ProviderErrorClassification::Unknown
 }
 
+pub fn classify_responses_websocket_error_envelope(body: &[u8]) -> ProviderErrorClassification {
+    if body.len() > PROVIDER_ERROR_ENVELOPE_MAX_BYTES {
+        return ProviderErrorClassification::Unknown;
+    }
+
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    if value.get("type").and_then(Value::as_str) != Some("error") {
+        return ProviderErrorClassification::Unknown;
+    }
+
+    let Some(error) = value.get("error").and_then(Value::as_object) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    let mut tokens = Vec::new();
+    if let Some(code) = error.get("code").and_then(Value::as_str) {
+        tokens.push(code);
+    }
+    if let Some(error_type) = error.get("type").and_then(Value::as_str) {
+        tokens.push(error_type);
+    }
+
+    if tokens.contains(&"websocket_connection_limit_reached") {
+        return ProviderErrorClassification::WebSocketConnectionLimit;
+    }
+    if tokens.iter().any(|token| is_quota_exhaustion_token(token)) {
+        return ProviderErrorClassification::AccountQuotaExhausted;
+    }
+
+    ProviderErrorClassification::Unknown
+}
+
 pub async fn record_provider_error_observation<R>(
     repository: &R,
     account_id: &AccountId,

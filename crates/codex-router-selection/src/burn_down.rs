@@ -17,6 +17,8 @@ pub const SHORT_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS: i64 = 100;
 pub const SHORT_NEAR_RESET_THRESHOLD_SECONDS: u64 = 1_800;
 /// Fixed v1 same-pool reset tolerance.
 pub const SAME_POOL_RESET_TOLERANCE_SECONDS: u64 = 7_200;
+/// Fixed v1 same-pool projected-runout tolerance.
+pub const SAME_POOL_PROJECTED_RUNOUT_TOLERANCE_SECONDS: u64 = 7_200;
 /// Fixed v1 same-pool survival margin tolerance in basis points.
 pub const SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS: i64 = 500;
 /// Fixed v1 active-session imbalance threshold.
@@ -1515,7 +1517,8 @@ fn compare_weekly_non_survivors(
     left: &BurnDownAccountAssessment,
     right: &BurnDownAccountAssessment,
 ) -> std::cmp::Ordering {
-    compare_same_pool_active_imbalance(left, right)
+    compare_material_projected_weekly_runout(left, right)
+        .then_with(|| compare_same_pool_active_imbalance(left, right))
         .then_with(|| compare_latest_projected_weekly_runout(left, right))
         .then_with(|| compare_weekly_survival_margin(left, right))
         .then_with(|| {
@@ -1526,6 +1529,23 @@ fn compare_weekly_non_survivors(
             left.current_active_sessions
                 .cmp(&right.current_active_sessions)
         })
+}
+
+fn compare_material_projected_weekly_runout(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    if same_effective_weekly_pool(left, right)
+        && let (Some(left_runout), Some(right_runout)) = (
+            left.weekly_projected_exhaustion_unix_seconds,
+            right.weekly_projected_exhaustion_unix_seconds,
+        )
+        && left_runout.abs_diff(right_runout) <= SAME_POOL_PROJECTED_RUNOUT_TOLERANCE_SECONDS
+    {
+        return std::cmp::Ordering::Equal;
+    }
+
+    compare_latest_projected_weekly_runout(left, right)
 }
 
 fn compare_latest_projected_weekly_runout(
@@ -1750,6 +1770,7 @@ mod tests {
         assert_eq!(SHORT_SURVIVAL_SAFETY_BUFFER_BASIS_POINTS, 100);
         assert_eq!(SHORT_NEAR_RESET_THRESHOLD_SECONDS, 1_800);
         assert_eq!(SAME_POOL_RESET_TOLERANCE_SECONDS, 7_200);
+        assert_eq!(SAME_POOL_PROJECTED_RUNOUT_TOLERANCE_SECONDS, 7_200);
         assert_eq!(SAME_POOL_SURVIVAL_MARGIN_TOLERANCE_BASIS_POINTS, 500);
         assert_eq!(ACTIVE_SESSION_IMBALANCE_THRESHOLD, 1);
         assert_eq!(USAGE_LIMIT_SUSPECT_TTL_SECONDS, 300);
@@ -2046,6 +2067,35 @@ mod tests {
             preferred_account.routing_reason(),
             RoutingReason::PreferredProjectedBurn,
             "W6 fallback should explain that the chosen non-survivor lasts longest"
+        );
+    }
+
+    #[test]
+    fn weekly_non_survivor_fallback_uses_projected_runout_before_active_count_w7() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_lasts_longer_busy",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    projected_window(WEEKLY, 10, 24 * 3_600, hours_minutes(16, 40))
+                        .with_burn_rate_basis_points_per_hour(60),
+                ],
+            )
+            .with_current_active_sessions(3),
+            account(
+                "acct_runs_out_sooner_idle",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    projected_window(WEEKLY, 9, 24 * 3_600, hours_minutes(12, 51))
+                        .with_burn_rate_basis_points_per_hour(70),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_lasts_longer_busy"),
+            "W7: when no same-pool account survives, latest projected runout beats active-count balancing"
         );
     }
 

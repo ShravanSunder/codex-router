@@ -2941,6 +2941,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_repository_backed_selector_concurrent_starts_reserve_atomically() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_atomic_reserve");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &alpha,
+            "responses",
+            &[
+                (18_000, 50, true, test_unix_seconds() + 4 * 3_600),
+                (604_800, 50, false, test_unix_seconds() + 3 * 86_400),
+            ],
+        );
+        persist_account_with_selector_window_reset_specs(
+            &state,
+            &beta,
+            "responses",
+            &[
+                (18_000, 50, true, test_unix_seconds() + 4 * 3_600),
+                (604_800, 50, false, test_unix_seconds() + 3 * 86_400),
+            ],
+        );
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            RouteBandReservationBooks::default(),
+            0,
+            Arc::new(test_unix_seconds),
+        );
+        let request =
+            HttpProxyRequest::new(Method::Post, "/v1/responses").with_websocket_upgrade(true);
+        let barrier = Arc::new(tokio::sync::Barrier::new(6));
+        let selections = futures_util::future::join_all((0..6).map(|session_index| {
+            let barrier = Arc::clone(&barrier);
+            let request = request.clone();
+            let selector = &selector;
+            async move {
+                barrier.wait().await;
+                selector
+                    .select_upstream_account(&request, TokenGeneration::new(1), None)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("session {session_index} should select account: {error}")
+                    })
+            }
+        }))
+        .await;
+
+        let selected_accounts = selections
+            .iter()
+            .map(|selected| selected.account_id().as_str())
+            .collect::<Vec<_>>();
+        let alpha_count = selected_accounts
+            .iter()
+            .filter(|account| **account == "acct_alpha")
+            .count();
+        let beta_count = selected_accounts
+            .iter()
+            .filter(|account| **account == "acct_beta")
+            .count();
+
+        assert_eq!(
+            (alpha_count, beta_count),
+            (3, 3),
+            "six simultaneous equal-account starts must reserve atomically and balance, got {selected_accounts:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn async_repository_backed_selector_drains_near_reset_pool_then_far_reset_reserve_s4() {
         let temp_dir = ProxyTestTempDir::new("async_repository_selector_s4_drain_pool");
         let database_path = temp_dir.path().join("state.sqlite");

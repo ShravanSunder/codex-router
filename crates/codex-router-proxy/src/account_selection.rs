@@ -51,6 +51,7 @@ use futures_util::future::BoxFuture;
 use sha2::Digest;
 use sha2::Sha256;
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::task::TaskTracker;
 
 use crate::http_sse::HttpProxyError;
@@ -64,6 +65,8 @@ pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitS
 pub type RouteBandAccountHolds = Arc<Mutex<HashMap<String, AccountHold>>>;
 /// Process-lifetime active reservation state partitioned by route band.
 pub type RouteBandReservationBooks = Arc<Mutex<HashMap<String, ReservationBook>>>;
+/// Async critical section for active-count projection and reservation.
+type SelectionReservationLock = Arc<AsyncMutex<()>>;
 
 const ROUTING_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
 const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
@@ -563,6 +566,7 @@ where
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
     active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
+    selection_reservation_lock: SelectionReservationLock,
     minimum_account_hold_cooldown_seconds: u64,
     clock: UnixClock,
 }
@@ -632,6 +636,7 @@ where
             account_holds: Arc::new(Mutex::new(HashMap::new())),
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
+            selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
         }
@@ -650,6 +655,7 @@ where
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
+            selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
         }
@@ -670,6 +676,7 @@ where
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
+            selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
         }
@@ -691,6 +698,7 @@ where
             account_holds,
             active_reservations,
             active_client_leases: None,
+            selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
         }
@@ -827,6 +835,7 @@ where
         Box::pin(async move {
             let route_kind = route_kind_for_request(request)?;
             let route_band = route_kind.route_band();
+            let _selection_reservation_guard = self.selection_reservation_lock.lock().await;
             let now_unix_seconds = (self.clock)();
             let active_reservation_book = active_reservation_book_for_route_band(
                 &self.active_reservations,
@@ -1341,6 +1350,7 @@ pub fn release_account_reservation(
 /// Returns whether a route band still has a selectable account after excluding one account.
 pub async fn route_band_has_selectable_alternative<R>(
     state_repository: &R,
+    active_reservations: Option<&RouteBandReservationBooks>,
     route_band: RouteBand,
     excluded_account_id: &AccountId,
     now_unix_seconds: u64,
@@ -1348,12 +1358,29 @@ pub async fn route_band_has_selectable_alternative<R>(
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
+    let active_session_overrides = match active_reservations {
+        Some(active_reservations) => {
+            let mut reservations =
+                active_reservations
+                    .lock()
+                    .map_err(|_error| StateStoreError::Sqlite {
+                        message: "active reservation state unavailable".to_owned(),
+                    })?;
+            if let Some(book) = reservations.get_mut(route_band.as_str()) {
+                book.purge_stale(now_unix_seconds, ACTIVE_RESERVATION_MAX_AGE_SECONDS);
+            }
+            reservations
+                .get(route_band.as_str())
+                .map(active_session_counts_by_account)
+        }
+        None => None,
+    };
     let projection = project_route_band_selection_inputs_with_active_counts(
         state_repository,
         route_band.as_str(),
         now_unix_seconds,
         ACTIVE_RESERVATION_MAX_AGE_SECONDS,
-        None,
+        active_session_overrides.as_ref(),
     )
     .await?;
     let account_inputs = projection

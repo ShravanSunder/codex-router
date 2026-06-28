@@ -78,8 +78,9 @@ weekly_survival_safety_buffer_basis_points = 200   # 2.00%
 short_survival_safety_buffer_basis_points = 100    # 1.00%
 short_near_reset_threshold_seconds = 1_800         # 30 minutes
 same_pool_reset_tolerance_seconds = 7_200          # 2 hours
+same_pool_projected_runout_tolerance_seconds = 7_200  # 2 hours
 same_pool_survival_margin_tolerance_basis_points = 500  # 5.00%
-active_session_imbalance_threshold = 2
+active_session_imbalance_threshold = 1
 usage_limit_suspect_ttl_seconds = 300
 active_session_rollup_bucket_seconds = 300
 ```
