@@ -40,7 +40,7 @@ const DEFAULT_LONG_PRESSURE_MULTIPLIER: u32 = 3;
 const DEFAULT_SHORT_SALVAGE_CAP: u32 = 10;
 const DEFAULT_LONG_SALVAGE_CAP: u32 = 20;
 const DEFAULT_RISK_PENALTY_CAP: u32 = 90;
-const DEFAULT_SELECTABLE_WEIGHT_MIN: u32 = 1;
+const DEFAULT_SELECTABLE_WEIGHT_MIN: u32 = 0;
 const DEFAULT_SELECTABLE_WEIGHT_MAX: u32 = 100;
 const DEFAULT_UNKNOWN_FALLBACK_WEIGHT: u32 = 1;
 const DEFAULT_NEAR_ZERO_HEADROOM_THRESHOLD: u32 = 5;
@@ -1773,6 +1773,7 @@ mod tests {
         accounts: Vec<ScenarioAccountFixture>,
         expected_sequence: Vec<&'static str>,
         expected_final_active_sessions: Vec<(&'static str, u32)>,
+        expected_selected_weekly_runouts: Option<Vec<(&'static str, Option<u64>)>>,
     }
 
     struct ScenarioAccountFixture {
@@ -1784,6 +1785,7 @@ mod tests {
     #[derive(Debug)]
     struct ScenarioRunResult {
         selected_accounts: Vec<String>,
+        selected_weekly_runouts: Vec<(String, Option<u64>)>,
         final_active_sessions: Vec<(String, u32)>,
         final_assessment: BurnDownRouteBandAssessmentResult,
     }
@@ -1795,6 +1797,7 @@ mod tests {
             .map(|account| (account.account_id, account.initial_active_sessions))
             .collect::<Vec<_>>();
         let mut selected_accounts = Vec::new();
+        let mut selected_weekly_runouts = Vec::new();
         let mut final_assessment = None;
 
         for _session_start in 0..scenario.starts_to_simulate {
@@ -1822,6 +1825,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} should have a quota candidate", scenario.id))
                 .as_str()
                 .to_owned();
+            let selected_weekly_runout = account_assessment(&assessment, &selected_account)
+                .weekly_projected_exhaustion_unix_seconds()
+                .map(|projected_exhaustion_unix_seconds| {
+                    projected_exhaustion_unix_seconds.saturating_sub(NOW)
+                });
             let (_, selected_active_sessions) = active_sessions_by_account
                 .iter_mut()
                 .find(|(account_id, _)| *account_id == selected_account)
@@ -1832,6 +1840,7 @@ mod tests {
                     )
                 });
             *selected_active_sessions += 1;
+            selected_weekly_runouts.push((selected_account.clone(), selected_weekly_runout));
             selected_accounts.push(selected_account);
             final_assessment = Some(assessment);
         }
@@ -1843,6 +1852,7 @@ mod tests {
 
         ScenarioRunResult {
             selected_accounts,
+            selected_weekly_runouts,
             final_active_sessions,
             final_assessment: final_assessment
                 .unwrap_or_else(|| panic!("{} must simulate at least one start", scenario.id)),
@@ -1872,6 +1882,17 @@ mod tests {
             "{} final active sessions",
             scenario.id
         );
+        if let Some(expected_selected_weekly_runouts) = &scenario.expected_selected_weekly_runouts {
+            assert_eq!(
+                result.selected_weekly_runouts,
+                expected_selected_weekly_runouts
+                    .iter()
+                    .map(|(account_id, runout)| ((*account_id).to_owned(), *runout))
+                    .collect::<Vec<_>>(),
+                "{} selected weekly projection trace",
+                scenario.id
+            );
+        }
 
         result
     }
@@ -1917,7 +1938,7 @@ mod tests {
         );
         assert_eq!(assessment.weighted_candidates()[0].0.as_str(), "acct_a");
         assert_account(&assessment, "acct_a", AccountAvailability::Usable, Some(9));
-        assert_account(&assessment, "acct_b", AccountAvailability::Reserve, Some(1));
+        assert_account(&assessment, "acct_b", AccountAvailability::Reserve, Some(0));
         assert_eq!(
             account_assessment(&assessment, "acct_a").routing_reason(),
             RoutingReason::PreferredWeeklyHealthier
@@ -2355,6 +2376,316 @@ mod tests {
     }
 
     #[test]
+    fn s3f_stale_unknown_peer_does_not_beat_known_drain_account() {
+        let result = assert_account_selection_scenario(&AccountSelectionScenario {
+            id: "S3f",
+            starts_to_simulate: 1,
+            accounts: vec![
+                ScenarioAccountFixture {
+                    account_id: "acct_known",
+                    initial_active_sessions: 2,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_known",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                projected_window(WEEKLY, 40, 24 * 3_600, 60 * 3_600)
+                                    .with_burn_rate_confidence(QuotaRunRateConfidence::Normal),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_stale",
+                    initial_active_sessions: 0,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_stale",
+                            vec![
+                                stale_window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                stale_window(WEEKLY, 42, hours_minutes(25, 0)),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_far_reset",
+                    initial_active_sessions: 0,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_far_reset",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                projected_window(WEEKLY, 40, 5 * 86_400, 10 * 86_400),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+            ],
+            expected_sequence: vec!["acct_known"],
+            expected_final_active_sessions: vec![
+                ("acct_known", 3),
+                ("acct_stale", 0),
+                ("acct_far_reset", 0),
+            ],
+            expected_selected_weekly_runouts: None,
+        });
+
+        assert_eq!(
+            account_assessment(&result.final_assessment, "acct_far_reset").routing_reason(),
+            RoutingReason::HeldReserve
+        );
+    }
+
+    #[test]
+    fn s3g_hard_blocked_account_is_skipped_before_far_reset_reserve() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_blocked",
+                vec![
+                    QuotaWindowFact::new(FIVE_HOURS, QuotaWindowStatus::Ineligible),
+                    QuotaWindowFact::new(WEEKLY, QuotaWindowStatus::Ineligible),
+                ],
+            ),
+            account(
+                "acct_drain",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 25, 24 * 3_600, 60 * 3_600),
+                ],
+            ),
+            account(
+                "acct_far_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 70, 5 * 86_400, 10 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_drain"),
+            "S3g: hard-blocked account is skipped and far-reset reserve is held"
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_blocked").availability(),
+            AccountAvailability::Blocked
+        );
+    }
+
+    #[test]
+    fn s3i_all_hard_blocked_accounts_have_no_selector_candidate() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    QuotaWindowFact::new(FIVE_HOURS, QuotaWindowStatus::Ineligible),
+                    QuotaWindowFact::new(WEEKLY, QuotaWindowStatus::Ineligible),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    QuotaWindowFact::new(FIVE_HOURS, QuotaWindowStatus::Ineligible),
+                    QuotaWindowFact::new(WEEKLY, QuotaWindowStatus::Ineligible),
+                ],
+            ),
+            account(
+                "acct_c",
+                vec![
+                    QuotaWindowFact::new(FIVE_HOURS, QuotaWindowStatus::Ineligible),
+                    QuotaWindowFact::new(WEEKLY, QuotaWindowStatus::Ineligible),
+                ],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::None);
+        assert_eq!(assessment.preferred_next(), None);
+        assert!(assessment.weighted_candidates().is_empty());
+    }
+
+    #[test]
+    fn s3k_near_reset_drain_account_is_used_before_later_resets() {
+        let result = assert_account_selection_scenario(&AccountSelectionScenario {
+            id: "S3k",
+            starts_to_simulate: 1,
+            accounts: vec![
+                ScenarioAccountFixture {
+                    account_id: "acct_reset_soon",
+                    initial_active_sessions: 0,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_reset_soon",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(2, 0)),
+                                projected_window(WEEKLY, 30, hours_minutes(2, 0), 20 * 3_600),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_next_day",
+                    initial_active_sessions: 0,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_next_day",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                projected_window(WEEKLY, 32, hours_minutes(26, 0), 72 * 3_600),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_far_reset",
+                    initial_active_sessions: 0,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_far_reset",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                projected_window(WEEKLY, 75, 5 * 86_400, 10 * 86_400),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+            ],
+            expected_sequence: vec!["acct_reset_soon"],
+            expected_final_active_sessions: vec![
+                ("acct_reset_soon", 1),
+                ("acct_next_day", 0),
+                ("acct_far_reset", 0),
+            ],
+            expected_selected_weekly_runouts: None,
+        });
+
+        assert_eq!(
+            account_assessment(&result.final_assessment, "acct_reset_soon").routing_reason(),
+            RoutingReason::PreferredWeeklyResetSoon
+        );
+    }
+
+    #[test]
+    fn s3l_refreshed_reset_segment_does_not_create_fake_old_burn() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_refreshed_far_reset",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 95, 5 * 86_400, 20 * 86_400),
+                ],
+            ),
+            account(
+                "acct_current_drain",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 28, 24 * 3_600, 96 * 3_600),
+                ],
+            ),
+            account(
+                "acct_reserve",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 65, 5 * 86_400, 20 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_current_drain"),
+            "S3l: old reset segment history must not make refreshed far-reset quota look preferable to current drain quota"
+        );
+    }
+
+    #[test]
+    fn s3m_projected_runway_beats_naive_active_count() {
+        let result = assert_account_selection_scenario(&AccountSelectionScenario {
+            id: "S3m",
+            starts_to_simulate: 1,
+            accounts: vec![
+                ScenarioAccountFixture {
+                    account_id: "acct_fast_burn_idle",
+                    initial_active_sessions: 0,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_fast_burn_idle",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                window_with_burn_rate_basis_points_per_hour(
+                                    WEEKLY,
+                                    18,
+                                    24 * 3_600,
+                                    80,
+                                ),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_slower_burn_busy",
+                    initial_active_sessions: 1,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_slower_burn_busy",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                window_with_burn_rate_basis_points_per_hour(
+                                    WEEKLY,
+                                    18,
+                                    24 * 3_600,
+                                    40,
+                                ),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_far_reset_low_burn",
+                    initial_active_sessions: 0,
+                    build_account: |active_sessions| {
+                        account(
+                            "acct_far_reset_low_burn",
+                            vec![
+                                window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                                window_with_burn_rate_basis_points_per_hour(
+                                    WEEKLY,
+                                    50,
+                                    5 * 86_400,
+                                    20,
+                                ),
+                            ],
+                        )
+                        .with_current_active_sessions(active_sessions)
+                    },
+                },
+            ],
+            expected_sequence: vec!["acct_slower_burn_busy"],
+            expected_final_active_sessions: vec![
+                ("acct_fast_burn_idle", 0),
+                ("acct_slower_burn_busy", 2),
+                ("acct_far_reset_low_burn", 0),
+            ],
+            expected_selected_weekly_runouts: None,
+        });
+
+        assert_ne!(
+            result.selected_accounts.first().map(String::as_str),
+            Some("acct_fast_burn_idle"),
+            "S3m: lower current active count must not beat materially safer projected runway"
+        );
+    }
+
+    #[test]
     fn preferred_next_matches_first_strict_candidate_without_smooth_selector() {
         let source = include_str!("burn_down.rs");
         let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
@@ -2416,7 +2747,7 @@ mod tests {
             Some("acct_b")
         );
         assert_account(&assessment, "acct_a", AccountAvailability::Blocked, None);
-        assert_account(&assessment, "acct_b", AccountAvailability::Reserve, Some(1));
+        assert_account(&assessment, "acct_b", AccountAvailability::Reserve, Some(0));
         assert_eq!(
             account_assessment(&assessment, "acct_a").routing_reason(),
             RoutingReason::BlockedWindowExhausted
@@ -2444,10 +2775,48 @@ mod tests {
             Some("acct_a")
         );
         assert_account(&assessment, "acct_a", AccountAvailability::Usable, Some(40));
-        assert_account(&assessment, "acct_b", AccountAvailability::Usable, Some(1));
+        assert_account(&assessment, "acct_b", AccountAvailability::Usable, Some(0));
         assert_eq!(
             account_assessment(&assessment, "acct_a").routing_reason(),
             RoutingReason::PreferredShortResetSoon
+        );
+    }
+
+    #[test]
+    fn weak_quota_candidate_is_not_clamped_to_minimum_score_s1() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_weak",
+                vec![
+                    window(FIVE_HOURS, 30, 4 * 3_600),
+                    window(WEEKLY, 60, 3 * 86_400),
+                ],
+            ),
+            account(
+                "acct_healthier",
+                vec![
+                    window(FIVE_HOURS, 80, 4 * 3_600),
+                    window(WEEKLY, 80, 3 * 86_400),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_healthier")
+        );
+        assert_account(
+            &assessment,
+            "acct_weak",
+            AccountAvailability::Usable,
+            Some(0),
+        );
+        assert!(
+            assessment
+                .weighted_candidates()
+                .iter()
+                .any(|(account_id, weight)| account_id.as_str() == "acct_weak" && *weight == 0),
+            "weak accounts may remain visible in the selected pool, but must not be manufactured as score 1"
         );
     }
 
@@ -2816,7 +3185,7 @@ mod tests {
             &assessment,
             "acct_near_empty",
             AccountAvailability::Usable,
-            Some(1),
+            Some(0),
         );
     }
 
@@ -2848,13 +3217,13 @@ mod tests {
             &assessment,
             "acct_near_empty",
             AccountAvailability::Usable,
-            Some(1),
+            Some(0),
         );
         assert_account(
             &assessment,
             "acct_worse_weekly",
             AccountAvailability::Reserve,
-            Some(1),
+            Some(0),
         );
     }
 
@@ -2892,7 +3261,7 @@ mod tests {
             &assessment,
             "acct_healthy",
             AccountAvailability::Usable,
-            Some(1),
+            Some(0),
         );
     }
 
@@ -3047,6 +3416,13 @@ mod tests {
                 ("acct_matches", 3),
                 ("acct_ssdev", 3),
             ],
+            expected_selected_weekly_runouts: Some(vec![
+                ("acct_matches", Some(hours_minutes(15, 5))),
+                ("acct_matches", Some(hours_minutes(11, 18))),
+                ("acct_matches", Some(hours_minutes(8, 42))),
+                ("acct_ssdev", Some(hours_minutes(17, 20))),
+                ("acct_ssdev", Some(hours_minutes(13, 0))),
+            ]),
         });
 
         assert_eq!(
@@ -3116,6 +3492,7 @@ mod tests {
             ],
             expected_sequence: vec!["acct_a", "acct_b", "acct_a", "acct_b", "acct_a"],
             expected_final_active_sessions: vec![("acct_a", 3), ("acct_b", 2), ("acct_c", 0)],
+            expected_selected_weekly_runouts: None,
         });
 
         assert_ne!(
@@ -3188,6 +3565,7 @@ mod tests {
             ],
             expected_sequence: vec!["acct_a", "acct_b", "acct_c", "acct_a", "acct_b"],
             expected_final_active_sessions: vec![("acct_a", 2), ("acct_b", 2), ("acct_c", 1)],
+            expected_selected_weekly_runouts: None,
         });
     }
 
@@ -3289,10 +3667,10 @@ mod tests {
 
     const fn ssdev_projected_weekly_runout(active_sessions: u32) -> u64 {
         match active_sessions {
-            0 | 1 => 24 * 3_600,
-            2 => hours_minutes(18, 0),
-            3 => hours_minutes(14, 0),
-            _ => hours_minutes(10, 0),
+            0 => 24 * 3_600,
+            1 => hours_minutes(17, 20),
+            2 => hours_minutes(13, 0),
+            _ => hours_minutes(10, 24),
         }
     }
 

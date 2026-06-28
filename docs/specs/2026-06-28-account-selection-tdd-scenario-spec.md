@@ -626,7 +626,7 @@ required executable fixture:
     5h remaining=10000bp, reset=4h59m, burn=0bp/h, confidence=insufficient,
     projection=NoBurnObserved
     weekly remaining=800bp, reset=23h56m, burn=53bp/h, confidence=normal,
-    projection=ExplicitPerStart[15h05m, 11h18m, 8h42m, 6h48m, 5h28m]
+    projection=ExplicitPerStart[15h05m, 11h18m, 8h42m, 5h28m, 4h12m]
     state=drainable
   C:
     active=1

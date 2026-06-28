@@ -69,7 +69,7 @@ pub fn classify_provider_error_envelope(body: &[u8]) -> ProviderErrorClassificat
 
 pub fn classify_responses_websocket_error_envelope(body: &[u8]) -> ProviderErrorClassification {
     if body.len() > PROVIDER_ERROR_ENVELOPE_MAX_BYTES {
-        return ProviderErrorClassification::Unknown;
+        return classify_responses_websocket_error_envelope_prefix(body);
     }
 
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
@@ -155,6 +155,12 @@ fn is_quota_exhaustion_token(token: &str) -> bool {
 }
 
 fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassification {
+    let Ok(body_text) = std::str::from_utf8(body) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    if !body_text.trim_end().ends_with('}') {
+        return ProviderErrorClassification::Unknown;
+    }
     let Some(prefix) = body.get(..PROVIDER_ERROR_ENVELOPE_MAX_BYTES) else {
         return ProviderErrorClassification::Unknown;
     };
@@ -162,11 +168,16 @@ fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassifi
         return ProviderErrorClassification::Unknown;
     };
     let trimmed = prefix.trim_start();
-    if !(trimmed.starts_with('{')
-        && (trimmed.contains(r#""type":"error""#)
-            || trimmed.contains(r#""type": "error""#)
-            || trimmed.contains(r#""error":{"#)
-            || trimmed.contains(r#""error": {"#)))
+    let Some(after_open_brace) = trimmed.strip_prefix('{') else {
+        return ProviderErrorClassification::Unknown;
+    };
+    if !after_open_brace.trim_start().starts_with('"') {
+        return ProviderErrorClassification::Unknown;
+    }
+    if !(trimmed.contains(r#""type":"error""#)
+        || trimmed.contains(r#""type": "error""#)
+        || trimmed.contains(r#""error":{"#)
+        || trimmed.contains(r#""error": {"#))
     {
         return ProviderErrorClassification::Unknown;
     }
@@ -176,6 +187,48 @@ fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassifi
     push_prefix_field_values(trimmed, r#""code": "#, &mut tokens);
     push_prefix_field_values(trimmed, r#""type":"#, &mut tokens);
     push_prefix_field_values(trimmed, r#""type": "#, &mut tokens);
+
+    if tokens
+        .iter()
+        .any(|token| token == "websocket_connection_limit_reached")
+    {
+        return ProviderErrorClassification::WebSocketConnectionLimit;
+    }
+    if tokens
+        .iter()
+        .any(|token| is_quota_exhaustion_token(token.as_str()))
+    {
+        return ProviderErrorClassification::AccountQuotaExhausted;
+    }
+
+    ProviderErrorClassification::Unknown
+}
+
+fn classify_responses_websocket_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassification {
+    let Some(prefix) = body.get(..PROVIDER_ERROR_ENVELOPE_MAX_BYTES) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    let Ok(prefix) = std::str::from_utf8(prefix) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    let Ok(body_text) = std::str::from_utf8(body) else {
+        return ProviderErrorClassification::Unknown;
+    };
+    let trimmed_prefix = prefix.trim_start();
+    let trimmed_body = body_text.trim_end();
+    if !(trimmed_prefix.starts_with('{')
+        && trimmed_prefix.contains(r#""type":"error""#)
+        && trimmed_prefix.contains(r#""error":{"#)
+        && trimmed_body.ends_with("}}"))
+    {
+        return ProviderErrorClassification::Unknown;
+    }
+
+    let mut tokens = Vec::new();
+    push_prefix_field_values(trimmed_prefix, r#""code":"#, &mut tokens);
+    push_prefix_field_values(trimmed_prefix, r#""code": "#, &mut tokens);
+    push_prefix_field_values(trimmed_prefix, r#""type":"#, &mut tokens);
+    push_prefix_field_values(trimmed_prefix, r#""type": "#, &mut tokens);
 
     if tokens
         .iter()
