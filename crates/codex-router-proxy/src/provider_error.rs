@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+
+use serde::Deserialize;
 use serde_json::Value;
 
 use codex_router_core::ids::AccountId;
@@ -201,42 +204,48 @@ fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassifi
 }
 
 fn classify_responses_websocket_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassification {
-    let Some(prefix) = body.get(..PROVIDER_ERROR_ENVELOPE_MAX_BYTES) else {
+    let Ok(envelope) = serde_json::from_slice::<ResponsesWebSocketErrorEnvelopeProbe<'_>>(body)
+    else {
         return ProviderErrorClassification::Unknown;
     };
-    let Ok(prefix) = std::str::from_utf8(prefix) else {
+    if envelope.message_type.as_deref() != Some("error") {
         return ProviderErrorClassification::Unknown;
     };
-    let Ok(body_text) = std::str::from_utf8(body) else {
+    let Some(error) = envelope.error else {
         return ProviderErrorClassification::Unknown;
     };
-    let trimmed_prefix = prefix.trim_start();
-    if !(trimmed_prefix.starts_with('{')
-        && prefix_top_level_string_field_equals(trimmed_prefix, "type", "error")
-        && prefix_top_level_object_field_present(trimmed_prefix, "error")
-        && json_object_braces_are_balanced(body_text))
-    {
-        return ProviderErrorClassification::Unknown;
-    }
 
-    let mut tokens = Vec::new();
-    push_prefix_json_string_field_values(trimmed_prefix, "code", &mut tokens);
-    push_prefix_json_string_field_values(trimmed_prefix, "type", &mut tokens);
-
-    if tokens
-        .iter()
-        .any(|token| token == "websocket_connection_limit_reached")
+    if error.code.as_deref() == Some("websocket_connection_limit_reached")
+        || error.error_type.as_deref() == Some("websocket_connection_limit_reached")
     {
         return ProviderErrorClassification::WebSocketConnectionLimit;
     }
-    if tokens
-        .iter()
-        .any(|token| is_quota_exhaustion_token(token.as_str()))
+    if error.code.as_deref().is_some_and(is_quota_exhaustion_token)
+        || error
+            .error_type
+            .as_deref()
+            .is_some_and(is_quota_exhaustion_token)
     {
         return ProviderErrorClassification::AccountQuotaExhausted;
     }
 
     ProviderErrorClassification::Unknown
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesWebSocketErrorEnvelopeProbe<'a> {
+    #[serde(rename = "type", borrow)]
+    message_type: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    error: Option<ResponsesWebSocketErrorObjectProbe<'a>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesWebSocketErrorObjectProbe<'a> {
+    #[serde(borrow)]
+    code: Option<Cow<'a, str>>,
+    #[serde(rename = "type", borrow)]
+    error_type: Option<Cow<'a, str>>,
 }
 
 fn prefix_top_level_string_field_equals(
@@ -524,6 +533,34 @@ mod tests {
             classification,
             ProviderErrorClassification::AccountQuotaExhausted
         );
+    }
+
+    #[test]
+    fn oversized_websocket_malformed_error_like_payload_is_not_classified() {
+        let padding = "x".repeat(128 * 1024);
+        let envelope = format!(
+            r#"{{"type":"error","error":{{"code":"usage_limit_reached"}} bogus, "padding":"{padding}"}}"#
+        );
+
+        let classification = classify_responses_websocket_error_envelope(envelope.as_bytes());
+
+        assert_eq!(classification, ProviderErrorClassification::Unknown);
+    }
+
+    #[test]
+    fn oversized_websocket_quota_token_outside_error_object_is_not_classified() {
+        let padding = "x".repeat(128 * 1024);
+        let envelope = format!(
+            r#"{{
+                "type":"error",
+                "debug":{{"code":"usage_limit_reached"}},
+                "error":{{"type":"invalid_request_error","code":"bad_request","message":"{padding}"}}
+            }}"#
+        );
+
+        let classification = classify_responses_websocket_error_envelope(envelope.as_bytes());
+
+        assert_eq!(classification, ProviderErrorClassification::Unknown);
     }
 
     #[test]
