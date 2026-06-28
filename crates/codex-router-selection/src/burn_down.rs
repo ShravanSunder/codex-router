@@ -1617,6 +1617,9 @@ fn compare_same_pool_active_imbalance(
     let active_delta = left
         .current_active_sessions
         .abs_diff(right.current_active_sessions);
+    if active_delta == 0 {
+        return left.account_id.cmp(&right.account_id);
+    }
     if active_delta < ACTIVE_SESSION_IMBALANCE_THRESHOLD {
         return std::cmp::Ordering::Equal;
     }
@@ -1763,6 +1766,115 @@ mod tests {
     const NOW: u64 = 1_700_000_000;
     const FIVE_HOURS: u64 = V1_SHORT_WINDOW_SECONDS;
     const WEEKLY: u64 = V1_WEEKLY_WINDOW_SECONDS;
+
+    struct AccountSelectionScenario {
+        id: &'static str,
+        starts_to_simulate: usize,
+        accounts: Vec<ScenarioAccountFixture>,
+        expected_sequence: Vec<&'static str>,
+        expected_final_active_sessions: Vec<(&'static str, u32)>,
+    }
+
+    struct ScenarioAccountFixture {
+        account_id: &'static str,
+        initial_active_sessions: u32,
+        build_account: fn(u32) -> BurnDownAccountInput,
+    }
+
+    #[derive(Debug)]
+    struct ScenarioRunResult {
+        selected_accounts: Vec<String>,
+        final_active_sessions: Vec<(String, u32)>,
+        final_assessment: BurnDownRouteBandAssessmentResult,
+    }
+
+    fn run_account_selection_scenario(scenario: &AccountSelectionScenario) -> ScenarioRunResult {
+        let mut active_sessions_by_account = scenario
+            .accounts
+            .iter()
+            .map(|account| (account.account_id, account.initial_active_sessions))
+            .collect::<Vec<_>>();
+        let mut selected_accounts = Vec::new();
+        let mut final_assessment = None;
+
+        for _session_start in 0..scenario.starts_to_simulate {
+            let assessment = assess_route_band(input(
+                scenario
+                    .accounts
+                    .iter()
+                    .map(|account| {
+                        let active_sessions = active_sessions_by_account
+                            .iter()
+                            .find(|(account_id, _)| *account_id == account.account_id)
+                            .map(|(_, active_sessions)| *active_sessions)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{} fixture missing active counter for {}",
+                                    scenario.id, account.account_id
+                                )
+                            });
+                        (account.build_account)(active_sessions)
+                    })
+                    .collect(),
+            ));
+            let selected_account = assessment
+                .preferred_next()
+                .unwrap_or_else(|| panic!("{} should have a quota candidate", scenario.id))
+                .as_str()
+                .to_owned();
+            let (_, selected_active_sessions) = active_sessions_by_account
+                .iter_mut()
+                .find(|(account_id, _)| *account_id == selected_account)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} selected account outside fixture: {}",
+                        scenario.id, selected_account
+                    )
+                });
+            *selected_active_sessions += 1;
+            selected_accounts.push(selected_account);
+            final_assessment = Some(assessment);
+        }
+
+        let final_active_sessions = active_sessions_by_account
+            .into_iter()
+            .map(|(account_id, active_sessions)| (account_id.to_owned(), active_sessions))
+            .collect::<Vec<_>>();
+
+        ScenarioRunResult {
+            selected_accounts,
+            final_active_sessions,
+            final_assessment: final_assessment
+                .unwrap_or_else(|| panic!("{} must simulate at least one start", scenario.id)),
+        }
+    }
+
+    fn assert_account_selection_scenario(scenario: &AccountSelectionScenario) -> ScenarioRunResult {
+        let result = run_account_selection_scenario(scenario);
+
+        assert_eq!(
+            result.selected_accounts,
+            scenario
+                .expected_sequence
+                .iter()
+                .map(|account_id| (*account_id).to_owned())
+                .collect::<Vec<_>>(),
+            "{} selected sequence",
+            scenario.id
+        );
+        assert_eq!(
+            result.final_active_sessions,
+            scenario
+                .expected_final_active_sessions
+                .iter()
+                .map(|(account_id, active_sessions)| ((*account_id).to_owned(), *active_sessions))
+                .collect::<Vec<_>>(),
+            "{} final active sessions",
+            scenario.id
+        );
+
+        result
+    }
 
     #[test]
     fn default_policy_constants_match_spec_r0() {
@@ -2857,90 +2969,226 @@ mod tests {
 
     #[test]
     fn s4_low_weekly_drain_pool_then_far_reset_reserve_with_mutated_active_sessions() {
-        let mut askluna_active_sessions = 1;
-        let mut matches_active_sessions = 0;
-        let mut ssdev_active_sessions = 1;
-        let mut selected_accounts = Vec::new();
-        let mut selected_reasons = Vec::new();
-
-        for _session_start in 0..5 {
-            let assessment = assess_route_band(input(vec![
-                account(
-                    "acct_askluna",
-                    vec![
-                        window(FIVE_HOURS, 99, hours_minutes(4, 46)),
-                        projected_window(WEEKLY, 4, hours_minutes(22, 49), hours_minutes(10, 15))
-                            .with_burn_rate_basis_points_per_hour(39),
-                    ],
-                )
-                .with_current_active_sessions(askluna_active_sessions),
-                account(
-                    "acct_matches",
-                    vec![
-                        window(FIVE_HOURS, 100, hours_minutes(4, 59)),
-                        projected_window(
-                            WEEKLY,
-                            8,
-                            hours_minutes(23, 56),
-                            matches_projected_weekly_runout(matches_active_sessions),
-                        )
-                        .with_burn_rate_basis_points_per_hour(53),
-                    ],
-                )
-                .with_current_active_sessions(matches_active_sessions),
-                account(
-                    "acct_ssdev",
-                    vec![
-                        window(FIVE_HOURS, 97, hours_minutes(4, 36)),
-                        projected_window(
-                            WEEKLY,
-                            26,
-                            84 * 3_600,
-                            ssdev_projected_weekly_runout(ssdev_active_sessions),
-                        )
-                        .with_burn_rate_basis_points_per_hour(105),
-                    ],
-                )
-                .with_current_active_sessions(ssdev_active_sessions),
-            ]));
-            let selected_account = assessment
-                .preferred_next()
-                .unwrap_or_else(|| panic!("session start should have a quota candidate"))
-                .as_str()
-                .to_owned();
-            selected_reasons.push((
-                selected_account.clone(),
-                account_assessment(&assessment, &selected_account).routing_reason(),
-            ));
-            match selected_account.as_str() {
-                "acct_askluna" => askluna_active_sessions += 1,
-                "acct_matches" => matches_active_sessions += 1,
-                "acct_ssdev" => ssdev_active_sessions += 1,
-                other => panic!("unexpected selected account: {other}"),
-            }
-            selected_accounts.push(selected_account);
+        fn askluna(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_askluna",
+                vec![
+                    window(FIVE_HOURS, 99, hours_minutes(4, 46)),
+                    projected_window(WEEKLY, 4, hours_minutes(22, 49), hours_minutes(10, 15))
+                        .with_burn_rate_basis_points_per_hour(39),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
         }
 
-        assert_eq!(
-            selected_accounts,
-            vec![
-                "acct_matches".to_owned(),
-                "acct_matches".to_owned(),
-                "acct_matches".to_owned(),
-                "acct_ssdev".to_owned(),
-                "acct_ssdev".to_owned(),
+        fn matches(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_matches",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 59)),
+                    projected_window(
+                        WEEKLY,
+                        8,
+                        hours_minutes(23, 56),
+                        matches_projected_weekly_runout(active_sessions),
+                    )
+                    .with_burn_rate_basis_points_per_hour(53),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        fn ssdev(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_ssdev",
+                vec![
+                    window(FIVE_HOURS, 97, hours_minutes(4, 36)),
+                    projected_window(
+                        WEEKLY,
+                        26,
+                        84 * 3_600,
+                        ssdev_projected_weekly_runout(active_sessions),
+                    )
+                    .with_burn_rate_basis_points_per_hour(105),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        let result = assert_account_selection_scenario(&AccountSelectionScenario {
+            id: "S4",
+            starts_to_simulate: 5,
+            accounts: vec![
+                ScenarioAccountFixture {
+                    account_id: "acct_askluna",
+                    initial_active_sessions: 1,
+                    build_account: askluna,
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_matches",
+                    initial_active_sessions: 0,
+                    build_account: matches,
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_ssdev",
+                    initial_active_sessions: 1,
+                    build_account: ssdev,
+                },
             ],
-            "S4: drain the near-reset B account while it has enough runway, then move new starts to far-reset reserve C: {selected_reasons:?}"
-        );
-        assert_eq!(askluna_active_sessions, 1, "A remains retiring only");
+            expected_sequence: vec![
+                "acct_matches",
+                "acct_matches",
+                "acct_matches",
+                "acct_ssdev",
+                "acct_ssdev",
+            ],
+            expected_final_active_sessions: vec![
+                ("acct_askluna", 1),
+                ("acct_matches", 3),
+                ("acct_ssdev", 3),
+            ],
+        });
+
         assert_eq!(
-            matches_active_sessions, 3,
-            "B accepts exactly three drain starts"
+            account_assessment(&result.final_assessment, "acct_askluna").availability(),
+            AccountAvailability::Retiring,
+            "S4: A remains retiring only"
         );
-        assert_eq!(
-            ssdev_active_sessions, 3,
-            "C takes the starts once B runway is unsafe"
+    }
+
+    #[test]
+    fn s5_far_reset_reserve_is_preserved_while_near_reset_pool_can_serve() {
+        fn acct_a(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 18, 24 * 3_600, 180 * 3_600)
+                        .with_burn_rate_basis_points_per_hour(10),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        fn acct_b(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 19, hours_minutes(25, 0), 190 * 3_600)
+                        .with_burn_rate_basis_points_per_hour(10),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        fn acct_c(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_c",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 60, 96 * 3_600, 600 * 3_600)
+                        .with_burn_rate_basis_points_per_hour(10),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        let result = assert_account_selection_scenario(&AccountSelectionScenario {
+            id: "S5",
+            starts_to_simulate: 5,
+            accounts: vec![
+                ScenarioAccountFixture {
+                    account_id: "acct_a",
+                    initial_active_sessions: 0,
+                    build_account: acct_a,
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_b",
+                    initial_active_sessions: 0,
+                    build_account: acct_b,
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_c",
+                    initial_active_sessions: 0,
+                    build_account: acct_c,
+                },
+            ],
+            expected_sequence: vec!["acct_a", "acct_b", "acct_a", "acct_b", "acct_a"],
+            expected_final_active_sessions: vec![("acct_a", 3), ("acct_b", 2), ("acct_c", 0)],
+        });
+
+        assert_ne!(
+            result
+                .final_assessment
+                .preferred_next()
+                .map(AccountId::as_str),
+            Some("acct_c"),
+            "S5: C must still not be the next account after the simulated starts"
         );
+    }
+
+    #[test]
+    fn s3n_same_effective_weekly_pool_spreads_by_active_sessions() {
+        fn acct_a(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 18, 24 * 3_600, 45 * 3_600)
+                        .with_burn_rate_basis_points_per_hour(40),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        fn acct_b(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 19, 24 * 3_600, hours_minutes(47, 30))
+                        .with_burn_rate_basis_points_per_hour(40),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        fn acct_c(active_sessions: u32) -> BurnDownAccountInput {
+            account(
+                "acct_c",
+                vec![
+                    window(FIVE_HOURS, 100, hours_minutes(4, 0)),
+                    projected_window(WEEKLY, 20, 24 * 3_600, 50 * 3_600)
+                        .with_burn_rate_basis_points_per_hour(40),
+                ],
+            )
+            .with_current_active_sessions(active_sessions)
+        }
+
+        assert_account_selection_scenario(&AccountSelectionScenario {
+            id: "S3n",
+            starts_to_simulate: 5,
+            accounts: vec![
+                ScenarioAccountFixture {
+                    account_id: "acct_a",
+                    initial_active_sessions: 0,
+                    build_account: acct_a,
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_b",
+                    initial_active_sessions: 0,
+                    build_account: acct_b,
+                },
+                ScenarioAccountFixture {
+                    account_id: "acct_c",
+                    initial_active_sessions: 0,
+                    build_account: acct_c,
+                },
+            ],
+            expected_sequence: vec!["acct_a", "acct_b", "acct_c", "acct_a", "acct_b"],
+            expected_final_active_sessions: vec![("acct_a", 2), ("acct_b", 2), ("acct_c", 1)],
+        });
     }
 
     #[test]

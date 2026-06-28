@@ -2922,14 +2922,16 @@ mod tests {
         }
 
         assert_eq!(
-            selected_accounts.first().map(String::as_str),
-            Some("acct_ssdev")
-        );
-        assert!(
-            selected_accounts
-                .iter()
-                .any(|account| account == "acct_matches"),
-            "six concurrent sessions should spill to the next healthy account as active load accumulates: {selected_accounts:?}"
+            selected_accounts,
+            vec![
+                "acct_matches".to_owned(),
+                "acct_ssdev".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_ssdev".to_owned(),
+                "acct_matches".to_owned(),
+                "acct_ssdev".to_owned(),
+            ],
+            "six concurrent sessions should spread across the same healthy reset pool: {selected_accounts:?}"
         );
         assert!(
             selected_accounts

@@ -30,6 +30,7 @@ mod tests {
     use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
     use codex_router_selection::run_rate::QuotaRunRateConfidence;
     use rusqlite::Connection;
+    use sqlx::Row;
 
     use super::package_name;
     use crate::account::AccountRecord;
@@ -107,7 +108,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 9);
+        assert_eq!(store.schema_version(), 10);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -624,7 +625,8 @@ mod tests {
                     reservation_id,
                     crate::sqlite::ActiveSessionEventKind::Released,
                     1_100,
-                ),
+                )
+                .with_session_interval(1_000, Some(1_100), "unknown"),
             ]
         );
     }
@@ -711,14 +713,102 @@ mod tests {
 
         assert_eq!(
             rollups,
-            vec![crate::sqlite::ActiveSessionRollup::new(
-                account,
-                "responses",
-                0,
-                300,
-                180,
-                2,
-            )]
+            vec![
+                crate::sqlite::ActiveSessionRollup::new(account, "responses", 0, 300, 180, 2)
+                    .with_terminal_counts(1, 0)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlx_active_session_history_schema_matches_spec_terminal_counters() {
+        let temp_dir = TestTempDir::new("async_active_session_schema_spec");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", database_path.display()))
+            .await
+            .unwrap_or_else(|error| panic!("schema check pool should open: {error}"));
+
+        let event_columns = sqlx::query("PRAGMA table_info(active_session_events)")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("active_session_events schema should load: {error}"))
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        for required_column in [
+            "session_started_unix_seconds",
+            "session_ended_unix_seconds",
+            "transport_kind",
+        ] {
+            assert!(
+                event_columns.iter().any(|column| column == required_column),
+                "active_session_events must include {required_column}: {event_columns:?}"
+            );
+        }
+
+        let rollup_columns = sqlx::query("PRAGMA table_info(active_session_rollups)")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("active_session_rollups schema should load: {error}"))
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        for required_column in ["completed_sessions", "stale_purged_sessions"] {
+            assert!(
+                rollup_columns
+                    .iter()
+                    .any(|column| column == required_column),
+                "active_session_rollups must include {required_column}: {rollup_columns:?}"
+            );
+        }
+
+        let account = account_id("acct_schema_spec");
+        let released = ReservationId::new("reservation_schema_released");
+        let stale = ReservationId::new("reservation_schema_stale");
+        store
+            .record_active_client_acquired("responses", "process-a", &released, &account, 10, 8)
+            .await
+            .unwrap_or_else(|error| panic!("released acquire should persist: {error}"));
+        store
+            .record_active_client_released("responses", "process-a", &released, 40)
+            .await
+            .unwrap_or_else(|error| panic!("released terminal event should persist: {error}"));
+        store
+            .record_active_client_acquired("responses", "process-a", &stale, &account, 50, 8)
+            .await
+            .unwrap_or_else(|error| panic!("stale acquire should persist: {error}"));
+        store
+            .active_client_counts_for_route_band("responses", 500, 300)
+            .await
+            .unwrap_or_else(|error| panic!("stale prune should persist terminal event: {error}"));
+        store
+            .refresh_active_session_rollups_for_interval("responses", 0, 600, 300)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should refresh: {error}"));
+
+        let rollups = store
+            .active_session_rollups_for_route_band("responses", 0, 600)
+            .await
+            .unwrap_or_else(|error| panic!("rollups should load: {error}"));
+        assert_eq!(
+            rollups
+                .iter()
+                .map(crate::sqlite::ActiveSessionRollup::completed_sessions)
+                .sum::<u32>(),
+            1
+        );
+        assert_eq!(
+            rollups
+                .iter()
+                .map(crate::sqlite::ActiveSessionRollup::stale_purged_sessions)
+                .sum::<u32>(),
+            1
         );
     }
 
@@ -773,7 +863,8 @@ mod tests {
                     reservation_id,
                     crate::sqlite::ActiveSessionEventKind::StalePurged,
                     1_000,
-                ),
+                )
+                .with_session_interval(100, Some(1_000), "unknown"),
             ]
         );
 
@@ -812,7 +903,8 @@ mod tests {
                     300,
                     1,
                 ),
-                crate::sqlite::ActiveSessionRollup::new(account, "responses", 900, 1_200, 100, 1),
+                crate::sqlite::ActiveSessionRollup::new(account, "responses", 900, 1_200, 100, 1)
+                    .with_terminal_counts(0, 1),
             ]
         );
     }
@@ -833,7 +925,7 @@ mod tests {
                 .schema_version()
                 .await
                 .unwrap_or_else(|error| panic!("schema version should load: {error}")),
-            9
+            10
         );
         assert_eq!(
             store
@@ -906,7 +998,8 @@ mod tests {
                     300,
                     1,
                 ),
-                crate::sqlite::ActiveSessionRollup::new(account, "responses", 600, 900, 100, 1),
+                crate::sqlite::ActiveSessionRollup::new(account, "responses", 600, 900, 100, 1)
+                    .with_terminal_counts(1, 0),
             ]
         );
     }
@@ -1618,7 +1711,7 @@ mod tests {
             Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 9);
+        assert_eq!(store.schema_version(), 10);
         let selector_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -1677,7 +1770,7 @@ mod tests {
             Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 9);
+        assert_eq!(store.schema_version(), 10);
         let responses_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -1711,7 +1804,7 @@ mod tests {
             Err(error) => panic!("v6 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 9);
+        assert_eq!(store.schema_version(), 10);
         let account_id = account_id("acct_v6_reset_credits");
         let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
             &store,

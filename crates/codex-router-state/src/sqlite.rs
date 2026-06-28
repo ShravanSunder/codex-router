@@ -48,7 +48,7 @@ use crate::repositories::QuotaSnapshotRepository;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const WEEKLY_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 604_800;
 const SUSPECT_EXHAUSTED_TTL_SECONDS: u64 = 300;
@@ -116,7 +116,7 @@ const ASYNC_V1_SCHEMA_STATEMENTS: &[&str] = &[
         created_unix_seconds INTEGER NOT NULL,
         PRIMARY KEY (affinity_key_hash, route_band, account_id)
     )",
-    "PRAGMA user_version = 9",
+    "PRAGMA user_version = 10",
 ];
 const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS quota_history_observations (
@@ -173,7 +173,10 @@ const ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         process_run_id TEXT NOT NULL,
         reservation_id TEXT NOT NULL,
         event_kind TEXT NOT NULL,
-        event_unix_seconds INTEGER NOT NULL
+        event_unix_seconds INTEGER NOT NULL,
+        session_started_unix_seconds INTEGER NOT NULL,
+        session_ended_unix_seconds INTEGER,
+        transport_kind TEXT NOT NULL
     )",
     "CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
         ON active_session_events (
@@ -186,6 +189,8 @@ const ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         bucket_end_unix_seconds INTEGER NOT NULL,
         active_session_seconds INTEGER NOT NULL,
         max_concurrent_sessions INTEGER NOT NULL,
+        completed_sessions INTEGER NOT NULL,
+        stale_purged_sessions INTEGER NOT NULL,
         PRIMARY KEY (account_id, route_band, bucket_start_unix_seconds, bucket_end_unix_seconds)
     )",
 ];
@@ -196,6 +201,18 @@ pub struct ActiveClientCount {
     account_id: AccountId,
     active_clients: u32,
     active_pressure: u32,
+}
+
+struct ActiveSessionEventInsert<'a> {
+    account_id: &'a AccountId,
+    route_band: &'a str,
+    process_run_id: &'a str,
+    reservation_id: &'a ReservationId,
+    event_kind: ActiveSessionEventKind,
+    event_unix_seconds: u64,
+    session_started_unix_seconds: u64,
+    session_ended_unix_seconds: Option<u64>,
+    transport_kind: &'a str,
 }
 
 /// Durable active-session event kind.
@@ -243,6 +260,9 @@ pub struct ActiveSessionEvent {
     reservation_id: ReservationId,
     event_kind: ActiveSessionEventKind,
     event_unix_seconds: u64,
+    session_started_unix_seconds: u64,
+    session_ended_unix_seconds: Option<u64>,
+    transport_kind: String,
 }
 
 impl ActiveSessionEvent {
@@ -256,6 +276,12 @@ impl ActiveSessionEvent {
         event_kind: ActiveSessionEventKind,
         event_unix_seconds: u64,
     ) -> Self {
+        let session_ended_unix_seconds = match event_kind {
+            ActiveSessionEventKind::Acquired => None,
+            ActiveSessionEventKind::Released
+            | ActiveSessionEventKind::Retired
+            | ActiveSessionEventKind::StalePurged => Some(event_unix_seconds),
+        };
         Self {
             account_id,
             route_band: route_band.into(),
@@ -263,7 +289,24 @@ impl ActiveSessionEvent {
             reservation_id,
             event_kind,
             event_unix_seconds,
+            session_started_unix_seconds: event_unix_seconds,
+            session_ended_unix_seconds,
+            transport_kind: "unknown".to_owned(),
         }
+    }
+
+    /// Sets explicit interval metadata for a durable active-session event.
+    #[must_use]
+    pub fn with_session_interval(
+        mut self,
+        session_started_unix_seconds: u64,
+        session_ended_unix_seconds: Option<u64>,
+        transport_kind: impl Into<String>,
+    ) -> Self {
+        self.session_started_unix_seconds = session_started_unix_seconds;
+        self.session_ended_unix_seconds = session_ended_unix_seconds;
+        self.transport_kind = transport_kind.into();
+        self
     }
 }
 
@@ -276,6 +319,8 @@ pub struct ActiveSessionRollup {
     bucket_end_unix_seconds: u64,
     active_session_seconds: u64,
     max_concurrent_sessions: u32,
+    completed_sessions: u32,
+    stale_purged_sessions: u32,
 }
 
 impl ActiveSessionRollup {
@@ -296,7 +341,21 @@ impl ActiveSessionRollup {
             bucket_end_unix_seconds,
             active_session_seconds,
             max_concurrent_sessions,
+            completed_sessions: 0,
+            stale_purged_sessions: 0,
         }
+    }
+
+    /// Sets terminal lifecycle counts for this rollup bucket.
+    #[must_use]
+    pub const fn with_terminal_counts(
+        mut self,
+        completed_sessions: u32,
+        stale_purged_sessions: u32,
+    ) -> Self {
+        self.completed_sessions = completed_sessions;
+        self.stale_purged_sessions = stale_purged_sessions;
+        self
     }
 
     /// Returns the account id.
@@ -321,6 +380,18 @@ impl ActiveSessionRollup {
     #[must_use]
     pub const fn active_session_seconds(&self) -> u64 {
         self.active_session_seconds
+    }
+
+    /// Returns completed session count in this bucket.
+    #[must_use]
+    pub const fn completed_sessions(&self) -> u32 {
+        self.completed_sessions
+    }
+
+    /// Returns stale-purged session count in this bucket.
+    #[must_use]
+    pub const fn stale_purged_sessions(&self) -> u32 {
+        self.stale_purged_sessions
     }
 }
 
@@ -1417,14 +1488,17 @@ impl AsyncSqliteStateStore {
         .await
         .map_err(sqlx_error)?;
 
-        self.append_active_session_event(
+        self.append_active_session_event(ActiveSessionEventInsert {
             account_id,
             route_band,
             process_run_id,
             reservation_id,
-            ActiveSessionEventKind::Acquired,
-            acquired_unix_seconds,
-        )
+            event_kind: ActiveSessionEventKind::Acquired,
+            event_unix_seconds: acquired_unix_seconds,
+            session_started_unix_seconds: acquired_unix_seconds,
+            session_ended_unix_seconds: None,
+            transport_kind: "unknown",
+        })
         .await?;
 
         Ok(())
@@ -1439,7 +1513,7 @@ impl AsyncSqliteStateStore {
         released_unix_seconds: u64,
     ) -> Result<(), StateStoreError> {
         let lease = sqlx::query(
-            "SELECT account_id
+            "SELECT account_id, acquired_unix_seconds
                FROM active_client_leases
               WHERE route_band = ?1 AND process_run_id = ?2 AND reservation_id = ?3",
         )
@@ -1454,18 +1528,25 @@ impl AsyncSqliteStateStore {
             let account_id_value = row.get::<String, _>(0);
             let account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
                 StateStoreError::CorruptAccount {
-                    account_id: account_id_value,
+                    account_id: account_id_value.clone(),
                     field: "account_id",
                 }
             })?;
-            self.append_active_session_event(
-                &account_id,
+            self.append_active_session_event(ActiveSessionEventInsert {
+                account_id: &account_id,
                 route_band,
                 process_run_id,
                 reservation_id,
-                ActiveSessionEventKind::Released,
-                released_unix_seconds,
-            )
+                event_kind: ActiveSessionEventKind::Released,
+                event_unix_seconds: released_unix_seconds,
+                session_started_unix_seconds: i64_to_u64(
+                    row.get::<i64, _>(1),
+                    &account_id_value,
+                    "acquired_unix_seconds",
+                )?,
+                session_ended_unix_seconds: Some(released_unix_seconds),
+                transport_kind: "unknown",
+            })
             .await?;
         }
 
@@ -1490,7 +1571,8 @@ impl AsyncSqliteStateStore {
     ) -> Result<Vec<ActiveSessionEvent>, StateStoreError> {
         let rows = sqlx::query(
             "SELECT account_id, route_band, process_run_id, reservation_id,
-                    event_kind, event_unix_seconds
+                    event_kind, event_unix_seconds, session_started_unix_seconds,
+                    session_ended_unix_seconds, transport_kind
                FROM active_session_events
               WHERE route_band = ?1
               ORDER BY event_unix_seconds, id",
@@ -1547,13 +1629,16 @@ impl AsyncSqliteStateStore {
                 "INSERT INTO active_session_rollups (
                    account_id, route_band, bucket_start_unix_seconds,
                    bucket_end_unix_seconds, active_session_seconds,
-                   max_concurrent_sessions
+                   max_concurrent_sessions, completed_sessions,
+                   stale_purged_sessions
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(account_id, route_band, bucket_start_unix_seconds, bucket_end_unix_seconds)
                  DO UPDATE SET
                    active_session_seconds = excluded.active_session_seconds,
-                   max_concurrent_sessions = excluded.max_concurrent_sessions",
+                   max_concurrent_sessions = excluded.max_concurrent_sessions,
+                   completed_sessions = excluded.completed_sessions,
+                   stale_purged_sessions = excluded.stale_purged_sessions",
             )
             .bind(rollup.account_id.as_str())
             .bind(&rollup.route_band)
@@ -1561,6 +1646,8 @@ impl AsyncSqliteStateStore {
             .bind(u64_to_i64(rollup.bucket_end_unix_seconds)?)
             .bind(u64_to_i64(rollup.active_session_seconds)?)
             .bind(u32_to_i64(rollup.max_concurrent_sessions))
+            .bind(u32_to_i64(rollup.completed_sessions))
+            .bind(u32_to_i64(rollup.stale_purged_sessions))
             .execute(&self.pool)
             .await
             .map_err(sqlx_error)?;
@@ -1579,7 +1666,8 @@ impl AsyncSqliteStateStore {
         let rows = sqlx::query(
             "SELECT account_id, route_band, bucket_start_unix_seconds,
                     bucket_end_unix_seconds, active_session_seconds,
-                    max_concurrent_sessions
+                    max_concurrent_sessions, completed_sessions,
+                    stale_purged_sessions
                FROM active_session_rollups
               WHERE route_band = ?1
                 AND bucket_end_unix_seconds > ?2
@@ -1615,26 +1703,30 @@ impl AsyncSqliteStateStore {
 
     async fn append_active_session_event(
         &self,
-        account_id: &AccountId,
-        route_band: &str,
-        process_run_id: &str,
-        reservation_id: &ReservationId,
-        event_kind: ActiveSessionEventKind,
-        event_unix_seconds: u64,
+        event: ActiveSessionEventInsert<'_>,
     ) -> Result<(), StateStoreError> {
         sqlx::query(
             "INSERT INTO active_session_events (
                account_id, route_band, process_run_id, reservation_id,
-               event_kind, event_unix_seconds
+               event_kind, event_unix_seconds, session_started_unix_seconds,
+               session_ended_unix_seconds, transport_kind
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
-        .bind(account_id.as_str())
-        .bind(route_band)
-        .bind(process_run_id)
-        .bind(reservation_id.as_str())
-        .bind(event_kind.as_str())
-        .bind(u64_to_i64(event_unix_seconds)?)
+        .bind(event.account_id.as_str())
+        .bind(event.route_band)
+        .bind(event.process_run_id)
+        .bind(event.reservation_id.as_str())
+        .bind(event.event_kind.as_str())
+        .bind(u64_to_i64(event.event_unix_seconds)?)
+        .bind(u64_to_i64(event.session_started_unix_seconds)?)
+        .bind(
+            event
+                .session_ended_unix_seconds
+                .map(u64_to_i64)
+                .transpose()?,
+        )
+        .bind(event.transport_kind)
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -1651,7 +1743,7 @@ impl AsyncSqliteStateStore {
     ) -> Result<Vec<ActiveClientCount>, StateStoreError> {
         let oldest_allowed = now_unix_seconds.saturating_sub(max_age_seconds);
         let stale_rows = sqlx::query(
-            "SELECT account_id, process_run_id, reservation_id
+            "SELECT account_id, process_run_id, reservation_id, acquired_unix_seconds
                FROM active_client_leases
               WHERE route_band = ?1 AND acquired_unix_seconds < ?2
               ORDER BY acquired_unix_seconds, account_id, process_run_id, reservation_id",
@@ -1666,18 +1758,25 @@ impl AsyncSqliteStateStore {
             let account_id_value = row.get::<String, _>(0);
             let account_id = AccountId::new(account_id_value.clone()).map_err(|_| {
                 StateStoreError::CorruptAccount {
-                    account_id: account_id_value,
+                    account_id: account_id_value.clone(),
                     field: "account_id",
                 }
             })?;
-            self.append_active_session_event(
-                &account_id,
+            self.append_active_session_event(ActiveSessionEventInsert {
+                account_id: &account_id,
                 route_band,
-                &row.get::<String, _>(1),
-                &ReservationId::new(row.get::<String, _>(2)),
-                ActiveSessionEventKind::StalePurged,
-                now_unix_seconds,
-            )
+                process_run_id: &row.get::<String, _>(1),
+                reservation_id: &ReservationId::new(row.get::<String, _>(2)),
+                event_kind: ActiveSessionEventKind::StalePurged,
+                event_unix_seconds: now_unix_seconds,
+                session_started_unix_seconds: i64_to_u64(
+                    row.get::<i64, _>(3),
+                    &account_id_value,
+                    "acquired_unix_seconds",
+                )?,
+                session_ended_unix_seconds: Some(now_unix_seconds),
+                transport_kind: "unknown",
+            })
             .await?;
         }
 
@@ -1733,9 +1832,14 @@ impl AsyncSqliteStateStore {
             0 => self.apply_v1().await,
             7 => {
                 self.apply_v8().await?;
-                self.apply_v9().await
+                self.apply_v9().await?;
+                self.apply_v10().await
             }
-            8 => self.apply_v9().await,
+            8 => {
+                self.apply_v9().await?;
+                self.apply_v10().await
+            }
+            9 => self.apply_v10().await,
             CURRENT_SCHEMA_VERSION => Ok(()),
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -1885,6 +1989,50 @@ impl AsyncSqliteStateStore {
         Ok(())
     }
 
+    async fn apply_v10(&self) -> Result<(), StateStoreError> {
+        self.ensure_active_session_history_schema().await?;
+        for (table_name, column_name, alter_statement) in [
+            (
+                "active_session_events",
+                "session_started_unix_seconds",
+                "ALTER TABLE active_session_events ADD COLUMN session_started_unix_seconds INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "active_session_events",
+                "session_ended_unix_seconds",
+                "ALTER TABLE active_session_events ADD COLUMN session_ended_unix_seconds INTEGER",
+            ),
+            (
+                "active_session_events",
+                "transport_kind",
+                "ALTER TABLE active_session_events ADD COLUMN transport_kind TEXT NOT NULL DEFAULT 'unknown'",
+            ),
+            (
+                "active_session_rollups",
+                "completed_sessions",
+                "ALTER TABLE active_session_rollups ADD COLUMN completed_sessions INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "active_session_rollups",
+                "stale_purged_sessions",
+                "ALTER TABLE active_session_rollups ADD COLUMN stale_purged_sessions INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            if !self.table_has_column(table_name, column_name).await? {
+                sqlx::query(alter_statement)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(sqlx_error)?;
+            }
+        }
+        sqlx::query("PRAGMA user_version = 10")
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
     async fn table_exists(&self, table_name: &str) -> Result<bool, StateStoreError> {
         sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")
             .bind(table_name)
@@ -1904,6 +2052,16 @@ impl AsyncSqliteStateStore {
                 .fetch_all(&self.pool)
                 .await
                 .map_err(sqlx_error)?,
+            "active_session_events" => sqlx::query("PRAGMA table_info(\"active_session_events\")")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(sqlx_error)?,
+            "active_session_rollups" => {
+                sqlx::query("PRAGMA table_info(\"active_session_rollups\")")
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(sqlx_error)?
+            }
             _ => Vec::new(),
         };
         Ok(rows
@@ -2948,7 +3106,8 @@ impl SqliteStateStore {
                 self.apply_v6()?;
                 self.apply_v7()?;
                 self.apply_v8()?;
-                self.apply_v9()
+                self.apply_v9()?;
+                self.apply_v10()
             }
             2 => {
                 self.apply_v3()?;
@@ -2957,7 +3116,8 @@ impl SqliteStateStore {
                 self.apply_v6()?;
                 self.apply_v7()?;
                 self.apply_v8()?;
-                self.apply_v9()
+                self.apply_v9()?;
+                self.apply_v10()
             }
             3 => {
                 self.apply_v4()?;
@@ -2965,31 +3125,40 @@ impl SqliteStateStore {
                 self.apply_v6()?;
                 self.apply_v7()?;
                 self.apply_v8()?;
-                self.apply_v9()
+                self.apply_v9()?;
+                self.apply_v10()
             }
             4 => {
                 self.apply_v5()?;
                 self.apply_v6()?;
                 self.apply_v7()?;
                 self.apply_v8()?;
-                self.apply_v9()
+                self.apply_v9()?;
+                self.apply_v10()
             }
             5 => {
                 self.apply_v6()?;
                 self.apply_v7()?;
                 self.apply_v8()?;
-                self.apply_v9()
+                self.apply_v9()?;
+                self.apply_v10()
             }
             6 => {
                 self.apply_v7()?;
                 self.apply_v8()?;
-                self.apply_v9()
+                self.apply_v9()?;
+                self.apply_v10()
             }
             7 => {
                 self.apply_v8()?;
-                self.apply_v9()
+                self.apply_v9()?;
+                self.apply_v10()
             }
-            8 => self.apply_v9(),
+            8 => {
+                self.apply_v9()?;
+                self.apply_v10()
+            }
+            9 => self.apply_v10(),
             CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
@@ -3062,7 +3231,10 @@ impl SqliteStateStore {
                     process_run_id TEXT NOT NULL,
                     reservation_id TEXT NOT NULL,
                     event_kind TEXT NOT NULL,
-                    event_unix_seconds INTEGER NOT NULL
+                    event_unix_seconds INTEGER NOT NULL,
+                    session_started_unix_seconds INTEGER NOT NULL,
+                    session_ended_unix_seconds INTEGER,
+                    transport_kind TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
@@ -3077,6 +3249,8 @@ impl SqliteStateStore {
                     bucket_end_unix_seconds INTEGER NOT NULL,
                     active_session_seconds INTEGER NOT NULL,
                     max_concurrent_sessions INTEGER NOT NULL,
+                    completed_sessions INTEGER NOT NULL,
+                    stale_purged_sessions INTEGER NOT NULL,
                     PRIMARY KEY (
                         account_id,
                         route_band,
@@ -3085,7 +3259,7 @@ impl SqliteStateStore {
                     )
                 );
 
-                PRAGMA user_version = 9;
+                PRAGMA user_version = 10;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -3348,7 +3522,10 @@ impl SqliteStateStore {
                     process_run_id TEXT NOT NULL,
                     reservation_id TEXT NOT NULL,
                     event_kind TEXT NOT NULL,
-                    event_unix_seconds INTEGER NOT NULL
+                    event_unix_seconds INTEGER NOT NULL,
+                    session_started_unix_seconds INTEGER NOT NULL,
+                    session_ended_unix_seconds INTEGER,
+                    transport_kind TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
@@ -3363,6 +3540,8 @@ impl SqliteStateStore {
                     bucket_end_unix_seconds INTEGER NOT NULL,
                     active_session_seconds INTEGER NOT NULL,
                     max_concurrent_sessions INTEGER NOT NULL,
+                    completed_sessions INTEGER NOT NULL,
+                    stale_purged_sessions INTEGER NOT NULL,
                     PRIMARY KEY (
                         account_id,
                         route_band,
@@ -3374,6 +3553,50 @@ impl SqliteStateStore {
                 PRAGMA user_version = 9;
                 ",
             )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn apply_v10(&self) -> Result<(), StateStoreError> {
+        for (table_name, column_name, column_definition) in [
+            (
+                "active_session_events",
+                "session_started_unix_seconds",
+                "session_started_unix_seconds INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "active_session_events",
+                "session_ended_unix_seconds",
+                "session_ended_unix_seconds INTEGER",
+            ),
+            (
+                "active_session_events",
+                "transport_kind",
+                "transport_kind TEXT NOT NULL DEFAULT 'unknown'",
+            ),
+            (
+                "active_session_rollups",
+                "completed_sessions",
+                "completed_sessions INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "active_session_rollups",
+                "stale_purged_sessions",
+                "stale_purged_sessions INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            if !self.table_has_column(table_name, column_name)? {
+                self.connection
+                    .execute(
+                        &format!("ALTER TABLE {table_name} ADD COLUMN {column_definition}"),
+                        [],
+                    )
+                    .map_err(sqlite_error)?;
+            }
+        }
+        self.connection
+            .execute_batch("PRAGMA user_version = 10;")
             .map_err(sqlite_error)?;
 
         Ok(())
@@ -4007,6 +4230,17 @@ fn parse_active_session_event(row: SqliteRow) -> Result<ActiveSessionEvent, Stat
             &account_id_value,
             "event_unix_seconds",
         )?,
+    )
+    .with_session_interval(
+        i64_to_u64(
+            row.get::<i64, _>(6),
+            &account_id_value,
+            "session_started_unix_seconds",
+        )?,
+        row.get::<Option<i64>, _>(7)
+            .map(|value| i64_to_u64(value, &account_id_value, "session_ended_unix_seconds"))
+            .transpose()?,
+        row.get::<String, _>(8),
     ))
 }
 
@@ -4041,6 +4275,18 @@ fn parse_active_session_rollup(row: SqliteRow) -> Result<ActiveSessionRollup, St
             &account_id_value,
             "max_concurrent_sessions",
         )?,
+    )
+    .with_terminal_counts(
+        i64_to_u32(
+            row.get::<i64, _>(6),
+            &account_id_value,
+            "completed_sessions",
+        )?,
+        i64_to_u32(
+            row.get::<i64, _>(7),
+            &account_id_value,
+            "stale_purged_sessions",
+        )?,
     ))
 }
 
@@ -4066,6 +4312,7 @@ struct ActiveSessionInterval {
     account_id: AccountId,
     start_unix_seconds: u64,
     end_unix_seconds: u64,
+    terminal_event_kind: Option<ActiveSessionEventKind>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -4102,8 +4349,11 @@ fn compute_active_session_rollups(
                 {
                     completed_intervals.push(ActiveSessionInterval {
                         account_id: start_event.account_id,
-                        start_unix_seconds: start_event.event_unix_seconds,
-                        end_unix_seconds: event.event_unix_seconds,
+                        start_unix_seconds: event.session_started_unix_seconds,
+                        end_unix_seconds: event
+                            .session_ended_unix_seconds
+                            .unwrap_or(event.event_unix_seconds),
+                        terminal_event_kind: Some(event.event_kind),
                     });
                 }
             }
@@ -4113,8 +4363,9 @@ fn compute_active_session_rollups(
         if interval_end_unix_seconds > start_event.event_unix_seconds {
             completed_intervals.push(ActiveSessionInterval {
                 account_id: start_event.account_id,
-                start_unix_seconds: start_event.event_unix_seconds,
+                start_unix_seconds: start_event.session_started_unix_seconds,
                 end_unix_seconds: interval_end_unix_seconds,
+                terminal_event_kind: None,
             });
         }
     }
@@ -4123,6 +4374,7 @@ fn compute_active_session_rollups(
         interval_start_unix_seconds.saturating_sub(interval_start_unix_seconds % bucket_seconds);
     let delete_end = interval_end_unix_seconds.div_ceil(bucket_seconds) * bucket_seconds;
     let mut bucket_segments = BTreeMap::<RollupKey, Vec<(u64, u64)>>::new();
+    let mut bucket_terminal_events = BTreeMap::<RollupKey, Vec<ActiveSessionEventKind>>::new();
     for session in completed_intervals {
         let clipped_start = session.start_unix_seconds.max(interval_start_unix_seconds);
         let clipped_end = session.end_unix_seconds.min(interval_end_unix_seconds);
@@ -4147,6 +4399,23 @@ fn compute_active_session_rollups(
             }
             bucket_start = bucket_end;
         }
+        if let Some(terminal_event_kind) = session.terminal_event_kind {
+            let terminal_time = session.end_unix_seconds;
+            if terminal_time >= interval_start_unix_seconds
+                && terminal_time < interval_end_unix_seconds
+            {
+                let bucket_start = terminal_time.saturating_sub(terminal_time % bucket_seconds);
+                let bucket_end = bucket_start.saturating_add(bucket_seconds);
+                bucket_terminal_events
+                    .entry(RollupKey {
+                        account_id: session.account_id,
+                        bucket_start_unix_seconds: bucket_start,
+                        bucket_end_unix_seconds: bucket_end,
+                    })
+                    .or_default()
+                    .push(terminal_event_kind);
+            }
+        }
     }
 
     bucket_segments
@@ -4154,6 +4423,20 @@ fn compute_active_session_rollups(
         .map(|(key, segments)| {
             let active_session_seconds =
                 segments.iter().map(|(start, end)| end - start).sum::<u64>();
+            let terminal_events = bucket_terminal_events.remove(&key).unwrap_or_default();
+            let completed_sessions = terminal_events
+                .iter()
+                .filter(|event_kind| {
+                    matches!(
+                        event_kind,
+                        ActiveSessionEventKind::Released | ActiveSessionEventKind::Retired
+                    )
+                })
+                .count();
+            let stale_purged_sessions = terminal_events
+                .iter()
+                .filter(|event_kind| matches!(event_kind, ActiveSessionEventKind::StalePurged))
+                .count();
             ActiveSessionRollup::new(
                 key.account_id,
                 route_band,
@@ -4161,6 +4444,10 @@ fn compute_active_session_rollups(
                 key.bucket_end_unix_seconds,
                 active_session_seconds,
                 max_concurrent_sessions(&segments),
+            )
+            .with_terminal_counts(
+                u32::try_from(completed_sessions).unwrap_or(u32::MAX),
+                u32::try_from(stale_purged_sessions).unwrap_or(u32::MAX),
             )
         })
         .collect()
