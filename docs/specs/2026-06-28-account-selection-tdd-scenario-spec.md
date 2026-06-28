@@ -633,7 +633,7 @@ required executable fixture:
     5h remaining=9700bp, reset=4h36m, burn=919bp/h, confidence=normal,
     projection=ExplicitPerStart[10h33m, 10h33m, 8h10m, 6h32m, 5h26m]
     weekly remaining=2600bp, reset=84h, burn=105bp/h, confidence=normal,
-    projection=ExplicitPerStart[24h, 24h, 17h20m, 13h, 10h24m]
+    projection=ExplicitPerStart[17h20m, 13h, 10h24m, 10h24m, 10h24m]
     state=far_reset_reserve
   expected sequence: B, B, B, C, C
   final active: A=1, B=3, C=3

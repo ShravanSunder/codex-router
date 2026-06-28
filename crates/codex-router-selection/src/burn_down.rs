@@ -1773,6 +1773,7 @@ mod tests {
         accounts: Vec<ScenarioAccountFixture>,
         expected_sequence: Vec<&'static str>,
         expected_final_active_sessions: Vec<(&'static str, u32)>,
+        expected_final_account_states: Vec<ExpectedAccountState>,
         expected_selected_weekly_runouts: Option<Vec<(&'static str, Option<u64>)>>,
     }
 
@@ -1780,6 +1781,12 @@ mod tests {
         account_id: &'static str,
         initial_active_sessions: u32,
         build_account: fn(u32) -> BurnDownAccountInput,
+    }
+
+    struct ExpectedAccountState {
+        account_id: &'static str,
+        availability: AccountAvailability,
+        routing_reason: RoutingReason,
     }
 
     #[derive(Debug)]
@@ -1798,28 +1805,10 @@ mod tests {
             .collect::<Vec<_>>();
         let mut selected_accounts = Vec::new();
         let mut selected_weekly_runouts = Vec::new();
-        let mut final_assessment = None;
 
         for _session_start in 0..scenario.starts_to_simulate {
-            let assessment = assess_route_band(input(
-                scenario
-                    .accounts
-                    .iter()
-                    .map(|account| {
-                        let active_sessions = active_sessions_by_account
-                            .iter()
-                            .find(|(account_id, _)| *account_id == account.account_id)
-                            .map(|(_, active_sessions)| *active_sessions)
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "{} fixture missing active counter for {}",
-                                    scenario.id, account.account_id
-                                )
-                            });
-                        (account.build_account)(active_sessions)
-                    })
-                    .collect(),
-            ));
+            let assessment =
+                assess_scenario_accounts(scenario, active_sessions_by_account.as_slice());
             let selected_account = assessment
                 .preferred_next()
                 .unwrap_or_else(|| panic!("{} should have a quota candidate", scenario.id))
@@ -1842,9 +1831,10 @@ mod tests {
             *selected_active_sessions += 1;
             selected_weekly_runouts.push((selected_account.clone(), selected_weekly_runout));
             selected_accounts.push(selected_account);
-            final_assessment = Some(assessment);
         }
 
+        let final_assessment =
+            assess_scenario_accounts(scenario, active_sessions_by_account.as_slice());
         let final_active_sessions = active_sessions_by_account
             .into_iter()
             .map(|(account_id, active_sessions)| (account_id.to_owned(), active_sessions))
@@ -1854,9 +1844,33 @@ mod tests {
             selected_accounts,
             selected_weekly_runouts,
             final_active_sessions,
-            final_assessment: final_assessment
-                .unwrap_or_else(|| panic!("{} must simulate at least one start", scenario.id)),
+            final_assessment,
         }
+    }
+
+    fn assess_scenario_accounts(
+        scenario: &AccountSelectionScenario,
+        active_sessions_by_account: &[(&'static str, u32)],
+    ) -> BurnDownRouteBandAssessmentResult {
+        assess_route_band(input(
+            scenario
+                .accounts
+                .iter()
+                .map(|account| {
+                    let active_sessions = active_sessions_by_account
+                        .iter()
+                        .find(|(account_id, _)| *account_id == account.account_id)
+                        .map(|(_, active_sessions)| *active_sessions)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{} fixture missing active counter for {}",
+                                scenario.id, account.account_id
+                            )
+                        });
+                    (account.build_account)(active_sessions)
+                })
+                .collect(),
+        ))
     }
 
     fn assert_account_selection_scenario(scenario: &AccountSelectionScenario) -> ScenarioRunResult {
@@ -1882,6 +1896,23 @@ mod tests {
             "{} final active sessions",
             scenario.id
         );
+        for expected_state in &scenario.expected_final_account_states {
+            let account = account_assessment(&result.final_assessment, expected_state.account_id);
+            assert_eq!(
+                account.availability(),
+                expected_state.availability,
+                "{} final availability for {}",
+                scenario.id,
+                expected_state.account_id
+            );
+            assert_eq!(
+                account.routing_reason(),
+                expected_state.routing_reason,
+                "{} final routing reason for {}",
+                scenario.id,
+                expected_state.account_id
+            );
+        }
         if let Some(expected_selected_weekly_runouts) = &scenario.expected_selected_weekly_runouts {
             assert_eq!(
                 result.selected_weekly_runouts,
@@ -2379,7 +2410,7 @@ mod tests {
     fn s3f_stale_unknown_peer_does_not_beat_known_drain_account() {
         let result = assert_account_selection_scenario(&AccountSelectionScenario {
             id: "S3f",
-            starts_to_simulate: 1,
+            starts_to_simulate: 5,
             accounts: vec![
                 ScenarioAccountFixture {
                     account_id: "acct_known",
@@ -2425,11 +2456,34 @@ mod tests {
                     },
                 },
             ],
-            expected_sequence: vec!["acct_known"],
+            expected_sequence: vec![
+                "acct_known",
+                "acct_known",
+                "acct_known",
+                "acct_known",
+                "acct_known",
+            ],
             expected_final_active_sessions: vec![
-                ("acct_known", 3),
+                ("acct_known", 7),
                 ("acct_stale", 0),
                 ("acct_far_reset", 0),
+            ],
+            expected_final_account_states: vec![
+                ExpectedAccountState {
+                    account_id: "acct_known",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::PreferredWeeklyHealthier,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_stale",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_far_reset",
+                    availability: AccountAvailability::Reserve,
+                    routing_reason: RoutingReason::HeldReserve,
+                },
             ],
             expected_selected_weekly_runouts: None,
         });
@@ -2512,7 +2566,7 @@ mod tests {
     fn s3k_near_reset_drain_account_is_used_before_later_resets() {
         let result = assert_account_selection_scenario(&AccountSelectionScenario {
             id: "S3k",
-            starts_to_simulate: 1,
+            starts_to_simulate: 5,
             accounts: vec![
                 ScenarioAccountFixture {
                     account_id: "acct_reset_soon",
@@ -2557,11 +2611,34 @@ mod tests {
                     },
                 },
             ],
-            expected_sequence: vec!["acct_reset_soon"],
+            expected_sequence: vec![
+                "acct_reset_soon",
+                "acct_reset_soon",
+                "acct_reset_soon",
+                "acct_reset_soon",
+                "acct_reset_soon",
+            ],
             expected_final_active_sessions: vec![
-                ("acct_reset_soon", 1),
+                ("acct_reset_soon", 5),
                 ("acct_next_day", 0),
                 ("acct_far_reset", 0),
+            ],
+            expected_final_account_states: vec![
+                ExpectedAccountState {
+                    account_id: "acct_reset_soon",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::PreferredWeeklyResetSoon,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_next_day",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_far_reset",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
             ],
             expected_selected_weekly_runouts: None,
         });
@@ -2609,7 +2686,7 @@ mod tests {
     fn s3m_projected_runway_beats_naive_active_count() {
         let result = assert_account_selection_scenario(&AccountSelectionScenario {
             id: "S3m",
-            starts_to_simulate: 1,
+            starts_to_simulate: 5,
             accounts: vec![
                 ScenarioAccountFixture {
                     account_id: "acct_fast_burn_idle",
@@ -2669,11 +2746,34 @@ mod tests {
                     },
                 },
             ],
-            expected_sequence: vec!["acct_slower_burn_busy"],
+            expected_sequence: vec![
+                "acct_slower_burn_busy",
+                "acct_slower_burn_busy",
+                "acct_slower_burn_busy",
+                "acct_slower_burn_busy",
+                "acct_slower_burn_busy",
+            ],
             expected_final_active_sessions: vec![
                 ("acct_fast_burn_idle", 0),
-                ("acct_slower_burn_busy", 2),
+                ("acct_slower_burn_busy", 6),
                 ("acct_far_reset_low_burn", 0),
+            ],
+            expected_final_account_states: vec![
+                ExpectedAccountState {
+                    account_id: "acct_fast_burn_idle",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_slower_burn_busy",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::PreferredWeeklyHealthier,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_far_reset_low_burn",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
             ],
             expected_selected_weekly_runouts: None,
         });
@@ -3416,6 +3516,23 @@ mod tests {
                 ("acct_matches", 3),
                 ("acct_ssdev", 3),
             ],
+            expected_final_account_states: vec![
+                ExpectedAccountState {
+                    account_id: "acct_askluna",
+                    availability: AccountAvailability::Retiring,
+                    routing_reason: RoutingReason::RetiringNearZero,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_matches",
+                    availability: AccountAvailability::Reserve,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_ssdev",
+                    availability: AccountAvailability::Reserve,
+                    routing_reason: RoutingReason::PreferredProjectedBurn,
+                },
+            ],
             expected_selected_weekly_runouts: Some(vec![
                 ("acct_matches", Some(hours_minutes(15, 5))),
                 ("acct_matches", Some(hours_minutes(11, 18))),
@@ -3492,6 +3609,23 @@ mod tests {
             ],
             expected_sequence: vec!["acct_a", "acct_b", "acct_a", "acct_b", "acct_a"],
             expected_final_active_sessions: vec![("acct_a", 3), ("acct_b", 2), ("acct_c", 0)],
+            expected_final_account_states: vec![
+                ExpectedAccountState {
+                    account_id: "acct_a",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_b",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::PreferredHighestWeight,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_c",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+            ],
             expected_selected_weekly_runouts: None,
         });
 
@@ -3565,6 +3699,23 @@ mod tests {
             ],
             expected_sequence: vec!["acct_a", "acct_b", "acct_c", "acct_a", "acct_b"],
             expected_final_active_sessions: vec![("acct_a", 2), ("acct_b", 2), ("acct_c", 1)],
+            expected_final_account_states: vec![
+                ExpectedAccountState {
+                    account_id: "acct_a",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_b",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                },
+                ExpectedAccountState {
+                    account_id: "acct_c",
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::PreferredHighestWeight,
+                },
+            ],
             expected_selected_weekly_runouts: None,
         });
     }
