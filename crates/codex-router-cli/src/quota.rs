@@ -2099,18 +2099,33 @@ fn format_run_rate_estimate(estimate: QuotaRunRateEstimate, now_unix_seconds: u6
         QuotaRunRateConfidence::Stale => "history stale".to_owned(),
         QuotaRunRateConfidence::Low | QuotaRunRateConfidence::Normal => {
             let confidence = run_rate_confidence_label(estimate.confidence());
-            let burn_rate = estimate.burn_rate_percent_per_hour().unwrap_or(0);
+            let burn_rate = format_burn_rate_basis_points_per_hour(
+                estimate.burn_rate_basis_points_per_hour().unwrap_or(0),
+            );
             match estimate.projected_exhaustion_unix_seconds(now_unix_seconds) {
                 Some(runout) => {
                     format!(
-                        "{confidence} burn {burn_rate}%/h; runout {}",
+                        "{confidence} burn {burn_rate}; runout {}",
                         format_relative_time(runout, now_unix_seconds)
                     )
                 }
-                None => format!("{confidence} burn {burn_rate}%/h; no runout"),
+                None => format!("{confidence} burn {burn_rate}; no runout"),
             }
         }
     }
+}
+
+fn format_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour: u32) -> String {
+    let whole_percent = burn_rate_basis_points_per_hour / 100;
+    let fractional_basis_points = burn_rate_basis_points_per_hour % 100;
+    if fractional_basis_points == 0 {
+        return format!("{whole_percent}%/h");
+    }
+    if fractional_basis_points.is_multiple_of(10) {
+        return format!("{}.{}%/h", whole_percent, fractional_basis_points / 10);
+    }
+
+    format!("{whole_percent}.{fractional_basis_points:02}%/h")
 }
 
 const fn run_rate_confidence_label(confidence: QuotaRunRateConfidence) -> &'static str {
@@ -2380,6 +2395,7 @@ impl JsonWindowSlot {
 struct JsonRunRateEstimate {
     confidence: &'static str,
     burn_rate_percent_per_hour: Option<u32>,
+    burn_rate_basis_points_per_hour: Option<u32>,
     projected_exhaustion_unix_seconds: Option<u64>,
 }
 
@@ -2388,6 +2404,7 @@ impl JsonRunRateEstimate {
         Self {
             confidence: "unknown",
             burn_rate_percent_per_hour: None,
+            burn_rate_basis_points_per_hour: None,
             projected_exhaustion_unix_seconds: None,
         }
     }
@@ -2396,6 +2413,7 @@ impl JsonRunRateEstimate {
         Self {
             confidence: run_rate_confidence_label(estimate.confidence()),
             burn_rate_percent_per_hour: estimate.burn_rate_percent_per_hour(),
+            burn_rate_basis_points_per_hour: estimate.burn_rate_basis_points_per_hour(),
             projected_exhaustion_unix_seconds: estimate
                 .projected_exhaustion_unix_seconds(now_unix_seconds),
         }
@@ -3007,6 +3025,36 @@ mod tests {
             slow_burning_assessment.routing_reason(),
             RoutingReason::PreferredProjectedBurn | RoutingReason::PreferredHighestWeight
         ));
+    }
+
+    #[test]
+    fn quota_status_formats_subpercent_burn_with_runout() {
+        let estimate = QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+            QuotaRunRateConfidence::Normal,
+            45,
+            6,
+        );
+
+        assert_eq!(
+            format_run_rate_estimate(estimate, NOW),
+            "normal burn 0.45%/h; runout in 13h 20m"
+        );
+    }
+
+    #[test]
+    fn quota_status_json_exposes_subpercent_burn_basis_points() {
+        let estimate = QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+            QuotaRunRateConfidence::Normal,
+            45,
+            6,
+        );
+
+        let json = serde_json::to_value(JsonRunRateEstimate::from_estimate(estimate, NOW))
+            .unwrap_or_else(|error| panic!("run-rate JSON should serialize: {error}"));
+
+        assert_eq!(json["burn_rate_percent_per_hour"], 0);
+        assert_eq!(json["burn_rate_basis_points_per_hour"], 45);
+        assert!(json["projected_exhaustion_unix_seconds"].is_number());
     }
 
     #[test]

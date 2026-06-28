@@ -261,7 +261,11 @@ mod tests {
                     quota_observation(NOW, reset_segment, 78),
                 ],
             ),
-            QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 43, 78)
+            QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+                QuotaRunRateConfidence::Normal,
+                4_320,
+                78
+            )
         );
         assert_eq!(
             estimator.estimate(
@@ -274,7 +278,11 @@ mod tests {
                     quota_observation(NOW, reset_segment, 78),
                 ],
             ),
-            QuotaRunRateEstimate::with_rate(QuotaRunRateConfidence::Normal, 48, 78)
+            QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+                QuotaRunRateConfidence::Normal,
+                4_800,
+                78
+            )
         );
         assert_eq!(
             estimator.estimate(

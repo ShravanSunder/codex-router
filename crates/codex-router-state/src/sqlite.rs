@@ -305,6 +305,18 @@ impl ActiveSessionRollup {
         &self.account_id
     }
 
+    /// Returns the bucket start timestamp.
+    #[must_use]
+    pub const fn bucket_start_unix_seconds(&self) -> u64 {
+        self.bucket_start_unix_seconds
+    }
+
+    /// Returns the bucket end timestamp.
+    #[must_use]
+    pub const fn bucket_end_unix_seconds(&self) -> u64 {
+        self.bucket_end_unix_seconds
+    }
+
     /// Returns active session seconds.
     #[must_use]
     pub const fn active_session_seconds(&self) -> u64 {

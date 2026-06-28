@@ -355,30 +355,61 @@ async fn estimate_window_burn_rate(
         .filter(|rollup| rollup.account_id() == account_id)
         .map(|rollup| rollup.active_session_seconds())
         .sum::<u64>();
-    let (confidence, burn_rate_basis_points_per_hour) = if active_session_seconds > 0 {
-        (
-            confidence,
-            ceil_div_u128(
-                u128::from(burned_basis_points)
-                    .saturating_mul(3_600)
-                    .saturating_mul(u128::from(projected_active_sessions)),
-                u128::from(active_session_seconds),
-            ),
-        )
-    } else {
-        (
-            downgrade_confidence_for_missing_active_sessions(confidence),
-            ceil_div_u128(
-                u128::from(burned_basis_points).saturating_mul(3_600),
-                u128::from(elapsed_seconds),
-            ),
-        )
-    };
+    let active_session_history_covers_interval = active_session_rollups_cover_interval(
+        &rollups,
+        account_id,
+        first_observation.observed_unix_seconds(),
+        latest_observation.observed_unix_seconds(),
+    );
+    let (confidence, burn_rate_basis_points_per_hour) =
+        if active_session_seconds > 0 && active_session_history_covers_interval {
+            (
+                confidence,
+                ceil_div_u128(
+                    u128::from(burned_basis_points)
+                        .saturating_mul(3_600)
+                        .saturating_mul(u128::from(projected_active_sessions)),
+                    u128::from(active_session_seconds),
+                ),
+            )
+        } else {
+            (
+                downgrade_confidence_for_missing_active_sessions(confidence),
+                ceil_div_u128(
+                    u128::from(burned_basis_points).saturating_mul(3_600),
+                    u128::from(elapsed_seconds),
+                ),
+            )
+        };
 
     Ok(ProjectedBurnRateEstimate {
         confidence,
         burn_rate_basis_points_per_hour: Some(clamp_u128_to_u32(burn_rate_basis_points_per_hour)),
     })
+}
+
+fn active_session_rollups_cover_interval(
+    rollups: &[ActiveSessionRollup],
+    account_id: &AccountId,
+    interval_start_unix_seconds: u64,
+    interval_end_unix_seconds: u64,
+) -> bool {
+    let mut account_rollups = rollups
+        .iter()
+        .filter(|rollup| rollup.account_id() == account_id);
+    let Some(first_rollup) = account_rollups.next() else {
+        return false;
+    };
+
+    let mut earliest_bucket_start = first_rollup.bucket_start_unix_seconds();
+    let mut latest_bucket_end = first_rollup.bucket_end_unix_seconds();
+    for rollup in account_rollups {
+        earliest_bucket_start = earliest_bucket_start.min(rollup.bucket_start_unix_seconds());
+        latest_bucket_end = latest_bucket_end.max(rollup.bucket_end_unix_seconds());
+    }
+
+    earliest_bucket_start <= interval_start_unix_seconds
+        && latest_bucket_end >= interval_end_unix_seconds
 }
 
 fn downgrade_confidence_for_missing_active_sessions(

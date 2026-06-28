@@ -1401,6 +1401,11 @@ fn routing_reason_for_account(
     if account.long_salvage > 0 {
         return RoutingReason::PreferredWeeklyResetSoon;
     }
+    if !account.weekly_survives_to_reset
+        && account.weekly_projected_exhaustion_unix_seconds.is_some()
+    {
+        return RoutingReason::PreferredProjectedBurn;
+    }
     if account.long_pressure == context.preferred_long_pressure
         && (context.has_worse_known_selected_pool_long_pressure || context.has_held_reserve_account)
     {
@@ -2004,6 +2009,12 @@ mod tests {
             assessment.preferred_next().map(AccountId::as_str),
             Some("acct_b"),
             "W6: when no weekly account survives, choose latest projected runout before margin"
+        );
+        let preferred_account = account_assessment(&assessment, "acct_b");
+        assert_eq!(
+            preferred_account.routing_reason(),
+            RoutingReason::PreferredProjectedBurn,
+            "W6 fallback should explain that the chosen non-survivor lasts longest"
         );
     }
 
