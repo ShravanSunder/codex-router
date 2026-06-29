@@ -2675,7 +2675,7 @@ exit 42
         );
         assert_eq!(
             lines[2],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tquota risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tquota guard 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
         );
         assert_eq!(
             lines[3],
@@ -2684,6 +2684,9 @@ exit 42
         assert_eq!(lines.len(), 4);
         assert!(!output.stdout.contains("acct_primary"));
         assert!(!output.stdout.contains("score"));
+        assert!(!output.stdout.contains("risk"));
+        assert!(!output.stdout.contains("pressure"));
+        assert!(!output.stdout.contains("cost"));
         assert!(!output.stdout.contains("routing_weight"));
         assert!(!output.stdout.contains("active_pressure"));
         assert!(!output.stdout.contains("headroom_cost"));
@@ -2786,7 +2789,7 @@ exit 42
         assert_eq!(parsed["accounts"][0]["freshness"], "fresh");
         assert_eq!(
             parsed["accounts"][0]["routing_reason"],
-            "preferred_highest_weight"
+            "preferred_safest_quota"
         );
         assert!(parsed["accounts"][0].get("routing_weight").is_none());
         assert_eq!(parsed["accounts"][0]["preferred_next"], true);
@@ -2798,8 +2801,10 @@ exit 42
             "sqlx_mirror"
         );
         assert_eq!(parsed["accounts"][0]["next_use"], "preferred by quota");
-        assert_eq!(parsed["accounts"][0]["short_quota_risk"], 25);
-        assert_eq!(parsed["accounts"][0]["weekly_quota_risk"], 20);
+        assert!(parsed["accounts"][0].get("short_quota_risk").is_none());
+        assert!(parsed["accounts"][0].get("weekly_quota_risk").is_none());
+        assert_eq!(parsed["accounts"][0]["short_quota_guard"], 25);
+        assert_eq!(parsed["accounts"][0]["weekly_quota_guard"], 20);
         assert_eq!(parsed["accounts"][0]["limiting_window"], "5h");
         assert_eq!(
             parsed["accounts"][0]["window_slots"]["5h"]["evidence_state"],
@@ -2833,6 +2838,9 @@ exit 42
         assert!(!output.stdout.contains("refresh-token"));
         assert!(!output.stdout.contains("authorization"));
         assert!(!output.stdout.contains("bottleneck"));
+        assert!(!output.stdout.contains("risk"));
+        assert!(!output.stdout.contains("pressure"));
+        assert!(!output.stdout.contains("cost"));
         assert!(!output.stdout.contains("routing_weight"));
         assert!(!output.stdout.contains("active_pressure"));
         assert!(!output.stdout.contains("headroom_cost"));

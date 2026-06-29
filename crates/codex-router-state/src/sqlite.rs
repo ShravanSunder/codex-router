@@ -171,6 +171,7 @@ const ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         account_id TEXT NOT NULL,
         route_band TEXT NOT NULL,
         process_run_id TEXT NOT NULL,
+        logical_session_id TEXT NOT NULL,
         reservation_id TEXT NOT NULL,
         event_kind TEXT NOT NULL,
         event_unix_seconds INTEGER NOT NULL,
@@ -207,6 +208,7 @@ struct ActiveSessionEventInsert<'a> {
     account_id: &'a AccountId,
     route_band: &'a str,
     process_run_id: &'a str,
+    logical_session_id: &'a str,
     reservation_id: &'a ReservationId,
     event_kind: ActiveSessionEventKind,
     event_unix_seconds: u64,
@@ -257,6 +259,7 @@ pub struct ActiveSessionEvent {
     account_id: AccountId,
     route_band: String,
     process_run_id: String,
+    logical_session_id: String,
     reservation_id: ReservationId,
     event_kind: ActiveSessionEventKind,
     event_unix_seconds: u64,
@@ -286,6 +289,7 @@ impl ActiveSessionEvent {
             account_id,
             route_band: route_band.into(),
             process_run_id: process_run_id.into(),
+            logical_session_id: reservation_id.as_str().to_owned(),
             reservation_id,
             event_kind,
             event_unix_seconds,
@@ -307,6 +311,19 @@ impl ActiveSessionEvent {
         self.session_ended_unix_seconds = session_ended_unix_seconds;
         self.transport_kind = transport_kind.into();
         self
+    }
+
+    /// Sets the logical session id used for interval continuity.
+    #[must_use]
+    pub fn with_logical_session_id(mut self, logical_session_id: impl Into<String>) -> Self {
+        self.logical_session_id = logical_session_id.into();
+        self
+    }
+
+    /// Returns the logical session id used for interval continuity.
+    #[must_use]
+    pub fn logical_session_id(&self) -> &str {
+        &self.logical_session_id
     }
 }
 
@@ -1492,6 +1509,7 @@ impl AsyncSqliteStateStore {
             account_id,
             route_band,
             process_run_id,
+            logical_session_id: reservation_id.as_str(),
             reservation_id,
             event_kind: ActiveSessionEventKind::Acquired,
             event_unix_seconds: acquired_unix_seconds,
@@ -1536,6 +1554,7 @@ impl AsyncSqliteStateStore {
                 account_id: &account_id,
                 route_band,
                 process_run_id,
+                logical_session_id: reservation_id.as_str(),
                 reservation_id,
                 event_kind: ActiveSessionEventKind::Released,
                 event_unix_seconds: released_unix_seconds,
@@ -1570,7 +1589,7 @@ impl AsyncSqliteStateStore {
         route_band: &str,
     ) -> Result<Vec<ActiveSessionEvent>, StateStoreError> {
         let rows = sqlx::query(
-            "SELECT account_id, route_band, process_run_id, reservation_id,
+            "SELECT account_id, route_band, process_run_id, logical_session_id, reservation_id,
                     event_kind, event_unix_seconds, session_started_unix_seconds,
                     session_ended_unix_seconds, transport_kind
                FROM active_session_events
@@ -1707,15 +1726,16 @@ impl AsyncSqliteStateStore {
     ) -> Result<(), StateStoreError> {
         sqlx::query(
             "INSERT INTO active_session_events (
-               account_id, route_band, process_run_id, reservation_id,
+               account_id, route_band, process_run_id, logical_session_id, reservation_id,
                event_kind, event_unix_seconds, session_started_unix_seconds,
                session_ended_unix_seconds, transport_kind
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(event.account_id.as_str())
         .bind(event.route_band)
         .bind(event.process_run_id)
+        .bind(event.logical_session_id)
         .bind(event.reservation_id.as_str())
         .bind(event.event_kind.as_str())
         .bind(u64_to_i64(event.event_unix_seconds)?)
@@ -1762,11 +1782,14 @@ impl AsyncSqliteStateStore {
                     field: "account_id",
                 }
             })?;
+            let reservation_id = ReservationId::new(row.get::<String, _>(2));
+            let logical_session_id = reservation_id.as_str().to_owned();
             self.append_active_session_event(ActiveSessionEventInsert {
                 account_id: &account_id,
                 route_band,
                 process_run_id: &row.get::<String, _>(1),
-                reservation_id: &ReservationId::new(row.get::<String, _>(2)),
+                logical_session_id: &logical_session_id,
+                reservation_id: &reservation_id,
                 event_kind: ActiveSessionEventKind::StalePurged,
                 event_unix_seconds: now_unix_seconds,
                 session_started_unix_seconds: i64_to_u64(
@@ -1840,7 +1863,7 @@ impl AsyncSqliteStateStore {
                 self.apply_v10().await
             }
             9 => self.apply_v10().await,
-            CURRENT_SCHEMA_VERSION => Ok(()),
+            CURRENT_SCHEMA_VERSION => self.apply_v10().await,
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
     }
@@ -1992,6 +2015,11 @@ impl AsyncSqliteStateStore {
     async fn apply_v10(&self) -> Result<(), StateStoreError> {
         self.ensure_active_session_history_schema().await?;
         for (table_name, column_name, alter_statement) in [
+            (
+                "active_session_events",
+                "logical_session_id",
+                "ALTER TABLE active_session_events ADD COLUMN logical_session_id TEXT NOT NULL DEFAULT ''",
+            ),
             (
                 "active_session_events",
                 "session_started_unix_seconds",
@@ -3159,7 +3187,7 @@ impl SqliteStateStore {
                 self.apply_v10()
             }
             9 => self.apply_v10(),
-            CURRENT_SCHEMA_VERSION => Ok(()),
+            CURRENT_SCHEMA_VERSION => self.apply_v10(),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
     }
@@ -3229,6 +3257,7 @@ impl SqliteStateStore {
                     account_id TEXT NOT NULL,
                     route_band TEXT NOT NULL,
                     process_run_id TEXT NOT NULL,
+                    logical_session_id TEXT NOT NULL,
                     reservation_id TEXT NOT NULL,
                     event_kind TEXT NOT NULL,
                     event_unix_seconds INTEGER NOT NULL,
@@ -3520,6 +3549,7 @@ impl SqliteStateStore {
                     account_id TEXT NOT NULL,
                     route_band TEXT NOT NULL,
                     process_run_id TEXT NOT NULL,
+                    logical_session_id TEXT NOT NULL,
                     reservation_id TEXT NOT NULL,
                     event_kind TEXT NOT NULL,
                     event_unix_seconds INTEGER NOT NULL,
@@ -3560,6 +3590,11 @@ impl SqliteStateStore {
 
     fn apply_v10(&self) -> Result<(), StateStoreError> {
         for (table_name, column_name, column_definition) in [
+            (
+                "active_session_events",
+                "logical_session_id",
+                "logical_session_id TEXT NOT NULL DEFAULT ''",
+            ),
             (
                 "active_session_events",
                 "session_started_unix_seconds",
@@ -4216,31 +4251,32 @@ fn parse_active_session_event(row: SqliteRow) -> Result<ActiveSessionEvent, Stat
             account_id: account_id_value.clone(),
             field: "account_id",
         })?;
-    let event_kind_value = row.get::<String, _>(4);
+    let event_kind_value = row.get::<String, _>(5);
     let event_kind = ActiveSessionEventKind::parse(&event_kind_value)?;
 
     Ok(ActiveSessionEvent::new(
         account_id,
         row.get::<String, _>(1),
         row.get::<String, _>(2),
-        ReservationId::new(row.get::<String, _>(3)),
+        ReservationId::new(row.get::<String, _>(4)),
         event_kind,
         i64_to_u64(
-            row.get::<i64, _>(5),
+            row.get::<i64, _>(6),
             &account_id_value,
             "event_unix_seconds",
         )?,
     )
+    .with_logical_session_id(row.get::<String, _>(3))
     .with_session_interval(
         i64_to_u64(
-            row.get::<i64, _>(6),
+            row.get::<i64, _>(7),
             &account_id_value,
             "session_started_unix_seconds",
         )?,
-        row.get::<Option<i64>, _>(7)
+        row.get::<Option<i64>, _>(8)
             .map(|value| i64_to_u64(value, &account_id_value, "session_ended_unix_seconds"))
             .transpose()?,
-        row.get::<String, _>(8),
+        row.get::<String, _>(9),
     ))
 }
 

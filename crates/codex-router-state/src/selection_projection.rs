@@ -223,22 +223,48 @@ where
         let mut windows = Vec::with_capacity(input.windows().len());
         for window in input.windows() {
             let mut fact = quota_window_fact_from_selector_window(window);
+            let projected_active_sessions = current_active_sessions.saturating_add(1);
             let estimate = estimate_window_burn_rate(
                 state,
                 input.account_id(),
                 route_band,
                 window,
                 now_unix_seconds,
-                current_active_sessions.saturating_add(1),
             )
             .await?;
-            if let Some(burn_rate_basis_points_per_hour) = estimate.burn_rate_basis_points_per_hour
+            if let Some(per_connection_burn_basis_points_per_hour) =
+                estimate.per_connection_burn_basis_points_per_hour
             {
-                fact = fact.with_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour);
+                let projected_candidate_burn_basis_points_per_hour =
+                    per_connection_burn_basis_points_per_hour
+                        .saturating_mul(projected_active_sessions.max(1));
+                fact = fact
+                    .with_per_connection_burn_basis_points_per_hour(
+                        per_connection_burn_basis_points_per_hour,
+                    )
+                    .with_projected_candidate_burn_basis_points_per_hour(
+                        projected_candidate_burn_basis_points_per_hour,
+                    );
                 if let Some(projected_exhaustion_unix_seconds) = projected_exhaustion_unix_seconds(
                     now_unix_seconds,
                     window.remaining_headroom(),
-                    burn_rate_basis_points_per_hour,
+                    projected_candidate_burn_basis_points_per_hour,
+                ) {
+                    fact = fact
+                        .with_projected_exhaustion_unix_seconds(projected_exhaustion_unix_seconds);
+                }
+            } else if let Some(aggregate_burn_basis_points_per_hour) =
+                estimate.aggregate_burn_basis_points_per_hour
+            {
+                fact = fact
+                    .with_aggregate_burn_basis_points_per_hour(aggregate_burn_basis_points_per_hour)
+                    .with_projected_candidate_burn_basis_points_per_hour(
+                        aggregate_burn_basis_points_per_hour,
+                    );
+                if let Some(projected_exhaustion_unix_seconds) = projected_exhaustion_unix_seconds(
+                    now_unix_seconds,
+                    window.remaining_headroom(),
+                    aggregate_burn_basis_points_per_hour,
                 ) {
                     fact = fact
                         .with_projected_exhaustion_unix_seconds(projected_exhaustion_unix_seconds);
@@ -262,7 +288,8 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProjectedBurnRateEstimate {
     confidence: QuotaRunRateConfidence,
-    burn_rate_basis_points_per_hour: Option<u32>,
+    per_connection_burn_basis_points_per_hour: Option<u32>,
+    aggregate_burn_basis_points_per_hour: Option<u32>,
 }
 
 async fn estimate_window_burn_rate(
@@ -271,12 +298,12 @@ async fn estimate_window_burn_rate(
     route_band: &str,
     window: &PersistedSelectorQuotaWindow,
     now_unix_seconds: u64,
-    projected_active_sessions: u32,
 ) -> Result<ProjectedBurnRateEstimate, StateStoreError> {
     let Some(reset_unix_seconds) = window.reset_unix_seconds() else {
         return Ok(ProjectedBurnRateEstimate {
             confidence: QuotaRunRateConfidence::Unknown,
-            burn_rate_basis_points_per_hour: None,
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
         });
     };
     let mut observations = state
@@ -296,7 +323,8 @@ async fn estimate_window_burn_rate(
     let Some(latest_observation) = observations.last() else {
         return Ok(ProjectedBurnRateEstimate {
             confidence: QuotaRunRateConfidence::Unknown,
-            burn_rate_basis_points_per_hour: Some(0),
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
         });
     };
     if now_unix_seconds.saturating_sub(latest_observation.observed_unix_seconds())
@@ -304,13 +332,15 @@ async fn estimate_window_burn_rate(
     {
         return Ok(ProjectedBurnRateEstimate {
             confidence: QuotaRunRateConfidence::Stale,
-            burn_rate_basis_points_per_hour: None,
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
         });
     }
     if observations.len() == 1 {
         return Ok(ProjectedBurnRateEstimate {
             confidence: QuotaRunRateConfidence::Insufficient,
-            burn_rate_basis_points_per_hour: Some(0),
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
         });
     }
 
@@ -331,7 +361,8 @@ async fn estimate_window_burn_rate(
     if elapsed_seconds == 0 {
         return Ok(ProjectedBurnRateEstimate {
             confidence,
-            burn_rate_basis_points_per_hour: Some(0),
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
         });
     }
 
@@ -361,30 +392,33 @@ async fn estimate_window_burn_rate(
         first_observation.observed_unix_seconds(),
         latest_observation.observed_unix_seconds(),
     );
-    let (confidence, burn_rate_basis_points_per_hour) =
+    let aggregate_burn_basis_points_per_hour = ceil_div_u128(
+        u128::from(burned_basis_points).saturating_mul(3_600),
+        u128::from(elapsed_seconds),
+    );
+    let (confidence, per_connection_burn_basis_points_per_hour) =
         if active_session_seconds > 0 && active_session_history_covers_interval {
             (
                 confidence,
-                ceil_div_u128(
-                    u128::from(burned_basis_points)
-                        .saturating_mul(3_600)
-                        .saturating_mul(u128::from(projected_active_sessions)),
+                Some(ceil_div_u128(
+                    u128::from(burned_basis_points).saturating_mul(3_600),
                     u128::from(active_session_seconds),
-                ),
+                )),
             )
         } else {
             (
                 downgrade_confidence_for_missing_active_sessions(confidence),
-                ceil_div_u128(
-                    u128::from(burned_basis_points).saturating_mul(3_600),
-                    u128::from(elapsed_seconds),
-                ),
+                None,
             )
         };
 
     Ok(ProjectedBurnRateEstimate {
         confidence,
-        burn_rate_basis_points_per_hour: Some(clamp_u128_to_u32(burn_rate_basis_points_per_hour)),
+        per_connection_burn_basis_points_per_hour: per_connection_burn_basis_points_per_hour
+            .map(clamp_u128_to_u32),
+        aggregate_burn_basis_points_per_hour: Some(clamp_u128_to_u32(
+            aggregate_burn_basis_points_per_hour,
+        )),
     })
 }
 
@@ -394,22 +428,36 @@ fn active_session_rollups_cover_interval(
     interval_start_unix_seconds: u64,
     interval_end_unix_seconds: u64,
 ) -> bool {
-    let mut account_rollups = rollups
-        .iter()
-        .filter(|rollup| rollup.account_id() == account_id);
-    let Some(first_rollup) = account_rollups.next() else {
-        return false;
-    };
-
-    let mut earliest_bucket_start = first_rollup.bucket_start_unix_seconds();
-    let mut latest_bucket_end = first_rollup.bucket_end_unix_seconds();
-    for rollup in account_rollups {
-        earliest_bucket_start = earliest_bucket_start.min(rollup.bucket_start_unix_seconds());
-        latest_bucket_end = latest_bucket_end.max(rollup.bucket_end_unix_seconds());
+    if interval_start_unix_seconds >= interval_end_unix_seconds {
+        return true;
     }
 
-    earliest_bucket_start <= interval_start_unix_seconds
-        && latest_bucket_end >= interval_end_unix_seconds
+    let mut account_rollups = rollups
+        .iter()
+        .filter(|rollup| rollup.account_id() == account_id)
+        .collect::<Vec<_>>();
+    account_rollups.sort_by_key(|rollup| {
+        (
+            rollup.bucket_start_unix_seconds(),
+            rollup.bucket_end_unix_seconds(),
+        )
+    });
+
+    let mut covered_until = interval_start_unix_seconds;
+    for rollup in account_rollups {
+        if rollup.bucket_end_unix_seconds() <= covered_until {
+            continue;
+        }
+        if rollup.bucket_start_unix_seconds() > covered_until {
+            return false;
+        }
+        covered_until = covered_until.max(rollup.bucket_end_unix_seconds());
+        if covered_until >= interval_end_unix_seconds {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn downgrade_confidence_for_missing_active_sessions(
@@ -465,4 +513,25 @@ fn projected_exhaustion_unix_seconds(
         .saturating_mul(3_600)
         .checked_div(u128::from(burn_rate_basis_points_per_hour))?;
     Some(now_unix_seconds.saturating_add(seconds_until_exhaustion.min(u128::from(u64::MAX)) as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_router_core::ids::AccountId;
+
+    use super::*;
+
+    #[test]
+    fn projection_rejects_rollup_gap_inside_quota_interval() {
+        let account = AccountId::new("acct_rollup_gap").unwrap_or_else(|error| panic!("{error}"));
+        let rollups = vec![
+            ActiveSessionRollup::new(account.clone(), "responses", 0, 300, 300, 1),
+            ActiveSessionRollup::new(account.clone(), "responses", 600, 900, 300, 1),
+        ];
+
+        assert!(
+            !active_session_rollups_cover_interval(&rollups, &account, 0, 900),
+            "a missing middle rollup bucket must downgrade active-session history"
+        );
+    }
 }

@@ -1,7 +1,7 @@
 # Account Quota Burn-Rate Selection Spec
 
 Date: 2026-06-27
-Status: accepted for implementation after fresh spec review
+Status: accepted for TDD implementation after one spec-review cycle
 
 ## Product Intent
 
@@ -83,6 +83,8 @@ same_pool_survival_margin_tolerance_basis_points = 500  # 5.00%
 active_session_imbalance_threshold = 1
 usage_limit_suspect_ttl_seconds = 300
 active_session_rollup_bucket_seconds = 300
+drain_pool_reset_horizon_seconds = 172_800         # 48 hours
+reactive_reconnect_min_runway_seconds = 900        # 15 minutes
 ```
 
 These constants are policy inputs, not hidden literals. Tests must pass them
@@ -109,54 +111,80 @@ must match runtime for the same fixture inputs. When the mirror is stale or
 unavailable, the CLI must label active-session state as stale/unavailable and
 must not present its next-account answer as live-load exact.
 
-### R2. Weekly Survival First
+### R2. Weekly Drain Target First
 
-For each account and route band, the selector computes:
+Weekly quota is perishable. For each account and route band, the selector
+computes how many active connections are needed to drain the account's remaining
+weekly quota by its weekly reset:
 
 ```text
-projected_weekly_burn_to_reset =
-  projected_weekly_burn_percent_per_hour * hours_until_weekly_reset
+hours_until_weekly_reset =
+  (weekly_reset_unix_seconds - now_unix_seconds) / 3600
 
-weekly_survival_margin =
-  current_weekly_remaining_percent - projected_weekly_burn_to_reset
+required_active_connections_to_drain =
+  weekly_remaining_basis_points
+  / (per_connection_weekly_burn_basis_points_per_hour * hours_until_weekly_reset)
+
+current_drain_gap =
+  required_active_connections_to_drain - current_active_sessions
+
+projected_drain_gap_after_selection =
+  required_active_connections_to_drain - (current_active_sessions + 1)
 ```
 
-An account is a weekly survivor when `weekly_survival_margin` is at or above the
-configured safety buffer. Survivors are preferred over non-survivors even when a
-non-survivor has higher raw remaining percentage.
+The selector optimizes for accounts with positive drain gap first: those accounts
+need more active connections if the router wants to consume their weekly quota
+before reset. Accounts with a reset inside `drain_pool_reset_horizon_seconds`
+form the near-reset drain pool. Far-reset accounts are reserve while any
+near-reset account can accept new work without violating hard blocks, the 5h
+guard, or the reactive reconnect floor.
 
-Among weekly survivors, first form same-effective-weekly pools. Two accounts are
-in the same effective weekly pool when:
+An account is drainable when:
 
-- both pass hard blocks and the 5h guard;
-- both are weekly survivors;
-- their weekly reset times differ by no more than
-  `same_pool_reset_tolerance_seconds`;
-- their weekly survival margins differ by no more than
-  `same_pool_survival_margin_tolerance_basis_points`; and
-- both accounts have the same burn-rate confidence tier.
+- it passes hard blocks;
+- it passes the 5h guard;
+- it has weekly reset data and a burn estimate with usable confidence;
+- its projected weekly runway after one additional active connection is at least
+  `reactive_reconnect_min_runway_seconds`; and
+- either it has positive drain gap, or all positive-gap near-reset peers are
+  already at higher immediate churn risk.
 
-Inside a same-effective-weekly pool, active session imbalance is an ordering
-rule, not a cosmetic tie-break. If active counts differ by at least
-`active_session_imbalance_threshold`, choose the lower-active account unless its
-projected burn, 5h guard, affinity, or hard block status makes it ineligible.
-A same-pool account with six active sessions must not keep receiving new
-sessions while a same-pool peer has zero active sessions and comparable
-survival.
+Inside the near-reset drain pool, select the account with the largest positive
+drain gap after accounting for the next session. If two accounts are close enough
+that their projected drain gaps compare equal at selector precision, choose the
+lower current active session count, then the earlier weekly reset, then the
+larger projected runway, then stable account order.
 
-Before reset optimization, prefer the highest available burn-rate confidence
-tier. A lower-confidence account with insufficient burn history does not beat a
-known survivor only because it resets sooner. Inside the highest available
-confidence tier, after same-pool active balancing, prefer the account with the
-earliest weekly reset. That uses quota that is closest to being refreshed and
-preserves later-reset accounts for later work. If reset times are still tied,
-prefer larger survival margin, then lower current active session count, then
-stable account order.
+If every near-reset drain-pool account has non-positive drain gap but can still
+run safely above the reactive floor, the selector may keep draining that pool
+before touching far-reset reserve. This is the controlled-drain mode that lets
+the router maximize quota use while Codex-safe reconnect containment handles real
+account exhaustion.
 
-When no account survives weekly, choose the account with the least bad weekly
-projection: latest projected weekly runout is primary, then less negative
-survival margin, then higher confidence, then lower current active sessions,
-then stable account order. The 5h guard and hard blocks still apply.
+Controlled-drain ordering is deterministic:
+
+1. Exclude candidates whose projected weekly runway after the next session is
+   below `reactive_reconnect_min_runway_seconds`.
+2. Hold far-reset reserve while any near-reset candidate remains safely
+   drainable.
+3. If near-reset candidates differ in current active sessions by at least
+   `active_session_imbalance_threshold`, choose the lower-active candidate.
+4. Otherwise choose the candidate with the larger projected weekly runway after
+   the next session.
+5. Tie by earlier weekly reset, then stable account order.
+
+This mode must not be enabled for runtime WebSocket selection until WebSocket
+exhaustion containment proof is green for the route band.
+
+Far-reset reserve is selected only when the near-reset pool is unavailable,
+hard-blocked, below the 5h guard, below the reactive reconnect floor, stale or
+unknown while known alternatives exist, or already attempted for the current
+request/rotation.
+
+If no known drainable account exists, choose the least-bad known candidate by
+latest projected weekly runway, then higher confidence, then lower current active
+sessions, then stable account order. Unknown fallback is allowed only when no
+known usable account exists.
 
 ### R3. 5h Flow Guard
 
@@ -167,10 +195,10 @@ For each account, compute:
 
 ```text
 projected_5h_burn_to_reset =
-  projected_5h_burn_percent_per_hour * hours_until_5h_reset
+  projected_5h_burn_basis_points_per_hour * hours_until_5h_reset
 
 short_survival_margin =
-  current_5h_remaining_percent - projected_5h_burn_to_reset
+  current_5h_remaining_basis_points - projected_5h_burn_to_reset
 ```
 
 If the account is projected to run out before the 5h reset and the reset is not
@@ -216,22 +244,25 @@ compute a burn slope across a reset boundary.
 For each account, route band, and window:
 
 ```text
-raw_burn_percent_per_hour =
-  max(0, prior_remaining_percent - latest_remaining_percent)
+burned_basis_points =
+  max(0, prior_remaining_basis_points - latest_remaining_basis_points)
+
+raw_burn_basis_points_per_hour =
+  burned_basis_points
   / elapsed_hours
 
 active_session_hours =
   active_session_seconds_between(prior_observed, latest_observed) / 3600
 
-per_session_burn_percent_per_hour =
-  burned_percent / active_session_hours
+per_connection_burn_basis_points_per_hour =
+  burned_basis_points / active_session_hours
 ```
 
 If active-session history is sufficient, project candidate burn with:
 
 ```text
-projected_burn_percent_per_hour =
-  per_session_burn_percent_per_hour * projected_active_session_count
+projected_burn_basis_points_per_hour =
+  per_connection_burn_basis_points_per_hour * projected_active_session_count
 ```
 
 All percent values in selector math use basis points, where `10_000` is 100%.
@@ -240,7 +271,7 @@ division cannot be exact, round projected burn up for safety. Display layers may
 render decimal percentages, but selector comparisons use basis points.
 
 If active-session history is insufficient but quota history is sufficient, use
-the account aggregate `raw_burn_percent_per_hour` with lower confidence.
+the account aggregate `raw_burn_basis_points_per_hour` with lower confidence.
 
 If quota burn occurs while active-session history says zero sessions were
 active, mark the estimate anomalous and fall back to account aggregate burn. Do
@@ -249,6 +280,41 @@ not divide by zero and do not manufacture a synthetic active cost.
 If quota history is insufficient, the selector can still use current remaining
 quota and reset time, but the candidate is lower confidence than a candidate
 with a fresh survival estimate.
+
+The persisted data must be sufficient to recompute the estimate from points in
+time. A latest quota row alone is not enough. SQLx must retain at least:
+
+```text
+quota observation point:
+  account_id
+  route_band
+  limit_window_seconds
+  observed_unix_seconds
+  remaining_basis_points
+  reset_unix_seconds
+  window_status
+  refresh_source
+  refresh_outcome
+
+active-session point/interval:
+  account_id
+  route_band
+  logical_session_id
+  session_started_unix_seconds
+  session_ended_unix_seconds
+  active_session_seconds overlapping the quota-observation interval
+  max_concurrent_sessions for diagnostics
+```
+
+The burn-rate unit is always:
+
+```text
+basis points of quota / hour / active connection
+```
+
+Aggregate account burn is a lower-confidence fallback. It must be named as
+aggregate in types and output, and must not be confused with the per-connection
+unit.
 
 ### R6. Hard Account Blocks
 
@@ -356,6 +422,7 @@ session intervals after the current lease is released:
 ```text
 event_id
 process_run_id
+logical_session_id             # stable for one client connection/session
 reservation_id
 account_id
 route_band
@@ -383,6 +450,8 @@ Overlap accounting is additive: two sessions active for the same 300-second
 bucket produce 600 active-session-seconds. A re-reservation for the same
 connection is a continuation of the same session interval unless the previous
 reservation was terminally released, retired, or stale-purged.
+`completed_sessions` counts released plus retired sessions. Stale-purged
+sessions are tracked separately.
 
 Legacy `active_pressure` columns or fields may be retained only for migration
 readability while being ignored by selector math. New code must not treat them
@@ -471,32 +540,42 @@ for each candidate account:
   estimate 5h burn and confidence
   compute weekly_survival_margin
   compute short_survival_margin
+  compute required_active_connections_to_drain
+  compute projected_drain_gap_after_selection
   classify:
     blocked
     unknown
     held_by_5h_guard
-    weekly_survivor
-    weekly_non_survivor
+    near_reset_positive_drain_gap
+    near_reset_controlled_drain
+    far_reset_reserve
+    least_bad_known
 
 selection:
-  if any weekly_survivor passing 5h guard:
-    keep only the highest available burn-rate confidence tier
-    group same-effective-weekly pools
-    within each same pool:
-      if active count difference >= active_session_imbalance_threshold:
-        choose lower active session count
-      else:
-        choose earliest weekly reset
-    across pools:
-      choose earliest weekly reset
-    tie: larger survival margin
-    tie: fewer current active sessions
+  if any known drainable account in near-reset drain pool:
+    prefer positive projected drain gap
+    tie: lower current active sessions
+    tie: earlier weekly reset
+    tie: larger projected runway
     tie: stable account order
-  else if any non-survivor passing 5h guard:
-    choose latest projected weekly runout
-    tie: less negative survival margin
+  else if controlled-drain is runtime-enabled and any near-reset account remains
+      above reactive_reconnect_min_runway_seconds:
+    continue draining near-reset pool before far-reset reserve
+    prefer lower current active sessions when the active-session gap is at least
+      active_session_imbalance_threshold
+    otherwise prefer larger projected runway
+    tie: earlier weekly reset
+    tie: stable account order
+  else if any far-reset reserve account is known usable:
+    choose largest projected runway
+    tie: lower current active sessions
+    tie: earlier weekly reset
+    tie: stable account order
+  else if any least-bad known candidate exists:
+    choose latest projected weekly runway
     tie: higher confidence
-    tie: stable account id order
+    tie: lower current active sessions
+    tie: stable account order
   else if only unknown candidates exist:
     choose unknown fallback only when no known usable account exists
   else:
@@ -509,31 +588,38 @@ The implementation plan must start with pure selector and data-structure tests
 before proxy or CLI changes.
 
 All numeric rows use the v1 default policy constants from R0. Percentages in the
-test implementation should be represented as basis points, so `0.5%/h` is
-`50` basis-points-per-hour and must not round to `0` or `1%/h`.
+test implementation should be represented as basis points per hour per active
+connection, so `0.5%/h/connection` is `50`
+basis-points-per-hour-per-connection and must not round to `0` or `1%/h`.
+
+This table is a coverage index for the core selector dimensions. The executable
+multi-start account timelines live in
+`docs/specs/2026-06-28-account-selection-tdd-scenario-spec.md`; if a row here
+and a scenario row appear to disagree, the executable scenario row is
+authoritative for account order.
 
 | id | A | B | C | expected |
 | --- | --- | --- | --- | --- |
-| W1 | 20% weekly, reset 24h, burn 0.5%/h, 0 active | 34% weekly, reset 96h, burn 0.5%/h, 0 active | 80% weekly, reset 7d, burn 0.5%/h, 0 active | A wins: A survives soon reset; B and C burn before reset or preserve later reset only if all soon-reset accounts fail |
-| W2 | 20%, reset 24h, burn 1.0%/h | 34%, reset 96h, burn 0.2%/h | 80%, reset 7d, burn 0.2%/h | B wins if B survives and A does not; C is preserved because B resets sooner |
-| W3 | 60%, reset 48h, burn 0.5%/h | 70%, reset 96h, burn 0.5%/h | 90%, reset 7d, burn 0.5%/h | A wins: all survive, earliest reset wins |
-| W4 | 20%, reset 24h, burn unknown, fresh quota | 34%, reset 96h, burn 0.2%/h | 80%, reset 7d, burn 0.2%/h | B wins: known survivor beats insufficient-burn A; C is far-reset reserve |
-| W5 | 25%, reset crossed, prior 5%, latest 95% | 30%, same reset, burn 0.5%/h | none | B wins; A history before reset is ignored, not negative burn |
-| W6 | 10%, reset 20h, runout 10h, margin -10% | 20%, reset 60h, runout 30h, margin -20% | none | B wins; non-survivor fallback uses latest projected runout before negative margin |
-| W7 | 40%, reset 48h, burn 0.5%/h, lower confidence, 0 active | 38%, reset 48h, burn 0.5%/h, higher confidence, 0 active | 80%, reset 7d, burn 0.2%/h, higher confidence | B wins: confidence tier gates before survival-margin tie; C is preserved because B resets sooner |
-| W8 | 21%, reset 24h, burn unknown, 0 active | 36%, reset 72h, burn 0.3%/h, 3 active | 80%, reset 7d, burn 0.3%/h, 0 active | B wins: known confidence beats A; active imbalance is only same-pool, so C is preserved as far-reset reserve |
-| F1 | weekly healthy, 5h 2%, 5h reset 4h, 5h burn 1%/h | weekly lower, 5h 30%, 5h reset 4h, 5h burn 1%/h | none | B wins; A fails 5h guard |
-| F2 | weekly healthy, 5h 2%, 5h reset 10m, 5h burn 1%/h | weekly lower, 5h 30%, 5h reset 4h | none | A can win if short reset safety buffer passes |
-| A1 | 50%, reset 72h, raw burn 6%/h, avg 3 sessions, current 0 | 35%, reset 72h, raw burn 1%/h, avg 1 session, current 0 | none | B wins; A per-session projection still fails |
+| W1 | 20% weekly, reset 24h, burn 0.5%/h/conn, 0 active | 34% weekly, reset 96h, burn 0.5%/h/conn, 0 active | 80% weekly, reset 7d, burn 0.5%/h/conn, 0 active | A wins: A is near-reset drain pool; B/C are reserve while A can drain safely |
+| W2 | 20%, reset 24h, burn 1.0%/h/conn | 34%, reset 96h, burn 0.2%/h/conn | 80%, reset 7d, burn 0.2%/h/conn | A wins while above reactive floor; B wins only if A falls below 5h guard/reactive floor |
+| W3 | 60%, reset 48h, burn 0.5%/h/conn | 70%, reset 96h, burn 0.5%/h/conn | 90%, reset 7d, burn 0.5%/h/conn | A wins: earliest near-reset drain pool wins when safe |
+| W4 | 20%, reset 24h, burn unknown, fresh quota | 34%, reset 96h, burn 0.2%/h/conn | 80%, reset 7d, burn 0.2%/h/conn | B wins: known usable estimate beats unknown A; C is farther reserve |
+| W5 | 25%, reset crossed, prior 5%, latest 95% | 30%, same reset, burn 0.5%/h/conn | none | B wins; A history before reset is ignored, not negative burn |
+| W6 | 10%, reset 20h, runout 10h | 20%, reset 60h, runout 30h | none | B wins only when A is below reactive floor; otherwise A is controlled drain |
+| W7 | 40%, reset 48h, burn 0.5%/h/conn, lower confidence, 0 active | 38%, reset 48h, burn 0.5%/h/conn, higher confidence, 0 active | 80%, reset 7d, burn 0.2%/h/conn, higher confidence | B wins when confidence makes A non-comparable; if both known enough, near-reset drain gap decides |
+| W8 | 21%, reset 24h, burn unknown, 0 active | 36%, reset 72h, burn 0.3%/h/conn, 3 active | 80%, reset 7d, burn 0.3%/h/conn, 0 active | B wins: known confidence beats A; C remains far-reset reserve |
+| F1 | weekly healthy, 5h 2%, 5h reset 4h, 5h burn 1%/h/conn | weekly lower, 5h 30%, 5h reset 4h, 5h burn 1%/h/conn | none | B wins; A fails 5h guard |
+| F2 | weekly healthy, 5h 2%, 5h reset 10m, 5h burn 1%/h/conn | weekly lower, 5h 30%, 5h reset 4h | none | A can win if short reset safety buffer passes |
+| A1 | 50%, reset 72h, raw burn 6%/h, avg 3 sessions, current 0 | 35%, reset 72h, raw burn 1%/h, avg 1 session, current 0 | none | B wins; A per-connection projection still fails |
 | A2 | 50%, reset 72h, raw burn 6%/h, avg 3 sessions, current 0 | 35%, reset 72h, raw burn 1%/h, avg 1 session, current 4 | none | A wins if B projected active sessions make B fail |
 | A3 | same quota and history as B, active current 0 | same quota and history as A, active current 3 | none | A wins tie by fewer current active sessions |
 | A4 | burn occurred, active session-hours zero | 40%, reset 48h, valid history | none | B wins or A low-confidence fallback; no divide-by-zero and no fake cost |
-| A5 | 19%, reset 45h, burn 0%/h observed, current 6 | 18%, reset 46h, burn 0%/h observed, current 0 | 34%, reset 107h, burn 0.2%/h | B wins; same low-weekly reset pool must share new sessions before using far-reset reserve |
-| A6 | same reset and same survival margin as B, higher confidence, current 4 | same reset and same survival margin as A, lower confidence, current 0 | none | A wins: confidence tier gates before active-count tie; active balancing does not make lower-confidence peers same-pool |
+| A5 | 19%, reset 45h, burn 0%/h/conn observed, current 6 | 18%, reset 46h, burn 0%/h/conn observed, current 0 | 34%, reset 107h, burn 0.2%/h/conn | B wins; same low-weekly reset pool must share new sessions before using far-reset reserve |
+| A6 | same reset and same drain gap as B, higher confidence, current 4 | same reset and same drain gap as A, lower confidence, current 0 | none | A wins only if B's confidence is too low to compare; otherwise lower active count wins |
 | T1 | same account inputs, request is HTTP/SSE | same account inputs, request is WebSocket | none | same selected account; transport kind cannot affect quota score |
-| U1 | usage-limit active block, otherwise best | 25%, reset 24h, burn 0.5%/h | 80%, reset 7d, burn 0.5%/h | B wins; usage limit hard-blocks A |
+| U1 | usage-limit active block, otherwise best | 25%, reset 24h, burn 0.5%/h/conn | 80%, reset 7d, burn 0.5%/h/conn | B wins; usage limit hard-blocks A |
 | U2 | usage-limit block | usage-limit block | usage-limit block | no account; router all-accounts-exhausted |
-| U3 | unknown quota | 25%, reset 24h, burn 0.5%/h | none | B wins; known survivor beats unknown |
+| U3 | unknown quota | 25%, reset 24h, burn 0.5%/h/conn | none | B wins; known drainable account beats unknown |
 | U4 | unknown quota | unknown quota | disabled | unknown fallback allowed; disabled excluded |
 | C1 | affinity owner, retiring but not blocked | healthier new-work account | none | continuation stays on A; new work goes B |
 | C2 | affinity owner, usage-limit hard blocked | healthier account | none | router uses Codex-safe reconnect/retry; A not reused |

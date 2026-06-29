@@ -1255,7 +1255,7 @@ mod async_forwarding_tests {
     #[test]
     fn websocket_quota_classifier_ignores_oversized_prefix_only_quota_token() {
         let oversized_prefix_frame = Message::text(format!(
-            r#"{{"type":"error","error":{{"code":"usage_limit_reached","message":"{}"}}"#,
+            r#"{{"type":"error","error":{{"code":"usage_limit_reached"}} bogus, "padding":"{}"}}"#,
             "x".repeat(70 * 1024)
         ));
 

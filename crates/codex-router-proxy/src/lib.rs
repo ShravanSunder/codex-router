@@ -116,6 +116,8 @@ mod tests {
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
     use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
+    use codex_router_selection::burn_down::assess_route_band;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_selection::reservation::ReservationHandle;
     use codex_router_state::account::AccountRecord;
@@ -133,6 +135,7 @@ mod tests {
     use codex_router_state::repositories::AffinityRepository;
     use codex_router_state::repositories::QuotaSnapshotRepository;
     use codex_router_state::repositories::SelectorQuotaRepository;
+    use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts;
     use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
     use codex_router_state::sqlite::SqliteStateStore;
@@ -2087,7 +2090,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), eligible.account_id());
-        assert_eq!(selected.selection_reason(), "preferred_highest_weight");
+        assert_eq!(selected.selection_reason(), "preferred_safest_quota");
     }
 
     #[test]
@@ -2720,7 +2723,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), eligible.account_id());
-        assert_eq!(selected.selection_reason(), "preferred_highest_weight");
+        assert_eq!(selected.selection_reason(), "preferred_safest_quota");
     }
 
     #[test]
@@ -2774,7 +2777,7 @@ mod tests {
         };
 
         assert_eq!(first.account_id(), alpha.account_id());
-        assert_eq!(first.selection_reason(), "preferred_highest_weight");
+        assert_eq!(first.selection_reason(), "preferred_safest_quota");
         assert_eq!(second.account_id(), alpha.account_id());
         assert_eq!(second.selection_reason(), "account_hold_cooldown");
     }
@@ -2862,13 +2865,14 @@ mod tests {
             AccountStatus::Enabled,
         );
         let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
+        let now = test_unix_seconds();
         persist_account_with_selector_window_reset_specs(
             &state,
             &askluna,
             "responses",
             &[
-                (18_000, 98, true, test_unix_seconds() + 4 * 3_600),
-                (604_800, 23, false, test_unix_seconds() + 3 * 86_400),
+                (18_000, 100, true, now + 4 * 3_600),
+                (604_800, 18, false, now + 24 * 3_600),
             ],
         );
         persist_account_with_selector_window_reset_specs(
@@ -2876,8 +2880,8 @@ mod tests {
             &matches,
             "responses",
             &[
-                (18_000, 55, true, test_unix_seconds() + 4 * 3_600),
-                (604_800, 55, false, test_unix_seconds() + 3 * 86_400),
+                (18_000, 100, true, now + 4 * 3_600),
+                (604_800, 19, false, now + 24 * 3_600),
             ],
         );
         persist_account_with_selector_window_reset_specs(
@@ -2885,14 +2889,45 @@ mod tests {
             &ssdev,
             "responses",
             &[
-                (18_000, 60, true, test_unix_seconds() + 4 * 3_600),
-                (604_800, 60, false, test_unix_seconds() + 3 * 86_400),
+                (18_000, 100, true, now + 4 * 3_600),
+                (604_800, 20, false, now + 24 * 3_600),
             ],
         );
         let async_state = match AsyncSqliteStateStore::open(&database_path).await {
             Ok(state) => state,
             Err(error) => panic!("async state store should open: {error}"),
         };
+        let history_start = now - 9_200;
+        let history_middle = now - 4_700;
+        let history_latest = now - 200;
+        for (account, start_remaining, latest_remaining) in [
+            (askluna.account_id(), 19, 18),
+            (matches.account_id(), 20, 19),
+            (ssdev.account_id(), 21, 20),
+        ] {
+            append_history_series_with_reset(
+                &async_state,
+                account,
+                "responses",
+                604_800,
+                now + 24 * 3_600,
+                &[
+                    (history_start, start_remaining),
+                    (history_middle, start_remaining),
+                    (history_latest, latest_remaining),
+                ],
+            )
+            .await;
+            record_completed_active_session(
+                &async_state,
+                account,
+                &format!("process-history-{}", account.as_str()),
+                &format!("reservation-history-{}", account.as_str()),
+                history_start,
+                history_latest,
+            )
+            .await;
+        }
         let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
             &async_state,
             RouteBandWeightedSelectors::default(),
@@ -2924,20 +2959,14 @@ mod tests {
         assert_eq!(
             selected_accounts,
             vec![
-                "acct_matches".to_owned(),
                 "acct_ssdev".to_owned(),
                 "acct_matches".to_owned(),
+                "acct_askluna".to_owned(),
                 "acct_ssdev".to_owned(),
                 "acct_matches".to_owned(),
-                "acct_ssdev".to_owned(),
+                "acct_askluna".to_owned(),
             ],
-            "six concurrent sessions should spread across the same healthy reset pool: {selected_accounts:?}"
-        );
-        assert!(
-            selected_accounts
-                .iter()
-                .all(|account| account != "acct_askluna"),
-            "weak weekly quota account must not be selected while healthier accounts exist: {selected_accounts:?}"
+            "six starts should spread across the same effective weekly pool: {selected_accounts:?}"
         );
         assert_eq!(active_sessions.len(), 6);
     }
@@ -3072,11 +3101,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("async state store should open: {error}"),
         };
-        let history_start = now - 9_200;
-        let history_middle = now - 4_700;
         let history_latest = now - 200;
-        let slow_history_start = now - 18_200;
-        let slow_history_middle = now - 9_200;
+        let askluna_history_start = now - 18_700;
+        let askluna_history_middle = now - 9_450;
         append_history_series_with_reset(
             &async_state,
             askluna.account_id(),
@@ -3084,8 +3111,8 @@ mod tests {
             604_800,
             now + hours_minutes(22, 49),
             &[
-                (slow_history_start, 5),
-                (slow_history_middle, 5),
+                (askluna_history_start, 6),
+                (askluna_history_middle, 5),
                 (history_latest, 4),
             ],
         )
@@ -3095,17 +3122,23 @@ mod tests {
             askluna.account_id(),
             "process-history-askluna",
             "reservation-history-askluna",
-            slow_history_start,
+            askluna_history_start,
             history_latest,
         )
         .await;
+        let matches_history_start = now - 7_000;
+        let matches_history_middle = now - 3_600;
         append_history_series_with_reset(
             &async_state,
             matches.account_id(),
             "responses",
             604_800,
             now + hours_minutes(23, 56),
-            &[(history_start, 9), (history_middle, 9), (history_latest, 8)],
+            &[
+                (matches_history_start, 9),
+                (matches_history_middle, 9),
+                (history_latest, 8),
+            ],
         )
         .await;
         record_completed_active_session(
@@ -3113,10 +3146,12 @@ mod tests {
             matches.account_id(),
             "process-history-matches",
             "reservation-history-matches",
-            history_start,
+            matches_history_start,
             history_latest,
         )
         .await;
+        let ssdev_history_start = now - 3_650;
+        let ssdev_history_middle = now - 1_900;
         append_history_series_with_reset(
             &async_state,
             ssdev.account_id(),
@@ -3124,8 +3159,8 @@ mod tests {
             604_800,
             now + 84 * 3_600,
             &[
-                (history_start, 27),
-                (history_middle, 27),
+                (ssdev_history_start, 27),
+                (ssdev_history_middle, 27),
                 (history_latest, 26),
             ],
         )
@@ -3135,7 +3170,7 @@ mod tests {
             ssdev.account_id(),
             "process-history-ssdev",
             "reservation-history-ssdev",
-            history_start,
+            ssdev_history_start,
             history_latest,
         )
         .await;
@@ -3152,14 +3187,63 @@ mod tests {
             &async_state,
             RouteBandWeightedSelectors::default(),
             RouteBandAccountHolds::default(),
-            active_reservations,
+            Arc::clone(&active_reservations),
             0,
             Arc::new(move || now),
         );
         let mut selected_accounts = Vec::new();
         let mut active_sessions = Vec::new();
+        let mut projection_trace = Vec::new();
 
         for session_index in 0..5 {
+            let active_session_overrides = {
+                let reservations = lock_test_mutex(&active_reservations, "active reservations");
+                reservations.get("responses").map(|book| {
+                    [
+                        askluna.account_id(),
+                        matches.account_id(),
+                        ssdev.account_id(),
+                    ]
+                    .into_iter()
+                    .map(|account_id| (account_id.clone(), book.active_session_count(account_id)))
+                    .collect::<HashMap<_, _>>()
+                })
+            };
+            let projection = project_route_band_selection_inputs_with_active_counts(
+                &async_state,
+                "responses",
+                now,
+                120,
+                active_session_overrides.as_ref(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("S4 projection should load: {error}"));
+            let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+                RouteBand::Responses,
+                now,
+                projection.accounts().to_vec(),
+            ));
+            projection_trace.push(
+                assessment
+                    .accounts()
+                    .iter()
+                    .map(|account| {
+                        (
+                            account.account_id().as_str().to_owned(),
+                            account.current_active_sessions_for_selection(),
+                            account.weekly_projected_exhaustion_unix_seconds().map(
+                                |projected_exhaustion_unix_seconds| {
+                                    projected_exhaustion_unix_seconds.saturating_sub(now)
+                                },
+                            ),
+                            account.projected_drain_gap_after_selection(),
+                            account.weekly_survival_margin_basis_points(),
+                            account.projected_weekly_runway_seconds(),
+                            account.routing_reason().as_str().to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
             let selected = match selector
                 .select_upstream_account(
                     &HttpProxyRequest::new(Method::Post, "/v1/responses")
@@ -3181,11 +3265,11 @@ mod tests {
             vec![
                 "acct_matches".to_owned(),
                 "acct_matches".to_owned(),
+                "acct_askluna".to_owned(),
                 "acct_matches".to_owned(),
-                "acct_ssdev".to_owned(),
-                "acct_ssdev".to_owned(),
+                "acct_askluna".to_owned(),
             ],
-            "S4 runtime path should drain near-reset B before consuming far-reset C"
+            "S4 runtime path should drain near-reset A/B before consuming far-reset C; projection trace: {projection_trace:?}"
         );
         assert_eq!(active_sessions.len(), 5);
     }
@@ -3374,7 +3458,7 @@ mod tests {
 
         assert_eq!(first.account_id(), alpha.account_id());
         assert_eq!(second.account_id(), alpha.account_id());
-        assert_eq!(second.selection_reason(), "preferred_highest_weight");
+        assert_eq!(second.selection_reason(), "preferred_safest_quota");
     }
 
     #[test]
@@ -3435,7 +3519,7 @@ mod tests {
 
         assert_eq!(first.account_id(), alpha.account_id());
         assert_eq!(second.account_id(), beta.account_id());
-        assert_eq!(second.selection_reason(), "preferred_highest_weight");
+        assert_eq!(second.selection_reason(), "preferred_safest_quota");
     }
 
     #[test]

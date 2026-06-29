@@ -106,7 +106,7 @@ grep -q "askluna" "${table_output}"
 grep -q "matches" "${table_output}"
 grep -q "ssdev" "${table_output}"
 grep -Eq "preferred|available|blocked|needs probe" "${table_output}"
-grep -q "quota risk" "${plain_output}"
+grep -q "quota guard" "${plain_output}"
 if grep -q "score" "${plain_output}" "${table_output}"; then
   echo "quota status exposed legacy score output" >&2
   exit 1
@@ -149,7 +149,7 @@ assert by_label["matches"]["availability"] in {"usable", "reserve"}
 assert by_label["ssdev"]["availability"] in {"usable", "reserve"}
 assert "weighted_candidates" not in payload
 assert "routing_weight" not in by_label["ssdev"]
-assert by_label["ssdev"]["weekly_quota_risk"] == 3
+assert by_label["ssdev"]["weekly_quota_guard"] == 3
 assert "weekly_survival_margin_basis_points" in by_label["ssdev"]
 assert "weekly_projected_exhaustion_unix_seconds" in by_label["ssdev"]
 assert by_label["ssdev"]["short_guard_result"] in {"pass", "held", "unknown"}
@@ -164,18 +164,20 @@ assert by_label["ssdev"]["weekly_burn_rate_confidence"] in {
 }
 assert "hard_block_reason" in by_label["ssdev"]
 assert "routing_weight" not in by_label["matches"]
-assert by_label["matches"]["weekly_quota_risk"] == 32
+assert by_label["matches"]["weekly_quota_guard"] == 32
 
 for account in payload["accounts"]:
     assert len(account["windows"]) == 2
     assert "routing_weight" not in account
-    assert "short_quota_risk" in account
-    assert "weekly_quota_risk" in account
+    assert "short_quota_risk" not in account
+    assert "weekly_quota_risk" not in account
+    assert "short_quota_guard" in account
+    assert "weekly_quota_guard" in account
     assert account["routing_reason"] in {
         "preferred_weekly_healthier",
         "preferred_weekly_reset_soon",
         "preferred_short_reset_soon",
-        "preferred_highest_weight",
+        "preferred_safest_quota",
         "available_same_pool",
         "held_reserve",
         "held_unknown",

@@ -2052,15 +2052,15 @@ fn format_burn_cell(assessment: &BurnDownAccountAssessment) -> String {
         return "needs refresh".to_owned();
     }
 
-    let quota_risk = format!(
-        "quota risk 5h {}% / weekly {}%",
+    let quota_guard = format!(
+        "quota guard 5h {}% / weekly {}%",
         assessment.short_pressure(),
         assessment.long_pressure()
     );
     if assessment.routing_weight().is_some() {
-        quota_risk
+        quota_guard
     } else {
-        format!("not selectable\n{quota_risk}")
+        format!("not selectable\n{quota_guard}")
     }
 }
 
@@ -2159,11 +2159,15 @@ fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
 
 fn format_routing_reason(reason: RoutingReason) -> &'static str {
     match reason {
+        RoutingReason::PreferredNearResetDrainable => "preferred by quota: near-reset drainable",
+        RoutingReason::PreferredNearResetControlledDrain => {
+            "preferred by quota: near-reset controlled drain"
+        }
         RoutingReason::PreferredWeeklyHealthier => "preferred by quota: weekly healthier",
         RoutingReason::PreferredWeeklyResetSoon => "preferred by quota: weekly reset soon",
         RoutingReason::PreferredShortResetSoon => "preferred by quota: 5h reset soon",
         RoutingReason::PreferredProjectedBurn => "preferred by quota: projected burn",
-        RoutingReason::PreferredHighestWeight => "preferred by quota: safest quota",
+        RoutingReason::PreferredSafestQuota => "preferred by quota: safest quota",
         RoutingReason::AvailableSamePool => "available by quota: same pool",
         RoutingReason::HeldReserve => "held by quota: reserve",
         RoutingReason::HeldUnknown => "held by quota: needs refresh",
@@ -2181,10 +2185,12 @@ fn format_routing_reason(reason: RoutingReason) -> &'static str {
 fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
     match assessment.routing_reason() {
         RoutingReason::PreferredWeeklyHealthier
+        | RoutingReason::PreferredNearResetDrainable
+        | RoutingReason::PreferredNearResetControlledDrain
         | RoutingReason::PreferredWeeklyResetSoon
         | RoutingReason::PreferredShortResetSoon
         | RoutingReason::PreferredProjectedBurn
-        | RoutingReason::PreferredHighestWeight => "preferred by quota",
+        | RoutingReason::PreferredSafestQuota => "preferred by quota",
         RoutingReason::AvailableSamePool => "available by quota",
         RoutingReason::HeldReserve
         | RoutingReason::HeldUnknown
@@ -2260,8 +2266,8 @@ struct JsonQuotaStatusAccount {
     next_use: String,
     limiting_window: &'static str,
     quota_evidence_reason: &'static str,
-    short_quota_risk: Option<u32>,
-    weekly_quota_risk: Option<u32>,
+    short_quota_guard: Option<u32>,
+    weekly_quota_guard: Option<u32>,
     weekly_survival_margin_basis_points: Option<i64>,
     weekly_projected_exhaustion_unix_seconds: Option<u64>,
     short_guard_result: &'static str,
@@ -2295,8 +2301,8 @@ impl JsonQuotaStatusAccount {
                 .limiting_window
                 .map_or("none", |window| quota_window_label(window.window_seconds())),
             quota_evidence_reason: quota_evidence_reason_json(row.quota_evidence_reason),
-            short_quota_risk: Some(row.short_pressure),
-            weekly_quota_risk: Some(row.long_pressure),
+            short_quota_guard: Some(row.short_pressure),
+            weekly_quota_guard: Some(row.long_pressure),
             weekly_survival_margin_basis_points: row.weekly_survival_margin_basis_points,
             weekly_projected_exhaustion_unix_seconds: row.weekly_projected_exhaustion_unix_seconds,
             short_guard_result: short_guard_result_json(row),
@@ -2436,7 +2442,7 @@ struct JsonQuotaWindow {
     reset_unix_seconds: Option<u64>,
     observed_unix_seconds: Option<u64>,
     effective: bool,
-    pressure_percent: Option<u32>,
+    guard_deficit_percent: Option<u32>,
     surplus_percent: Option<u32>,
     contributed_to_salvage: bool,
     run_rate: JsonRunRateEstimate,
@@ -2444,7 +2450,7 @@ struct JsonQuotaWindow {
 
 impl JsonQuotaWindow {
     fn from_window(window: &DisplayQuotaWindow, now_unix_seconds: u64) -> Self {
-        let (pressure_percent, surplus_percent) =
+        let (guard_deficit_percent, surplus_percent) =
             window_pressure_and_surplus(window, now_unix_seconds);
         Self {
             window_seconds: window.window_seconds,
@@ -2453,7 +2459,7 @@ impl JsonQuotaWindow {
             reset_unix_seconds: window.reset_unix_seconds,
             observed_unix_seconds: Some(window.observed_unix_seconds),
             effective: window.effective,
-            pressure_percent,
+            guard_deficit_percent,
             surplus_percent,
             contributed_to_salvage: surplus_percent.is_some_and(|surplus| surplus > 0),
             run_rate: JsonRunRateEstimate::from_estimate(
@@ -2762,10 +2768,11 @@ fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
                     ],
                 );
         }
-        for (window_label, pressure) in [("5h", row.short_pressure), ("weekly", row.long_pressure)]
+        for (window_label, guard_deficit) in
+            [("5h", row.short_pressure), ("weekly", row.long_pressure)]
         {
             global::meter("codex-router")
-                .u64_gauge("codex_router_quota_pressure_bucket")
+                .u64_gauge("codex_router_quota_guard_bucket")
                 .build()
                 .record(
                     1,
@@ -2773,7 +2780,7 @@ fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
                         KeyValue::new("account.slot", account_hash.clone()),
                         KeyValue::new("route_band", route_band.to_owned()),
                         KeyValue::new("quota.window", window_label),
-                        KeyValue::new("quota.pressure_bucket", quota_pressure_bucket(pressure)),
+                        KeyValue::new("quota.guard_bucket", quota_guard_bucket(guard_deficit)),
                     ],
                 );
         }
@@ -2809,8 +2816,8 @@ fn quota_remaining_bucket(remaining_headroom: u32) -> &'static str {
     }
 }
 
-fn quota_pressure_bucket(pressure: u32) -> &'static str {
-    match pressure {
+fn quota_guard_bucket(guard_deficit: u32) -> &'static str {
+    match guard_deficit {
         0 => "none",
         1..=24 => "low",
         25..=49 => "medium",
@@ -3031,7 +3038,7 @@ mod tests {
         };
         assert!(matches!(
             slow_burning_assessment.routing_reason(),
-            RoutingReason::PreferredProjectedBurn | RoutingReason::PreferredHighestWeight
+            RoutingReason::PreferredProjectedBurn | RoutingReason::PreferredSafestQuota
         ));
     }
 
@@ -3085,7 +3092,7 @@ mod tests {
             "selection.reason",
             "quota.window",
             "quota.remaining_bucket",
-            "quota.pressure_bucket",
+            "quota.guard_bucket",
         ] {
             assert!(
                 metrics_helper.contains(required_label),

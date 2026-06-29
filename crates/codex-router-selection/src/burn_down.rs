@@ -27,10 +27,10 @@ pub const ACTIVE_SESSION_IMBALANCE_THRESHOLD: u32 = 1;
 pub const USAGE_LIMIT_SUSPECT_TTL_SECONDS: u64 = 300;
 /// Fixed v1 active-session rollup bucket size.
 pub const ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS: u64 = 300;
-/// Fixed v1 minimum runway for assigning a new session to a low-weekly drain account.
-pub const CONTROLLED_DRAIN_MIN_RUNWAY_SECONDS: u64 = 21_600;
-/// Fixed v1 reset horizon for treating low weekly quota as drainable instead of reserve.
-pub const CONTROLLED_DRAIN_RESET_HORIZON_SECONDS: u64 = 172_800;
+/// Fixed v1 minimum weekly runway before asking Codex to reconnect.
+pub const REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS: u64 = 900;
+/// Fixed v1 weekly reset horizon for the near-reset drain pool.
+pub const DRAIN_POOL_RESET_HORIZON_SECONDS: u64 = 172_800;
 
 const DEFAULT_SHORT_WINDOW_CUTOFF_SECONDS: u64 = 86_400;
 const DEFAULT_LONG_NEAR_RESET_MAX_SECONDS: u64 = 43_200;
@@ -166,7 +166,9 @@ pub struct QuotaWindowFact {
     observed_unix_seconds: u64,
     effective: bool,
     projected_exhaustion_unix_seconds: Option<u64>,
-    burn_rate_basis_points_per_hour: Option<u32>,
+    per_connection_burn_basis_points_per_hour: Option<u32>,
+    aggregate_burn_basis_points_per_hour: Option<u32>,
+    projected_candidate_burn_basis_points_per_hour: Option<u32>,
     burn_rate_confidence: QuotaRunRateConfidence,
 }
 
@@ -182,7 +184,9 @@ impl QuotaWindowFact {
             observed_unix_seconds: 0,
             effective: false,
             projected_exhaustion_unix_seconds: None,
-            burn_rate_basis_points_per_hour: None,
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
+            projected_candidate_burn_basis_points_per_hour: None,
             burn_rate_confidence: QuotaRunRateConfidence::Unknown,
         }
     }
@@ -225,14 +229,47 @@ impl QuotaWindowFact {
         self
     }
 
-    /// Sets estimated burn rate in basis points per hour.
+    /// Returns projected exhaustion time.
     #[must_use]
-    pub const fn with_burn_rate_basis_points_per_hour(
+    pub const fn projected_exhaustion_unix_seconds(&self) -> Option<u64> {
+        self.projected_exhaustion_unix_seconds
+    }
+
+    /// Sets observed per-connection burn rate in basis points per hour.
+    #[must_use]
+    pub const fn with_per_connection_burn_basis_points_per_hour(
         mut self,
-        burn_rate_basis_points_per_hour: u32,
+        per_connection_burn_basis_points_per_hour: u32,
     ) -> Self {
-        self.burn_rate_basis_points_per_hour = Some(burn_rate_basis_points_per_hour);
+        self.per_connection_burn_basis_points_per_hour =
+            Some(per_connection_burn_basis_points_per_hour);
+        self.projected_candidate_burn_basis_points_per_hour =
+            Some(per_connection_burn_basis_points_per_hour);
         self.burn_rate_confidence = QuotaRunRateConfidence::Normal;
+        self
+    }
+
+    /// Sets aggregate fallback burn rate in basis points per hour.
+    #[must_use]
+    pub const fn with_aggregate_burn_basis_points_per_hour(
+        mut self,
+        aggregate_burn_basis_points_per_hour: u32,
+    ) -> Self {
+        self.aggregate_burn_basis_points_per_hour = Some(aggregate_burn_basis_points_per_hour);
+        self.projected_candidate_burn_basis_points_per_hour =
+            Some(aggregate_burn_basis_points_per_hour);
+        self.burn_rate_confidence = QuotaRunRateConfidence::Normal;
+        self
+    }
+
+    /// Sets projected candidate burn rate after adding the next session.
+    #[must_use]
+    pub const fn with_projected_candidate_burn_basis_points_per_hour(
+        mut self,
+        projected_candidate_burn_basis_points_per_hour: u32,
+    ) -> Self {
+        self.projected_candidate_burn_basis_points_per_hour =
+            Some(projected_candidate_burn_basis_points_per_hour);
         self
     }
 
@@ -252,10 +289,22 @@ impl QuotaWindowFact {
         self.window_seconds
     }
 
-    /// Returns burn rate in basis points per hour when available.
+    /// Returns observed per-connection burn rate in basis points per hour.
     #[must_use]
-    pub const fn burn_rate_basis_points_per_hour(&self) -> Option<u32> {
-        self.burn_rate_basis_points_per_hour
+    pub const fn per_connection_burn_basis_points_per_hour(&self) -> Option<u32> {
+        self.per_connection_burn_basis_points_per_hour
+    }
+
+    /// Returns aggregate fallback burn rate in basis points per hour.
+    #[must_use]
+    pub const fn aggregate_burn_basis_points_per_hour(&self) -> Option<u32> {
+        self.aggregate_burn_basis_points_per_hour
+    }
+
+    /// Returns projected candidate burn rate in basis points per hour.
+    #[must_use]
+    pub const fn projected_candidate_burn_basis_points_per_hour(&self) -> Option<u32> {
+        self.projected_candidate_burn_basis_points_per_hour
     }
 
     /// Returns burn-rate confidence.
@@ -391,6 +440,10 @@ pub struct BurnDownAccountAssessment {
     weekly_survives_to_reset: bool,
     weekly_survival_margin_basis_points: Option<i64>,
     weekly_burn_rate_confidence: QuotaRunRateConfidence,
+    weekly_in_drain_pool: bool,
+    required_active_connections_to_drain: Option<u32>,
+    projected_drain_gap_after_selection: Option<i64>,
+    projected_weekly_runway_seconds: Option<u64>,
     salvage_sort_key: Option<SalvageSortKey>,
 }
 
@@ -508,6 +561,30 @@ impl BurnDownAccountAssessment {
     pub const fn weekly_burn_rate_confidence(&self) -> QuotaRunRateConfidence {
         self.weekly_burn_rate_confidence
     }
+
+    /// Returns whether the account is in the near-reset weekly drain pool.
+    #[must_use]
+    pub const fn weekly_in_drain_pool(&self) -> bool {
+        self.weekly_in_drain_pool
+    }
+
+    /// Returns active sessions needed to drain weekly quota by reset.
+    #[must_use]
+    pub const fn required_active_connections_to_drain(&self) -> Option<u32> {
+        self.required_active_connections_to_drain
+    }
+
+    /// Returns drain gap after adding one candidate session.
+    #[must_use]
+    pub const fn projected_drain_gap_after_selection(&self) -> Option<i64> {
+        self.projected_drain_gap_after_selection
+    }
+
+    /// Returns projected weekly runway after adding one candidate session.
+    #[must_use]
+    pub const fn projected_weekly_runway_seconds(&self) -> Option<u64> {
+        self.projected_weekly_runway_seconds
+    }
 }
 
 /// Account availability class.
@@ -590,6 +667,10 @@ pub enum QuotaEvidenceReason {
 /// Public routing reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingReason {
+    /// Preferred because near-reset weekly quota needs more active sessions to drain.
+    PreferredNearResetDrainable,
+    /// Preferred because near-reset weekly quota is safe to keep draining.
+    PreferredNearResetControlledDrain,
     /// Preferred because weekly quota is healthier than alternatives.
     PreferredWeeklyHealthier,
     /// Preferred because weekly reset is near.
@@ -598,8 +679,8 @@ pub enum RoutingReason {
     PreferredShortResetSoon,
     /// Preferred because projected burn lasts longer than alternatives.
     PreferredProjectedBurn,
-    /// Preferred by neutral quota weight.
-    PreferredHighestWeight,
+    /// Preferred by the safest quota guard when no narrower reason wins.
+    PreferredSafestQuota,
     /// Same-pool selectable account.
     AvailableSamePool,
     /// Reserve account held behind usable accounts.
@@ -629,11 +710,13 @@ impl RoutingReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::PreferredNearResetDrainable => "preferred_near_reset_drainable",
+            Self::PreferredNearResetControlledDrain => "preferred_near_reset_controlled_drain",
             Self::PreferredWeeklyHealthier => "preferred_weekly_healthier",
             Self::PreferredWeeklyResetSoon => "preferred_weekly_reset_soon",
             Self::PreferredShortResetSoon => "preferred_short_reset_soon",
             Self::PreferredProjectedBurn => "preferred_projected_burn",
-            Self::PreferredHighestWeight => "preferred_highest_weight",
+            Self::PreferredSafestQuota => "preferred_safest_quota",
             Self::AvailableSamePool => "available_same_pool",
             Self::HeldReserve => "held_reserve",
             Self::HeldUnknown => "held_unknown",
@@ -652,13 +735,17 @@ impl RoutingReason {
     #[must_use]
     pub const fn human_phrase(self) -> &'static str {
         match self {
+            Self::PreferredNearResetDrainable => "preferred next: near-reset drainable",
+            Self::PreferredNearResetControlledDrain => {
+                "preferred next: near-reset controlled drain"
+            }
             Self::PreferredWeeklyHealthier => "preferred next: weekly healthier",
             Self::PreferredWeeklyResetSoon => "preferred next: weekly reset soon",
             Self::PreferredShortResetSoon => "preferred next: 5h reset soon",
             Self::PreferredProjectedBurn => "preferred next: projected burn",
-            Self::PreferredHighestWeight => "preferred next: safest quota",
+            Self::PreferredSafestQuota => "preferred next: safest quota",
             Self::AvailableSamePool => "available: same pool",
-            Self::HeldReserve => "held: reserve",
+            Self::HeldReserve => "held: far-reset reserve",
             Self::HeldUnknown => "held: needs refresh",
             Self::UnknownFallbackPreferred => "fallback: needs refresh",
             Self::UnknownFallbackAvailable => "fallback: same unknown pool",
@@ -725,7 +812,9 @@ struct WindowAssessment {
     surplus: u32,
     time_left_seconds: Option<u64>,
     near_reset: bool,
-    burn_rate_basis_points_per_hour: Option<u32>,
+    per_connection_burn_basis_points_per_hour: Option<u32>,
+    aggregate_burn_basis_points_per_hour: Option<u32>,
+    projected_candidate_burn_basis_points_per_hour: Option<u32>,
     burn_rate_confidence: QuotaRunRateConfidence,
     survival_margin_basis_points: Option<i64>,
 }
@@ -848,6 +937,10 @@ fn assess_account(
         weekly_survives_to_reset: false,
         weekly_survival_margin_basis_points: None,
         weekly_burn_rate_confidence: QuotaRunRateConfidence::Unknown,
+        weekly_in_drain_pool: false,
+        required_active_connections_to_drain: None,
+        projected_drain_gap_after_selection: None,
+        projected_weekly_runway_seconds: None,
         salvage_sort_key: None,
     };
 
@@ -995,6 +1088,15 @@ fn assess_account(
     let weekly_window = windows
         .iter()
         .find(|window| !is_short_window(window.window_seconds, policy));
+    let weekly_in_drain_pool = weekly_window.is_some_and(weekly_window_is_drain_pool_candidate);
+    let required_active_connections_to_drain =
+        weekly_window.and_then(required_active_connections_to_drain);
+    let projected_drain_gap_after_selection =
+        required_active_connections_to_drain.map(|required_active_connections_to_drain| {
+            i64::from(required_active_connections_to_drain)
+                - i64::from(input.current_active_sessions.saturating_add(1))
+        });
+    let projected_weekly_runway_seconds = weekly_window.and_then(projected_runway_seconds);
     if short_window_fails_guard(&windows, policy) {
         return BurnDownAccountAssessment {
             availability: AccountAvailability::Blocked,
@@ -1020,6 +1122,10 @@ fn assess_account(
                 .map_or(QuotaRunRateConfidence::Unknown, |window| {
                     window.burn_rate_confidence
                 }),
+            weekly_in_drain_pool,
+            required_active_connections_to_drain,
+            projected_drain_gap_after_selection,
+            projected_weekly_runway_seconds,
             salvage_sort_key: salvage_sort_key(&windows, short_salvage, long_salvage, policy),
             ..base
         };
@@ -1048,6 +1154,10 @@ fn assess_account(
             .map_or(QuotaRunRateConfidence::Unknown, |window| {
                 window.burn_rate_confidence
             }),
+        weekly_in_drain_pool,
+        required_active_connections_to_drain,
+        projected_drain_gap_after_selection,
+        projected_weekly_runway_seconds,
         salvage_sort_key: salvage_sort_key(&windows, short_salvage, long_salvage, policy),
         routing_reason: RoutingReason::AvailableSamePool,
         ..base
@@ -1140,7 +1250,10 @@ fn assess_window(
         surplus,
         time_left_seconds,
         near_reset,
-        burn_rate_basis_points_per_hour: window.burn_rate_basis_points_per_hour,
+        per_connection_burn_basis_points_per_hour: window.per_connection_burn_basis_points_per_hour,
+        aggregate_burn_basis_points_per_hour: window.aggregate_burn_basis_points_per_hour,
+        projected_candidate_burn_basis_points_per_hour: window
+            .projected_candidate_burn_basis_points_per_hour,
         burn_rate_confidence: window.burn_rate_confidence,
         survival_margin_basis_points,
     }
@@ -1173,14 +1286,58 @@ fn long_window_requires_reserve(
 }
 
 fn long_window_can_controlled_drain(window: &WindowAssessment) -> bool {
-    if !window.time_left_seconds.is_some_and(|time_left_seconds| {
-        time_left_seconds <= CONTROLLED_DRAIN_RESET_HORIZON_SECONDS
-    }) {
+    if window
+        .time_left_seconds
+        .is_none_or(|time_left_seconds| time_left_seconds > DRAIN_POOL_RESET_HORIZON_SECONDS)
+    {
         return false;
     }
 
     projected_runway_seconds(window)
-        .is_some_and(|runway_seconds| runway_seconds >= CONTROLLED_DRAIN_MIN_RUNWAY_SECONDS)
+        .is_some_and(|runway_seconds| runway_seconds >= REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS)
+}
+
+fn weekly_window_is_drain_pool_candidate(window: &WindowAssessment) -> bool {
+    if window.window_seconds != V1_WEEKLY_WINDOW_SECONDS {
+        return false;
+    }
+    if window
+        .time_left_seconds
+        .is_none_or(|time_left_seconds| time_left_seconds > DRAIN_POOL_RESET_HORIZON_SECONDS)
+    {
+        return false;
+    }
+    if !matches!(
+        window.burn_rate_confidence,
+        QuotaRunRateConfidence::Normal | QuotaRunRateConfidence::Low
+    ) {
+        return false;
+    }
+    if window.per_connection_burn_basis_points_per_hour.is_none()
+        && window.aggregate_burn_basis_points_per_hour.is_none()
+    {
+        return false;
+    }
+
+    projected_runway_seconds(window)
+        .is_some_and(|runway_seconds| runway_seconds >= REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS)
+}
+
+fn required_active_connections_to_drain(window: &WindowAssessment) -> Option<u32> {
+    let per_connection_burn_basis_points_per_hour =
+        u128::from(window.per_connection_burn_basis_points_per_hour?);
+    let time_left_seconds = u128::from(window.time_left_seconds?);
+    if per_connection_burn_basis_points_per_hour == 0 || time_left_seconds == 0 {
+        return None;
+    }
+
+    let remaining_basis_points = u128::from(window.remaining_headroom).saturating_mul(100);
+    let denominator = per_connection_burn_basis_points_per_hour.saturating_mul(time_left_seconds);
+    let required_connections = remaining_basis_points
+        .saturating_mul(3_600)
+        .div_ceil(denominator);
+
+    Some(clamp_u128_to_u32(required_connections))
 }
 
 fn projected_runway_seconds(window: &WindowAssessment) -> Option<u64> {
@@ -1292,6 +1449,11 @@ fn selected_pool_matches(selected_pool: SelectedPool, availability: AccountAvail
 }
 
 fn window_requires_near_zero_retirement(window: &WindowAssessment, now_unix_seconds: u64) -> bool {
+    if window.window_seconds == V1_WEEKLY_WINDOW_SECONDS && long_window_can_controlled_drain(window)
+    {
+        return false;
+    }
+
     if window.remaining_headroom < DEFAULT_NEAR_ZERO_HEADROOM_THRESHOLD {
         return true;
     }
@@ -1427,6 +1589,16 @@ fn routing_reason_for_account(
         AccountAvailability::Excluded => return RoutingReason::ExcludedDisabled,
     }
 
+    if account.weekly_in_drain_pool {
+        if account
+            .projected_drain_gap_after_selection
+            .is_some_and(|gap| gap > 0)
+        {
+            return RoutingReason::PreferredNearResetDrainable;
+        }
+
+        return RoutingReason::PreferredNearResetControlledDrain;
+    }
     if account.long_salvage > 0 {
         return RoutingReason::PreferredWeeklyResetSoon;
     }
@@ -1450,7 +1622,7 @@ fn routing_reason_for_account(
         return RoutingReason::PreferredProjectedBurn;
     }
 
-    RoutingReason::PreferredHighestWeight
+    RoutingReason::PreferredSafestQuota
 }
 
 fn projected_pressure(window: &QuotaWindowFact, now_unix_seconds: u64) -> u32 {
@@ -1490,12 +1662,63 @@ fn candidate_priority_cmp(
     right: &BurnDownAccountAssessment,
     right_weight: u32,
 ) -> std::cmp::Ordering {
-    compare_weekly_survival(left, right)
+    compare_weekly_drain_pool(left, right)
+        .then_with(|| compare_drain_pool_confidence(left, right))
+        .then_with(|| compare_projected_drain_gap(left, right))
+        .then_with(|| compare_weekly_survival(left, right))
         .then_with(|| right_weight.cmp(&left_weight))
         .then_with(|| left.long_pressure.cmp(&right.long_pressure))
         .then_with(|| left.short_pressure.cmp(&right.short_pressure))
         .then_with(|| compare_salvage_key(left, right))
         .then_with(|| left.account_id.cmp(&right.account_id))
+}
+
+fn compare_weekly_drain_pool(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    match (left.weekly_in_drain_pool, right.weekly_in_drain_pool) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_projected_drain_gap(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    if !(left.weekly_in_drain_pool && right.weekly_in_drain_pool) {
+        return std::cmp::Ordering::Equal;
+    }
+
+    match (
+        left.projected_drain_gap_after_selection,
+        right.projected_drain_gap_after_selection,
+    ) {
+        (Some(left_gap), Some(right_gap)) if left_gap > 0 && right_gap > 0 => {
+            right_gap.cmp(&left_gap)
+        }
+        (Some(left_gap), Some(right_gap)) if left_gap > 0 || right_gap > 0 => {
+            right_gap.max(0).cmp(&left_gap.max(0))
+        }
+        (Some(_), Some(_)) => std::cmp::Ordering::Equal,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_drain_pool_confidence(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    if !(left.weekly_in_drain_pool && right.weekly_in_drain_pool) {
+        return std::cmp::Ordering::Equal;
+    }
+
+    confidence_rank(right.weekly_burn_rate_confidence)
+        .cmp(&confidence_rank(left.weekly_burn_rate_confidence))
 }
 
 fn compare_weekly_survival(
@@ -1618,7 +1841,7 @@ fn compare_same_pool_active_imbalance(
         .current_active_sessions
         .abs_diff(right.current_active_sessions);
     if active_delta == 0 {
-        return left.account_id.cmp(&right.account_id);
+        return std::cmp::Ordering::Equal;
     }
     if active_delta < ACTIVE_SESSION_IMBALANCE_THRESHOLD {
         return std::cmp::Ordering::Equal;
@@ -1643,6 +1866,17 @@ fn same_effective_weekly_pool(
     };
     if left_reset.abs_diff(right_reset) > SAME_POOL_RESET_TOLERANCE_SECONDS {
         return false;
+    }
+    if left.weekly_in_drain_pool
+        && right.weekly_in_drain_pool
+        && !left.weekly_survives_to_reset
+        && !right.weekly_survives_to_reset
+        && let (Some(left_runout), Some(right_runout)) = (
+            left.weekly_projected_exhaustion_unix_seconds,
+            right.weekly_projected_exhaustion_unix_seconds,
+        )
+    {
+        return left_runout.abs_diff(right_runout) <= SAME_POOL_PROJECTED_RUNOUT_TOLERANCE_SECONDS;
     }
 
     match (
@@ -1689,7 +1923,12 @@ fn survival_margin_basis_points(
     window: &QuotaWindowFact,
     time_left_seconds: Option<u64>,
 ) -> Option<i64> {
-    let burn_rate_basis_points_per_hour = u128::from(window.burn_rate_basis_points_per_hour?);
+    let burn_rate_basis_points_per_hour = u128::from(
+        window
+            .projected_candidate_burn_basis_points_per_hour
+            .or(window.per_connection_burn_basis_points_per_hour)
+            .or(window.aggregate_burn_basis_points_per_hour)?,
+    );
     let time_left_seconds = u128::from(time_left_seconds?);
     let projected_burn_basis_points = burn_rate_basis_points_per_hour
         .saturating_mul(time_left_seconds)
@@ -1739,6 +1978,10 @@ const fn clamp_u32(value: u32, min: u32, max: u32) -> u32 {
     } else {
         value
     }
+}
+
+fn clamp_u128_to_u32(value: u128) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 const fn min_u64(left: u64, right: u64) -> u64 {
@@ -1987,21 +2230,36 @@ mod tests {
                 "acct_a",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 20, 24 * 3_600, 50),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        20,
+                        24 * 3_600,
+                        50,
+                    ),
                 ],
             ),
             account(
                 "acct_b",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 34, 96 * 3_600, 50),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        34,
+                        96 * 3_600,
+                        50,
+                    ),
                 ],
             ),
             account(
                 "acct_c",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 7 * 86_400, 50),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        80,
+                        7 * 86_400,
+                        50,
+                    ),
                 ],
             ),
         ]));
@@ -2020,21 +2278,36 @@ mod tests {
                 "acct_a",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 60, 48 * 3_600, 50),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        60,
+                        48 * 3_600,
+                        50,
+                    ),
                 ],
             ),
             account(
                 "acct_b",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 70, 96 * 3_600, 50),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        70,
+                        96 * 3_600,
+                        50,
+                    ),
                 ],
             ),
             account(
                 "acct_c",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 90, 7 * 86_400, 50),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        90,
+                        7 * 86_400,
+                        50,
+                    ),
                 ],
             ),
         ]));
@@ -2060,14 +2333,24 @@ mod tests {
                 "acct_b",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 34, 96 * 3_600, 20),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        34,
+                        96 * 3_600,
+                        20,
+                    ),
                 ],
             ),
             account(
                 "acct_c",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 7 * 86_400, 20),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        80,
+                        7 * 86_400,
+                        20,
+                    ),
                 ],
             ),
         ]));
@@ -2086,7 +2369,12 @@ mod tests {
                 "acct_a",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 19, 45 * 3_600, 0),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        19,
+                        45 * 3_600,
+                        0,
+                    ),
                 ],
             )
             .with_current_active_sessions(6),
@@ -2094,7 +2382,12 @@ mod tests {
                 "acct_b",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 18, 46 * 3_600, 0),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        18,
+                        46 * 3_600,
+                        0,
+                    ),
                 ],
             )
             .with_current_active_sessions(0),
@@ -2102,7 +2395,12 @@ mod tests {
                 "acct_c",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 34, 107 * 3_600, 20),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        34,
+                        107 * 3_600,
+                        20,
+                    ),
                 ],
             )
             .with_current_active_sessions(0),
@@ -2122,8 +2420,13 @@ mod tests {
                 "acct_a",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 48 * 3_600, 50)
-                        .with_burn_rate_confidence(QuotaRunRateConfidence::Normal),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        40,
+                        48 * 3_600,
+                        50,
+                    )
+                    .with_burn_rate_confidence(QuotaRunRateConfidence::Normal),
                 ],
             )
             .with_current_active_sessions(4),
@@ -2131,8 +2434,13 @@ mod tests {
                 "acct_b",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 48 * 3_600, 50)
-                        .with_burn_rate_confidence(QuotaRunRateConfidence::Low),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        40,
+                        48 * 3_600,
+                        50,
+                    )
+                    .with_burn_rate_confidence(QuotaRunRateConfidence::Low),
                 ],
             )
             .with_current_active_sessions(0),
@@ -2151,15 +2459,35 @@ mod tests {
             account(
                 "acct_a",
                 vec![
-                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 2, 4 * 3_600, 100),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 4 * 86_400, 20),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        FIVE_HOURS,
+                        2,
+                        4 * 3_600,
+                        100,
+                    ),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        80,
+                        4 * 86_400,
+                        20,
+                    ),
                 ],
             ),
             account(
                 "acct_b",
                 vec![
-                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 30, 4 * 3_600, 100),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 4 * 86_400, 20),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        FIVE_HOURS,
+                        30,
+                        4 * 3_600,
+                        100,
+                    ),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        40,
+                        4 * 86_400,
+                        20,
+                    ),
                 ],
             ),
         ]));
@@ -2182,15 +2510,35 @@ mod tests {
             account(
                 "acct_a",
                 vec![
-                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 2, 10 * 60, 100),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 80, 4 * 86_400, 20),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        FIVE_HOURS,
+                        2,
+                        10 * 60,
+                        100,
+                    ),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        80,
+                        4 * 86_400,
+                        20,
+                    ),
                 ],
             ),
             account(
                 "acct_b",
                 vec![
-                    window_with_burn_rate_basis_points_per_hour(FIVE_HOURS, 30, 4 * 3_600, 100),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 40, 4 * 86_400, 20),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        FIVE_HOURS,
+                        30,
+                        4 * 3_600,
+                        100,
+                    ),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        40,
+                        4 * 86_400,
+                        20,
+                    ),
                 ],
             ),
         ]));
@@ -2203,34 +2551,44 @@ mod tests {
     }
 
     #[test]
-    fn weekly_non_survivor_fallback_uses_latest_projected_runout_w6() {
+    fn weekly_non_survivor_above_reactive_floor_stays_in_drain_pool_w6() {
         let assessment = assess_route_band(input(vec![
             account(
                 "acct_a",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 10, 20 * 3_600, 100),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        10,
+                        20 * 3_600,
+                        100,
+                    ),
                 ],
             ),
             account(
                 "acct_b",
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
-                    window_with_burn_rate_basis_points_per_hour(WEEKLY, 20, 60 * 3_600, 67),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        20,
+                        60 * 3_600,
+                        67,
+                    ),
                 ],
             ),
         ]));
 
         assert_eq!(
             assessment.preferred_next().map(AccountId::as_str),
-            Some("acct_b"),
-            "W6: when no weekly account survives, choose latest projected runout before margin"
+            Some("acct_a"),
+            "W6: near-reset account above the reactive floor stays in the drain pool before later reset quota"
         );
-        let preferred_account = account_assessment(&assessment, "acct_b");
+        let preferred_account = account_assessment(&assessment, "acct_a");
         assert_eq!(
             preferred_account.routing_reason(),
-            RoutingReason::PreferredProjectedBurn,
-            "W6 fallback should explain that the chosen non-survivor lasts longest"
+            RoutingReason::PreferredNearResetControlledDrain,
+            "W6 should explain that the chosen non-survivor remains in controlled drain"
         );
     }
 
@@ -2242,7 +2600,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
                     projected_window(WEEKLY, 10, 24 * 3_600, hours_minutes(16, 40))
-                        .with_burn_rate_basis_points_per_hour(60),
+                        .with_per_connection_burn_basis_points_per_hour(60),
                 ],
             )
             .with_current_active_sessions(3),
@@ -2251,7 +2609,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, 4 * 3_600),
                     projected_window(WEEKLY, 9, 24 * 3_600, hours_minutes(12, 51))
-                        .with_burn_rate_basis_points_per_hour(70),
+                        .with_per_connection_burn_basis_points_per_hour(70),
                 ],
             ),
         ]));
@@ -2270,11 +2628,11 @@ mod tests {
             vec![
                 window(FIVE_HOURS, 95, hours_minutes(4, 0)),
                 projected_window(WEEKLY, 4, hours_minutes(23, 0), hours_minutes(5, 0))
-                    .with_burn_rate_basis_points_per_hour(80),
+                    .with_per_connection_burn_basis_points_per_hour(80),
             ],
         )]));
 
-        assert_eq!(assessment.selected_pool(), SelectedPool::Reserve);
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
         assert_eq!(
             assessment.preferred_next().map(AccountId::as_str),
             Some("acct_only"),
@@ -2290,7 +2648,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 8, hours_minutes(23, 30), hours_minutes(12, 0))
-                        .with_burn_rate_basis_points_per_hour(67),
+                        .with_per_connection_burn_basis_points_per_hour(67),
                 ],
             ),
             account(
@@ -2298,7 +2656,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 26, 84 * 3_600, 24 * 3_600)
-                        .with_burn_rate_basis_points_per_hour(108),
+                        .with_per_connection_burn_basis_points_per_hour(108),
                 ],
             ),
         ]));
@@ -2312,14 +2670,14 @@ mod tests {
     }
 
     #[test]
-    fn two_account_drain_under_runway_guard_moves_to_far_reset_reserve_s3c() {
+    fn two_account_near_reset_drain_above_reactive_floor_beats_far_reset_reserve_s3c() {
         let assessment = assess_route_band(input(vec![
             account(
                 "acct_near_reset",
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 8, hours_minutes(23, 30), hours_minutes(5, 30))
-                        .with_burn_rate_basis_points_per_hour(145),
+                        .with_per_connection_burn_basis_points_per_hour(145),
                 ],
             ),
             account(
@@ -2327,16 +2685,16 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 26, 84 * 3_600, 24 * 3_600)
-                        .with_burn_rate_basis_points_per_hour(108),
+                        .with_per_connection_burn_basis_points_per_hour(108),
                 ],
             ),
         ]));
 
-        assert_eq!(assessment.selected_pool(), SelectedPool::Reserve);
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
         assert_eq!(
             assessment.preferred_next().map(AccountId::as_str),
-            Some("acct_far_reset"),
-            "S3c: a near-reset drain account below the runway guard should not take new starts"
+            Some("acct_near_reset"),
+            "S3c: a near-reset drain account above the reactive floor should take new starts"
         );
     }
 
@@ -2348,7 +2706,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 19, hours_minutes(45, 0), hours_minutes(20, 0))
-                        .with_burn_rate_basis_points_per_hour(95),
+                        .with_per_connection_burn_basis_points_per_hour(95),
                 ],
             )
             .with_current_active_sessions(6),
@@ -2357,7 +2715,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 18, hours_minutes(46, 0), hours_minutes(19, 0))
-                        .with_burn_rate_basis_points_per_hour(95),
+                        .with_per_connection_burn_basis_points_per_hour(95),
                 ],
             )
             .with_current_active_sessions(0),
@@ -2366,7 +2724,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 40, 5 * 86_400, 4 * 86_400)
-                        .with_burn_rate_basis_points_per_hour(42),
+                        .with_per_connection_burn_basis_points_per_hour(42),
                 ],
             ),
         ]));
@@ -2696,7 +3054,7 @@ mod tests {
                             "acct_fast_burn_idle",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                window_with_burn_rate_basis_points_per_hour(
+                                window_with_per_connection_burn_basis_points_per_hour(
                                     WEEKLY,
                                     18,
                                     24 * 3_600,
@@ -2715,7 +3073,7 @@ mod tests {
                             "acct_slower_burn_busy",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                window_with_burn_rate_basis_points_per_hour(
+                                window_with_per_connection_burn_basis_points_per_hour(
                                     WEEKLY,
                                     18,
                                     24 * 3_600,
@@ -2734,7 +3092,7 @@ mod tests {
                             "acct_far_reset_low_burn",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                window_with_burn_rate_basis_points_per_hour(
+                                window_with_per_connection_burn_basis_points_per_hour(
                                     WEEKLY,
                                     50,
                                     5 * 86_400,
@@ -2767,7 +3125,7 @@ mod tests {
                 ExpectedAccountState {
                     account_id: "acct_slower_burn_busy",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::PreferredWeeklyHealthier,
+                    routing_reason: RoutingReason::PreferredNearResetControlledDrain,
                 },
                 ExpectedAccountState {
                     account_id: "acct_far_reset_low_burn",
@@ -3437,14 +3795,19 @@ mod tests {
     }
 
     #[test]
-    fn s4_low_weekly_drain_pool_then_far_reset_reserve_with_mutated_active_sessions() {
+    fn s4_low_weekly_pool_drains_b_b_a_b_a() {
         fn askluna(active_sessions: u32) -> BurnDownAccountInput {
             account(
                 "acct_askluna",
                 vec![
                     window(FIVE_HOURS, 99, hours_minutes(4, 46)),
-                    projected_window(WEEKLY, 4, hours_minutes(22, 49), hours_minutes(10, 15))
-                        .with_burn_rate_basis_points_per_hour(39),
+                    projected_window(
+                        WEEKLY,
+                        4,
+                        hours_minutes(22, 49),
+                        askluna_projected_weekly_runout(active_sessions),
+                    )
+                    .with_per_connection_burn_basis_points_per_hour(39),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3461,7 +3824,7 @@ mod tests {
                         hours_minutes(23, 56),
                         matches_projected_weekly_runout(active_sessions),
                     )
-                    .with_burn_rate_basis_points_per_hour(53),
+                    .with_per_connection_burn_basis_points_per_hour(53),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3478,7 +3841,7 @@ mod tests {
                         84 * 3_600,
                         ssdev_projected_weekly_runout(active_sessions),
                     )
-                    .with_burn_rate_basis_points_per_hour(105),
+                    .with_per_connection_burn_basis_points_per_hour(105),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3507,45 +3870,45 @@ mod tests {
             expected_sequence: vec![
                 "acct_matches",
                 "acct_matches",
+                "acct_askluna",
                 "acct_matches",
-                "acct_ssdev",
-                "acct_ssdev",
+                "acct_askluna",
             ],
             expected_final_active_sessions: vec![
-                ("acct_askluna", 1),
+                ("acct_askluna", 3),
                 ("acct_matches", 3),
-                ("acct_ssdev", 3),
+                ("acct_ssdev", 1),
             ],
             expected_final_account_states: vec![
                 ExpectedAccountState {
                     account_id: "acct_askluna",
-                    availability: AccountAvailability::Retiring,
-                    routing_reason: RoutingReason::RetiringNearZero,
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
                 },
                 ExpectedAccountState {
                     account_id: "acct_matches",
-                    availability: AccountAvailability::Reserve,
-                    routing_reason: RoutingReason::AvailableSamePool,
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::PreferredNearResetControlledDrain,
                 },
                 ExpectedAccountState {
                     account_id: "acct_ssdev",
                     availability: AccountAvailability::Reserve,
-                    routing_reason: RoutingReason::PreferredProjectedBurn,
+                    routing_reason: RoutingReason::HeldReserve,
                 },
             ],
             expected_selected_weekly_runouts: Some(vec![
                 ("acct_matches", Some(hours_minutes(15, 5))),
-                ("acct_matches", Some(hours_minutes(11, 18))),
-                ("acct_matches", Some(hours_minutes(8, 42))),
-                ("acct_ssdev", Some(hours_minutes(17, 20))),
-                ("acct_ssdev", Some(hours_minutes(13, 0))),
+                ("acct_matches", Some(hours_minutes(7, 32))),
+                ("acct_askluna", Some(hours_minutes(5, 7))),
+                ("acct_matches", Some(hours_minutes(5, 2))),
+                ("acct_askluna", Some(hours_minutes(3, 25))),
             ]),
         });
 
         assert_eq!(
             account_assessment(&result.final_assessment, "acct_askluna").availability(),
-            AccountAvailability::Retiring,
-            "S4: A remains retiring only"
+            AccountAvailability::Usable,
+            "S4: A remains usable for controlled drain instead of being retired"
         );
     }
 
@@ -3557,7 +3920,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 18, 24 * 3_600, 180 * 3_600)
-                        .with_burn_rate_basis_points_per_hour(10),
+                        .with_per_connection_burn_basis_points_per_hour(10),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3569,7 +3932,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 19, hours_minutes(25, 0), 190 * 3_600)
-                        .with_burn_rate_basis_points_per_hour(10),
+                        .with_per_connection_burn_basis_points_per_hour(10),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3581,7 +3944,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 60, 96 * 3_600, 600 * 3_600)
-                        .with_burn_rate_basis_points_per_hour(10),
+                        .with_per_connection_burn_basis_points_per_hour(10),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3618,7 +3981,7 @@ mod tests {
                 ExpectedAccountState {
                     account_id: "acct_b",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::PreferredHighestWeight,
+                    routing_reason: RoutingReason::PreferredNearResetDrainable,
                 },
                 ExpectedAccountState {
                     account_id: "acct_c",
@@ -3647,7 +4010,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 18, 24 * 3_600, 45 * 3_600)
-                        .with_burn_rate_basis_points_per_hour(40),
+                        .with_per_connection_burn_basis_points_per_hour(40),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3659,7 +4022,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 19, 24 * 3_600, hours_minutes(47, 30))
-                        .with_burn_rate_basis_points_per_hour(40),
+                        .with_per_connection_burn_basis_points_per_hour(40),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3671,7 +4034,7 @@ mod tests {
                 vec![
                     window(FIVE_HOURS, 100, hours_minutes(4, 0)),
                     projected_window(WEEKLY, 20, 24 * 3_600, 50 * 3_600)
-                        .with_burn_rate_basis_points_per_hour(40),
+                        .with_per_connection_burn_basis_points_per_hour(40),
                 ],
             )
             .with_current_active_sessions(active_sessions)
@@ -3697,13 +4060,13 @@ mod tests {
                     build_account: acct_c,
                 },
             ],
-            expected_sequence: vec!["acct_a", "acct_b", "acct_c", "acct_a", "acct_b"],
-            expected_final_active_sessions: vec![("acct_a", 2), ("acct_b", 2), ("acct_c", 1)],
+            expected_sequence: vec!["acct_c", "acct_b", "acct_a", "acct_c", "acct_b"],
+            expected_final_active_sessions: vec![("acct_a", 1), ("acct_b", 2), ("acct_c", 2)],
             expected_final_account_states: vec![
                 ExpectedAccountState {
                     account_id: "acct_a",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::AvailableSamePool,
+                    routing_reason: RoutingReason::PreferredNearResetControlledDrain,
                 },
                 ExpectedAccountState {
                     account_id: "acct_b",
@@ -3713,7 +4076,7 @@ mod tests {
                 ExpectedAccountState {
                     account_id: "acct_c",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::PreferredHighestWeight,
+                    routing_reason: RoutingReason::AvailableSamePool,
                 },
             ],
             expected_selected_weekly_runouts: None,
@@ -3777,7 +4140,7 @@ mod tests {
             .with_projected_exhaustion_unix_seconds(NOW + projected_runout_in_seconds)
     }
 
-    fn window_with_burn_rate_basis_points_per_hour(
+    fn window_with_per_connection_burn_basis_points_per_hour(
         window_seconds: u64,
         remaining_headroom: u32,
         resets_in_seconds: u64,
@@ -3785,7 +4148,7 @@ mod tests {
     ) -> QuotaWindowFact {
         if burn_rate_basis_points_per_hour == 0 {
             return window(window_seconds, remaining_headroom, resets_in_seconds)
-                .with_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour);
+                .with_per_connection_burn_basis_points_per_hour(burn_rate_basis_points_per_hour);
         }
 
         let remaining_basis_points = u64::from(remaining_headroom) * 100;
@@ -3799,7 +4162,7 @@ mod tests {
             resets_in_seconds,
             runout_seconds,
         )
-        .with_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour)
+        .with_per_connection_burn_basis_points_per_hour(burn_rate_basis_points_per_hour)
     }
 
     const fn hours_minutes(hours: u64, minutes: u64) -> u64 {
@@ -3809,10 +4172,16 @@ mod tests {
     const fn matches_projected_weekly_runout(active_sessions: u32) -> u64 {
         match active_sessions {
             0 => hours_minutes(15, 5),
-            1 => hours_minutes(11, 18),
-            2 => hours_minutes(8, 42),
-            3 => hours_minutes(5, 28),
-            _ => hours_minutes(4, 12),
+            1 => hours_minutes(7, 32),
+            2 => hours_minutes(5, 2),
+            _ => hours_minutes(3, 46),
+        }
+    }
+
+    const fn askluna_projected_weekly_runout(active_sessions: u32) -> u64 {
+        match active_sessions {
+            0 | 1 => hours_minutes(5, 7),
+            _ => hours_minutes(3, 25),
         }
     }
 

@@ -1,7 +1,7 @@
 # Account Selection Burn-Rate Implementation Plan
 
 Date: 2026-06-28
-Status: draft for one plan-review cycle
+Status: reviewed and accepted for TDD implementation
 Goal id: 2026-06-28-quota-burn-rate-selection
 
 ## Source Coverage
@@ -9,13 +9,13 @@ Goal id: 2026-06-28-quota-burn-rate-selection
 Primary specs:
 
 - `docs/specs/2026-06-28-account-selection-tdd-scenario-spec.md`
-  - line count checked after review/address: 815
-  - full chunks read by parent across spec/review/address: 1-190, 210-360,
-    360-742, with final 742-815 expansion sanity checked after patch
+  - line count must be rechecked with `wc -l` before implementation start
+  - parent and reviewers loaded product intent, companion inputs, fixture shape,
+    S1-S6 scenario rows, and non-goals
 - `docs/specs/2026-06-27-account-quota-burn-rate-selection.md`
-  - line count checked: 616
-  - parent read requirements, SQLx domains, selector contract, proof
-    expectations, and post-v1 tuning sections
+  - line count must be rechecked with `wc -l` before implementation start
+  - parent and reviewers loaded requirements, SQLx domains, selector contract,
+    CLI/OTEL contract, and proof expectations
 
 Current repo anchors:
 
@@ -28,17 +28,19 @@ Current repo anchors:
 
 Review cycle budget:
 
-- Spec review/address was capped at two cycles and is spent.
-- Plan review/address is capped at one cycle.
-- After one plan review/address pass, proceed to implementation unless a
-  material blocker prevents meaningful progress.
+- Spec review/address completed one cycle; accepted blockers were addressed in
+  the specs before implementation.
+- Plan review/address completed one cycle; accepted findings are folded into
+  this plan before implementation.
+- Proceed to implementation unless a material blocker prevents meaningful
+  progress.
 
 ## Goal
 
-Make account selection deterministic, burn-rate aware, active-session aware, and
-Codex-safe under account exhaustion. The router should maximize usable weekly
-quota across configured OAuth accounts while minimizing downtime for long-running
-Codex work.
+Make account selection deterministic, per-connection-burn aware,
+active-session aware, and Codex-safe under account exhaustion. The router should
+maximize usable weekly quota across configured OAuth accounts while minimizing
+downtime for long-running Codex work.
 
 ## Non-Goals
 
@@ -95,6 +97,17 @@ Source anchors:
 
 Behavior:
 
+- Cut over selector input types so unit names are honest:
+  - `per_connection_burn_basis_points_per_hour`
+  - `aggregate_burn_basis_points_per_hour`
+  - `projected_candidate_burn_basis_points_per_hour`
+  - `required_active_connections_to_drain`
+  - `projected_drain_gap_after_selection`
+  - `projected_weekly_runway_seconds`
+- Replace `REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS = 21_600` with
+  `reactive_reconnect_min_runway_seconds = 900`.
+- Replace any old controlled-drain reset-horizon naming with
+  `drain_pool_reset_horizon_seconds`.
 - Add a pure selector scenario harness in `codex-router-selection`.
 - Every account-selection scenario includes:
   - `now_unix_seconds`
@@ -110,10 +123,30 @@ Behavior:
   - `headroom_cost`
   - transport-specific pressure
   - score/weight fallback that keeps weak accounts selectable
+  - survival-first ordering as the top-level account choice
+  - `WeightedDeficitSelector` for quota account selection
+  - generic `burn_rate_basis_points_per_hour` fields that conflate
+    per-connection, aggregate, and projected-candidate units
+- Replace rather than extend legacy selection concepts:
+  - delete/quarantine `BurnDownRouteBandPolicy` pressure, risk, selectable
+    weight, and salvage knobs from quota ranking
+  - delete/quarantine `BurnDownAccountAssessment` short/long pressure,
+    salvage, projected-burn-pressure, and routing-weight fields from selector
+    assertions
+  - replace `RoutingReason::PreferredHighestWeight` and smooth-weight reasons
+    with drain-pool, reserve, guard, usage-limit, unknown, and controlled-drain
+    reason codes
+  - remove `ReservationHandle.headroom_cost` from account-selection math
+  - keep transport kind only as diagnostic metadata
 
 Likely touched files:
 
 - `crates/codex-router-selection/src/burn_down.rs`
+- `crates/codex-router-selection/src/run_rate.rs`
+- `crates/codex-router-selection/src/reservation.rs`
+- `crates/codex-router-selection/src/weighted_deficit.rs` if no non-quota caller
+  remains after the selector cutover
+- `crates/codex-router-proxy/src/account_selection.rs`
 - optional new test helper module under `crates/codex-router-selection/src/`
 
 TDD gate:
@@ -122,13 +155,19 @@ TDD gate:
   - expand S1, S2, S3e-S3m, and S5 to executable fixture quality
   - include full policy, `now_unix_seconds`, route band, all account windows,
     projection mode or explicit per-start projection vector,
+    per-connection burn in basis-points/hour/active-connection,
+    aggregate fallback burn when per-connection data is unavailable,
     `selected_sequence`, final active sessions, account states, reason codes,
     and pool roles
-  - include controlled-drain long-running placement boundaries at 6h, 10h,
-    and 15h
+  - include reactive reconnect floor boundaries around 15m and drain-pool reset
+    horizon boundaries around 48h
 - First red behavior test after the fixture gate: S4 real low-weekly case
-  selects `B, B, B, C, C` with replayed active-session mutation and projection
+  selects `B, B, A, B, A` with replayed active-session mutation and projection
   trace.
+- Exact first-red filters:
+  - `s4_low_weekly_pool_drains_b_b_a_b_a`
+  - `controlled_drain_uses_active_imbalance_before_far_reset_reserve`
+  - `selector_ignores_transport_pressure_and_headroom_cost`
 - Then add S1, S2, S3a-S3n, S5, and no-cost canaries as executable fixtures.
 
 Proof:
@@ -139,9 +178,13 @@ Proof:
   - same-pool active balancing
   - drain-pool before far-reset reserve
   - projection-driven reserve entry
-  - controlled-drain 6h, 10h, and 15h boundaries
+  - reactive reconnect floor and drain-pool reset horizon boundaries
   - usage-limit hard block
   - no `score 1`, active pressure, headroom, or transport-cost influence
+  - no process-lifetime smooth weighted-deficit state participates in quota
+    account selection
+  - unknown or insufficient burn history does not become `Some(0)` unless zero
+    burn was actually observed from two or more same-reset quota points
 - Red/green required for the first failing scenario and any current behavior
   that is known wrong.
 
@@ -161,6 +204,11 @@ Source anchors:
 Behavior:
 
 - Ensure SQLx projections can create the exact pure selector input shape.
+- Persist enough point-in-time data to recompute `% quota / hour / active
+  connection`; a latest quota row alone is not valid burn-rate proof.
+- Split projection output into observed per-connection burn, aggregate fallback
+  burn, and projected candidate burn. Do not write projected post-selection
+  aggregate burn into a field whose name reads as raw observed burn.
 - Runtime/proxy remains authoritative for live active sessions.
 - SQLx remains the durable mirror/history source:
   - current active-session mirror
@@ -169,6 +217,10 @@ Behavior:
   - quota history by reset segment
   - route-band usage-limit state
 - Projection must use active-session overrides for runtime-owned current truth.
+- Add `logical_session_id` or prove an equivalent stable session identifier so
+  re-reservations for the same client connection remain one interval in event
+  and rollup history.
+- Add `max_concurrent_sessions` to rollup output if missing.
 
 Likely touched files:
 
@@ -181,11 +233,30 @@ TDD gate:
 
 - Red test: SQLx fixture for S4 projects the same account sequence as the pure
   selector when active-session overrides mutate between starts.
+- Red test: projecting the same quota observations and active-session rollups
+  with active overrides `0`, `1`, and `2` leaves
+  `per_connection_burn_basis_points_per_hour` invariant while
+  `projected_candidate_burn_basis_points_per_hour` changes.
+- Red test: one same-reset quota interval with two overlapping active sessions
+  computes per-connection burn from additive session-hours.
+- Red test: a three-bucket quota interval with the middle rollup bucket absent
+  downgrades to aggregate/insufficient confidence instead of computing a
+  per-connection burn unit from a gap.
+- Red test: one quota observation or stale quota history yields
+  unknown/insufficient confidence without manufacturing zero burn.
+- Red test: observed zero burn is represented only when two same-reset quota
+  points have equal remaining basis points.
+- Exact first-red filters:
+  - `projection_keeps_per_connection_burn_invariant_across_active_overrides`
+  - `projection_rejects_rollup_gap_inside_quota_interval`
+  - `projection_never_manufactures_zero_from_one_observation`
 
 Proof:
 
 - Integration:
-  - quota history and active-session rollups produce expected burn estimates
+  - quota history points and active-session interval points produce expected
+    per-connection burn estimates
+  - aggregate account burn is separately named and lower confidence
   - active-session events retain completed sessions after current leases are
     released
   - overlapping sessions add session-seconds
@@ -196,12 +267,16 @@ Proof:
   - retention keeps week-long quota history and active-session rollups long
     enough for run-rate calculation, then purges deterministically
   - reset-boundary history does not create fake burn
+  - same-reset observations are joined only with active-session seconds inside
+    the same observation interval
   - zero/partial active-session history falls back without divide-by-zero
+  - no-history and one-observation cases do not produce fake zero projected burn
   - usage-limit state excludes accounts before selection
   - migration preserves current mirror state without synthetic backfill
   - migration/schema proof creates `active_session_events` and
-    `active_session_rollups` SQLx domains without using legacy active pressure
-    as selector input
+    `active_session_rollups` SQLx domains, including `logical_session_id` and
+    `max_concurrent_sessions`, without using legacy active pressure as selector
+    input
 
 Split/replan trigger:
 
@@ -218,6 +293,10 @@ Source anchors:
 Behavior:
 
 - Keep traffic pass-through except account routing/auth/quota safety.
+- Controlled-drain runtime activation is route-band gated: selector unit tests
+  may exercise controlled drain, but WebSocket runtime selection must not enable
+  controlled-drain behavior until this slice's reconnect-containment proof is
+  green for that route band.
 - Preserve affinity and existing-work behavior:
   - usable previous-response affinity and same-turn continuations stay on the
     owning account
@@ -251,9 +330,14 @@ TDD gate:
 - Red test: WebSocket account exhaustion with A selected and B available emits
   reconnect signal, excludes A on reconnect, and mock upstream A receives no
   later client data frame.
-- Red test: six concurrent runtime selection attempts across three accounts
-  produce the expected selected timeline, final active reservations, and SQLx
-  mirror state.
+- Red test: six serialized runtime selection attempts replay S4 and assert exact
+  selected timeline, final active reservations, and SQLx mirror state.
+- Red test: truly concurrent runtime selection attempts replay S3n and assert
+  final active-reservation multiset rather than wall-clock acquisition order.
+- Exact first-red filters:
+  - `websocket_usage_limit_with_alternative_emits_reconnect_and_retires_account`
+  - `runtime_s4_serialized_selection_matches_selector_timeline`
+  - `runtime_s3n_concurrent_selection_balances_final_active_counts`
 
 Proof:
 
@@ -293,11 +377,24 @@ Behavior:
 - JSON output exposes stable selected account/reason/active/freshness fields.
 - Output does not show fake score, active pressure cost, headroom cost, or
   transport cost.
+- Rename/remove current CLI selector-ranking fields and wording:
+  - `ActiveClientMirrorLoad.pressure`
+  - table text that says `pressure`, `score`, `cost`, `weight`, or legacy
+    selector `risk`
+  - `quota_pressure_bucket` metrics when they imply selector pressure
+  - replace with current active sessions, per-connection burn, projected runway,
+    pool role, and stable reason code
+- OTel metric names/dimensions must be renamed away from selector
+  `pressure`/`score` language where that language implies quota cost. If an
+  existing pressure metric remains for backward diagnostics, it must be clearly
+  labeled legacy or display-only and must not be sourced from selector ranking
+  fields.
 - Installed binary proof reports version/current command path.
 
 Likely touched files:
 
 - `crates/codex-router-cli/src/lib.rs`
+- `crates/codex-router-cli/src/quota.rs`
 - CLI tests under the same crate
 - docs/testing runbook only if existing smoke instructions need a pointer
 
@@ -305,12 +402,22 @@ TDD gate:
 
 - Red test: fixture CLI output for the S4 state shows B as selected initially,
   then updated state after refresh/projection, with no score/cost fields.
+- Red test: table, JSON, stderr, and telemetry fixture output do not contain
+  selector-ranking `score`, `pressure`, `headroom`, `transport cost`, `weight`,
+  or legacy `risk` fields. Any retained diagnostic field must be explicitly
+  labeled legacy/display-only and must not be selector input.
+- Exact first-red filters:
+  - `quota_status_s4_explains_selected_account_without_score_or_pressure`
+  - `quota_status_json_exposes_reason_code_and_no_legacy_cost_fields`
+  - `quota_otel_dimensions_use_reason_codes_not_pressure_scores`
 
 Proof:
 
 - CLI:
   - table output and JSON output match selector
   - stale/unavailable active-session mirror is labeled as not live-load exact
+  - no user-facing table, JSON, or OTel field exposes score, active pressure
+    cost, headroom cost, or smooth-weighted candidate language
   - installed `codex-router quota` path reports expected behavior after install
 - Smoke/e2e:
   - use debug router port/state only, not production port 8787
@@ -350,10 +457,11 @@ R2 mutating multi-start active sessions
   freshness guard: mutation must happen inside test loop
   red/green: required
 
-R3 burn-rate/reset-aware selection
+R3 per-connection burn-rate/reset-aware selection
   owning slice: 1 and 2
   proof source: selector unit tests and SQLx run-rate integration tests
-  evidence source: projection trace, burn basis-points/hour, reset/runout rows
+  evidence source: projection trace, per-connection burn basis-points/hour,
+    aggregate fallback burn when used, reset/runout rows
   freshness guard: basis-point math, no display rounding in comparisons
   red/green: required
 
@@ -423,10 +531,11 @@ R9 telemetry and redaction proof
 Initial targeted gates:
 
 ```text
-cargo test -p codex-router-selection <scenario filters>
-cargo test -p codex-router-state <projection/rollup filters>
-cargo test -p codex-router-proxy <quota exhaustion filters>
-cargo test -p codex-router-cli <quota output filters>
+cargo test -p codex-router-selection s4_low_weekly_pool_drains_b_b_a_b_a
+cargo test -p codex-router-state projection_keeps_per_connection_burn_invariant_across_active_overrides
+cargo test -p codex-router-state projection_rejects_rollup_gap_inside_quota_interval
+cargo test -p codex-router-proxy websocket_usage_limit_with_alternative_emits_reconnect_and_retires_account
+cargo test -p codex-router-cli quota_status_s4_explains_selected_account_without_score_or_pressure
 ```
 
 Quality gates:
@@ -450,9 +559,9 @@ Smoke/e2e gates:
 
 ```text
 codex-router --version
-codex-router quota --format json
-codex-router serve --bind 127.0.0.1:<debug-port> --state <temp-state>
-codex --profile <debug-router-profile> ...  # only with debug port/state
+CODEX_ROUTER_HOME=<temp-router-home> codex-router quota --format json
+CODEX_ROUTER_HOME=<temp-router-home> codex-router serve --bind 127.0.0.1:0
+codex --profile <debug-router-profile> ...  # debug profile points at temp bind
 ```
 
 The smoke command shape is finalized during implementation based on available

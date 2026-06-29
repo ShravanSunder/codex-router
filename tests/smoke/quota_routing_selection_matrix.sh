@@ -136,29 +136,31 @@ preferred = [account for account in payload["accounts"] if account["preferred_ne
 assert len(preferred) == 1
 assert preferred[0]["safe_account_label"] == "askluna"
 assert preferred[0]["next_use"] == "preferred by quota"
-assert preferred[0]["routing_reason"] == "preferred_highest_weight"
+assert preferred[0]["routing_reason"] == "preferred_safest_quota"
 
 assert by_label["askluna"]["preferred_next"] is True
-assert by_label["askluna"]["weekly_quota_risk"] == 20
+assert by_label["askluna"]["weekly_quota_guard"] == 20
 assert by_label["askluna"]["active_clients"] == 1
 assert by_label["askluna"]["active_clients_source"] == "sqlx_mirror"
 assert "routing_weight" not in by_label["askluna"]
 
 assert by_label["matches"]["preferred_next"] is False
-assert by_label["matches"]["weekly_quota_risk"] == 10
+assert by_label["matches"]["weekly_quota_guard"] == 10
 assert by_label["matches"]["active_clients"] == 1
 assert by_label["matches"]["active_clients_source"] == "sqlx_mirror"
 assert "routing_weight" not in by_label["matches"]
 
 assert by_label["ssdev"]["preferred_next"] is False
-assert by_label["ssdev"]["weekly_quota_risk"] == 3
+assert by_label["ssdev"]["weekly_quota_guard"] == 3
 assert by_label["ssdev"]["active_clients"] == 0
 assert by_label["ssdev"]["active_clients_source"] == "sqlx_mirror"
 assert "routing_weight" not in by_label["ssdev"]
 
 for account in payload["accounts"]:
-    assert "short_quota_risk" in account
-    assert "weekly_quota_risk" in account
+    assert "short_quota_risk" not in account
+    assert "weekly_quota_risk" not in account
+    assert "short_quota_guard" in account
+    assert "weekly_quota_guard" in account
     assert "routing_weight" not in account
 PY
 

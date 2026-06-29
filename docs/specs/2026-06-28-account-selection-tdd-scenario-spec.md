@@ -1,7 +1,7 @@
 # Account Selection TDD Scenario Spec
 
 Date: 2026-06-28
-Status: draft for review; TDD scenario contract
+Status: accepted for TDD implementation after one spec-review cycle
 
 ## Product Intent
 
@@ -33,10 +33,13 @@ R0. V1 Policy Constants
   short_survival_safety_buffer_basis_points
   short_near_reset_threshold_seconds
   same_pool_reset_tolerance_seconds
+  same_pool_projected_runout_tolerance_seconds
   same_pool_survival_margin_tolerance_basis_points
   active_session_imbalance_threshold
   usage_limit_suspect_ttl_seconds
   active_session_rollup_bucket_seconds
+  drain_pool_reset_horizon_seconds
+  reactive_reconnect_min_runway_seconds
 
 R1. Strict Next Account
   runtime/proxy owns authoritative live active-session truth
@@ -56,8 +59,9 @@ R10. CLI and observability
 ```
 
 All scenario tests in this file must use those defaults unless a row explicitly
-overrides a policy input. The only new policy knob introduced by this scenario
-spec is the controlled-drain runway horizon.
+overrides a policy input. This scenario spec does not introduce extra selector
+knobs; it highlights the controlled-drain knobs from the companion spec because
+they are central to the TDD rows.
 
 ## Requirements
 
@@ -81,14 +85,16 @@ AccountSelectionScenario
       status
       remaining_basis_points
       reset_in_seconds
-      burn_basis_points_per_hour
+      per_connection_burn_basis_points_per_hour
+      aggregate_burn_basis_points_per_hour
       burn_confidence
       projected_exhaustion_in_seconds
     weekly_window
       status
       remaining_basis_points
       reset_in_seconds
-      burn_basis_points_per_hour
+      per_connection_burn_basis_points_per_hour
+      aggregate_burn_basis_points_per_hour
       burn_confidence
       projected_exhaustion_in_seconds
   expected
@@ -133,20 +139,40 @@ the durable mirror, lifecycle events, and rollups can produce the same selector
 input. Proxy tests prove the runtime reservation lifecycle is mirrored into
 SQLx without making SQLx the authoritative live source.
 
-### R3. Burn Rate And Exhaustion Projection Are First-Class Inputs
+### R3. Per-Connection Burn And Exhaustion Projection Are First-Class Inputs
 
 The selector must consider:
 
-- observed burn rate for the 5h window;
-- observed burn rate for the weekly window;
+- observed burn rate for the 5h window in `%/hr/active connection`;
+- observed burn rate for the weekly window in `%/hr/active connection`;
+- aggregate account burn as a lower-confidence fallback only;
 - burn confidence for each window;
 - projected exhaustion time after adding one new session;
 - reset time for each window;
 - current active session count.
 
-Burn rates are represented in basis points per hour. Sub-percent burn rates
-must not round away. For example, `0.39%/h` is `39` basis points per hour, not
-`0%/h`.
+Burn rates are represented in basis points per hour per active connection.
+Sub-percent burn rates must not round away. For example, `0.39%/h/connection`
+is `39` basis points per hour per active connection, not `0%/h`.
+
+SQLx projection tests must prove this unit from point-in-time data:
+
+```text
+quota points:
+  prior observed time, prior remaining basis points, reset segment
+  latest observed time, latest remaining basis points, same reset segment
+
+active-session points:
+  active session intervals overlapping the quota-observation interval
+  additive active-session seconds for overlapping sessions
+
+per_connection_burn =
+  (prior_remaining_basis_points - latest_remaining_basis_points)
+  / active_session_hours
+```
+
+A test that provides only a latest quota row plus current active sessions cannot
+claim to validate burn rate. It can validate display or fallback behavior only.
 
 Projected exhaustion is the candidate projection after adding one new session
 to the candidate account. Tests may provide explicit
@@ -156,9 +182,9 @@ the value, they must use the 2026-06-27 spec's basis-point math:
 ```text
 projected_active_session_count = current_active_sessions + 1
 
-if active-session history is sufficient:
+if active-session interval history is sufficient:
   projected_burn_basis_points_per_hour =
-    per_session_burn_basis_points_per_hour * projected_active_session_count
+    per_connection_burn_basis_points_per_hour * projected_active_session_count
 
 else if quota history is sufficient:
   projected_burn_basis_points_per_hour =
@@ -171,32 +197,33 @@ projected_exhaustion_in_seconds =
 When division is inexact, selector math rounds projected burn up for safety.
 Display rounding must not affect selector comparisons.
 
-### R4. Drain Pool Before Far-Reset Reserve
+### R4. Drain Near-Reset Accounts Before Far-Reset Reserve
 
-The selector forms a drain pool from accounts with the nearest weekly reset that
-can still accept new work. Accounts with far later weekly resets are reserve.
-Pool membership inherits the 2026-06-27 spec defaults:
-`same_pool_reset_tolerance_seconds = 7_200` and
-`same_pool_survival_margin_tolerance_basis_points = 500`.
+The selector forms a near-reset drain pool from accounts whose weekly reset is
+inside `drain_pool_reset_horizon_seconds`. Accounts with far later weekly resets
+are reserve.
 
 The drain pool wins even when a reserve account has more absolute weekly
 headroom, because soon-reset quota is perishable. The reserve pool is used when
 the drain pool is hard-blocked, exhausted, fails the 5h guard, lacks
-credentials, is stale/unknown with known alternatives, or is projected to create
-unsafe immediate churn.
+credentials, is stale/unknown with known alternatives, is below the reactive
+reconnect floor, or has already been attempted for the current request/rotation.
 
-For v1 scenario tests, "can still accept new work" means one of:
+For v1 scenario tests, "needs new work" is computed from:
 
-- the account survives to its weekly reset after adding one projected session;
-- the account is a controlled-drain candidate with projected runway at or above
-  `controlled_drain_min_runway_seconds`; or
-- all alternatives are worse or unavailable, in which case the expected behavior
-  must be explicit in the scenario row.
+```text
+required_active_connections_to_drain =
+  weekly_remaining_basis_points
+  / (per_connection_weekly_burn_basis_points_per_hour * hours_until_weekly_reset)
 
-The scenario fixture must expose `controlled_drain_min_runway_seconds` as a
-policy input. The recommended initial value is fifteen minutes for reactive
-reconnect safety tests and six hours for long-running work placement tests. A
-test must name which horizon it is exercising.
+projected_drain_gap_after_selection =
+  required_active_connections_to_drain - (current_active_sessions + 1)
+```
+
+Positive drain gap means the account needs more active connections to drain by
+reset. Non-positive drain gap does not make the account unusable; it means
+additional work is controlled drain and must stay above
+`reactive_reconnect_min_runway_seconds`.
 
 ### R5. Balance Active Sessions Inside The Drain Pool
 
@@ -299,7 +326,8 @@ struct AccountSelectionPolicyFixture {
     active_session_imbalance_threshold: u32,
     usage_limit_suspect_ttl_seconds: u64,
     active_session_rollup_bucket_seconds: u64,
-    controlled_drain_min_runway_seconds: u64,
+    drain_pool_reset_horizon_seconds: u64,
+    reactive_reconnect_min_runway_seconds: u64,
 }
 
 struct AccountFixture {
@@ -317,7 +345,8 @@ struct WindowFixture {
     status: QuotaWindowStatus,
     remaining_basis_points: u32,
     reset_in_seconds: u64,
-    burn_basis_points_per_hour: Option<u32>,
+    per_connection_burn_basis_points_per_hour: Option<u32>,
+    aggregate_burn_basis_points_per_hour: Option<u32>,
     confidence: QuotaRunRateConfidence,
     projection: ProjectionFixture,
 }
@@ -326,8 +355,8 @@ enum ProjectionFixture {
     ExplicitPerStart {
         projected_exhaustion_after_start_seconds: Vec<Option<u64>>,
     },
-    DerivedFromPerSessionBurn {
-        per_session_burn_basis_points_per_hour: u32,
+    DerivedFromPerConnectionBurn {
+        per_connection_burn_basis_points_per_hour: u32,
         aggregate_burn_basis_points_per_hour: u32,
         active_session_history_sufficient: bool,
     },
@@ -357,6 +386,12 @@ struct ExpectedSelectionFixture {
 The fixture may derive `projected_exhaustion_in_seconds` from remaining
 basis-points and burn rate, but tests that target boundary math should set the
 projection explicitly.
+
+`ExplicitPerStart` means the projected exhaustion for this candidate when it is
+assessed at selector start N after applying the hypothetical +1 active session
+to that candidate. If a scenario needs projections by active count instead, the
+fixture source must name that mode explicitly and prove the conversion before
+selector assertions.
 
 Every multi-start fixture must name the exact selected sequence and a projection
 trace for rows where projection changes the selected account. Expected values
@@ -446,11 +481,12 @@ balancing and reserve behavior enter the picture.
 └─────┴─────┴────────┴──────────────┴────────────┴────────┴──────────────┘
 ```
 
-The S1c policy is not allowed to be implicit. The scenario must specify the
-controlled-drain horizon and assert whether the account is selectable under that
-horizon. A single-account weekly non-survivor with 10h projected runway is
-selectable under a 6h long-running horizon and not selectable under a 15h
-long-running horizon.
+The S1c policy is not allowed to be implicit. The scenario must specify
+`reactive_reconnect_min_runway_seconds` and assert whether the account is
+selectable under that floor. A single-account weekly non-survivor with 10h
+projected runway is selectable under the v1 15m reactive floor; an account with
+less than the reactive floor is not selected for new work unless no safer route
+exists and the all-accounts outcome is explicit.
 
 ### S2. Two-Account Suite
 
@@ -505,9 +541,9 @@ terminal case.
 │ S3i  │ usage-limit active       │ usage-limit active       │ usage-limit active       │ router all-accounts         │
 │      │                          │                          │                          │ exhausted                   │
 ├──────┼──────────────────────────┼──────────────────────────┼──────────────────────────┼──────────────────────────────┤
-│ S3j  │ 20%, reset 24h, runout   │ 21%, reset 24h, runout   │ 80%, reset 3d, runout    │ C only if controlled-drain  │
-│      │ 5h, active 0             │ 7h, active 0             │ after reset, active 0    │ horizon is 10h or higher;  │
-│      │                          │                          │                          │ otherwise B then A/B       │
+│ S3j  │ 20%, reset 24h, runout   │ 21%, reset 24h, runout   │ 80%, reset 3d, runout    │ B then A/B while both stay │
+│      │ 5h, active 0             │ 7h, active 0             │ after reset, active 0    │ above reactive floor; C    │
+│      │                          │                          │                          │ only after A/B unsafe      │
 ├──────┼──────────────────────────┼──────────────────────────┼──────────────────────────┼──────────────────────────────┤
 │ S3k  │ 30%, reset 2h, runout    │ 32%, reset 26h, runout   │ 75%, reset 5d, runout    │ A until reset-safe margin   │
 │      │ after reset, active 0    │ after reset, active 0    │ after reset, active 0    │ closes; then B, not C       │
@@ -516,10 +552,10 @@ terminal case.
 │      │ refreshed to 95%         │ after reset, active 0    │ after reset, active 0    │ must not create fake burn   │
 ├──────┼──────────────────────────┼──────────────────────────┼──────────────────────────┼──────────────────────────────┤
 │ S3m  │ 18%, reset 24h, burn     │ 18%, reset 24h, burn     │ 50%, reset 5d, burn      │ B/A balance by projected    │
-│      │ 0.8%/h, active 0         │ 0.4%/h, active 1         │ 0.2%/h, active 0         │ runway, not just active     │
+│      │ 80bp/h/conn, active 0    │ 40bp/h/conn, active 1    │ 20bp/h/conn, active 0    │ runway, not just active     │
 ├──────┼──────────────────────────┼──────────────────────────┼──────────────────────────┼──────────────────────────────┤
 │ S3n  │ 18%, reset 24h, burn     │ 19%, reset 24h, burn     │ 20%, reset 24h, burn     │ spread across A/B/C by      │
-│      │ 0.4%/h, active 0         │ 0.4%/h, active 0         │ 0.4%/h, active 0         │ active count; no reserve    │
+│      │ 40bp/h/conn, active 0    │ 40bp/h/conn, active 0    │ 40bp/h/conn, active 0    │ active count; no reserve    │
 │      │                          │                          │                          │ when all are same pool      │
 └──────┴──────────────────────────┴──────────────────────────┴──────────────────────────┴──────────────────────────────┘
 ```
@@ -543,15 +579,16 @@ S3a expected sequence:
   C reason: held_far_reset_reserve
 
 S3b expected sequence:
-  B, B, B, B, A
-  final active: A=7, B=4, C=0
+  B, B, B, B, B
+  final active: A=6, B=5, C=0
   C reason: held_far_reset_reserve
 
 S3c expected sequence:
-  B, B, B, C, C
-  final active: A=1, B=3, C=3
-  A reason: retiring_near_zero_quota
-  C enters only after B projection drops below controlled-drain runway
+  B, B, A, B, A
+  final active: A=3, B=3, C=1
+  A reason: near_reset_controlled_drain
+  C reason: held_far_reset_reserve
+  A/B continue draining while above reactive reconnect floor
 
 S3d expected sequence:
   B, A, B, A, B
@@ -559,9 +596,10 @@ S3d expected sequence:
   C reason: held_far_reset_reserve
 
 S3n expected sequence:
-  A, B, C, A, B
-  final active: A=2, B=2, C=1
-  no account is reserve because all three are same effective weekly pool
+  C, B, A, C, B
+  final active: A=1, B=2, C=2
+  no account is reserve because all three are same effective weekly pool; most
+  remaining same-reset quota receives load first, then active sessions balance
 ```
 
 Rows with less specific table prose, such as S3e-S3m, must still be implemented
@@ -589,6 +627,57 @@ pool roles
 Those rows are required coverage, not optional examples. Implementation may
 start with a smaller first red test, but PR-ready proof must include every row.
 
+### Required Executable Fixture Appendix
+
+The executable fixture source must materialize every row below with the complete
+`AccountSelectionScenario` shape from this spec. The compact table fixes the
+expected outputs; fixture code owns the expanded 5h/weekly window values and may
+derive them from the row description only when the derivation is deterministic.
+
+```text
+defaults for rows unless overridden:
+  now_unix_seconds: fixed
+  route_band: responses
+  policy: 2026-06-27 defaults
+  5h window: safe, 90% left, reset after 4h, normal confidence
+  projection mode: DerivedFromPerConnectionBurn when history is sufficient
+  far-reset reserve means weekly reset outside drain_pool_reset_horizon_seconds
+```
+
+```text
+┌─────┬────────┬────────────────────┬──────────────────────┬────────────────────────────┐
+│ id  │ starts │ expected sequence  │ final active         │ required states/reasons    │
+├─────┼────────┼────────────────────┼──────────────────────┼────────────────────────────┤
+│ S1a │ 1      │ A                  │ A=1                  │ A near_reset_drainable     │
+│ S1b │ 1      │ none               │ A=0                  │ A held_by_5h_guard         │
+│ S1c │ 1      │ A                  │ A=1                  │ A controlled_drain         │
+│ S1d │ 1      │ none               │ A=0                  │ all_accounts_exhausted     │
+│ S1e │ 1      │ A                  │ A=1                  │ unknown_fallback           │
+│ S1f │ 1      │ A                  │ A=1                  │ stale_only_account         │
+│ S1g │ 1      │ A                  │ A=4                  │ observed_zero_burn         │
+│ S2a │ 1      │ B                  │ A=3, B=1             │ same_pool_lower_active     │
+│ S2b │ 1      │ A                  │ A=1, B=0             │ A near_reset, B reserve    │
+│ S2c │ 1      │ B                  │ A=0, B=1             │ A held_by_5h_guard         │
+│ S2d │ 1      │ B                  │ A=0, B=1             │ A unknown_held             │
+│ S2e │ 1      │ B                  │ A=0, B=1             │ A usage_limit_blocked      │
+│ S2f │ 5      │ A, B, A, B, A      │ A=3, B=2             │ same_pool_active_balance   │
+│ S3e │ 5      │ C, C, C, C, C      │ A=0, B=0, C=5        │ A/B unsafe, C reserve used │
+│ S3f │ 5      │ A, A, A, A, A      │ A=7, B=0, C=0        │ B stale_held, C reserve    │
+│ S3g │ 5      │ B, B, B, B, B      │ A=0, B=5, C=0        │ A usage_limit, C reserve   │
+│ S3h │ 5      │ B, B, B, B, B      │ A=0, B=5, C=0        │ A exhausted_after_mark     │
+│ S3i │ 1      │ none               │ A=0, B=0, C=0        │ all_accounts_exhausted     │
+│ S3j │ 5      │ B, A, B, A, B      │ A=2, B=3, C=0        │ C reserve                  │
+│ S3k │ 5      │ A, A, B, A, B      │ A=3, B=2, C=0        │ C reserve                  │
+│ S3l │ 5      │ B, B, B, B, B      │ A=0, B=5, C=0        │ A reset_segment_ignored    │
+│ S3m │ 5      │ B, A, B, A, B      │ A=2, B=4, C=0        │ C reserve                  │
+│ S5  │ 5      │ A, B, A, B, A      │ A=3, B=2, C=0        │ C reserve                  │
+└─────┴────────┴────────────────────┴──────────────────────┴────────────────────────────┘
+```
+
+Rows S3h and S6 are related but distinct: S3h proves selection after an account
+has already been marked exhausted; S6 proves the WebSocket containment behavior
+that records the exhaustion and emits the reconnect signal.
+
 ### S4. Real Observed Low-Weekly Case
 
 This is the scenario that motivated the current discussion. Exact live numbers
@@ -607,43 +696,58 @@ expected:
   next account: B
   reason: nearest usable weekly drain pool with fewer active sessions
   not expected: C solely because it has more weekly headroom
-  not expected: A while B can absorb new work
+  not expected: A for starts 1-2 while B has lower/equal active count and
+    better controlled-drain runway
 
 required executable fixture:
   now_unix_seconds: fixed
   route_band: responses
   starts_to_simulate: 5
-  policy: 2026-06-27 defaults plus controlled_drain_min_runway_seconds=21600
+  policy: 2026-06-27 defaults plus reactive_reconnect_min_runway_seconds=900
+          and drain_pool_reset_horizon_seconds=172800
   A:
     active=1
-    5h remaining=9900bp, reset=4h46m, burn=680bp/h, confidence=normal,
+    5h remaining=9900bp, reset=4h46m,
+    per_connection_burn=680bp/h/conn, confidence=normal,
     projection=ExplicitPerStart[14h33m, 14h33m, 14h33m, 14h33m, 14h33m]
-    weekly remaining=400bp, reset=22h49m, burn=39bp/h, confidence=normal,
-    projection=ExplicitPerStart[10h15m, 10h15m, 10h15m, 10h15m, 10h15m]
-    state=retiring_near_zero_quota
+    weekly remaining=400bp, reset=22h49m,
+    per_connection_burn=39bp/h/conn, confidence=normal,
+    projection=ExplicitPerStart[5h07m, 3h25m]
+    state=near_reset_controlled_drain
   B:
     active=0
-    5h remaining=10000bp, reset=4h59m, burn=0bp/h, confidence=insufficient,
+    5h remaining=10000bp, reset=4h59m,
+    per_connection_burn=0bp/h/conn, confidence=insufficient,
     projection=NoBurnObserved
-    weekly remaining=800bp, reset=23h56m, burn=53bp/h, confidence=normal,
-    projection=ExplicitPerStart[15h05m, 11h18m, 8h42m, 5h28m, 4h12m]
+    weekly remaining=800bp, reset=23h56m,
+    per_connection_burn=53bp/h/conn, confidence=normal,
+    projection=ExplicitPerStart[15h05m, 7h32m, 5h02m]
     state=drainable
   C:
     active=1
-    5h remaining=9700bp, reset=4h36m, burn=919bp/h, confidence=normal,
+    5h remaining=9700bp, reset=4h36m,
+    per_connection_burn=919bp/h/conn, confidence=normal,
     projection=ExplicitPerStart[10h33m, 10h33m, 8h10m, 6h32m, 5h26m]
-    weekly remaining=2600bp, reset=84h, burn=105bp/h, confidence=normal,
+    weekly remaining=2600bp, reset=84h,
+    per_connection_burn=105bp/h/conn, confidence=normal,
     projection=ExplicitPerStart[17h20m, 13h, 10h24m, 10h24m, 10h24m]
     state=far_reset_reserve
-  expected sequence: B, B, B, C, C
-  final active: A=1, B=3, C=3
+  expected sequence: B, B, A, B, A
+  final active: A=3, B=3, C=1
   projection trace:
-    B weekly after each selected start: 15h05m, 11h18m, 8h42m
-    C weekly after each selected start: 17h20m, 13h
+    B weekly after each selected start: 15h05m, 7h32m, 5h02m
+    A weekly after each selected start: 5h07m, 3h25m
   reason transition:
-    starts 1-3 choose B because B is the nearest usable drain-pool account
-    start 4 chooses C because B drops below the 6h controlled-drain runway
-    start 5 stays on C because A remains retiring and B remains below runway
+    start 1 chooses B because B has positive current drain gap and no active
+      sessions
+    start 2 chooses B because A/B are both controlled-drain, have equal active
+      sessions, and B has larger projected runway after selection
+    start 3 chooses A because B has been loaded and A remains above the
+      reactive reconnect floor
+    start 4 chooses B because active sessions are equal and B has larger
+      projected runway after selection
+    start 5 chooses A because B has one more active session than A
+    C stays reserve because A/B are near reset and still safely drainable
 ```
 
 ### S5. Realistic Active-Session Mutation Case
@@ -652,9 +756,9 @@ This case proves that the selector sequence changes as active sessions change.
 
 ```text
 initial:
-  A: weekly 18%, reset 24h, burn 0.40%/h, active 0
-  B: weekly 19%, reset 25h, burn 0.40%/h, active 0
-  C: weekly 50%, reset 5d,  burn 0.20%/h, active 0
+  A: weekly 18%, reset 24h, burn 40bp/h/conn, active 0
+  B: weekly 19%, reset 25h, burn 40bp/h/conn, active 0
+  C: weekly 50%, reset 5d,  burn 20bp/h/conn, active 0
 
 expected starts:
   1 -> A
@@ -794,18 +898,18 @@ Review must explicitly answer:
 - No account switch inside one already-open upstream WebSocket except through
   Codex-compatible reconnect after exhaustion containment.
 
-## Open Policy Knob
+## Policy Knobs
 
-The remaining policy knob is the controlled-drain runway horizon:
+The remaining policy knobs are:
 
 ```text
-short reactive horizon:
-  enough time to mark exhaustion, send reconnect, and reselect without immediate
-  churn; recommended starting point 15 minutes
+drain_pool_reset_horizon_seconds:
+  reset horizon for treating accounts as near-reset drain pool instead of
+  far-reset reserve; v1 default 48 hours
 
-long-running placement horizon:
-  enough projected runway for 6-15 hour Codex goals; recommended test values
-  must include 6h, 10h, and 15h boundaries
+reactive_reconnect_min_runway_seconds:
+  enough time to avoid immediate reconnect churn while still draining quota;
+  v1 default 15 minutes
 ```
 
 Selector tests may classify controlled-drain eligibility before proxy proof is

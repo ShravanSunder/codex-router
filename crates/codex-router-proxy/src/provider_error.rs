@@ -1,6 +1,3 @@
-use std::borrow::Cow;
-
-use serde::Deserialize;
 use serde_json::Value;
 
 use codex_router_core::ids::AccountId;
@@ -204,48 +201,42 @@ fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassifi
 }
 
 fn classify_responses_websocket_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassification {
-    let Ok(envelope) = serde_json::from_slice::<ResponsesWebSocketErrorEnvelopeProbe<'_>>(body)
-    else {
+    let Some(prefix) = body.get(..PROVIDER_ERROR_ENVELOPE_MAX_BYTES) else {
         return ProviderErrorClassification::Unknown;
     };
-    if envelope.message_type.as_deref() != Some("error") {
+    let Ok(prefix) = std::str::from_utf8(prefix) else {
         return ProviderErrorClassification::Unknown;
     };
-    let Some(error) = envelope.error else {
+    let trimmed = prefix.trim_start();
+    if !json_object_prefix_is_open_or_cleanly_closed(trimmed) {
+        return ProviderErrorClassification::Unknown;
+    }
+    if !prefix_top_level_string_field_equals(trimmed, "type", "error") {
+        return ProviderErrorClassification::Unknown;
+    }
+
+    let Some(error_prefix) = prefix_top_level_object_field_prefix(trimmed, "error") else {
         return ProviderErrorClassification::Unknown;
     };
 
-    if error.code.as_deref() == Some("websocket_connection_limit_reached")
-        || error.error_type.as_deref() == Some("websocket_connection_limit_reached")
-    {
+    if prefix_top_level_string_field_equals(
+        error_prefix,
+        "code",
+        "websocket_connection_limit_reached",
+    ) || prefix_top_level_string_field_equals(
+        error_prefix,
+        "type",
+        "websocket_connection_limit_reached",
+    ) {
         return ProviderErrorClassification::WebSocketConnectionLimit;
     }
-    if error.code.as_deref().is_some_and(is_quota_exhaustion_token)
-        || error
-            .error_type
-            .as_deref()
-            .is_some_and(is_quota_exhaustion_token)
+    if prefix_top_level_string_field_matches(error_prefix, "code", is_quota_exhaustion_token)
+        || prefix_top_level_string_field_matches(error_prefix, "type", is_quota_exhaustion_token)
     {
         return ProviderErrorClassification::AccountQuotaExhausted;
     }
 
     ProviderErrorClassification::Unknown
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponsesWebSocketErrorEnvelopeProbe<'a> {
-    #[serde(rename = "type", borrow)]
-    message_type: Option<Cow<'a, str>>,
-    #[serde(borrow)]
-    error: Option<ResponsesWebSocketErrorObjectProbe<'a>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponsesWebSocketErrorObjectProbe<'a> {
-    #[serde(borrow)]
-    code: Option<Cow<'a, str>>,
-    #[serde(rename = "type", borrow)]
-    error_type: Option<Cow<'a, str>>,
 }
 
 fn prefix_top_level_string_field_equals(
@@ -260,6 +251,110 @@ fn prefix_top_level_string_field_equals(
 fn prefix_top_level_object_field_present(prefix: &str, field_name: &str) -> bool {
     prefix_top_level_field_value(prefix, field_name)
         .is_some_and(|value| value == PrefixJsonFieldValue::Object)
+}
+
+fn prefix_top_level_string_field_matches(
+    prefix: &str,
+    field_name: &str,
+    predicate: impl FnOnce(&str) -> bool,
+) -> bool {
+    prefix_top_level_field_value(prefix, field_name).is_some_and(
+        |value| matches!(value, PrefixJsonFieldValue::String(value) if predicate(value)),
+    )
+}
+
+fn prefix_top_level_object_field_prefix<'a>(prefix: &'a str, field_name: &str) -> Option<&'a str> {
+    let bytes = prefix.as_bytes();
+    let mut index = 0;
+    let mut depth = 0_u32;
+    let mut expect_field = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => {
+                depth = depth.saturating_add(1);
+                expect_field = depth == 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                expect_field = false;
+                index += 1;
+            }
+            b',' if depth == 1 => {
+                expect_field = true;
+                index += 1;
+            }
+            b'"' if depth == 1 && expect_field => {
+                let (field, after_field) = parse_json_string_token(prefix, index)?;
+                let value_index = prefix_json_value_start(bytes, after_field)?;
+                if field == field_name && bytes.get(value_index).copied() == Some(b'{') {
+                    return prefix_json_object_slice(prefix, value_index);
+                }
+                expect_field = false;
+                index = after_field;
+            }
+            b'"' => {
+                let (_, after_string) = parse_json_string_token(prefix, index)?;
+                index = after_string;
+            }
+            b if b.is_ascii_whitespace() => {
+                index += 1;
+            }
+            _ => {
+                expect_field = false;
+                index += 1;
+            }
+        }
+    }
+
+    None
+}
+
+fn prefix_json_object_slice(input: &str, object_start: usize) -> Option<&str> {
+    let bytes = input.as_bytes();
+    if bytes.get(object_start).copied() != Some(b'{') {
+        return None;
+    }
+
+    let mut index = object_start;
+    let mut depth = 0_u32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => {
+                depth = depth.saturating_add(1);
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                index += 1;
+                if depth == 0 {
+                    let mut next_index = index;
+                    while matches!(bytes.get(next_index), Some(byte) if byte.is_ascii_whitespace())
+                    {
+                        next_index += 1;
+                    }
+                    if matches!(
+                        bytes.get(next_index).copied(),
+                        None | Some(b',') | Some(b'}')
+                    ) {
+                        return input.get(object_start..index);
+                    }
+                    return None;
+                }
+            }
+            b'"' => {
+                let Some((_, after_string)) = parse_json_string_token(input, index) else {
+                    return input.get(object_start..);
+                };
+                index = after_string;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    input.get(object_start..)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -390,6 +485,48 @@ fn json_object_braces_are_balanced(input: &str) -> bool {
     }
 
     false
+}
+
+fn json_object_prefix_is_open_or_cleanly_closed(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while matches!(bytes.get(index), Some(byte) if byte.is_ascii_whitespace()) {
+        index += 1;
+    }
+    if bytes.get(index).copied() != Some(b'{') {
+        return false;
+    }
+
+    let mut depth = 0_u32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => {
+                depth = depth.saturating_add(1);
+                index += 1;
+            }
+            b'}' => {
+                let Some(next_depth) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next_depth;
+                index += 1;
+                if depth == 0 {
+                    return bytes[index..].iter().all(|byte| byte.is_ascii_whitespace());
+                }
+            }
+            b'"' => {
+                let Some((_, after_string)) = parse_json_string_token(input, index) else {
+                    return true;
+                };
+                index = after_string;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    true
 }
 
 fn prefix_json_value_start(bytes: &[u8], after_field: usize) -> Option<usize> {
