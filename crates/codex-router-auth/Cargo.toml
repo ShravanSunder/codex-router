@@ -13,8 +13,8 @@ sync-rusqlite-fixtures = ["codex-router-state/sync-rusqlite-fixtures"]
 
 [dependencies]
 codex-router-core.workspace = true
-codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.0" }
-codex-router-state = { path = "../codex-router-state", version = "0.1.0" }
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.1" }
+codex-router-state = { path = "../codex-router-state", version = "0.1.1" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -22,4 +22,4 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-codex-router-state = { path = "../codex-router-state", version = "0.1.0", features = ["sync-rusqlite-fixtures"] }
+codex-router-state = { path = "../codex-router-state", version = "0.1.1", features = ["sync-rusqlite-fixtures"] }
