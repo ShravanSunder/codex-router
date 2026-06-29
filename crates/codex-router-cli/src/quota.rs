@@ -26,11 +26,13 @@ use codex_router_core::redaction::safe_account_label;
 use codex_router_core::routes::RouteBand;
 use codex_router_selection::burn_down::AccountAvailability;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
+#[cfg(test)]
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
 use codex_router_selection::burn_down::LimitingWindow;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaEvidenceReason;
+#[cfg(test)]
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
 use codex_router_selection::burn_down::RoutingExclusion;
@@ -55,6 +57,7 @@ use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
+use codex_router_state::selection_projection::project_route_band_selection_inputs;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
@@ -1305,8 +1308,8 @@ fn render_quota_status_once(
     let unicode_bars = format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
     match format {
-        QuotaStatusFormat::Table => write_quota_table(stdout, report.rows()),
-        QuotaStatusFormat::Plain => write_quota_plain(stdout, report.rows()),
+        QuotaStatusFormat::Table => write_quota_table(stdout, &report),
+        QuotaStatusFormat::Plain => write_quota_plain(stdout, &report),
         QuotaStatusFormat::Json => write_quota_json(stdout, &report),
     }
 }
@@ -1378,8 +1381,14 @@ fn quota_status_report(
             })
             .collect::<HashMap<_, _>>()
     });
+    let selection_projection =
+        quota_history_runtime.block_on(project_route_band_selection_inputs(
+            quota_history_state,
+            USER_QUOTA_ROUTE_BAND,
+            now_unix_seconds,
+            ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
+        ))?;
     let mut status_inputs = Vec::new();
-    let mut burn_down_inputs = Vec::new();
     for account in accounts {
         let selector_input = selector_inputs
             .iter()
@@ -1420,12 +1429,6 @@ fn quota_status_report(
                         max_age_seconds: ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
                     }
                 });
-        burn_down_inputs.push(burn_down_input_from_display_windows(
-            account,
-            &display_windows,
-            active_clients.pressure_for_selection(),
-            now_unix_seconds,
-        ));
         status_inputs.push(QuotaStatusAccountInput {
             account_label: account.label().to_owned(),
             account_status: account.status().as_str().to_owned(),
@@ -1443,7 +1446,7 @@ fn quota_status_report(
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         now_unix_seconds,
-        burn_down_inputs,
+        selection_projection.accounts().to_vec(),
     ));
     let selected_pool = assessment.selected_pool();
     let preferred_next_account_id = assessment.preferred_next().cloned();
@@ -1478,9 +1481,9 @@ fn quota_status_report(
     emit_quota_status_metrics(USER_QUOTA_ROUTE_BAND, &rows);
 
     Ok(QuotaStatusReport {
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
         route_band: USER_QUOTA_ROUTE_BAND.to_owned(),
         selected_pool,
-        weighted_candidates: assessment.weighted_candidates().to_vec(),
         preferred_next_account_id,
         now_unix_seconds,
         rows,
@@ -1489,8 +1492,10 @@ fn quota_status_report(
 
 fn write_quota_table(
     stdout: &mut impl Write,
-    rows: &[QuotaStatusRow],
+    report: &QuotaStatusReport,
 ) -> Result<(), QuotaCommandError> {
+    let rows = report.rows();
+    writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header([
@@ -1528,8 +1533,10 @@ fn write_quota_table(
 
 fn write_quota_plain(
     stdout: &mut impl Write,
-    rows: &[QuotaStatusRow],
+    report: &QuotaStatusReport,
 ) -> Result<(), QuotaCommandError> {
+    let rows = report.rows();
+    writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     writeln!(
         stdout,
         "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
@@ -1613,9 +1620,9 @@ fn write_quota_json(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QuotaStatusReport {
+    app_version: String,
     route_band: String,
     selected_pool: SelectedPool,
-    weighted_candidates: Vec<(AccountId, u32)>,
     preferred_next_account_id: Option<AccountId>,
     now_unix_seconds: u64,
     rows: Vec<QuotaStatusRow>,
@@ -1661,13 +1668,15 @@ struct QuotaStatusRow {
     routing_exclusion: RoutingExclusion,
     quota_evidence_reason: QuotaEvidenceReason,
     routing_reason: RoutingReason,
-    routing_weight: Option<u32>,
     preferred_next: bool,
     short_pressure: u32,
     long_pressure: u32,
     short_salvage: u32,
     long_salvage: u32,
     limiting_window: Option<LimitingWindow>,
+    weekly_survival_margin_basis_points: Option<i64>,
+    weekly_projected_exhaustion_unix_seconds: Option<u64>,
+    weekly_burn_rate_confidence: QuotaRunRateConfidence,
 }
 
 impl QuotaStatusRow {
@@ -1709,13 +1718,16 @@ impl QuotaStatusRow {
             routing_exclusion: assessment.routing_exclusion(),
             quota_evidence_reason: assessment.quota_evidence_reason(),
             routing_reason: assessment.routing_reason(),
-            routing_weight: assessment.routing_weight(),
             preferred_next: assessment.preferred_next(),
             short_pressure: assessment.short_pressure(),
             long_pressure: assessment.long_pressure(),
             short_salvage: assessment.short_salvage(),
             long_salvage: assessment.long_salvage(),
             limiting_window: assessment.limiting_window(),
+            weekly_survival_margin_basis_points: assessment.weekly_survival_margin_basis_points(),
+            weekly_projected_exhaustion_unix_seconds: assessment
+                .weekly_projected_exhaustion_unix_seconds(),
+            weekly_burn_rate_confidence: assessment.weekly_burn_rate_confidence(),
         }
     }
 }
@@ -1817,10 +1829,10 @@ fn quota_run_rate_observation_from_history(
     ))
 }
 
+#[cfg(test)]
 fn burn_down_input_from_display_windows(
     account: &AccountRecord,
     windows: &[DisplayQuotaWindow],
-    active_pressure: u32,
     now_unix_seconds: u64,
 ) -> BurnDownAccountInput {
     let facts = windows
@@ -1850,7 +1862,6 @@ fn burn_down_input_from_display_windows(
     BurnDownAccountInput::new(account.account_id().clone(), account.label(), facts)
         .with_account_enabled(account.status() == AccountStatus::Enabled)
         .with_active_credential(account.active_credential_generation().is_some())
-        .with_active_load_pressure(active_pressure)
 }
 
 fn format_window_cell(
@@ -1924,13 +1935,6 @@ impl ActiveClientMirrorStatus {
         match self {
             Self::MirrorFresh { count, .. } => Some(count),
             Self::Unavailable => None,
-        }
-    }
-
-    const fn pressure_for_selection(self) -> u32 {
-        match self {
-            Self::MirrorFresh { pressure, .. } => pressure,
-            Self::Unavailable => 0,
         }
     }
 
@@ -2048,15 +2052,16 @@ fn format_burn_cell(assessment: &BurnDownAccountAssessment) -> String {
         return "needs refresh".to_owned();
     }
 
-    let score = assessment.routing_weight().map_or_else(
-        || "not selectable".to_owned(),
-        |weight| format!("score {weight}"),
-    );
-    format!(
-        "{score}\nrisk 5h {}% / weekly {}%",
+    let quota_guard = format!(
+        "quota guard 5h {}% / weekly {}%",
         assessment.short_pressure(),
         assessment.long_pressure()
-    )
+    );
+    if assessment.routing_weight().is_some() {
+        quota_guard
+    } else {
+        format!("not selectable\n{quota_guard}")
+    }
 }
 
 fn format_window_pace(
@@ -2100,18 +2105,33 @@ fn format_run_rate_estimate(estimate: QuotaRunRateEstimate, now_unix_seconds: u6
         QuotaRunRateConfidence::Stale => "history stale".to_owned(),
         QuotaRunRateConfidence::Low | QuotaRunRateConfidence::Normal => {
             let confidence = run_rate_confidence_label(estimate.confidence());
-            let burn_rate = estimate.burn_rate_percent_per_hour().unwrap_or(0);
+            let burn_rate = format_burn_rate_basis_points_per_hour(
+                estimate.burn_rate_basis_points_per_hour().unwrap_or(0),
+            );
             match estimate.projected_exhaustion_unix_seconds(now_unix_seconds) {
                 Some(runout) => {
                     format!(
-                        "{confidence} burn {burn_rate}%/h; runout {}",
+                        "{confidence} burn {burn_rate}; runout {}",
                         format_relative_time(runout, now_unix_seconds)
                     )
                 }
-                None => format!("{confidence} burn {burn_rate}%/h; no runout"),
+                None => format!("{confidence} burn {burn_rate}; no runout"),
             }
         }
     }
+}
+
+fn format_burn_rate_basis_points_per_hour(burn_rate_basis_points_per_hour: u32) -> String {
+    let whole_percent = burn_rate_basis_points_per_hour / 100;
+    let fractional_basis_points = burn_rate_basis_points_per_hour % 100;
+    if fractional_basis_points == 0 {
+        return format!("{whole_percent}%/h");
+    }
+    if fractional_basis_points.is_multiple_of(10) {
+        return format!("{}.{}%/h", whole_percent, fractional_basis_points / 10);
+    }
+
+    format!("{whole_percent}.{fractional_basis_points:02}%/h")
 }
 
 const fn run_rate_confidence_label(confidence: QuotaRunRateConfidence) -> &'static str {
@@ -2139,14 +2159,19 @@ fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
 
 fn format_routing_reason(reason: RoutingReason) -> &'static str {
     match reason {
+        RoutingReason::PreferredNearResetDrainable => "preferred by quota: near-reset drainable",
+        RoutingReason::PreferredNearResetControlledDrain => {
+            "preferred by quota: near-reset controlled drain"
+        }
         RoutingReason::PreferredWeeklyHealthier => "preferred by quota: weekly healthier",
         RoutingReason::PreferredWeeklyResetSoon => "preferred by quota: weekly reset soon",
         RoutingReason::PreferredShortResetSoon => "preferred by quota: 5h reset soon",
         RoutingReason::PreferredProjectedBurn => "preferred by quota: projected burn",
-        RoutingReason::PreferredHighestWeight => "preferred by quota: safest quota",
+        RoutingReason::PreferredSafestQuota => "preferred by quota: safest quota",
         RoutingReason::AvailableSamePool => "available by quota: same pool",
         RoutingReason::HeldReserve => "held by quota: reserve",
         RoutingReason::HeldUnknown => "held by quota: needs refresh",
+        RoutingReason::HeldShortWindowGuard => "held by quota: 5h guard",
         RoutingReason::UnknownFallbackPreferred => "fallback by quota: needs refresh",
         RoutingReason::UnknownFallbackAvailable => "fallback by quota: same unknown pool",
         RoutingReason::RetiringNearZero => "retiring: near zero quota",
@@ -2160,12 +2185,16 @@ fn format_routing_reason(reason: RoutingReason) -> &'static str {
 fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
     match assessment.routing_reason() {
         RoutingReason::PreferredWeeklyHealthier
+        | RoutingReason::PreferredNearResetDrainable
+        | RoutingReason::PreferredNearResetControlledDrain
         | RoutingReason::PreferredWeeklyResetSoon
         | RoutingReason::PreferredShortResetSoon
         | RoutingReason::PreferredProjectedBurn
-        | RoutingReason::PreferredHighestWeight => "preferred by quota",
+        | RoutingReason::PreferredSafestQuota => "preferred by quota",
         RoutingReason::AvailableSamePool => "available by quota",
-        RoutingReason::HeldReserve | RoutingReason::HeldUnknown => "held by quota",
+        RoutingReason::HeldReserve
+        | RoutingReason::HeldUnknown
+        | RoutingReason::HeldShortWindowGuard => "held by quota",
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
             "fallback by quota"
         }
@@ -2198,11 +2227,11 @@ struct JsonQuotaRefreshResult {
 #[derive(Serialize)]
 struct JsonQuotaStatusReport {
     route_result: &'static str,
+    app_version: String,
     route_band: String,
     selected_pool: &'static str,
     selected_pool_reason: &'static str,
     preferred_next_account_hash: Option<String>,
-    weighted_candidates: Vec<JsonWeightedCandidate>,
     accounts: Vec<JsonQuotaStatusAccount>,
 }
 
@@ -2210,6 +2239,7 @@ impl JsonQuotaStatusReport {
     fn from_report(report: &QuotaStatusReport) -> Self {
         Self {
             route_result: "ok",
+            app_version: report.app_version.clone(),
             route_band: report.route_band.clone(),
             selected_pool: selected_pool_json(report.selected_pool),
             selected_pool_reason: selected_pool_reason_json(report.selected_pool),
@@ -2217,14 +2247,6 @@ impl JsonQuotaStatusReport {
                 .preferred_next_account_id
                 .as_ref()
                 .map(|account_id| telemetry_hash(account_id.as_str())),
-            weighted_candidates: report
-                .weighted_candidates
-                .iter()
-                .map(|(account_id, routing_weight)| JsonWeightedCandidate {
-                    account_hash: telemetry_hash(account_id.as_str()),
-                    routing_weight: *routing_weight,
-                })
-                .collect(),
             accounts: report
                 .rows
                 .iter()
@@ -2232,12 +2254,6 @@ impl JsonQuotaStatusReport {
                 .collect(),
         }
     }
-}
-
-#[derive(Serialize)]
-struct JsonWeightedCandidate {
-    account_hash: String,
-    routing_weight: u32,
 }
 
 #[derive(Serialize)]
@@ -2250,13 +2266,19 @@ struct JsonQuotaStatusAccount {
     next_use: String,
     limiting_window: &'static str,
     quota_evidence_reason: &'static str,
-    short_pressure: Option<u32>,
-    long_pressure: Option<u32>,
+    short_quota_guard: Option<u32>,
+    weekly_quota_guard: Option<u32>,
+    weekly_survival_margin_basis_points: Option<i64>,
+    weekly_projected_exhaustion_unix_seconds: Option<u64>,
+    short_guard_result: &'static str,
+    current_active_sessions: Option<u32>,
+    active_session_source: &'static str,
+    weekly_burn_rate_confidence: &'static str,
+    hard_block_reason: Option<&'static str>,
     short_salvage: Option<u32>,
     long_salvage: Option<u32>,
     salvage_tie_key: Option<JsonSalvageTieKey>,
     routing_reason: &'static str,
-    routing_weight: Option<u32>,
     preferred_next: bool,
     reset_credits_available: Option<u32>,
     active_clients: Option<u32>,
@@ -2279,13 +2301,19 @@ impl JsonQuotaStatusAccount {
                 .limiting_window
                 .map_or("none", |window| quota_window_label(window.window_seconds())),
             quota_evidence_reason: quota_evidence_reason_json(row.quota_evidence_reason),
-            short_pressure: Some(row.short_pressure),
-            long_pressure: Some(row.long_pressure),
+            short_quota_guard: Some(row.short_pressure),
+            weekly_quota_guard: Some(row.long_pressure),
+            weekly_survival_margin_basis_points: row.weekly_survival_margin_basis_points,
+            weekly_projected_exhaustion_unix_seconds: row.weekly_projected_exhaustion_unix_seconds,
+            short_guard_result: short_guard_result_json(row),
+            current_active_sessions: row.active_clients_value,
+            active_session_source: row.active_clients_source,
+            weekly_burn_rate_confidence: run_rate_confidence_label(row.weekly_burn_rate_confidence),
+            hard_block_reason: hard_block_reason_json(row),
             short_salvage: Some(row.short_salvage),
             long_salvage: Some(row.long_salvage),
             salvage_tie_key: None,
             routing_reason: routing_reason_json(row.routing_reason),
-            routing_weight: row.routing_weight,
             preferred_next: row.preferred_next,
             reset_credits_available: row.reset_credits_available_value,
             active_clients: row.active_clients_value,
@@ -2381,6 +2409,7 @@ impl JsonWindowSlot {
 struct JsonRunRateEstimate {
     confidence: &'static str,
     burn_rate_percent_per_hour: Option<u32>,
+    burn_rate_basis_points_per_hour: Option<u32>,
     projected_exhaustion_unix_seconds: Option<u64>,
 }
 
@@ -2389,6 +2418,7 @@ impl JsonRunRateEstimate {
         Self {
             confidence: "unknown",
             burn_rate_percent_per_hour: None,
+            burn_rate_basis_points_per_hour: None,
             projected_exhaustion_unix_seconds: None,
         }
     }
@@ -2397,6 +2427,7 @@ impl JsonRunRateEstimate {
         Self {
             confidence: run_rate_confidence_label(estimate.confidence()),
             burn_rate_percent_per_hour: estimate.burn_rate_percent_per_hour(),
+            burn_rate_basis_points_per_hour: estimate.burn_rate_basis_points_per_hour(),
             projected_exhaustion_unix_seconds: estimate
                 .projected_exhaustion_unix_seconds(now_unix_seconds),
         }
@@ -2411,7 +2442,7 @@ struct JsonQuotaWindow {
     reset_unix_seconds: Option<u64>,
     observed_unix_seconds: Option<u64>,
     effective: bool,
-    pressure_percent: Option<u32>,
+    guard_deficit_percent: Option<u32>,
     surplus_percent: Option<u32>,
     contributed_to_salvage: bool,
     run_rate: JsonRunRateEstimate,
@@ -2419,7 +2450,7 @@ struct JsonQuotaWindow {
 
 impl JsonQuotaWindow {
     fn from_window(window: &DisplayQuotaWindow, now_unix_seconds: u64) -> Self {
-        let (pressure_percent, surplus_percent) =
+        let (guard_deficit_percent, surplus_percent) =
             window_pressure_and_surplus(window, now_unix_seconds);
         Self {
             window_seconds: window.window_seconds,
@@ -2428,7 +2459,7 @@ impl JsonQuotaWindow {
             reset_unix_seconds: window.reset_unix_seconds,
             observed_unix_seconds: Some(window.observed_unix_seconds),
             effective: window.effective,
-            pressure_percent,
+            guard_deficit_percent,
             surplus_percent,
             contributed_to_salvage: surplus_percent.is_some_and(|surplus| surplus > 0),
             run_rate: JsonRunRateEstimate::from_estimate(
@@ -2493,6 +2524,7 @@ const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'static str 
         QuotaEvidenceReason::WindowExhausted => "window_exhausted",
         QuotaEvidenceReason::UnknownQuotaWindow => "unknown_quota_window",
         QuotaEvidenceReason::MissingResetTime => "missing_reset_time",
+        QuotaEvidenceReason::ShortWindowGuard => "short_window_guard",
         QuotaEvidenceReason::AccountDisabled => "account_disabled",
         QuotaEvidenceReason::MissingCredential => "missing_credential",
     }
@@ -2500,6 +2532,34 @@ const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'static str 
 
 const fn routing_reason_json(value: RoutingReason) -> &'static str {
     value.as_str()
+}
+
+fn short_guard_result_json(row: &QuotaStatusRow) -> &'static str {
+    if row.routing_reason == RoutingReason::HeldShortWindowGuard
+        || row.quota_evidence_reason == QuotaEvidenceReason::ShortWindowGuard
+    {
+        return "held";
+    }
+    let Some(short_window) = row
+        .windows
+        .iter()
+        .find(|window| window.window_seconds == V1_SHORT_WINDOW_SECONDS)
+    else {
+        return "unknown";
+    };
+    match short_window.status {
+        QuotaWindowStatus::Eligible | QuotaWindowStatus::Stale | QuotaWindowStatus::Ineligible => {
+            "pass"
+        }
+        QuotaWindowStatus::Unknown => "unknown",
+    }
+}
+
+fn hard_block_reason_json(row: &QuotaStatusRow) -> Option<&'static str> {
+    match row.quota_evidence_reason {
+        QuotaEvidenceReason::Ok => None,
+        reason => Some(quota_evidence_reason_json(reason)),
+    }
 }
 
 const fn quota_window_status_json(value: QuotaWindowStatus) -> &'static str {
@@ -2708,10 +2768,11 @@ fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
                     ],
                 );
         }
-        for (window_label, pressure) in [("5h", row.short_pressure), ("weekly", row.long_pressure)]
+        for (window_label, guard_deficit) in
+            [("5h", row.short_pressure), ("weekly", row.long_pressure)]
         {
             global::meter("codex-router")
-                .u64_gauge("codex_router_quota_pressure_bucket")
+                .u64_gauge("codex_router_quota_guard_bucket")
                 .build()
                 .record(
                     1,
@@ -2719,7 +2780,7 @@ fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
                         KeyValue::new("account.slot", account_hash.clone()),
                         KeyValue::new("route_band", route_band.to_owned()),
                         KeyValue::new("quota.window", window_label),
-                        KeyValue::new("quota.pressure_bucket", quota_pressure_bucket(pressure)),
+                        KeyValue::new("quota.guard_bucket", quota_guard_bucket(guard_deficit)),
                     ],
                 );
         }
@@ -2755,8 +2816,8 @@ fn quota_remaining_bucket(remaining_headroom: u32) -> &'static str {
     }
 }
 
-fn quota_pressure_bucket(pressure: u32) -> &'static str {
-    match pressure {
+fn quota_guard_bucket(guard_deficit: u32) -> &'static str {
+    match guard_deficit {
         0 => "none",
         1..=24 => "low",
         25..=49 => "medium",
@@ -2937,7 +2998,6 @@ mod tests {
                     QuotaRunRateEstimate::unknown(),
                 ),
             ],
-            0,
             NOW,
         );
         let slow_burning_input = burn_down_input_from_display_windows(
@@ -2956,7 +3016,6 @@ mod tests {
                     QuotaRunRateEstimate::unknown(),
                 ),
             ],
-            0,
             NOW,
         );
 
@@ -2977,10 +3036,40 @@ mod tests {
         else {
             panic!("slow-burning account should be assessed");
         };
-        assert_eq!(
+        assert!(matches!(
             slow_burning_assessment.routing_reason(),
-            RoutingReason::PreferredProjectedBurn
+            RoutingReason::PreferredProjectedBurn | RoutingReason::PreferredSafestQuota
+        ));
+    }
+
+    #[test]
+    fn quota_status_formats_subpercent_burn_with_runout() {
+        let estimate = QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+            QuotaRunRateConfidence::Normal,
+            45,
+            6,
         );
+
+        assert_eq!(
+            format_run_rate_estimate(estimate, NOW),
+            "normal burn 0.45%/h; runout in 13h 20m"
+        );
+    }
+
+    #[test]
+    fn quota_status_json_exposes_subpercent_burn_basis_points() {
+        let estimate = QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+            QuotaRunRateConfidence::Normal,
+            45,
+            6,
+        );
+
+        let json = serde_json::to_value(JsonRunRateEstimate::from_estimate(estimate, NOW))
+            .unwrap_or_else(|error| panic!("run-rate JSON should serialize: {error}"));
+
+        assert_eq!(json["burn_rate_percent_per_hour"], 0);
+        assert_eq!(json["burn_rate_basis_points_per_hour"], 45);
+        assert!(json["projected_exhaustion_unix_seconds"].is_number());
     }
 
     #[test]
@@ -3003,7 +3092,7 @@ mod tests {
             "selection.reason",
             "quota.window",
             "quota.remaining_bucket",
-            "quota.pressure_bucket",
+            "quota.guard_bucket",
         ] {
             assert!(
                 metrics_helper.contains(required_label),

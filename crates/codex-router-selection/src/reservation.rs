@@ -147,6 +147,30 @@ impl ReservationBook {
             .count() as u64
     }
 
+    /// Returns active session count for an account across reservation cost classes.
+    #[must_use]
+    pub fn active_session_count(&self, account_id: &AccountId) -> u32 {
+        self.reservations
+            .values()
+            .filter(|reservation| &reservation.account_id == account_id)
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Returns account ids with active reservations.
+    #[must_use]
+    pub fn account_ids(&self) -> Vec<&AccountId> {
+        let mut account_ids = self
+            .reservations
+            .values()
+            .map(|reservation| &reservation.account_id)
+            .collect::<Vec<_>>();
+        account_ids.sort();
+        account_ids.dedup();
+        account_ids
+    }
+
     /// Removes reservations older than `max_age_seconds`.
     pub fn purge_stale(&mut self, now_unix_seconds: u64, max_age_seconds: u64) -> usize {
         let before_count = self.reservations.len();

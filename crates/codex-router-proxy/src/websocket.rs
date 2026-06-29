@@ -89,7 +89,7 @@ use crate::local_auth::ProxyLocalAuthGate;
 use crate::local_auth::extract_presented_local_token_from_request;
 use crate::provider_error::AsyncProviderErrorObserver;
 use crate::provider_error::ProviderErrorClassification;
-use crate::provider_error::classify_provider_error_envelope;
+use crate::provider_error::classify_responses_websocket_error_envelope;
 
 use crate::routes::Method;
 
@@ -1190,6 +1190,7 @@ mod async_forwarding_tests {
     use super::forward_duplex_until_complete;
     use super::is_response_completed;
     use super::is_response_create;
+    use super::provider_error_classification_from_message;
     use super::record_forwarded_websocket_metadata;
     use super::websocket_affinity_owner_record;
     use bytes::Bytes;
@@ -1226,6 +1227,7 @@ mod async_forwarding_tests {
     use crate::http_sse::HttpProxyRequest;
     use crate::local_auth::ProxyLocalAuthGate;
     use crate::provider_error::AsyncProviderErrorObserver;
+    use crate::provider_error::ProviderErrorClassification;
     use crate::provider_error::ProviderErrorObservationError;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
@@ -1235,6 +1237,33 @@ mod async_forwarding_tests {
         account_id: AccountId,
         route_band: codex_router_core::routes::RouteBand,
         body: Vec<u8>,
+    }
+
+    #[test]
+    fn websocket_quota_classifier_ignores_non_error_json_with_nested_quota_token() {
+        let non_error_frame = Message::text(
+            r#"{"type":"response.output_text.delta","error":{"code":"usage_limit_reached"}}"#,
+        );
+
+        assert_eq!(
+            provider_error_classification_from_message(&non_error_frame),
+            ProviderErrorClassification::Unknown,
+            "WebSocket quota containment must only trigger on complete Responses error envelopes"
+        );
+    }
+
+    #[test]
+    fn websocket_quota_classifier_ignores_oversized_prefix_only_quota_token() {
+        let oversized_prefix_frame = Message::text(format!(
+            r#"{{"type":"error","error":{{"code":"usage_limit_reached"}} bogus, "padding":"{}"}}"#,
+            "x".repeat(70 * 1024)
+        ));
+
+        assert_eq!(
+            provider_error_classification_from_message(&oversized_prefix_frame),
+            ProviderErrorClassification::Unknown,
+            "WebSocket quota containment must not infer quota state from oversized or malformed text"
+        );
     }
 
     #[derive(Clone, Debug)]
@@ -1431,7 +1460,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -1440,15 +1469,15 @@ mod async_forwarding_tests {
         );
         let active_turn_reservation =
             ActiveTurnReservationState::new(Some(active_reservation_guard));
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
-        assert_eq!(active_pressure(), 8);
+        assert_eq!(active_sessions(), 1);
 
         let affinity_secret = RouterAffinityHashSecret::new(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -1487,22 +1516,22 @@ mod async_forwarding_tests {
             .await
             .unwrap_or_else(|_elapsed| panic!("recorder should be entered"));
         assert_eq!(
-            active_pressure(),
+            active_sessions(),
             0,
-            "completion must release active pressure before affinity persistence can block"
+            "completion must release the active session before affinity persistence can block"
         );
 
         active_turn_reservation.reserve_if_idle(2);
         assert_eq!(
-            active_pressure(),
-            8,
+            active_sessions(),
+            1,
             "a new same-socket turn must be able to reserve while affinity persistence is blocked"
         );
         recorder_release.notify_one();
         record_task
             .await
             .unwrap_or_else(|error| panic!("record task should finish: {error}"));
-        assert_eq!(active_pressure(), 8);
+        assert_eq!(active_sessions(), 1);
     }
 
     #[derive(Clone, Debug)]
@@ -2013,7 +2042,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new_with_active_client_leases(
             active_reservations.clone(),
@@ -2032,15 +2061,15 @@ mod async_forwarding_tests {
             active_reservation_guard: Some(active_reservation_guard),
         };
 
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
-        assert_eq!(active_pressure(), 8);
+        assert_eq!(active_sessions(), 1);
 
         let router_task = async {
             forward_duplex_until_complete(
@@ -2080,12 +2109,12 @@ mod async_forwarding_tests {
             }
 
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .unwrap_or_else(|_elapsed| panic!("response.completed should release active load"));
+            .unwrap_or_else(|_elapsed| panic!("response.completed should release active session"));
 
             client_websocket
                 .send(Message::Ping(Bytes::from_static(b"still-open")))
@@ -2109,7 +2138,7 @@ mod async_forwarding_tests {
             router_result.is_ok(),
             "completion release should not close the websocket by itself, got {router_result:?}"
         );
-        assert_eq!(active_pressure(), 0);
+        assert_eq!(active_sessions(), 0);
     }
 
     #[tokio::test]
@@ -2138,7 +2167,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2155,13 +2184,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
 
         let router_task = async {
@@ -2182,7 +2211,7 @@ mod async_forwarding_tests {
             .await
         };
         let peer_task = async {
-            assert_eq!(active_pressure(), 8);
+            assert_eq!(active_sessions(), 1);
             client_websocket
                 .send(Message::text(r#"{"type":"response.create","turn":1}"#))
                 .await
@@ -2202,7 +2231,7 @@ mod async_forwarding_tests {
                 None => panic!("client should receive first completion"),
             }
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -2219,12 +2248,12 @@ mod async_forwarding_tests {
                 None => panic!("upstream should receive second request"),
             }
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 8 {
+                while active_sessions() != 1 {
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .unwrap_or_else(|_elapsed| panic!("second request should re-reserve active load"));
+            .unwrap_or_else(|_elapsed| panic!("second request should re-reserve active session"));
 
             upstream_websocket
                 .send(Message::text(r#"{"type":"response.completed","turn":2}"#))
@@ -2236,7 +2265,7 @@ mod async_forwarding_tests {
                 None => panic!("client should receive second completion"),
             }
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -2278,7 +2307,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2295,13 +2324,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
 
         let router_task = async {
@@ -2322,7 +2351,7 @@ mod async_forwarding_tests {
             .await
         };
         let peer_task = async {
-            assert_eq!(active_pressure(), 8);
+            assert_eq!(active_sessions(), 1);
             client_websocket
                 .send(Message::text(r#"{"type":"response.create","turn":1}"#))
                 .await
@@ -2342,9 +2371,9 @@ mod async_forwarding_tests {
                 None => panic!("client should receive first completion"),
             }
             assert_eq!(
-                active_pressure(),
+                active_sessions(),
                 0,
-                "completion must release active load synchronously before the next same-socket request"
+                "completion must release the active session synchronously before the next same-socket request"
             );
 
             client_websocket
@@ -2357,8 +2386,8 @@ mod async_forwarding_tests {
                 None => panic!("upstream should receive second request"),
             }
             assert_eq!(
-                active_pressure(),
-                8,
+                active_sessions(),
+                1,
                 "second same-socket request should acquire a fresh active reservation"
             );
             drop(upstream_websocket);
@@ -2402,7 +2431,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2415,13 +2444,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -2470,13 +2499,13 @@ mod async_forwarding_tests {
                 "single-account quota exhaustion must not leak to Codex while router can rotate"
             );
             tokio::time::timeout(Duration::from_secs(1), async {
-                while active_pressure() != 0 {
+                while active_sessions() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
             .await
             .unwrap_or_else(|_elapsed| {
-                panic!("quota replacement should release exhausted account active load")
+                panic!("quota replacement should release exhausted account active session")
             });
             drop(upstream_websocket);
         };
@@ -2503,7 +2532,7 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
-    async fn oversized_upstream_usage_limit_frame_is_hidden_behind_codex_reconnect_signal() {
+    async fn oversized_upstream_usage_limit_error_frame_is_hidden_behind_codex_reconnect_signal() {
         let (router_local_stream, client_stream) = duplex(256 * 1024);
         let (router_upstream_stream, upstream_stream) = duplex(256 * 1024);
         let router_local_websocket =
@@ -2574,11 +2603,12 @@ mod async_forwarding_tests {
             };
             assert_eq!(
                 client_message.to_string(),
-                super::CODEX_WEBSOCKET_RECONNECT_SIGNAL
+                super::CODEX_WEBSOCKET_RECONNECT_SIGNAL,
+                "valid oversized quota error envelopes must be hidden behind reconnect signal"
             );
             assert!(
                 !client_message.to_string().contains("usage_limit_reached"),
-                "oversized quota exhaustion must not leak to Codex while router can rotate"
+                "single-account quota exhaustion must not leak to Codex while router can rotate"
             );
             drop(upstream_websocket);
             usage_limit_frame
@@ -2603,6 +2633,221 @@ mod async_forwarding_tests {
                 body: usage_limit_frame.as_bytes().to_vec(),
             }]
         );
+        assert!(usage_limit_frame.contains("usage_limit_reached"));
+    }
+
+    #[tokio::test]
+    async fn oversized_spaced_usage_limit_error_frame_is_hidden_behind_codex_reconnect_signal() {
+        let (router_local_stream, client_stream) = duplex(256 * 1024);
+        let (router_upstream_stream, upstream_stream) = duplex(256 * 1024);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let provider_error_observer = Arc::new(RecordingAsyncProviderErrorObserver::default());
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let padding = "x".repeat(128 * 1024);
+        let usage_limit_frame = format!(
+            r#"{{
+                "type" : "error",
+                "error" :
+                {{
+                    "type" : "usage_limit_reached",
+                    "code" : "usage_limit_reached",
+                    "message" : "{padding}"
+                }}
+            }}"#
+        );
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: Some(provider_error_observer.clone()),
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(usage_limit_frame.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("usage limit should send: {error}"));
+            let client_message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive reconnect signal: {error}"),
+                None => panic!("client should receive reconnect signal"),
+            };
+            assert_eq!(
+                client_message.to_string(),
+                super::CODEX_WEBSOCKET_RECONNECT_SIGNAL,
+                "valid oversized quota error envelopes with JSON whitespace must be hidden behind reconnect signal"
+            );
+            assert!(
+                !client_message.to_string().contains("usage_limit_reached"),
+                "single-account quota exhaustion must not leak to Codex while router can rotate"
+            );
+            drop(upstream_websocket);
+            usage_limit_frame
+        };
+
+        let (router_result, usage_limit_frame) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should hide spaced oversized provider quota exhaustion behind reconnect signal, got {router_result:?}"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            provider_error_observer.observed.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("provider error should be observed"));
+        assert_eq!(
+            provider_error_observer.records(),
+            vec![RecordedProviderError {
+                account_id: selected_account,
+                route_band: codex_router_core::routes::RouteBand::Responses,
+                body: usage_limit_frame.as_bytes().to_vec(),
+            }]
+        );
+        assert!(usage_limit_frame.contains("usage_limit_reached"));
+    }
+
+    #[tokio::test]
+    async fn oversized_non_error_quota_text_frame_is_forwarded_without_quota_policy() {
+        let (router_local_stream, client_stream) = duplex(256 * 1024);
+        let (router_upstream_stream, upstream_stream) = duplex(256 * 1024);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let provider_error_observer = Arc::new(RecordingAsyncProviderErrorObserver::default());
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account,
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let padding = "x".repeat(128 * 1024);
+        let model_text_frame = format!(
+            r#"{{"type":"response.output_text.delta","delta":"usage_limit_reached is model text {padding}"}}"#
+        );
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: Some(provider_error_observer.clone()),
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+            upstream_websocket
+                .send(Message::text(model_text_frame.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("model text should send: {error}"));
+            let client_message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive model text: {error}"),
+                None => panic!("client should receive model text"),
+            };
+            assert_eq!(
+                client_message.to_string(),
+                model_text_frame,
+                "oversized non-error WebSocket text remains Codex-owned payload"
+            );
+            drop(upstream_websocket);
+            model_text_frame
+        };
+
+        let (router_result, model_text_frame) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should pass oversized non-error WebSocket text through, got {router_result:?}"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                provider_error_observer.observed.notified(),
+            )
+            .await
+            .is_err(),
+            "oversized non-error WebSocket text must not be observed as provider quota"
+        );
+        assert_eq!(
+            provider_error_observer.records(),
+            Vec::<RecordedProviderError>::new(),
+            "oversized non-error WebSocket text must not mark account quota"
+        );
+        assert!(model_text_frame.contains("usage_limit_reached"));
     }
 
     #[tokio::test]
@@ -2744,7 +2989,7 @@ mod async_forwarding_tests {
             reservations
                 .entry("responses".to_owned())
                 .or_insert_with(ReservationBook::default)
-                .reserve_next_at(selected_account.clone(), 8, 1)
+                .reserve_next_at(selected_account.clone(), 1, 1)
         };
         let active_reservation_guard = ActiveReservationGuard::new(
             active_reservations.clone(),
@@ -2757,13 +3002,13 @@ mod async_forwarding_tests {
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
         };
-        let active_pressure = || {
+        let active_sessions = || {
             let reservations = active_reservations
                 .lock()
                 .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
             reservations
                 .get("responses")
-                .map_or(0, |book| book.active_load_pressure(&selected_account))
+                .map_or(0, |book| book.active_session_count(&selected_account))
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -2821,9 +3066,9 @@ mod async_forwarding_tests {
                 );
             }
             assert_eq!(
-                active_pressure(),
+                active_sessions(),
                 0,
-                "old exhausted tunnel must not reacquire active load after reconnect signal"
+                "old exhausted tunnel must not reacquire active session after reconnect signal"
             );
             drop(upstream_websocket);
         };
@@ -4442,7 +4687,7 @@ fn provider_error_classification_from_message(message: &Message) -> ProviderErro
     let Message::Text(text) = message else {
         return ProviderErrorClassification::Unknown;
     };
-    classify_provider_error_envelope(text.as_str().as_bytes())
+    classify_responses_websocket_error_envelope(text.as_str().as_bytes())
 }
 
 fn current_unix_seconds() -> u64 {

@@ -279,6 +279,7 @@ dependencies = [
  "hyper-util",
  "opentelemetry",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "thiserror",
@@ -326,6 +327,7 @@ name = "codex-router-state"
 version = "0.1.0"
 dependencies = [
  "codex-router-core",
+ "codex-router-selection",
  "futures-util",
  "rusqlite",
  "sqlx",

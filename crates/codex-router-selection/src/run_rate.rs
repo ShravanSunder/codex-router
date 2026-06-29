@@ -64,7 +64,7 @@ impl QuotaRunRateObservation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QuotaRunRateEstimate {
     confidence: QuotaRunRateConfidence,
-    burn_rate_percent_per_hour: Option<u32>,
+    burn_rate_basis_points_per_hour: Option<u32>,
     latest_remaining_headroom_percent: Option<u32>,
 }
 
@@ -74,7 +74,7 @@ impl QuotaRunRateEstimate {
     pub const fn unknown() -> Self {
         Self {
             confidence: QuotaRunRateConfidence::Unknown,
-            burn_rate_percent_per_hour: None,
+            burn_rate_basis_points_per_hour: None,
             latest_remaining_headroom_percent: None,
         }
     }
@@ -84,7 +84,7 @@ impl QuotaRunRateEstimate {
     pub const fn insufficient() -> Self {
         Self {
             confidence: QuotaRunRateConfidence::Insufficient,
-            burn_rate_percent_per_hour: None,
+            burn_rate_basis_points_per_hour: None,
             latest_remaining_headroom_percent: None,
         }
     }
@@ -94,7 +94,7 @@ impl QuotaRunRateEstimate {
     pub const fn stale() -> Self {
         Self {
             confidence: QuotaRunRateConfidence::Stale,
-            burn_rate_percent_per_hour: None,
+            burn_rate_basis_points_per_hour: None,
             latest_remaining_headroom_percent: None,
         }
     }
@@ -106,9 +106,23 @@ impl QuotaRunRateEstimate {
         burn_rate_percent_per_hour: u32,
         latest_remaining_headroom_percent: u32,
     ) -> Self {
+        Self::with_rate_basis_points_per_hour(
+            confidence,
+            burn_rate_percent_per_hour.saturating_mul(100),
+            latest_remaining_headroom_percent,
+        )
+    }
+
+    /// Creates an estimate with a basis-point burn rate and latest headroom.
+    #[must_use]
+    pub const fn with_rate_basis_points_per_hour(
+        confidence: QuotaRunRateConfidence,
+        burn_rate_basis_points_per_hour: u32,
+        latest_remaining_headroom_percent: u32,
+    ) -> Self {
         Self {
             confidence,
-            burn_rate_percent_per_hour: Some(burn_rate_percent_per_hour),
+            burn_rate_basis_points_per_hour: Some(burn_rate_basis_points_per_hour),
             latest_remaining_headroom_percent: Some(clamp_percent(
                 latest_remaining_headroom_percent,
             )),
@@ -124,7 +138,16 @@ impl QuotaRunRateEstimate {
     /// Returns burn rate percent per hour when available.
     #[must_use]
     pub const fn burn_rate_percent_per_hour(self) -> Option<u32> {
-        self.burn_rate_percent_per_hour
+        match self.burn_rate_basis_points_per_hour {
+            Some(burn_rate_basis_points_per_hour) => Some(burn_rate_basis_points_per_hour / 100),
+            None => None,
+        }
+    }
+
+    /// Returns burn rate basis points per hour when available.
+    #[must_use]
+    pub const fn burn_rate_basis_points_per_hour(self) -> Option<u32> {
+        self.burn_rate_basis_points_per_hour
     }
 
     /// Returns latest remaining headroom percent when available.
@@ -136,14 +159,16 @@ impl QuotaRunRateEstimate {
     /// Projects when the window reaches zero headroom.
     #[must_use]
     pub fn projected_exhaustion_unix_seconds(self, now_unix_seconds: u64) -> Option<u64> {
-        let burn_rate_percent_per_hour = u64::from(self.burn_rate_percent_per_hour?);
-        if burn_rate_percent_per_hour == 0 {
+        let burn_rate_basis_points_per_hour = u64::from(self.burn_rate_basis_points_per_hour?);
+        if burn_rate_basis_points_per_hour == 0 {
             return None;
         }
         let latest_remaining_headroom_percent = u64::from(self.latest_remaining_headroom_percent?);
-        let seconds_until_exhaustion = latest_remaining_headroom_percent
+        let latest_remaining_headroom_basis_points =
+            latest_remaining_headroom_percent.saturating_mul(100);
+        let seconds_until_exhaustion = latest_remaining_headroom_basis_points
             .saturating_mul(3_600)
-            .checked_div(burn_rate_percent_per_hour)?;
+            .checked_div(burn_rate_basis_points_per_hour)?;
 
         Some(now_unix_seconds.saturating_add(seconds_until_exhaustion))
     }
@@ -207,7 +232,8 @@ impl QuotaRunRateEstimator {
         let burned_percent = first_observation
             .remaining_headroom_percent
             .saturating_sub(latest_observation.remaining_headroom_percent);
-        let burn_rate_percent_per_hour = u64::from(burned_percent)
+        let burn_rate_basis_points_per_hour = u64::from(burned_percent)
+            .saturating_mul(100)
             .saturating_mul(3_600)
             .checked_div(span_seconds)
             .unwrap_or(0)
@@ -220,9 +246,9 @@ impl QuotaRunRateEstimator {
             QuotaRunRateConfidence::Low
         };
 
-        QuotaRunRateEstimate::with_rate(
+        QuotaRunRateEstimate::with_rate_basis_points_per_hour(
             confidence,
-            burn_rate_percent_per_hour,
+            burn_rate_basis_points_per_hour,
             latest_observation.remaining_headroom_percent,
         )
     }

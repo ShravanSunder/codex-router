@@ -204,6 +204,10 @@ where
         CliCommand::Quota(command) => quota::run_quota_command(stdout, command)?,
         CliCommand::Live(command) => live::run_live_command(stdout, command)?,
         CliCommand::Sessions(command) => sessions::run_sessions_command(stdout, command, context)?,
+        CliCommand::Version => {
+            writeln!(stdout, "codex-router {}", env!("CARGO_PKG_VERSION"))
+                .map_err(CliError::Stdout)?;
+        }
         CliCommand::Help => {
             stdout
                 .write_all(HELP_TEXT.as_bytes())
@@ -467,6 +471,7 @@ enum CliCommand {
     Quota(QuotaCommand),
     Live(LiveCommand),
     Sessions(SessionsCommand),
+    Version,
     Help,
 }
 
@@ -505,6 +510,10 @@ impl CliCommand {
                 SessionsCommand::parse(parser.remaining_arguments())
                     .map_err(|message| CliError::SessionsParse { message })?,
             )),
+            "--version" | "-V" | "version" => {
+                parser.reject_remaining()?;
+                Ok(Self::Version)
+            }
             "--help" | "-h" | "help" => Ok(Self::Help),
             unknown => Err(CliError::UnknownCommand {
                 command: unknown.to_owned(),
@@ -1345,6 +1354,20 @@ mod tests {
     #[test]
     fn reports_package_name() {
         assert_eq!(package_name(), "codex-router-cli");
+    }
+
+    #[test]
+    fn process_binary_path_supports_top_level_version() {
+        let output = run_cli(
+            ["/tmp/build/target/debug/codex-router", "--version"],
+            CliContext::new(Vec::new()),
+        );
+
+        assert_eq!(
+            output.stdout,
+            format!("codex-router {}\n", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -2547,17 +2570,21 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
+            concat!("codex-router ", env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(
             lines[1],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients mirror <= 2h\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[2],
+            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients mirror <= 2h\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
+        );
+        assert_eq!(
+            lines[3],
             "responses route\tnext: snapshot\twhy: fallback by quota: needs refresh limiting window: 5h 75% left"
         );
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
         assert!(output.stderr.is_empty());
     }
 
@@ -2640,19 +2667,29 @@ exit 42
         let lines = output.stdout.lines().collect::<Vec<_>>();
         assert_eq!(
             lines[0],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
+            concat!("codex-router ", env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(
             lines[1],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tscore 1 risk 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
         );
         assert_eq!(
             lines[2],
+            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tquota guard 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+        );
+        assert_eq!(
+            lines[3],
             "responses route\tnext: primary\twhy: preferred by quota: safest quota limiting window: 5h 25% left"
         );
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
         assert!(!output.stdout.contains("acct_primary"));
-        assert!(!output.stdout.contains("pp"));
+        assert!(!output.stdout.contains("score"));
+        assert!(!output.stdout.contains("risk"));
+        assert!(!output.stdout.contains("pressure"));
+        assert!(!output.stdout.contains("cost"));
+        assert!(!output.stdout.contains("routing_weight"));
+        assert!(!output.stdout.contains("active_pressure"));
+        assert!(!output.stdout.contains("headroom_cost"));
         assert!(!output.stdout.contains("bottleneck"));
         assert!(output.stderr.is_empty());
     }
@@ -2734,6 +2771,7 @@ exit 42
 
         let parsed: serde_json::Value = must_ok(serde_json::from_str(&output.stdout));
         assert_eq!(parsed["route_result"], "ok");
+        assert_eq!(parsed["app_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(parsed["route_band"], "responses");
         assert_eq!(parsed["selected_pool"], "usable");
         assert_eq!(parsed["selected_pool_reason"], "usable_available");
@@ -2741,13 +2779,7 @@ exit 42
             parsed["preferred_next_account_hash"].as_str().map(str::len),
             Some(16)
         );
-        assert_eq!(
-            parsed["weighted_candidates"][0]["account_hash"]
-                .as_str()
-                .map(str::len),
-            Some(16)
-        );
-        assert_eq!(parsed["weighted_candidates"][0]["routing_weight"], 1);
+        assert!(parsed.get("weighted_candidates").is_none());
         assert_eq!(
             parsed["accounts"][0]["account_hash"].as_str().map(str::len),
             Some(16)
@@ -2757,8 +2789,9 @@ exit 42
         assert_eq!(parsed["accounts"][0]["freshness"], "fresh");
         assert_eq!(
             parsed["accounts"][0]["routing_reason"],
-            "preferred_highest_weight"
+            "preferred_safest_quota"
         );
+        assert!(parsed["accounts"][0].get("routing_weight").is_none());
         assert_eq!(parsed["accounts"][0]["preferred_next"], true);
         assert!(!output.stdout.contains("acct_primary"));
         assert_eq!(parsed["accounts"][0]["reset_credits_available"], 1);
@@ -2768,8 +2801,10 @@ exit 42
             "sqlx_mirror"
         );
         assert_eq!(parsed["accounts"][0]["next_use"], "preferred by quota");
-        assert_eq!(parsed["accounts"][0]["short_pressure"], 25);
-        assert_eq!(parsed["accounts"][0]["long_pressure"], 20);
+        assert!(parsed["accounts"][0].get("short_quota_risk").is_none());
+        assert!(parsed["accounts"][0].get("weekly_quota_risk").is_none());
+        assert_eq!(parsed["accounts"][0]["short_quota_guard"], 25);
+        assert_eq!(parsed["accounts"][0]["weekly_quota_guard"], 20);
         assert_eq!(parsed["accounts"][0]["limiting_window"], "5h");
         assert_eq!(
             parsed["accounts"][0]["window_slots"]["5h"]["evidence_state"],
@@ -2803,7 +2838,12 @@ exit 42
         assert!(!output.stdout.contains("refresh-token"));
         assert!(!output.stdout.contains("authorization"));
         assert!(!output.stdout.contains("bottleneck"));
-        assert!(!output.stdout.contains("pp"));
+        assert!(!output.stdout.contains("risk"));
+        assert!(!output.stdout.contains("pressure"));
+        assert!(!output.stdout.contains("cost"));
+        assert!(!output.stdout.contains("routing_weight"));
+        assert!(!output.stdout.contains("active_pressure"));
+        assert!(!output.stdout.contains("headroom_cost"));
         assert!(output.stderr.is_empty());
 
         let auto_output = run_cli(
@@ -2831,8 +2871,8 @@ exit 42
     }
 
     #[test]
-    fn quota_status_selection_uses_active_client_pressure() {
-        let test_root = TestRoot::new("quota-status-active-pressure");
+    fn quota_status_selection_uses_active_session_count() {
+        let test_root = TestRoot::new("quota-status-active-session-count");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
         must_ok(fs::create_dir_all(&router_root));
