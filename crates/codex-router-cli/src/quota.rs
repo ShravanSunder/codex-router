@@ -60,8 +60,6 @@ use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::selection_projection::project_route_band_selection_inputs;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
-use comfy_table::Table;
-use comfy_table::presets::UTF8_FULL;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use serde::Serialize;
@@ -227,6 +225,7 @@ pub enum QuotaCommandError {
 pub fn run_quota_command(
     stdout: &mut impl Write,
     command: QuotaCommand,
+    stdout_is_terminal: bool,
 ) -> Result<(), QuotaCommandError> {
     match command {
         QuotaCommand::Help(help_text) => stdout
@@ -242,6 +241,7 @@ pub fn run_quota_command(
             stdout,
             router_root,
             format,
+            stdout_is_terminal,
             all_limits,
             now_unix_seconds,
             auto_refresh,
@@ -1207,110 +1207,93 @@ fn render_quota_status(
     stdout: &mut impl Write,
     router_root: PathBuf,
     format: QuotaStatusFormat,
+    stdout_is_terminal: bool,
     all_limits: bool,
     now_unix_seconds: u64,
     auto_refresh: bool,
 ) -> Result<(), QuotaCommandError> {
     if format == QuotaStatusFormat::Json && auto_refresh {
-        return render_quota_status_json_with_refresh(
+        let _refresh_result = refresh_quota(
+            &mut Vec::new(),
+            router_root.clone(),
+            DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+        );
+        return render_quota_status_once(
             stdout,
-            router_root,
+            &router_root,
+            format,
+            stdout_is_terminal,
+            all_limits,
+            current_unix_seconds(),
+        );
+    }
+
+    if !auto_refresh {
+        return render_quota_status_once(
+            stdout,
+            &router_root,
+            format,
+            stdout_is_terminal,
             all_limits,
             now_unix_seconds,
         );
     }
 
-    render_quota_status_once(stdout, &router_root, format, all_limits, now_unix_seconds)?;
-    if !auto_refresh {
-        return Ok(());
-    }
-
-    writeln!(stdout, "refreshing quota...").map_err(QuotaCommandError::Stdout)?;
     let mut refresh_output = Vec::new();
     match refresh_quota(
         &mut refresh_output,
         router_root.clone(),
         DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
     ) {
-        Ok(()) => {
-            write!(stdout, "{}", String::from_utf8_lossy(&refresh_output))
-                .map_err(QuotaCommandError::Stdout)?;
-            writeln!(stdout, "updated quota:").map_err(QuotaCommandError::Stdout)?;
+        Ok(()) => render_quota_status_once(
+            stdout,
+            &router_root,
+            format,
+            stdout_is_terminal,
+            all_limits,
+            current_unix_seconds(),
+        ),
+        Err(error) => {
             render_quota_status_once(
                 stdout,
                 &router_root,
                 format,
+                stdout_is_terminal,
                 all_limits,
-                current_unix_seconds(),
-            )
-        }
-        Err(error) => {
+                now_unix_seconds,
+            )?;
             writeln!(stdout, "refresh failed: {error}").map_err(QuotaCommandError::Stdout)?;
             Ok(())
         }
     }
 }
 
-fn render_quota_status_json_with_refresh(
-    stdout: &mut impl Write,
-    router_root: PathBuf,
-    all_limits: bool,
-    now_unix_seconds: u64,
-) -> Result<(), QuotaCommandError> {
-    let cached_report = load_quota_status_report(&router_root, all_limits, now_unix_seconds, true)?;
-    let refresh_result = match refresh_quota(
-        &mut Vec::new(),
-        router_root.clone(),
-        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-    ) {
-        Ok(()) => JsonQuotaRefreshResult {
-            route_result: "ok",
-            error: None,
-        },
-        Err(error) => JsonQuotaRefreshResult {
-            route_result: "error",
-            error: Some(error.to_string()),
-        },
-    };
-    let updated_report = if refresh_result.route_result == "ok" {
-        Some(load_quota_status_report(
-            &router_root,
-            all_limits,
-            current_unix_seconds(),
-            true,
-        )?)
-    } else {
-        None
-    };
-    let json_report = JsonQuotaStatusRefreshReport {
-        route_result: "ok",
-        cached: JsonQuotaStatusReport::from_report(&cached_report),
-        refresh: refresh_result,
-        updated: updated_report
-            .as_ref()
-            .map(JsonQuotaStatusReport::from_report),
-    };
-    serde_json::to_writer_pretty(&mut *stdout, &json_report).map_err(|error| {
-        QuotaCommandError::Stdout(std::io::Error::other(format!(
-            "failed to serialize quota status json: {error}"
-        )))
-    })?;
-    writeln!(stdout).map_err(QuotaCommandError::Stdout)
-}
-
 fn render_quota_status_once(
     stdout: &mut impl Write,
     router_root: &Path,
     format: QuotaStatusFormat,
+    stdout_is_terminal: bool,
     all_limits: bool,
     now_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
-    let unicode_bars = format != QuotaStatusFormat::Plain;
+    let effective_format = effective_human_quota_format(format, stdout_is_terminal);
+    let unicode_bars = effective_format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
-    match format {
+    match effective_format {
         QuotaStatusFormat::Table => write_quota_table(stdout, &report),
         QuotaStatusFormat::Plain => write_quota_plain(stdout, &report),
         QuotaStatusFormat::Json => write_quota_json(stdout, &report),
+    }
+}
+
+fn effective_human_quota_format(
+    format: QuotaStatusFormat,
+    stdout_is_terminal: bool,
+) -> QuotaStatusFormat {
+    match format {
+        QuotaStatusFormat::Json | QuotaStatusFormat::Plain => format,
+        QuotaStatusFormat::Table if stdout_is_terminal => QuotaStatusFormat::Table,
+        QuotaStatusFormat::Table => QuotaStatusFormat::Plain,
     }
 }
 
@@ -1495,40 +1478,57 @@ fn write_quota_table(
     report: &QuotaStatusReport,
 ) -> Result<(), QuotaCommandError> {
     let rows = report.rows();
-    writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
-    table.set_header([
-        "account",
-        "status",
-        "5h",
-        "weekly",
-        "pace",
-        "burn",
-        "updated",
-        "clients",
-        "resets available",
-        "routing",
-        "next use",
-    ]);
+    writeln!(stdout, "{}", human_version_banner(&report.app_version))
+        .map_err(QuotaCommandError::Stdout)?;
+    writeln!(
+        stdout,
+        "{} -> {}",
+        report.route_band,
+        selected_account_label(rows)
+    )
+    .map_err(QuotaCommandError::Stdout)?;
+    writeln!(stdout, "why: {}", selector_summary(rows)).map_err(QuotaCommandError::Stdout)?;
+    writeln!(stdout).map_err(QuotaCommandError::Stdout)?;
+
     for row in rows {
-        table.add_row([
-            row.account_label.as_str(),
-            row.account_status.as_str(),
-            row.short_window.as_str(),
-            row.weekly_window.as_str(),
-            row.pace.as_str(),
-            row.burn.as_str(),
-            row.updated.as_str(),
-            row.active_clients.as_str(),
-            row.reset_credits_available.as_str(),
-            row.routing.as_str(),
-            row.next_use.as_str(),
-        ]);
+        writeln!(
+            stdout,
+            "{}   {}",
+            row.account_label,
+            human_routing_state(row)
+        )
+        .map_err(QuotaCommandError::Stdout)?;
+        writeln!(
+            stdout,
+            "  quota      {}     {}",
+            compact_window_cell("5h", &row.short_window),
+            compact_window_cell("weekly", &row.weekly_window)
+        )
+        .map_err(QuotaCommandError::Stdout)?;
+        writeln!(
+            stdout,
+            "  activity   {}     {}",
+            first_line(&row.active_clients),
+            first_line(&row.burn)
+        )
+        .map_err(QuotaCommandError::Stdout)?;
+        if row.reset_credits_available_value.is_some() {
+            writeln!(stdout, "  reset      {}", row.reset_credits_available)
+                .map_err(QuotaCommandError::Stdout)?;
+        }
+        writeln!(stdout, "  note       {}", first_line(&row.routing))
+            .map_err(QuotaCommandError::Stdout)?;
+        writeln!(stdout).map_err(QuotaCommandError::Stdout)?;
     }
 
-    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)?;
-    write_selector_summary_table(stdout, rows)
+    Ok(())
+}
+
+fn human_version_banner(app_version: &str) -> String {
+    let build_id = option_env!("CODEX_ROUTER_BUILD_ID")
+        .or(option_env!("CODEX_ROUTER_GIT_SHA"))
+        .unwrap_or("dev");
+    format!("codex-router {app_version} (build {build_id})")
 }
 
 fn write_quota_plain(
@@ -1564,20 +1564,6 @@ fn write_quota_plain(
     write_selector_summary_plain(stdout, rows)
 }
 
-fn write_selector_summary_table(
-    stdout: &mut impl Write,
-    rows: &[QuotaStatusRow],
-) -> Result<(), QuotaCommandError> {
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
-    table.set_header(["route", "next", "why"]);
-    let next = selected_account_label(rows).to_owned();
-    let summary = selector_summary(rows);
-    table.add_row(["responses".to_owned(), next, summary]);
-
-    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)
-}
-
 fn write_selector_summary_plain(
     stdout: &mut impl Write,
     rows: &[QuotaStatusRow],
@@ -1603,6 +1589,28 @@ fn selector_summary(rows: &[QuotaStatusRow]) -> String {
         return "no usable accounts".to_owned();
     };
     selected_row.routing.replace('\n', " ")
+}
+
+fn human_routing_state(row: &QuotaStatusRow) -> &str {
+    if row.preferred_next {
+        "preferred"
+    } else {
+        row.next_use.as_str()
+    }
+}
+
+fn compact_window_cell(label: &str, cell: &str) -> String {
+    let compact = cell.replace('\n', ", ");
+    let compact = compact.trim();
+    let content_start = compact
+        .char_indices()
+        .find(|(_, character)| character.is_ascii_digit() || character.is_ascii_alphabetic())
+        .map_or(0, |(index, _)| index);
+    format!("{label} {}", compact[content_start..].trim())
+}
+
+fn first_line(value: &str) -> &str {
+    value.lines().next().unwrap_or(value).trim()
 }
 
 fn write_quota_json(
@@ -2208,20 +2216,6 @@ fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
 
 fn format_percent(value: u32) -> String {
     format!("{}%", value.min(100))
-}
-
-#[derive(Serialize)]
-struct JsonQuotaStatusRefreshReport {
-    route_result: &'static str,
-    cached: JsonQuotaStatusReport,
-    refresh: JsonQuotaRefreshResult,
-    updated: Option<JsonQuotaStatusReport>,
-}
-
-#[derive(Serialize)]
-struct JsonQuotaRefreshResult {
-    route_result: &'static str,
-    error: Option<String>,
 }
 
 #[derive(Serialize)]

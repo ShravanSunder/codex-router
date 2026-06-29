@@ -13,7 +13,7 @@ sync-rusqlite-fixtures = ["dep:rusqlite"]
 
 [dependencies]
 codex-router-core.workspace = true
-codex-router-selection = { path = "../codex-router-selection", version = "0.1.0" }
+codex-router-selection = { path = "../codex-router-selection", version = "0.1.1" }
 futures-util.workspace = true
 rusqlite = { workspace = true, optional = true }
 sqlx.workspace = true
