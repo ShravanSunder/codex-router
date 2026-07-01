@@ -181,9 +181,16 @@ fn render_picker_view(
         if model.width >= SIDECAR_PICKER_WIDTH {
             let list_width = (content_width.saturating_sub(2) / 2).max(42);
             let detail_width = content_width.saturating_sub(list_width + 2).max(28);
+            let list_height = session_list_height(visible_records.len(), model.selected_index);
+            let details_panel_height = selected_record
+                .map(|record| {
+                    detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
+                })
+                .unwrap_or(2);
+            let main_height = list_height.max(details_panel_height);
             children.push(
                 element! {
-                    View(width: 100pct) {
+                    View(width: 100pct, height: main_height as u32) {
                         #(render_session_list(&visible_records, model.selected_index, list_width))
                         View(width: 2) { Text(content: "") }
                         #(selected_record
@@ -208,10 +215,12 @@ fn render_picker_view(
     }
 
     children.push(render_footer(content_width));
+    let picker_height = picker_content_height(model, &visible_records, selected_conversation);
 
     element! {
         View(
             width: model.width as u32,
+            height: picker_height as u32,
             border_style: BorderStyle::Round,
             border_color: Color::Cyan,
             overflow: Overflow::Hidden,
@@ -225,6 +234,93 @@ fn render_picker_view(
             #(children)
         }
     }
+}
+
+fn picker_content_height(
+    model: &SessionsPickerModel,
+    visible_records: &[&SessionPickerRecord],
+    selected_conversation: Option<&SessionConversationPreview>,
+) -> usize {
+    let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
+    let heading_height = 1 + filter_control_height(content_width);
+    let body_height = if visible_records.is_empty() {
+        2
+    } else if model.width >= SIDECAR_PICKER_WIDTH {
+        let conversation = selected_conversation.or_else(|| {
+            visible_records
+                .get(model.selected_index)
+                .map(|record| &record.conversation)
+        });
+        session_list_height(visible_records.len(), model.selected_index)
+            .max(detail_height(conversation))
+    } else {
+        let list_height = session_list_height(visible_records.len(), model.selected_index);
+        if model.width >= NARROW_PICKER_WIDTH {
+            let conversation = selected_conversation.or_else(|| {
+                visible_records
+                    .get(model.selected_index)
+                    .map(|record| &record.conversation)
+            });
+            list_height + detail_height(conversation)
+        } else {
+            list_height
+        }
+    };
+
+    let footer_height = 2;
+    let root_border_and_padding_height = 4;
+    root_border_and_padding_height + heading_height + body_height + footer_height
+}
+
+fn filter_control_height(width: usize) -> usize {
+    if width < COMPACT_PICKER_WIDTH {
+        4
+    } else if width < NARROW_PICKER_WIDTH {
+        3
+    } else {
+        2
+    }
+}
+
+fn session_list_height(visible_len: usize, selected_index: usize) -> usize {
+    let window_start = visible_window_start(selected_index, visible_len, MAX_VISIBLE_RECORDS);
+    let visible_count = visible_len
+        .saturating_sub(window_start)
+        .min(MAX_VISIBLE_RECORDS);
+    let remaining = visible_len.saturating_sub(window_start + MAX_VISIBLE_RECORDS);
+
+    let header_height = 2;
+    let record_rows_height = visible_count * 2;
+    let record_gap_height = visible_count.saturating_sub(1);
+    let more_above_height = if window_start > 0 { 2 } else { 0 };
+    let more_below_height = if remaining > 0 { 2 } else { 0 };
+    let list_border_and_padding_height = 4;
+
+    list_border_and_padding_height
+        + header_height
+        + more_above_height
+        + record_rows_height
+        + record_gap_height
+        + more_below_height
+}
+
+fn detail_height(conversation: Option<&SessionConversationPreview>) -> usize {
+    let conversation_row_count = conversation
+        .map(|conversation| conversation.snippets.len().max(1))
+        .unwrap_or(1);
+    let detail_border_height = 2;
+    let preview_height = 2;
+    let divider_height = 2;
+    let conversation_heading_height = 1;
+    let metadata_height = 6;
+
+    detail_border_height
+        + preview_height
+        + divider_height
+        + conversation_heading_height
+        + conversation_row_count
+        + divider_height
+        + metadata_height
 }
 
 fn render_filter_controls(model: &SessionsPickerModel, width: usize) -> Vec<AnyElement<'static>> {
@@ -354,6 +450,7 @@ fn render_session_list(
     element! {
         View(
             width: width as u32,
+            height: session_list_height(visible_records.len(), selected_index) as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
@@ -449,9 +546,10 @@ fn render_details(
     width: usize,
     selected_conversation: Option<&SessionConversationPreview>,
 ) -> AnyElement<'static> {
-    let detail_width = width.saturating_sub(2);
+    let detail_width = width.saturating_sub(4);
     let preview = record.preview.as_deref().unwrap_or(&record.title);
     let conversation = selected_conversation.unwrap_or(&record.conversation);
+    let panel_height = detail_height(Some(conversation));
     let conversation_rows = if conversation.snippets.is_empty() {
         vec![detail_text(
             conversation
@@ -495,6 +593,7 @@ fn render_details(
     element! {
         View(
             width: width as u32,
+            height: panel_height as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
@@ -939,6 +1038,19 @@ mod tests {
             assert!(
                 text.contains("ctrl-n new"),
                 "capture should expose the new-thread shortcut:\n{text}"
+            );
+            let lines = text.lines().collect::<Vec<_>>();
+            let footer_index = lines
+                .iter()
+                .position(|line| line.contains("type search"))
+                .unwrap_or_else(|| panic!("capture should render footer:\n{text}"));
+            let bottom_border_index = lines
+                .iter()
+                .rposition(|line| line.contains('╰'))
+                .unwrap_or_else(|| panic!("capture should render bottom border:\n{text}"));
+            assert!(
+                bottom_border_index <= footer_index + 2,
+                "picker outer border should stop after footer at width {width}:\n{text}"
             );
         }
 
