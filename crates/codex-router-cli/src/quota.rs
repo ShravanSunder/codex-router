@@ -1574,7 +1574,7 @@ fn write_quota_table_with_style(
     write_quota_box_line(
         stdout,
         width,
-        "Account      Status              Pace",
+        "Account      Status              Quota / burn",
         style,
         QuotaLineStyle::Header,
     )?;
@@ -1628,16 +1628,31 @@ fn write_quota_account_block(
         stdout,
         width,
         &format!(
-            "    5h {}    weekly {}",
-            quota_window_summary(&row.short_window),
-            quota_window_summary(&row.weekly_window)
+            "    {}",
+            quota_window_visual_summary(
+                &row.windows,
+                V1_SHORT_WINDOW_SECONDS,
+                "5h",
+                now_unix_seconds,
+            )
         ),
         style,
-        if row.preferred_next {
-            QuotaLineStyle::Healthy
-        } else {
-            QuotaLineStyle::Normal
-        },
+        QuotaLineStyle::Normal,
+    )?;
+    write_quota_box_line(
+        stdout,
+        width,
+        &format!(
+            "    {}",
+            quota_window_visual_summary(
+                &row.windows,
+                V1_WEEKLY_WINDOW_SECONDS,
+                "weekly",
+                now_unix_seconds,
+            )
+        ),
+        style,
+        QuotaLineStyle::Normal,
     )?;
     write_quota_box_line(
         stdout,
@@ -1696,12 +1711,31 @@ fn write_selected_quota_details_with_style(
         stdout,
         width,
         &format!(
-            "quota    5h {}    weekly {}",
-            quota_window_summary(&row.short_window),
-            quota_window_summary(&row.weekly_window)
+            "quota    {}",
+            quota_window_visual_summary(
+                &row.windows,
+                V1_SHORT_WINDOW_SECONDS,
+                "5h",
+                now_unix_seconds,
+            )
         ),
         style,
-        QuotaLineStyle::Healthy,
+        QuotaLineStyle::Normal,
+    )?;
+    write_quota_box_line(
+        stdout,
+        width,
+        &format!(
+            "         {}",
+            quota_window_visual_summary(
+                &row.windows,
+                V1_WEEKLY_WINDOW_SECONDS,
+                "weekly",
+                now_unix_seconds,
+            )
+        ),
+        style,
+        QuotaLineStyle::Normal,
     )?;
     write_quota_box_line(
         stdout,
@@ -1969,22 +2003,26 @@ fn quota_state_text(row: &QuotaStatusRow) -> &'static str {
     }
 }
 
-fn dense_window_cell(cell: &str) -> String {
-    let line = cell.replace('\n', " ");
-    let percent = line
-        .split_whitespace()
-        .find(|token| token.ends_with('%'))
-        .unwrap_or("?");
-    let reset = line
-        .split("resets in ")
-        .nth(1)
-        .map(str::trim)
-        .unwrap_or("-");
-    format!("{percent} reset {reset}")
-}
-
-fn quota_window_summary(cell: &str) -> String {
-    dense_window_cell(cell).replace(" reset ", " left, reset ")
+fn quota_window_visual_summary(
+    windows: &[DisplayQuotaWindow],
+    window_seconds: u64,
+    label: &'static str,
+    now_unix_seconds: u64,
+) -> String {
+    let Some(window) = windows
+        .iter()
+        .find(|window| window.window_seconds == window_seconds)
+    else {
+        return format!("{label} {} no data", quota_bar(0, true));
+    };
+    let note = window_display_note(window, now_unix_seconds)
+        .replace("resets in ", "reset ")
+        .replace("resets ", "reset ");
+    format!(
+        "{label} {} {} left, {note}",
+        quota_bar(window.remaining_headroom, true),
+        format_percent(window.remaining_headroom)
+    )
 }
 
 fn first_line(value: &str) -> &str {
@@ -2546,11 +2584,11 @@ fn quota_pace_summary(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64
     let direction = quota_pace_direction(snapshot, now_unix_seconds);
     let pace_load = quota_pace_load(snapshot, now_unix_seconds).map_or_else(
         || "safe pace unknown".to_owned(),
-        |load| format!("{load}% of safe pace"),
+        |load| format!("{load}% safe pace"),
     );
     format!(
-        "{direction}  {}  {pace_load}",
-        quota_pace_bar(snapshot, now_unix_seconds)
+        "{direction}  burn {}  {pace_load}",
+        quota_burn_bar(snapshot, now_unix_seconds)
     )
 }
 
@@ -2607,11 +2645,11 @@ fn quota_pace_direction(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> S
     }
 }
 
-fn quota_pace_bar(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> String {
+fn quota_burn_bar(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> String {
     let load = quota_pace_load(snapshot, now_unix_seconds).unwrap_or(0);
     let filled = load.min(100).div_ceil(10) as usize;
     let empty = 10_usize.saturating_sub(filled);
-    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+    format!("{}{}", "▰".repeat(filled), "▱".repeat(empty))
 }
 
 fn quota_pace_load(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> Option<u32> {
@@ -3651,7 +3689,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_status_table_uses_pace_and_rate_instead_of_burn_pressure() {
+    fn quota_status_table_separates_quota_bars_from_burn_bars() {
         let report = quota_capture_report();
         let mut output = Vec::new();
 
@@ -3659,8 +3697,8 @@ mod tests {
         let text = must_ok(String::from_utf8(output));
 
         assert!(
-            text.contains("Pace"),
-            "quota table should make pace a first-class column:\n{text}"
+            text.contains("Quota / burn"),
+            "quota table should label the quota and burn section:\n{text}"
         );
         assert!(
             text.contains("%/h") && text.contains("%/h/conn"),
@@ -3671,12 +3709,16 @@ mod tests {
             "quota table should say whether the account is ahead or behind reset:\n{text}"
         );
         assert!(
-            !text.contains("burn ") && !text.contains(" burn"),
-            "quota table should not label guard pressure as burn:\n{text}"
+            text.contains("weekly █"),
+            "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
         );
         assert!(
-            !text.contains('▰') && !text.contains('▱'),
-            "quota table should not render the old ambiguous burn-pressure bar:\n{text}"
+            text.contains("burn ▰") || text.contains("burn ▱"),
+            "quota table should show burn pace with a distinct burn bar glyph:\n{text}"
+        );
+        assert!(
+            !text.contains("[████") && !text.contains("[░░░"),
+            "quota table should not use bracketed quota glyphs for burn pace:\n{text}"
         );
     }
 
@@ -3989,6 +4031,10 @@ mod tests {
                     "quota capture width 72 should preserve weekly reset facts for {account_label}:\n{text}"
                 );
             }
+            assert!(
+                !text.contains("..."),
+                "quota capture width 72 should avoid clipping normal account rows:\n{text}"
+            );
         }
         if width == 90 {
             for reason in ["safest quota", "same pool", "5h guard", "quota empty"] {
