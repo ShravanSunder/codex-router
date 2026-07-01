@@ -21,6 +21,24 @@ const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
 const MAX_VISIBLE_RECORDS: usize = VISIBLE_SESSION_ROWS;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConversationPreviewLoadRequest {
+    session_id: String,
+    source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ConversationPreviewLoadState {
+    Loading,
+    Loaded(SessionConversationPreview),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectedConversationPreview {
+    preview: SessionConversationPreview,
+    load_request: Option<ConversationPreviewLoadRequest>,
+}
+
 #[derive(Default, Props)]
 pub(crate) struct SessionsPickerComponentProps<'a> {
     request: SessionsPickerRequest,
@@ -42,7 +60,25 @@ pub(crate) fn SessionsPickerComponent<'a>(
     };
     let mut model = hooks.use_state(|| SessionsPickerModel::new(props.request.clone(), width));
     let mut conversation_cache =
-        hooks.use_state(BTreeMap::<String, SessionConversationPreview>::new);
+        hooks.use_state(BTreeMap::<String, ConversationPreviewLoadState>::new);
+    let load_conversation = hooks.use_async_handler({
+        let mut conversation_cache = conversation_cache;
+        move |request: ConversationPreviewLoadRequest| async move {
+            let session_id = request.session_id;
+            let source = request.source;
+            let preview = match tokio::task::spawn_blocking(move || {
+                SessionConversationPreview::from_rollout_path(Some(&source))
+            })
+            .await
+            {
+                Ok(preview) => preview,
+                Err(_) => SessionConversationPreview::unavailable("history unavailable"),
+            };
+            conversation_cache
+                .write()
+                .insert(session_id, ConversationPreviewLoadState::Loaded(preview));
+        }
+    });
     let mut selected_outcome = hooks.use_state(|| Option::<SessionsPickerOutcome>::None);
     let mut should_cancel = hooks.use_state(|| false);
 
@@ -141,19 +177,53 @@ pub(crate) fn SessionsPickerComponent<'a>(
             .visible_records()
             .get(model_value.selected_index)
             .copied();
-        selected.and_then(|record| {
-            let source = record.conversation_source.as_deref()?;
-            let mut cache = conversation_cache.write();
-            Some(
-                cache
-                    .entry(record.session_id.clone())
-                    .or_insert_with(|| SessionConversationPreview::from_rollout_path(Some(source)))
-                    .clone(),
-            )
+        selected.map(|record| {
+            let selected_preview = {
+                let cache = conversation_cache.read();
+                selected_conversation_preview_for_record(record, &cache)
+            };
+            if let Some(load_request) = selected_preview.load_request.clone() {
+                conversation_cache.write().insert(
+                    load_request.session_id.clone(),
+                    ConversationPreviewLoadState::Loading,
+                );
+                load_conversation(load_request);
+            }
+            selected_preview.preview
         })
     };
 
     render_picker_view(&model.read(), selected_conversation.as_ref())
+}
+
+fn selected_conversation_preview_for_record(
+    record: &SessionPickerRecord,
+    cache: &BTreeMap<String, ConversationPreviewLoadState>,
+) -> SelectedConversationPreview {
+    let Some(source) = record.conversation_source.as_deref() else {
+        return SelectedConversationPreview {
+            preview: record.conversation.clone(),
+            load_request: None,
+        };
+    };
+
+    match cache.get(&record.session_id) {
+        Some(ConversationPreviewLoadState::Loaded(preview)) => SelectedConversationPreview {
+            preview: preview.clone(),
+            load_request: None,
+        },
+        Some(ConversationPreviewLoadState::Loading) => SelectedConversationPreview {
+            preview: record.conversation.clone(),
+            load_request: None,
+        },
+        None => SelectedConversationPreview {
+            preview: record.conversation.clone(),
+            load_request: Some(ConversationPreviewLoadRequest {
+                session_id: record.session_id.clone(),
+                source: source.to_owned(),
+            }),
+        },
+    }
 }
 
 fn render_picker_view(
@@ -977,6 +1047,28 @@ mod tests {
             "picker should render an iocraft bordered panel: {}",
             canvas
         );
+    }
+
+    #[test]
+    fn selected_conversation_preview_requests_background_load_without_reading_jsonl() {
+        let mut record = picker_request().records.remove(0);
+        record.conversation = SessionConversationPreview::unavailable("history loading");
+        record.conversation_source = Some("/tmp/codex-router-history.jsonl".to_owned());
+        let cache = BTreeMap::new();
+
+        let preview = selected_conversation_preview_for_record(&record, &cache);
+
+        assert_eq!(
+            preview,
+            SelectedConversationPreview {
+                preview: SessionConversationPreview::unavailable("history loading"),
+                load_request: Some(ConversationPreviewLoadRequest {
+                    session_id: "thread-a".to_owned(),
+                    source: "/tmp/codex-router-history.jsonl".to_owned(),
+                }),
+            }
+        );
+        assert!(cache.is_empty(), "render decision should not mutate cache");
     }
 
     #[tokio::test]
