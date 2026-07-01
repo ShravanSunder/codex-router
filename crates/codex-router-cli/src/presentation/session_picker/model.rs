@@ -28,11 +28,13 @@ pub(crate) struct SessionsPickerModel {
     pub(super) sort: SessionsSort,
     pub(super) search: String,
     pub(super) selected_index: usize,
+    visible_indices: Vec<usize>,
+    visible_rows_generation: usize,
 }
 
 impl SessionsPickerModel {
     pub(crate) fn new(request: SessionsPickerRequest, width: usize) -> Self {
-        Self {
+        let mut model = Self {
             root: request.root,
             provider: request.provider.clone(),
             source: request.source,
@@ -41,13 +43,17 @@ impl SessionsPickerModel {
             width,
             search: String::new(),
             selected_index: 0,
-        }
+            visible_indices: Vec::new(),
+            visible_rows_generation: 0,
+        };
+        model.rebuild_visible_rows();
+        model
     }
 
     pub(crate) fn handle_key(&mut self, key: SessionsPickerKey) {
         match key {
             SessionsPickerKey::MoveDown => {
-                let visible_len = self.visible_records().len();
+                let visible_len = self.visible_len();
                 if visible_len > 0 {
                     self.selected_index = (self.selected_index + 1).min(visible_len - 1);
                 }
@@ -56,7 +62,7 @@ impl SessionsPickerModel {
                 self.selected_index = self.selected_index.saturating_sub(1);
             }
             SessionsPickerKey::PageDown => {
-                let visible_len = self.visible_records().len();
+                let visible_len = self.visible_len();
                 if visible_len > 0 {
                     self.selected_index =
                         (self.selected_index + VISIBLE_SESSION_ROWS).min(visible_len - 1);
@@ -69,43 +75,51 @@ impl SessionsPickerModel {
                 self.selected_index = 0;
             }
             SessionsPickerKey::MoveLast => {
-                let visible_len = self.visible_records().len();
+                let visible_len = self.visible_len();
                 if visible_len > 0 {
                     self.selected_index = visible_len - 1;
                 }
             }
             SessionsPickerKey::CycleRoot => {
                 self.root = next_root_filter(self.root);
+                self.rebuild_visible_rows();
                 self.clamp_selection();
             }
             SessionsPickerKey::CycleSource => {
                 self.source = next_source_filter(self.source);
+                self.rebuild_visible_rows();
                 self.clamp_selection();
             }
             SessionsPickerKey::CycleSort => {
                 self.sort = next_sort_filter(self.sort);
+                self.rebuild_visible_rows();
                 self.clamp_selection();
             }
             SessionsPickerKey::SearchChar(character) => {
                 if !character.is_control() {
                     self.search.push(character);
+                    self.rebuild_visible_rows();
                 }
                 self.clamp_selection();
             }
             SessionsPickerKey::SearchBackspace => {
-                self.search.pop();
-                self.clamp_selection();
+                if self.search.pop().is_some() {
+                    self.rebuild_visible_rows();
+                    self.clamp_selection();
+                }
             }
             SessionsPickerKey::ClearSearch => {
-                self.search.clear();
-                self.clamp_selection();
+                if !self.search.is_empty() {
+                    self.search.clear();
+                    self.rebuild_visible_rows();
+                    self.clamp_selection();
+                }
             }
         }
     }
 
     pub(crate) fn selected_session_id(&self) -> Option<&str> {
-        self.visible_records()
-            .get(self.selected_index)
+        self.selected_record()
             .map(|record| record.session_id.as_str())
     }
 
@@ -121,16 +135,36 @@ impl SessionsPickerModel {
         render_model_snapshot(self)
     }
 
-    pub(super) fn visible_records(&self) -> Vec<&SessionPickerRecord> {
+    #[cfg(test)]
+    pub(crate) fn visible_rows_generation(&self) -> usize {
+        self.visible_rows_generation
+    }
+
+    pub(super) fn visible_len(&self) -> usize {
+        self.visible_indices.len()
+    }
+
+    pub(super) fn selected_record(&self) -> Option<&SessionPickerRecord> {
+        self.visible_record_at(self.selected_index)
+    }
+
+    pub(super) fn visible_record_at(&self, index: usize) -> Option<&SessionPickerRecord> {
+        self.visible_indices
+            .get(index)
+            .and_then(|record_index| self.request.records.get(*record_index))
+    }
+
+    fn rebuild_visible_rows(&mut self) {
         let search = self.search.to_lowercase();
-        let mut records = self
+        let mut indices = self
             .request
             .records
             .iter()
-            .filter(|record| root_matches(self.root, &self.request, record))
-            .filter(|record| provider_matches(&self.provider, &self.request, record))
-            .filter(|record| source_matches(self.source, record))
-            .filter(|record| {
+            .enumerate()
+            .filter(|(_index, record)| root_matches(self.root, &self.request, record))
+            .filter(|(_index, record)| provider_matches(&self.provider, &self.request, record))
+            .filter(|(_index, record)| source_matches(self.source, record))
+            .filter(|(_index, record)| {
                 search.is_empty()
                     || record.title.to_lowercase().contains(&search)
                     || record.session_id.to_lowercase().contains(&search)
@@ -141,22 +175,28 @@ impl SessionsPickerModel {
                         .to_lowercase()
                         .contains(&search)
             })
+            .map(|(index, _record)| index)
             .collect::<Vec<_>>();
-        records.sort_by(|left, right| match self.sort {
-            SessionsSort::Updated => right
-                .recency_at_ms
-                .unwrap_or(i64::MIN)
-                .cmp(&left.recency_at_ms.unwrap_or(i64::MIN)),
-            SessionsSort::Created => right
-                .created_at_ms
-                .unwrap_or(i64::MIN)
-                .cmp(&left.created_at_ms.unwrap_or(i64::MIN)),
+        indices.sort_by(|left_index, right_index| {
+            let left = &self.request.records[*left_index];
+            let right = &self.request.records[*right_index];
+            match self.sort {
+                SessionsSort::Updated => right
+                    .recency_at_ms
+                    .unwrap_or(i64::MIN)
+                    .cmp(&left.recency_at_ms.unwrap_or(i64::MIN)),
+                SessionsSort::Created => right
+                    .created_at_ms
+                    .unwrap_or(i64::MIN)
+                    .cmp(&left.created_at_ms.unwrap_or(i64::MIN)),
+            }
         });
-        records
+        self.visible_indices = indices;
+        self.visible_rows_generation = self.visible_rows_generation.saturating_add(1);
     }
 
     fn clamp_selection(&mut self) {
-        let visible_len = self.visible_records().len();
+        let visible_len = self.visible_len();
         if visible_len == 0 {
             self.selected_index = 0;
         } else if self.selected_index >= visible_len {

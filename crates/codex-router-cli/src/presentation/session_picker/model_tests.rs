@@ -131,6 +131,40 @@ fn sessions_picker_model_supports_page_and_edge_navigation() {
 }
 
 #[test]
+fn sessions_picker_model_reuses_visible_rows_for_navigation_keys() {
+    let mut request = picker_request();
+    request.root = crate::sessions::SessionsRoot::Any;
+    request.source = crate::sessions::SessionsSource::All;
+    for index in 0..25 {
+        request.records.push(picker_record(
+            &format!("thread-extra-{index}"),
+            &format!("Overflow session {index}"),
+            "/repo/project-a",
+            "codex-router",
+            "cli",
+        ));
+    }
+    let mut model = SessionsPickerModel::new(request, 100);
+
+    let initial_generation = model.visible_rows_generation();
+    model.handle_key(SessionsPickerKey::MoveDown);
+    model.handle_key(SessionsPickerKey::MoveDown);
+    model.handle_key(SessionsPickerKey::PageDown);
+
+    assert_eq!(
+        model.visible_rows_generation(),
+        initial_generation,
+        "navigation should not rebuild the filtered/sorted visible rows"
+    );
+
+    model.handle_key(SessionsPickerKey::CycleRoot);
+    assert!(
+        model.visible_rows_generation() > initial_generation,
+        "filter changes should rebuild the visible rows"
+    );
+}
+
+#[test]
 fn sessions_picker_model_clears_search_without_changing_filters() {
     let mut model = SessionsPickerModel::new(picker_request(), 100);
 

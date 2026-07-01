@@ -23,7 +23,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         return "terminal too narrow\n".to_owned();
     }
 
-    let visible_records = model.visible_records();
+    let visible_len = model.visible_len();
     let mut lines = vec![
         fit_line("Resume a previous session", model.width),
         fit_line(
@@ -38,7 +38,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         render_filters_line(model),
     ];
 
-    if visible_records.is_empty() {
+    if visible_len == 0 {
         lines.push(fit_line("Start new session", model.width));
         lines.push(fit_line(
             if model.search.is_empty() {
@@ -49,23 +49,19 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
             model.width,
         ));
     } else {
-        let window_start = visible_window_start(
-            model.selected_index,
-            visible_records.len(),
-            VISIBLE_SESSION_ROWS,
-        );
+        let window_start =
+            visible_window_start(model.selected_index, visible_len, VISIBLE_SESSION_ROWS);
         if window_start > 0 {
             lines.push(fit_line(
                 &format!("+{window_start} more above"),
                 model.width,
             ));
         }
-        for (visible_index, record) in visible_records
-            .iter()
-            .enumerate()
-            .skip(window_start)
-            .take(VISIBLE_SESSION_ROWS)
-        {
+        let window_end = (window_start + VISIBLE_SESSION_ROWS).min(visible_len);
+        for visible_index in window_start..window_end {
+            let Some(record) = model.visible_record_at(visible_index) else {
+                continue;
+            };
             let marker = if visible_index == model.selected_index {
                 "❯"
             } else {
@@ -90,14 +86,12 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
                 model.width,
             ));
         }
-        let remaining = visible_records
-            .len()
-            .saturating_sub(window_start + VISIBLE_SESSION_ROWS);
+        let remaining = visible_len.saturating_sub(window_start + VISIBLE_SESSION_ROWS);
         if remaining > 0 {
             lines.push(fit_line(&format!("+{remaining} more below"), model.width));
         }
         if model.width >= NARROW_PICKER_WIDTH
-            && let Some(record) = visible_records.get(model.selected_index)
+            && let Some(record) = model.selected_record()
         {
             lines.push(fit_line("Preview", model.width));
             lines.push(fit_line(

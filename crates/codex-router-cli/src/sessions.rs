@@ -305,7 +305,7 @@ async fn load_session_records(
         }
         records.push(SessionRecord {
             session_id: row.get("id"),
-            rollout_path: validated_rollout_path(
+            rollout_path: deferred_rollout_source(
                 &codex_home_path,
                 row.get::<Option<String>, _>("rollout_path").as_deref(),
             ),
@@ -753,6 +753,29 @@ fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
     candidate == parent || candidate.starts_with(parent)
 }
 
+fn deferred_rollout_source(
+    codex_home_path: &Path,
+    rollout_path: Option<&str>,
+) -> Option<SessionConversationSource> {
+    let rollout_path = rollout_path.and_then(non_empty_trimmed)?;
+    let path = Path::new(rollout_path);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let session_history_root = codex_home_path.join("sessions");
+    if !path.starts_with(&session_history_root) {
+        return None;
+    }
+    Some(SessionConversationSource {
+        rollout_path: rollout_path.to_owned(),
+        codex_home_path: codex_home_path.to_path_buf(),
+    })
+}
+
 fn validated_rollout_path(codex_home_path: &Path, rollout_path: Option<&str>) -> Option<String> {
     let rollout_path = rollout_path.and_then(non_empty_trimmed)?;
     let path = Path::new(rollout_path);
@@ -774,7 +797,7 @@ fn validated_rollout_path(codex_home_path: &Path, rollout_path: Option<&str>) ->
 struct SessionRecord {
     session_id: String,
     #[serde(skip)]
-    rollout_path: Option<String>,
+    rollout_path: Option<SessionConversationSource>,
     #[serde(skip)]
     display_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -825,7 +848,7 @@ pub(crate) struct SessionPickerRecord {
     pub(crate) model: Option<String>,
     pub(crate) preview: Option<String>,
     pub(crate) conversation: SessionConversationPreview,
-    pub(crate) conversation_source: Option<String>,
+    pub(crate) conversation_source: Option<SessionConversationSource>,
     pub(crate) source: Option<String>,
     pub(crate) thread_source: Option<String>,
 }
@@ -835,6 +858,23 @@ pub(crate) struct SessionPickerRecord {
 pub(crate) struct SessionConversationPreview {
     pub(crate) snippets: Vec<String>,
     pub(crate) unavailable_reason: Option<String>,
+}
+
+/// Deferred, validated-on-read conversation history source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionConversationSource {
+    rollout_path: String,
+    codex_home_path: PathBuf,
+}
+
+#[cfg(test)]
+impl SessionConversationSource {
+    pub(crate) fn for_test(rollout_path: impl Into<String>, codex_home_path: PathBuf) -> Self {
+        Self {
+            rollout_path: rollout_path.into(),
+            codex_home_path,
+        }
+    }
 }
 
 impl SessionPickerRecord {
@@ -868,6 +908,18 @@ impl SessionPickerRecord {
 }
 
 impl SessionConversationPreview {
+    pub(crate) fn from_rollout_source(source: Option<&SessionConversationSource>) -> Self {
+        let Some(source) = source else {
+            return Self::unavailable("history unavailable");
+        };
+        let Some(path) =
+            validated_rollout_path(&source.codex_home_path, Some(&source.rollout_path))
+        else {
+            return Self::unavailable("history unavailable");
+        };
+        Self::from_rollout_path(Some(&path))
+    }
+
     pub(crate) fn from_rollout_path(rollout_path: Option<&str>) -> Self {
         let Some(rollout_path) = rollout_path.and_then(non_empty_trimmed) else {
             return Self::unavailable("history unavailable");
@@ -1153,6 +1205,7 @@ fn format_duration_ms(duration_ms: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::SessionConversationPreview;
+    use super::deferred_rollout_source;
     use super::extract_recent_conversation_snippets;
     use super::format_duration_ms;
     use super::validated_rollout_path;
@@ -1395,6 +1448,43 @@ mod tests {
             None
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deferred_rollout_source_avoids_filesystem_validation_during_session_load() {
+        let root = std::env::temp_dir().join(format!(
+            "codex-router-deferred-rollout-{}",
+            std::process::id()
+        ));
+        let codex_home = root.join("codex-home");
+        let missing_inside = codex_home.join("sessions").join("missing.jsonl");
+        let outside = root.join("outside").join("missing.jsonl");
+
+        assert!(
+            deferred_rollout_source(
+                &codex_home,
+                Some(
+                    missing_inside
+                        .to_str()
+                        .expect("inside path should be utf-8")
+                ),
+            )
+            .is_some(),
+            "startup should keep an inside source candidate without canonicalizing every file"
+        );
+        assert_eq!(
+            deferred_rollout_source(
+                &codex_home,
+                Some(outside.to_str().expect("outside path should be utf-8")),
+            ),
+            None,
+            "startup should still reject lexically outside rollout paths"
+        );
+        assert_eq!(
+            deferred_rollout_source(&codex_home, Some("../sessions/escape.jsonl")),
+            None,
+            "startup should reject parent-directory escape paths"
+        );
     }
 }
 

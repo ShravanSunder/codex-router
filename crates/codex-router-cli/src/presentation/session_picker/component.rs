@@ -11,6 +11,7 @@ use crate::presentation::session_picker::model::visible_window_start;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionConversationPreview;
+use crate::sessions::SessionConversationSource;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSort;
@@ -24,7 +25,7 @@ const MAX_VISIBLE_RECORDS: usize = VISIBLE_SESSION_ROWS;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConversationPreviewLoadRequest {
     session_id: String,
-    source: String,
+    source: SessionConversationSource,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,7 +68,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
             let session_id = request.session_id;
             let source = request.source;
             let preview = match tokio::task::spawn_blocking(move || {
-                SessionConversationPreview::from_rollout_path(Some(&source))
+                SessionConversationPreview::from_rollout_source(Some(&source))
             })
             .await
             {
@@ -173,11 +174,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
 
     let selected_conversation = {
         let model_value = model.read();
-        let selected = model_value
-            .visible_records()
-            .get(model_value.selected_index)
-            .copied();
-        selected.map(|record| {
+        model_value.selected_record().map(|record| {
             let selected_preview = {
                 let cache = conversation_cache.read();
                 selected_conversation_preview_for_record(record, &cache)
@@ -200,7 +197,7 @@ fn selected_conversation_preview_for_record(
     record: &SessionPickerRecord,
     cache: &BTreeMap<String, ConversationPreviewLoadState>,
 ) -> SelectedConversationPreview {
-    let Some(source) = record.conversation_source.as_deref() else {
+    let Some(source) = record.conversation_source.as_ref() else {
         return SelectedConversationPreview {
             preview: record.conversation.clone(),
             load_request: None,
@@ -220,7 +217,7 @@ fn selected_conversation_preview_for_record(
             preview: record.conversation.clone(),
             load_request: Some(ConversationPreviewLoadRequest {
                 session_id: record.session_id.clone(),
-                source: source.to_owned(),
+                source: source.clone(),
             }),
         },
     }
@@ -243,15 +240,15 @@ fn render_picker_view(
     ];
     children.extend(render_filter_controls(model, content_width));
 
-    let visible_records = model.visible_records();
-    if visible_records.is_empty() {
+    let visible_len = model.visible_len();
+    if visible_len == 0 {
         children.push(render_empty_state(model));
     } else {
-        let selected_record = visible_records.get(model.selected_index).copied();
+        let selected_record = model.selected_record();
         if model.width >= SIDECAR_PICKER_WIDTH {
             let list_width = (content_width.saturating_sub(2) / 2).max(42);
             let detail_width = content_width.saturating_sub(list_width + 2).max(28);
-            let list_height = session_list_height(visible_records.len(), model.selected_index);
+            let list_height = session_list_height(visible_len, model.selected_index);
             let details_panel_height = selected_record
                 .map(|record| {
                     detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
@@ -261,7 +258,7 @@ fn render_picker_view(
             children.push(
                 element! {
                     View(width: 100pct, height: main_height as u32) {
-                        #(render_session_list(&visible_records, model.selected_index, list_width))
+                        #(render_session_list(model, list_width))
                         View(width: 2) { Text(content: "") }
                         #(selected_record
                             .map(|record| render_details(record, detail_width, selected_conversation))
@@ -271,11 +268,7 @@ fn render_picker_view(
                 .into_any(),
             );
         } else {
-            children.push(render_session_list(
-                &visible_records,
-                model.selected_index,
-                content_width,
-            ));
+            children.push(render_session_list(model, content_width));
             if model.width >= NARROW_PICKER_WIDTH
                 && let Some(record) = selected_record
             {
@@ -285,7 +278,7 @@ fn render_picker_view(
     }
 
     children.push(render_footer(content_width));
-    let picker_height = picker_content_height(model, &visible_records, selected_conversation);
+    let picker_height = picker_content_height(model, selected_conversation);
 
     element! {
         View(
@@ -308,29 +301,22 @@ fn render_picker_view(
 
 fn picker_content_height(
     model: &SessionsPickerModel,
-    visible_records: &[&SessionPickerRecord],
     selected_conversation: Option<&SessionConversationPreview>,
 ) -> usize {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let heading_height = 1 + filter_control_height(content_width);
-    let body_height = if visible_records.is_empty() {
+    let visible_len = model.visible_len();
+    let body_height = if visible_len == 0 {
         2
     } else if model.width >= SIDECAR_PICKER_WIDTH {
-        let conversation = selected_conversation.or_else(|| {
-            visible_records
-                .get(model.selected_index)
-                .map(|record| &record.conversation)
-        });
-        session_list_height(visible_records.len(), model.selected_index)
-            .max(detail_height(conversation))
+        let conversation = selected_conversation
+            .or_else(|| model.selected_record().map(|record| &record.conversation));
+        session_list_height(visible_len, model.selected_index).max(detail_height(conversation))
     } else {
-        let list_height = session_list_height(visible_records.len(), model.selected_index);
+        let list_height = session_list_height(visible_len, model.selected_index);
         if model.width >= NARROW_PICKER_WIDTH {
-            let conversation = selected_conversation.or_else(|| {
-                visible_records
-                    .get(model.selected_index)
-                    .map(|record| &record.conversation)
-            });
+            let conversation = selected_conversation
+                .or_else(|| model.selected_record().map(|record| &record.conversation));
             list_height + detail_height(conversation)
         } else {
             list_height
@@ -463,15 +449,12 @@ fn render_empty_state(model: &SessionsPickerModel) -> AnyElement<'static> {
     .into_any()
 }
 
-fn render_session_list(
-    visible_records: &[&SessionPickerRecord],
-    selected_index: usize,
-    width: usize,
-) -> AnyElement<'static> {
+fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<'static> {
     let row_width = width.saturating_sub(6).max(24);
     let mut rows = vec![render_session_header(row_width)];
-    let window_start =
-        visible_window_start(selected_index, visible_records.len(), MAX_VISIBLE_RECORDS);
+    let visible_len = model.visible_len();
+    let selected_index = model.selected_index;
+    let window_start = visible_window_start(selected_index, visible_len, MAX_VISIBLE_RECORDS);
     if window_start > 0 {
         rows.push(
             element! {
@@ -485,24 +468,20 @@ fn render_session_list(
         );
         rows.push(list_gap());
     }
-    for (visible_index, record) in visible_records
-        .iter()
-        .enumerate()
-        .skip(window_start)
-        .take(MAX_VISIBLE_RECORDS)
-    {
+    let window_end = (window_start + MAX_VISIBLE_RECORDS).min(visible_len);
+    for visible_index in window_start..window_end {
         if visible_index > window_start {
             rows.push(list_gap());
         }
-        rows.push(render_record_row(
-            record,
-            visible_index == selected_index,
-            row_width,
-        ));
+        if let Some(record) = model.visible_record_at(visible_index) {
+            rows.push(render_record_row(
+                record,
+                visible_index == selected_index,
+                row_width,
+            ));
+        }
     }
-    let remaining = visible_records
-        .len()
-        .saturating_sub(window_start + MAX_VISIBLE_RECORDS);
+    let remaining = visible_len.saturating_sub(window_start + MAX_VISIBLE_RECORDS);
     if remaining > 0 {
         rows.push(list_gap());
         rows.push(
@@ -520,7 +499,7 @@ fn render_session_list(
     element! {
         View(
             width: width as u32,
-            height: session_list_height(visible_records.len(), selected_index) as u32,
+            height: session_list_height(visible_len, selected_index) as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
@@ -1053,7 +1032,11 @@ mod tests {
     fn selected_conversation_preview_requests_background_load_without_reading_jsonl() {
         let mut record = picker_request().records.remove(0);
         record.conversation = SessionConversationPreview::unavailable("history loading");
-        record.conversation_source = Some("/tmp/codex-router-history.jsonl".to_owned());
+        let source = SessionConversationSource::for_test(
+            "/tmp/codex-router-history.jsonl",
+            "/tmp/codex-router".into(),
+        );
+        record.conversation_source = Some(source.clone());
         let cache = BTreeMap::new();
 
         let preview = selected_conversation_preview_for_record(&record, &cache);
@@ -1064,7 +1047,7 @@ mod tests {
                 preview: SessionConversationPreview::unavailable("history loading"),
                 load_request: Some(ConversationPreviewLoadRequest {
                     session_id: "thread-a".to_owned(),
-                    source: "/tmp/codex-router-history.jsonl".to_owned(),
+                    source,
                 }),
             }
         );
