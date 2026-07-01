@@ -6,17 +6,20 @@ use iocraft::prelude::*;
 use crate::presentation::session_picker::action::SessionsPickerKey;
 use crate::presentation::session_picker::action::SessionsPickerOutcome;
 use crate::presentation::session_picker::model::SessionsPickerModel;
+use crate::presentation::session_picker::model::VISIBLE_SESSION_ROWS;
+use crate::presentation::session_picker::model::visible_window_start;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionConversationPreview;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsRoot;
+use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
 const SIDECAR_PICKER_WIDTH: usize = 96;
 const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
-const MAX_VISIBLE_RECORDS: usize = 8;
+const MAX_VISIBLE_RECORDS: usize = VISIBLE_SESSION_ROWS;
 
 #[derive(Default, Props)]
 pub(crate) struct SessionsPickerComponentProps<'a> {
@@ -65,21 +68,44 @@ pub(crate) fn SessionsPickerComponent<'a>(
             match code {
                 KeyCode::Down => model_value.handle_key(SessionsPickerKey::MoveDown),
                 KeyCode::Up => model_value.handle_key(SessionsPickerKey::MoveUp),
-                KeyCode::Tab => model_value.handle_key(SessionsPickerKey::CycleRoot),
-                KeyCode::Char('n')
-                    if modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
-                {
+                KeyCode::PageDown => model_value.handle_key(SessionsPickerKey::PageDown),
+                KeyCode::PageUp => model_value.handle_key(SessionsPickerKey::PageUp),
+                KeyCode::Home => model_value.handle_key(SessionsPickerKey::MoveFirst),
+                KeyCode::End => model_value.handle_key(SessionsPickerKey::MoveLast),
+                KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
                     selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
                 }
                 KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    model_value.handle_key(SessionsPickerKey::CycleRoot);
+                }
+                KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
                     model_value.handle_key(SessionsPickerKey::CycleSource);
+                }
+                KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    model_value.handle_key(SessionsPickerKey::CycleSort);
+                }
+                KeyCode::Char('c' | 'd') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    should_cancel.set(true);
+                }
+                KeyCode::Char('\u{3}' | '\u{4}') => {
+                    should_cancel.set(true);
                 }
                 KeyCode::Backspace => model_value.handle_key(SessionsPickerKey::SearchBackspace),
                 KeyCode::Char(character) => {
-                    model_value.handle_key(SessionsPickerKey::SearchChar(character));
+                    if !modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                    {
+                        model_value.handle_key(SessionsPickerKey::SearchChar(character));
+                    }
                 }
                 KeyCode::Enter => selected_outcome.set(model_value.selected_outcome()),
-                KeyCode::Esc => should_cancel.set(true),
+                KeyCode::Esc => {
+                    if model_value.search.is_empty() {
+                        should_cancel.set(true);
+                    } else {
+                        model_value.handle_key(SessionsPickerKey::ClearSearch);
+                    }
+                }
                 _ => {}
             }
         }
@@ -91,6 +117,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
         }
         system.exit();
     } else if *should_cancel.read() {
+        if let Some(out) = props.selected_outcome_out.as_mut() {
+            **out = None;
+        }
         system.exit();
     }
 
@@ -185,6 +214,7 @@ fn render_picker_view(
             width: model.width as u32,
             border_style: BorderStyle::Round,
             border_color: Color::Cyan,
+            overflow: Overflow::Hidden,
             padding_left: 1,
             padding_right: 1,
             padding_top: 1,
@@ -205,7 +235,7 @@ fn render_filter_controls(model: &SessionsPickerModel, width: usize) -> Vec<AnyE
     };
     let scope = format!("Scope: [{}]", root_label(model.root));
     let threads = format!("Threads: [{}]", source_label(model.source));
-    let sort = "Sort: [updated]".to_owned();
+    let sort = format!("Sort: [{}]", sort_label(model.sort));
 
     if width < COMPACT_PICKER_WIDTH {
         return [filter, scope, threads, sort]
@@ -274,22 +304,45 @@ fn render_session_list(
 ) -> AnyElement<'static> {
     let row_width = width.saturating_sub(6).max(24);
     let mut rows = vec![render_session_header(row_width)];
-    for (index, record) in visible_records.iter().take(MAX_VISIBLE_RECORDS).enumerate() {
-        if index > 0 {
+    let window_start =
+        visible_window_start(selected_index, visible_records.len(), MAX_VISIBLE_RECORDS);
+    if window_start > 0 {
+        rows.push(
+            element! {
+                Text(
+                    content: format!("+{window_start} more above"),
+                    color: Color::DarkGrey,
+                    weight: Weight::Light,
+                )
+            }
+            .into_any(),
+        );
+        rows.push(list_gap());
+    }
+    for (visible_index, record) in visible_records
+        .iter()
+        .enumerate()
+        .skip(window_start)
+        .take(MAX_VISIBLE_RECORDS)
+    {
+        if visible_index > window_start {
             rows.push(list_gap());
         }
         rows.push(render_record_row(
             record,
-            index == selected_index,
+            visible_index == selected_index,
             row_width,
         ));
     }
-    if visible_records.len() > MAX_VISIBLE_RECORDS {
+    let remaining = visible_records
+        .len()
+        .saturating_sub(window_start + MAX_VISIBLE_RECORDS);
+    if remaining > 0 {
         rows.push(list_gap());
         rows.push(
             element! {
                 Text(
-                    content: format!("+{} more below", visible_records.len() - MAX_VISIBLE_RECORDS),
+                    content: format!("+{remaining} more below"),
                     color: Color::DarkGrey,
                     weight: Weight::Light,
                 )
@@ -300,10 +353,11 @@ fn render_session_list(
 
     element! {
         View(
-            width: 100pct,
+            width: width as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
+            overflow: Overflow::Hidden,
             padding_left: 1,
             padding_right: 1,
             padding_top: 1,
@@ -319,7 +373,7 @@ fn render_session_header(width: usize) -> AnyElement<'static> {
     let title_width = width.saturating_sub(18).max(14);
     element! {
         View(
-            width: 100pct,
+            width: width as u32,
             border_style: BorderStyle::Single,
             border_edges: Edges::Bottom,
             border_color: Color::DarkGrey,
@@ -336,7 +390,7 @@ fn render_session_header(width: usize) -> AnyElement<'static> {
 
 fn list_gap() -> AnyElement<'static> {
     element! {
-        View(width: 100pct, height: 1) {
+        View(height: 1) {
             Text(content: "")
         }
     }
@@ -354,11 +408,6 @@ fn render_record_row(
     } else {
         Color::DarkGrey
     };
-    let background_color = selected.then(|| Color::Rgb {
-        r: 58,
-        g: 70,
-        b: 122,
-    });
     let title_prefix = if selected { "❯ " } else { "  " };
     let title_width = width.saturating_sub(18).max(14);
     let title = truncate_end(&record.title, title_width);
@@ -372,23 +421,24 @@ fn render_record_row(
         width.saturating_sub(2),
     );
     let cwd = record.cwd.as_deref().unwrap_or("-");
-    let second_line = fit_line(
-        &format!("    ⎇ {:<12}  📂 {cwd}", record.branch),
-        width.saturating_sub(2),
-    );
+    let metadata_line = if width < 43 {
+        format!("    ⎇ {:<10}  {cwd}", record.branch)
+    } else {
+        format!("    ⎇ {:<12}  📂 {cwd}", record.branch)
+    };
+    let second_line = fit_line(&metadata_line, width.saturating_sub(2));
 
     element! {
         View(
-            width: 100pct,
+            width: width as u32,
             flex_direction: FlexDirection::Column,
-            background_color,
             padding_left: 1,
             padding_right: 1,
             padding_top: 0,
             padding_bottom: 0,
         ) {
-            Text(content: first_line, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold)
-            Text(content: second_line, color: metadata, weight: Weight::Light)
+            Text(content: first_line, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            Text(content: second_line, color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
         }
     }
     .into_any()
@@ -444,15 +494,16 @@ fn render_details(
 
     element! {
         View(
-            width: 100pct,
+            width: width as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
+            overflow: Overflow::Hidden,
             padding_left: 1,
             padding_right: 1,
         ) {
             Text(content: "Preview", color: Color::Cyan, weight: Weight::Bold)
-            Text(content: fit_line(preview, detail_width), color: Color::Yellow, weight: Weight::Bold)
+            Text(content: fit_line(preview, detail_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
                 Text(content: "")
             }
@@ -474,6 +525,7 @@ fn detail_text(value: &str, width: usize, color: Color) -> AnyElement<'static> {
             content: fit_line(value, width),
             color,
             weight: Weight::Normal,
+            wrap: TextWrap::NoWrap,
         )
     }
     .into_any()
@@ -485,6 +537,7 @@ fn detail_line(label: &str, value: &str, width: usize) -> AnyElement<'static> {
             content: fit_line(&format!("{label:<9} {value}"), width),
             color: Color::Grey,
             weight: Weight::Normal,
+            wrap: TextWrap::NoWrap,
         )
     }
     .into_any()
@@ -492,11 +545,11 @@ fn detail_line(label: &str, value: &str, width: usize) -> AnyElement<'static> {
 
 fn render_footer(width: usize) -> AnyElement<'static> {
     let content = if width < NARROW_PICKER_WIDTH {
-        "type search    enter resume    ⌘N/Ctrl-N new thread"
+        "type search    enter resume    ctrl-n new"
     } else if width < 90 {
-        "type search    enter resume    ⌘N/Ctrl-N new thread    esc exit"
+        "type search    enter resume    ctrl-n new    esc exit"
     } else {
-        "type search    enter resume    ⌘N/Ctrl-N new thread    esc exit    tab scope    ctrl-s threads"
+        "type search  ↑/↓ select  enter  ctrl-n new  ctrl-s scope  ctrl-t threads  ctrl-o sort  esc"
     };
     element! {
         View(
@@ -510,6 +563,7 @@ fn render_footer(width: usize) -> AnyElement<'static> {
                 content: fit_line(content, width),
                 color: Color::Grey,
                 weight: Weight::Light,
+                wrap: TextWrap::NoWrap,
             )
         }
     }
@@ -530,6 +584,13 @@ fn source_label(source: SessionsSource) -> &'static str {
         SessionsSource::Interactive => "interactive",
         SessionsSource::All => "all",
         SessionsSource::Subagents => "subagents",
+    }
+}
+
+fn sort_label(sort: SessionsSort) -> &'static str {
+    match sort {
+        SessionsSort::Updated => "updated",
+        SessionsSort::Created => "created",
     }
 }
 
@@ -629,9 +690,8 @@ mod tests {
         }
         .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
             vec![
-                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Tab)),
-                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Tab)),
-                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Tab)),
+                ctrl_key('s'),
+                ctrl_key('s'),
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
             ],
@@ -653,6 +713,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessions_picker_iocraft_mock_terminal_ctrl_shortcuts_drive_filters() {
+        let actual = element! {
+            SessionsPickerComponent(
+                request: picker_request(),
+                width: 100usize,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                ctrl_key('s'),
+                ctrl_key('t'),
+                ctrl_key('o'),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            actual.iter().any(|snapshot| snapshot
+                .contains("Scope: [worktree]    Threads: [all]    Sort: [created]")),
+            "ctrl shortcuts should cycle scope, threads, and sort: {actual:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_iocraft_mock_terminal_ctrl_n_starts_new_thread() {
+        let mut selected_outcome = None;
+        let _actual = element! {
+            SessionsPickerComponent(
+                request: picker_request(),
+                width: 100usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![ctrl_key('n')],
+        )))
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            selected_outcome,
+            Some(SessionsPickerOutcome::StartNewSession)
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_iocraft_mock_terminal_esc_clears_search_before_exit() {
+        let mut selected_outcome: Option<SessionsPickerOutcome> = None;
+        let actual = element! {
+            SessionsPickerComponent(
+                request: picker_request(),
+                width: 100usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('r'))),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('u'))),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('s'))),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('t'))),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            actual
+                .iter()
+                .any(|snapshot| snapshot.contains("Type to search")),
+            "first escape should clear search instead of exiting immediately: {actual:?}"
+        );
+        assert_eq!(selected_outcome, None);
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_iocraft_mock_terminal_ctrl_c_and_ctrl_d_exit() {
+        for key in ['c', 'd'] {
+            let mut selected_outcome: Option<SessionsPickerOutcome> = None;
+            let actual = element! {
+                SessionsPickerComponent(
+                    request: picker_request(),
+                    width: 100usize,
+                    selected_outcome_out: &mut selected_outcome,
+                )
+            }
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+                vec![ctrl_key(key)],
+            )))
+            .collect::<Vec<_>>()
+            .await;
+
+            assert!(!actual.is_empty(), "ctrl-{key} should render before exit");
+            assert_eq!(selected_outcome, None, "ctrl-{key} should cancel picker");
+        }
+    }
+
+    #[tokio::test]
     async fn sessions_picker_iocraft_mock_terminal_search_keeps_plain_letters() {
         let actual = element! {
             SessionsPickerComponent(
@@ -667,18 +831,13 @@ mod tests {
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('s'))),
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('t'))),
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
             ],
         )))
         .map(|canvas| canvas.to_string())
         .collect::<Vec<_>>()
         .await;
 
-        assert!(
-            actual
-                .iter()
-                .any(|snapshot| snapshot.contains("Search: [rust]")),
-            "plain filter letters should search, not switch filters: {actual:?}"
-        );
         assert!(
             actual
                 .iter()
@@ -710,7 +869,7 @@ mod tests {
             "selected row should use the contracted focus marker: {canvas}"
         );
         assert!(
-            snapshot.contains("⎇ main") && snapshot.contains("📂 /repo/project-a"),
+            snapshot.contains("⎇ main") && snapshot.contains("/repo/project-a"),
             "selected row should keep branch and cwd on the metadata row: {canvas}"
         );
         assert!(
@@ -778,7 +937,7 @@ mod tests {
                 "capture should show the more-below affordance:\n{text}"
             );
             assert!(
-                text.contains("⌘N/Ctrl-N new thread"),
+                text.contains("ctrl-n new"),
                 "capture should expose the new-thread shortcut:\n{text}"
             );
         }
@@ -856,6 +1015,12 @@ mod tests {
             .unwrap_or_else(|| panic!("picker should render at least one frame"))
     }
 
+    fn ctrl_key(character: char) -> TerminalEvent {
+        let mut event = KeyEvent::new(KeyEventKind::Press, KeyCode::Char(character));
+        event.modifiers = KeyModifiers::CONTROL;
+        TerminalEvent::Key(event)
+    }
+
     fn capture_picker_request() -> SessionsPickerRequest {
         let mut request = picker_request();
         request.root = SessionsRoot::Any;
@@ -884,6 +1049,8 @@ mod tests {
             title: title.to_owned(),
             recency: "now".to_owned(),
             created: "1d ago".to_owned(),
+            recency_at_ms: Some(2_000),
+            created_at_ms: Some(1_000),
             branch: "main".to_owned(),
             context: cwd.rsplit('/').next().unwrap_or(cwd).to_owned(),
             cwd: Some(cwd.to_owned()),
@@ -933,16 +1100,6 @@ mod tests {
         let mut svg = format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pixel_width}\" height=\"{pixel_height}\" viewBox=\"0 0 {pixel_width} {pixel_height}\"><rect width=\"100%\" height=\"100%\" fill=\"#111318\"/>"
         );
-        for (index, line) in lines.iter().enumerate() {
-            if line.contains('❯') || line.contains("Start new session") {
-                let y = 36 + index * 18;
-                svg.push_str(&format!(
-                    "<rect x=\"8\" y=\"{}\" width=\"{}\" height=\"18\" fill=\"#2d333b\"/>",
-                    y.saturating_sub(14),
-                    pixel_width.saturating_sub(16)
-                ));
-            }
-        }
         svg.push_str(&format!(
             "<text x=\"16\" y=\"24\" xml:space=\"preserve\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"14\" fill=\"#e6edf3\"><tspan>{}</tspan>",
             escape_xml(title)

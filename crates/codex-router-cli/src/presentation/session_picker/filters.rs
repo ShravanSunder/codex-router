@@ -4,6 +4,7 @@ use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsRoot;
+use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
 pub(super) fn root_matches(
@@ -69,6 +70,13 @@ pub(super) fn next_source_filter(source: SessionsSource) -> SessionsSource {
         SessionsSource::Interactive => SessionsSource::All,
         SessionsSource::All => SessionsSource::Subagents,
         SessionsSource::Subagents => SessionsSource::Interactive,
+    }
+}
+
+pub(super) fn next_sort_filter(sort: SessionsSort) -> SessionsSort {
+    match sort {
+        SessionsSort::Updated => SessionsSort::Created,
+        SessionsSort::Created => SessionsSort::Updated,
     }
 }
 

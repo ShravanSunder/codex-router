@@ -3,10 +3,16 @@
 pub(crate) enum SessionsPickerKey {
     MoveDown,
     MoveUp,
+    PageDown,
+    PageUp,
+    MoveFirst,
+    MoveLast,
     CycleRoot,
     CycleSource,
+    CycleSort,
     SearchChar(char),
     SearchBackspace,
+    ClearSearch,
 }
 
 /// User action selected from the sessions picker.

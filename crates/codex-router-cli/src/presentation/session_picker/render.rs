@@ -1,7 +1,13 @@
 #[cfg(test)]
 use crate::presentation::session_picker::model::SessionsPickerModel;
 #[cfg(test)]
+use crate::presentation::session_picker::model::VISIBLE_SESSION_ROWS;
+#[cfg(test)]
+use crate::presentation::session_picker::model::visible_window_start;
+#[cfg(test)]
 use crate::sessions::SessionsRoot;
+#[cfg(test)]
+use crate::sessions::SessionsSort;
 #[cfg(test)]
 use crate::sessions::SessionsSource;
 
@@ -43,8 +49,24 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
             model.width,
         ));
     } else {
-        for (index, record) in visible_records.iter().take(8).enumerate() {
-            let marker = if index == model.selected_index {
+        let window_start = visible_window_start(
+            model.selected_index,
+            visible_records.len(),
+            VISIBLE_SESSION_ROWS,
+        );
+        if window_start > 0 {
+            lines.push(fit_line(
+                &format!("+{window_start} more above"),
+                model.width,
+            ));
+        }
+        for (visible_index, record) in visible_records
+            .iter()
+            .enumerate()
+            .skip(window_start)
+            .take(VISIBLE_SESSION_ROWS)
+        {
+            let marker = if visible_index == model.selected_index {
                 "❯"
             } else {
                 " "
@@ -67,6 +89,12 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
                 ),
                 model.width,
             ));
+        }
+        let remaining = visible_records
+            .len()
+            .saturating_sub(window_start + VISIBLE_SESSION_ROWS);
+        if remaining > 0 {
+            lines.push(fit_line(&format!("+{remaining} more below"), model.width));
         }
         if model.width >= NARROW_PICKER_WIDTH
             && let Some(record) = visible_records.get(model.selected_index)
@@ -108,7 +136,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
     }
 
     lines.push(fit_line(
-        "Keys: type search  enter resume  ⌘N/Ctrl-N new thread  tab scope  ctrl-s threads  esc cancel",
+        "Keys: type search  enter resume  ctrl-n new thread  ctrl-s scope  ctrl-t threads  ctrl-o sort  esc exit",
         model.width,
     ));
     format!("{}\n", lines.join("\n"))
@@ -118,7 +146,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
 fn render_filters_line(model: &SessionsPickerModel) -> String {
     let root = format!("Scope: [{}]", root_label(model.root));
     let source = format!("Threads: [{}]", source_label(model.source));
-    let sort = "Sort: [updated]".to_owned();
+    let sort = format!("Sort: [{}]", sort_label(model.sort));
     if model.width < ULTRA_NARROW_PICKER_WIDTH {
         return [root, source, sort]
             .into_iter()
@@ -127,6 +155,14 @@ fn render_filters_line(model: &SessionsPickerModel) -> String {
             .join("\n");
     }
     fit_line(&format!("{root}  {source}  {sort}"), model.width)
+}
+
+#[cfg(test)]
+fn sort_label(sort: SessionsSort) -> &'static str {
+    match sort {
+        SessionsSort::Updated => "updated",
+        SessionsSort::Created => "created",
+    }
 }
 
 #[cfg(test)]

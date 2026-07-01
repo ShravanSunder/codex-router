@@ -342,6 +342,7 @@ fn run_interactive_session(
     let picker_root = command.root;
     let picker_provider = command.provider.clone();
     let picker_source = command.source;
+    let picker_sort = command.sort;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -354,6 +355,7 @@ fn run_interactive_session(
         root: picker_root,
         provider: picker_provider,
         source: picker_source,
+        sort: picker_sort,
         current_dir: normalize_path(context.current_dir()),
         checkout_root: checkout_root(context.current_dir()),
         repo_roots: repo_roots(context.current_dir()),
@@ -814,6 +816,8 @@ pub(crate) struct SessionPickerRecord {
     pub(crate) title: String,
     pub(crate) recency: String,
     pub(crate) created: String,
+    pub(crate) recency_at_ms: Option<i64>,
+    pub(crate) created_at_ms: Option<i64>,
     pub(crate) branch: String,
     pub(crate) context: String,
     pub(crate) cwd: Option<String>,
@@ -840,6 +844,8 @@ impl SessionPickerRecord {
             title: record.display_title().to_owned(),
             recency: format_recency_at_ms(record.recency_at_ms),
             created: format_recency_at_ms(record.created_at_ms),
+            recency_at_ms: record.recency_at_ms,
+            created_at_ms: record.created_at_ms,
             branch: record.branch().to_owned(),
             context: record
                 .cwd

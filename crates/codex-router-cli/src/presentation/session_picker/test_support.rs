@@ -3,6 +3,7 @@ use crate::sessions::SessionConversationPreview;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsRoot;
+use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
 pub(crate) fn picker_request() -> SessionsPickerRequest {
@@ -10,6 +11,7 @@ pub(crate) fn picker_request() -> SessionsPickerRequest {
         root: SessionsRoot::Cwd,
         provider: SessionsProvider::Any,
         source: SessionsSource::Interactive,
+        sort: SessionsSort::Updated,
         current_dir: "/repo/project-a".into(),
         checkout_root: "/repo/project-a".into(),
         repo_roots: vec!["/repo/project-a".into(), "/repo/project-b".into()],
@@ -52,6 +54,8 @@ pub(crate) fn picker_record(
         title: title.to_owned(),
         recency: "now".to_owned(),
         created: "1d ago".to_owned(),
+        recency_at_ms: Some(2_000),
+        created_at_ms: Some(1_000),
         branch: "main".to_owned(),
         context: cwd.rsplit('/').next().unwrap_or(cwd).to_owned(),
         cwd: Some(cwd.to_owned()),
