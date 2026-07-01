@@ -759,7 +759,8 @@ pub(crate) fn run_sessions_picker(
                 selected_outcome_out: &mut selected_outcome,
             )
         }
-        .render_loop(),
+        .render_loop()
+        .ignore_ctrl_c(),
     )?;
     Ok(selected_outcome)
 }
