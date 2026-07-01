@@ -32,7 +32,6 @@ use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
 use codex_router_selection::burn_down::LimitingWindow;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaEvidenceReason;
-#[cfg(test)]
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
 use codex_router_selection::burn_down::RoutingExclusion;
@@ -1411,6 +1410,18 @@ fn quota_status_report(
             now_unix_seconds,
             &mut display_windows,
         )?;
+        let projected_weekly_window = selection_projection
+            .accounts()
+            .iter()
+            .find(|projected_account| projected_account.account_id() == account.account_id())
+            .and_then(|projected_account| {
+                projected_account
+                    .windows()
+                    .iter()
+                    .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+            });
+        let weekly_pace =
+            quota_pace_snapshot(&display_windows, projected_weekly_window, now_unix_seconds);
         let active_clients =
             active_client_counts
                 .as_ref()
@@ -1436,6 +1447,7 @@ fn quota_status_report(
             ),
             active_clients,
             windows: display_windows,
+            weekly_pace,
         });
     }
 
@@ -1519,10 +1531,6 @@ impl QuotaTableStyle {
         self.paint("\x1b[90m", value)
     }
 
-    fn selected_background(self, value: &str) -> String {
-        self.paint("\x1b[48;2;58;70;122m", value)
-    }
-
     fn paint(self, prefix: &str, value: &str) -> String {
         match self {
             #[cfg(test)]
@@ -1566,7 +1574,7 @@ fn write_quota_table_with_style(
     write_quota_box_line(
         stdout,
         width,
-        "Account      Status              Quota",
+        "Account      Status              Pace",
         style,
         QuotaLineStyle::Header,
     )?;
@@ -1575,11 +1583,17 @@ fn write_quota_table_with_style(
         if index > 0 {
             write_quota_box_line(stdout, width, "", style, QuotaLineStyle::Normal)?;
         }
-        write_quota_account_block(stdout, width, row, style)?;
+        write_quota_account_block(stdout, width, row, report.now_unix_seconds, style)?;
     }
     if let Some(selected_row) = rows.iter().find(|row| row.preferred_next) {
         write_quota_border_rule(stdout, width, style)?;
-        write_selected_quota_details_with_style(stdout, width, selected_row, style)?;
+        write_selected_quota_details_with_style(
+            stdout,
+            width,
+            selected_row,
+            report.now_unix_seconds,
+            style,
+        )?;
     }
     write_quota_border_bottom(stdout, width, style)?;
 
@@ -1590,6 +1604,7 @@ fn write_quota_account_block(
     stdout: &mut impl Write,
     width: usize,
     row: &QuotaStatusRow,
+    now_unix_seconds: u64,
     style: QuotaTableStyle,
 ) -> Result<(), QuotaCommandError> {
     let marker = if row.preferred_next { "❯" } else { " " };
@@ -1612,18 +1627,11 @@ fn write_quota_account_block(
     write_quota_box_line(
         stdout,
         width,
-        &format!("    5h       {}", quota_window_summary(&row.short_window)),
-        style,
-        if row.preferred_next {
-            QuotaLineStyle::Healthy
-        } else {
-            QuotaLineStyle::Normal
-        },
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!("    weekly   {}", quota_window_summary(&row.weekly_window)),
+        &format!(
+            "    5h {}    weekly {}",
+            quota_window_summary(&row.short_window),
+            quota_window_summary(&row.weekly_window)
+        ),
         style,
         if row.preferred_next {
             QuotaLineStyle::Healthy
@@ -1635,17 +1643,26 @@ fn write_quota_account_block(
         stdout,
         width,
         &format!(
-            "    activity {:<12} burn {} {}",
-            active_clients_count(row),
-            quota_burn_bar(row.short_pressure.max(row.long_pressure)),
-            first_line(&row.burn)
+            "    {}",
+            quota_pace_summary(row.weekly_pace, now_unix_seconds)
         ),
         style,
         if row.preferred_next {
-            QuotaLineStyle::Selected
+            QuotaLineStyle::Healthy
         } else {
             QuotaLineStyle::Normal
         },
+    )?;
+    write_quota_box_line(
+        stdout,
+        width,
+        &format!(
+            "    activity {:<8} {}",
+            active_clients_count(row),
+            quota_rate_summary(row.weekly_pace)
+        ),
+        style,
+        QuotaLineStyle::Normal,
     )
 }
 
@@ -1653,6 +1670,7 @@ fn write_selected_quota_details_with_style(
     stdout: &mut impl Write,
     width: usize,
     row: &QuotaStatusRow,
+    now_unix_seconds: u64,
     style: QuotaTableStyle,
 ) -> Result<(), QuotaCommandError> {
     write_quota_box_line(
@@ -1677,14 +1695,11 @@ fn write_selected_quota_details_with_style(
     write_quota_box_line(
         stdout,
         width,
-        &format!("5h       {}", quota_window_summary(&row.short_window)),
-        style,
-        QuotaLineStyle::Healthy,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!("weekly   {}", quota_window_summary(&row.weekly_window)),
+        &format!(
+            "quota    5h {}    weekly {}",
+            quota_window_summary(&row.short_window),
+            quota_window_summary(&row.weekly_window)
+        ),
         style,
         QuotaLineStyle::Healthy,
     )?;
@@ -1692,13 +1707,25 @@ fn write_selected_quota_details_with_style(
         stdout,
         width,
         &format!(
-            "activity {}    burn {} {}",
-            active_clients_count(row),
-            quota_burn_bar(row.short_pressure.max(row.long_pressure)),
-            first_line(&row.burn)
+            "pace     {}",
+            quota_pace_summary(row.weekly_pace, now_unix_seconds)
         ),
         style,
-        QuotaLineStyle::Selected,
+        QuotaLineStyle::Healthy,
+    )?;
+    write_quota_box_line(
+        stdout,
+        width,
+        &quota_rate_summary(row.weekly_pace),
+        style,
+        QuotaLineStyle::Normal,
+    )?;
+    write_quota_box_line(
+        stdout,
+        width,
+        &format!("clients  {}", active_clients_count(row)),
+        style,
+        QuotaLineStyle::Normal,
     )?;
     write_quota_box_line(
         stdout,
@@ -1790,7 +1817,7 @@ fn write_quota_box_line(
         QuotaLineStyle::Normal => fitted,
         QuotaLineStyle::Header => style.accent(&fitted),
         QuotaLineStyle::Summary => style.selected(&fitted),
-        QuotaLineStyle::Selected => style.selected_background(&style.selected(&fitted)),
+        QuotaLineStyle::Selected => style.selected(&fitted),
         QuotaLineStyle::Healthy => style.healthy(&fitted),
     };
     writeln!(stdout, "│ {fitted} │").map_err(QuotaCommandError::Stdout)
@@ -1960,17 +1987,6 @@ fn quota_window_summary(cell: &str) -> String {
     dense_window_cell(cell).replace(" reset ", " left, reset ")
 }
 
-fn quota_burn_bar(percent: u32) -> String {
-    let filled = percent.min(100).div_ceil(10) as usize;
-    let empty = 10_usize.saturating_sub(filled);
-    format!(
-        "{}{} {:>3}%",
-        "▰".repeat(filled),
-        "▱".repeat(empty),
-        percent
-    )
-}
-
 fn first_line(value: &str) -> &str {
     value.lines().next().unwrap_or(value).trim()
 }
@@ -2048,6 +2064,7 @@ struct QuotaStatusAccountInput {
     updated: String,
     active_clients: ActiveClientMirrorStatus,
     windows: Vec<DisplayQuotaWindow>,
+    weekly_pace: Option<QuotaPaceSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2067,6 +2084,7 @@ struct QuotaStatusRow {
     reset_credits_available_value: Option<u32>,
     routing: String,
     next_use: String,
+    weekly_pace: Option<QuotaPaceSnapshot>,
     windows: Vec<DisplayQuotaWindow>,
     availability: AccountAvailability,
     freshness: QuotaEvidenceFreshness,
@@ -2117,6 +2135,7 @@ impl QuotaStatusRow {
             reset_credits_available_value: input.reset_credits_available,
             routing: format_routing_cell(assessment),
             next_use: format_next_use(assessment).to_owned(),
+            weekly_pace: input.weekly_pace,
             windows: input.windows.clone(),
             availability: assessment.availability(),
             freshness: assessment.freshness(),
@@ -2135,6 +2154,17 @@ impl QuotaStatusRow {
             weekly_burn_rate_confidence: assessment.weekly_burn_rate_confidence(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QuotaPaceSnapshot {
+    remaining_headroom: u32,
+    reset_unix_seconds: Option<u64>,
+    projected_exhaustion_unix_seconds: Option<u64>,
+    projected_candidate_burn_basis_points_per_hour: Option<u32>,
+    aggregate_burn_basis_points_per_hour: Option<u32>,
+    per_connection_burn_basis_points_per_hour: Option<u32>,
+    confidence: QuotaRunRateConfidence,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2467,6 +2497,138 @@ fn format_burn_cell(assessment: &BurnDownAccountAssessment) -> String {
     } else {
         format!("not selectable\n{quota_guard}")
     }
+}
+
+fn quota_pace_snapshot(
+    windows: &[DisplayQuotaWindow],
+    projected_weekly_window: Option<&QuotaWindowFact>,
+    now_unix_seconds: u64,
+) -> Option<QuotaPaceSnapshot> {
+    let weekly_window = windows
+        .iter()
+        .find(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS)?;
+    let aggregate_rate = projected_weekly_window
+        .and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour)
+        .or_else(|| {
+            weekly_window
+                .run_rate_estimate
+                .burn_rate_basis_points_per_hour()
+        });
+    let candidate_rate = projected_weekly_window
+        .and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour)
+        .or(aggregate_rate);
+    let projected_exhaustion = projected_weekly_window
+        .and_then(QuotaWindowFact::projected_exhaustion_unix_seconds)
+        .or_else(|| {
+            weekly_window
+                .run_rate_estimate
+                .projected_exhaustion_unix_seconds(now_unix_seconds)
+        });
+    Some(QuotaPaceSnapshot {
+        remaining_headroom: weekly_window.remaining_headroom,
+        reset_unix_seconds: weekly_window.reset_unix_seconds,
+        projected_exhaustion_unix_seconds: projected_exhaustion,
+        projected_candidate_burn_basis_points_per_hour: candidate_rate,
+        aggregate_burn_basis_points_per_hour: aggregate_rate,
+        per_connection_burn_basis_points_per_hour: projected_weekly_window
+            .and_then(QuotaWindowFact::per_connection_burn_basis_points_per_hour),
+        confidence: projected_weekly_window.map_or(
+            weekly_window.run_rate_estimate.confidence(),
+            QuotaWindowFact::burn_rate_confidence,
+        ),
+    })
+}
+
+fn quota_pace_summary(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64) -> String {
+    let Some(snapshot) = snapshot else {
+        return "pace unknown".to_owned();
+    };
+    let direction = quota_pace_direction(snapshot, now_unix_seconds);
+    let pace_load = quota_pace_load(snapshot, now_unix_seconds).map_or_else(
+        || "safe pace unknown".to_owned(),
+        |load| format!("{load}% of safe pace"),
+    );
+    format!(
+        "{direction}  {}  {pace_load}",
+        quota_pace_bar(snapshot, now_unix_seconds)
+    )
+}
+
+fn quota_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return "rate unknown".to_owned();
+    };
+    let total_rate = snapshot
+        .projected_candidate_burn_basis_points_per_hour
+        .or(snapshot.aggregate_burn_basis_points_per_hour)
+        .map_or_else(
+            || "unknown".to_owned(),
+            format_burn_rate_basis_points_per_hour,
+        );
+    let per_connection_rate = snapshot
+        .per_connection_burn_basis_points_per_hour
+        .map_or_else(
+            || "unknown".to_owned(),
+            |basis_points| {
+                format!(
+                    "{}/conn",
+                    format_burn_rate_basis_points_per_hour(basis_points)
+                )
+            },
+        );
+    format!(
+        "rate {total_rate} total, {per_connection_rate} ({})",
+        run_rate_confidence_label(snapshot.confidence)
+    )
+}
+
+fn quota_pace_direction(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> String {
+    match (
+        snapshot.projected_exhaustion_unix_seconds,
+        snapshot.reset_unix_seconds,
+    ) {
+        (Some(projected_exhaustion), Some(reset)) if projected_exhaustion < reset => {
+            format!(
+                "behind {}",
+                format_duration(reset.saturating_sub(projected_exhaustion))
+            )
+        }
+        (Some(projected_exhaustion), Some(reset)) => {
+            format!(
+                "ahead {}",
+                format_duration(projected_exhaustion.saturating_sub(reset))
+            )
+        }
+        (None, Some(reset)) => format!(
+            "ahead to reset ({})",
+            format_relative_time(reset, now_unix_seconds)
+        ),
+        _ => "pace unknown".to_owned(),
+    }
+}
+
+fn quota_pace_bar(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> String {
+    let load = quota_pace_load(snapshot, now_unix_seconds).unwrap_or(0);
+    let filled = load.min(100).div_ceil(10) as usize;
+    let empty = 10_usize.saturating_sub(filled);
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+}
+
+fn quota_pace_load(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> Option<u32> {
+    let reset_unix_seconds = snapshot.reset_unix_seconds?;
+    let time_left_seconds = reset_unix_seconds.saturating_sub(now_unix_seconds);
+    if time_left_seconds == 0 {
+        return None;
+    }
+    let candidate_rate = u128::from(snapshot.projected_candidate_burn_basis_points_per_hour?);
+    let safe_rate = u128::from(snapshot.remaining_headroom)
+        .saturating_mul(100)
+        .saturating_mul(3_600)
+        .checked_div(u128::from(time_left_seconds))?;
+    if safe_rate == 0 {
+        return None;
+    }
+    Some(((candidate_rate.saturating_mul(100)) / safe_rate).min(999) as u32)
 }
 
 fn format_window_pace(
@@ -3489,6 +3651,36 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_table_uses_pace_and_rate_instead_of_burn_pressure() {
+        let report = quota_capture_report();
+        let mut output = Vec::new();
+
+        must_ok(write_quota_table(&mut output, &report, Some(120)));
+        let text = must_ok(String::from_utf8(output));
+
+        assert!(
+            text.contains("Pace"),
+            "quota table should make pace a first-class column:\n{text}"
+        );
+        assert!(
+            text.contains("%/h") && text.contains("%/h/conn"),
+            "quota table should expose total and per-connection rate units:\n{text}"
+        );
+        assert!(
+            text.contains("ahead") || text.contains("behind"),
+            "quota table should say whether the account is ahead or behind reset:\n{text}"
+        );
+        assert!(
+            !text.contains("burn ") && !text.contains(" burn"),
+            "quota table should not label guard pressure as burn:\n{text}"
+        );
+        assert!(
+            !text.contains('▰') && !text.contains('▱'),
+            "quota table should not render the old ambiguous burn-pressure bar:\n{text}"
+        );
+    }
+
+    #[test]
     fn quota_status_table_can_emit_terminal_color() {
         let report = quota_capture_report();
         let mut output = Vec::new();
@@ -3514,8 +3706,8 @@ mod tests {
             "healthy quota and preferred state should use green ANSI color:\n{text:?}"
         );
         assert!(
-            text.contains("\x1b[48;2;58;70;122m"),
-            "selected account row should use a background ANSI color:\n{text:?}"
+            !text.contains("\x1b[48;2;58;70;122m"),
+            "quota colors should not use the old blue selected-row background:\n{text:?}"
         );
     }
 
@@ -3657,6 +3849,20 @@ mod tests {
             reset_credits_available_value: Some(2),
             routing: format_routing_reason(routing_reason).to_owned(),
             next_use: format_next_use_for_capture(routing_reason).to_owned(),
+            weekly_pace: Some(QuotaPaceSnapshot {
+                remaining_headroom: weekly_remaining,
+                reset_unix_seconds: Some(NOW + V1_WEEKLY_WINDOW_SECONDS),
+                projected_exhaustion_unix_seconds: Some(
+                    NOW + u64::from(weekly_remaining)
+                        .saturating_mul(100)
+                        .saturating_mul(3_600)
+                        / 10,
+                ),
+                projected_candidate_burn_basis_points_per_hour: Some(10),
+                aggregate_burn_basis_points_per_hour: Some(8),
+                per_connection_burn_basis_points_per_hour: Some(5),
+                confidence: QuotaRunRateConfidence::Normal,
+            }),
             windows,
             availability,
             freshness,

@@ -2810,7 +2810,8 @@ exit 42
         assert!(visible_stdout.contains("80% left, reset 6d 23h"));
         assert!(visible_stdout.contains("Selected account"));
         assert!(visible_stdout.contains("activity"));
-        assert!(visible_stdout.contains("burn"));
+        assert!(visible_stdout.contains("pace"));
+        assert!(visible_stdout.contains("rate"));
         assert!(visible_stdout.contains("guards"));
         assert!(!visible_stdout.contains("│ Clients"));
         assert!(visible_stdout.contains("safest quota"));
