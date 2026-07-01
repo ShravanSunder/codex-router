@@ -14,12 +14,12 @@ workspace = true
 
 [dependencies]
 base64.workspace = true
-codex-router-auth = { path = "../codex-router-auth", version = "0.1.0" }
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.2" }
 codex-router-core.workspace = true
-codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.0" }
-codex-router-selection = { path = "../codex-router-selection", version = "0.1.0" }
-codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.0" }
-codex-router-state = { path = "../codex-router-state", version = "0.1.0" }
+codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.2" }
+codex-router-selection = { path = "../codex-router-selection", version = "0.1.2" }
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.2" }
+codex-router-state = { path = "../codex-router-state", version = "0.1.2" }
 clap.workspace = true
 comfy-table.workspace = true
 indicatif.workspace = true
@@ -39,6 +39,6 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-codex-router-auth = { path = "../codex-router-auth", version = "0.1.0", features = ["sync-rusqlite-fixtures"] }
-codex-router-state = { path = "../codex-router-state", version = "0.1.0", features = ["sync-rusqlite-fixtures"] }
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
+codex-router-state = { path = "../codex-router-state", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
 tungstenite = "0.28.0"

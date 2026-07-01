@@ -1,5 +1,6 @@
 //! Router-owned Codex session picker command contract.
 
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -119,8 +120,12 @@ pub struct SessionsCommand {
     pub format: SessionsFormat,
     /// Resume the latest session matching filters.
     pub last: bool,
+    /// Launch a new Codex session instead of resuming one.
+    pub new: bool,
     /// Print the command that would be launched instead of executing it.
     pub dry_run: bool,
+    /// Arguments passed through to Codex after the router profile is selected.
+    pub codex_args: Vec<OsString>,
 }
 
 impl SessionsCommand {
@@ -130,6 +135,7 @@ impl SessionsCommand {
         argv.extend(arguments);
         let parsed =
             ClapSessionsCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
+        reject_legacy_router_options(&parsed.codex_args)?;
         Ok(Self {
             root: parsed.root()?,
             provider: parsed.provider,
@@ -138,9 +144,21 @@ impl SessionsCommand {
             list: parsed.list,
             format: parsed.format,
             last: parsed.last,
+            new: parsed.new,
             dry_run: parsed.dry_run,
+            codex_args: parsed.codex_args,
         })
     }
+}
+
+fn reject_legacy_router_options(codex_args: &[OsString]) -> Result<(), String> {
+    if codex_args
+        .iter()
+        .any(|argument| argument == OsStr::new("--scope"))
+    {
+        return Err("--scope was removed; use --checkout, --repo, or --any".to_owned());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Parser)]
@@ -164,8 +182,12 @@ struct ClapSessionsCommand {
     format: SessionsFormat,
     #[arg(long)]
     last: bool,
+    #[arg(long, conflicts_with_all = ["list", "last"])]
+    new: bool,
     #[arg(long)]
     dry_run: bool,
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    codex_args: Vec<OsString>,
 }
 
 impl ClapSessionsCommand {
@@ -199,6 +221,9 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
+    if command.new {
+        return run_new_session(stdout, command, runner);
+    }
     if command.last {
         return run_last_session(stdout, command, context, runner);
     }
@@ -329,23 +354,37 @@ fn run_interactive_session(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
+    let codex_args = command.codex_args.clone();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(SessionsCommandError::Runtime)?;
     let records = runtime.block_on(load_session_records(command, context))?;
-    if records.is_empty() {
-        return Err(SessionsCommandError::NoSessionsMatch);
-    }
-    let choices = records
-        .into_iter()
-        .map(SessionPickerChoice::from_record)
-        .collect::<Vec<_>>();
-    let Some(session_id) = picker.select_session(choices)? else {
+    let mut choices = vec![SessionPickerChoice::new_session(&codex_args)];
+    choices.extend(records.into_iter().map(SessionPickerChoice::from_record));
+    let Some(selection) = picker.select_session(choices)? else {
         return Err(SessionsCommandError::PickerCanceled);
     };
-    validate_resume_session_id(&session_id)?;
-    runner.run_codex_resume(&session_id)
+    match selection {
+        SessionPickerSelection::New => runner.run_codex_new(&codex_args),
+        SessionPickerSelection::Resume(session_id) => {
+            validate_resume_session_id(&session_id)?;
+            runner.run_codex_resume(&codex_args, &session_id)
+        }
+    }
+}
+
+fn run_new_session<W: Write>(
+    stdout: &mut W,
+    command: SessionsCommand,
+    runner: &mut impl SessionsCommandRunner,
+) -> Result<(), SessionsCommandError> {
+    if command.dry_run {
+        write_codex_new_dry_run(stdout, &command.codex_args)?;
+        return Ok(());
+    }
+
+    runner.run_codex_new(&command.codex_args)
 }
 
 fn run_last_session<W: Write>(
@@ -355,6 +394,7 @@ fn run_last_session<W: Write>(
     runner: &mut impl SessionsCommandRunner,
 ) -> Result<(), SessionsCommandError> {
     let dry_run = command.dry_run;
+    let codex_args = command.codex_args.clone();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -366,16 +406,40 @@ fn run_last_session<W: Write>(
     validate_resume_session_id(&record.session_id)?;
 
     if dry_run {
-        writeln!(
-            stdout,
-            "codex --profile codex-router resume -- {}",
-            record.session_id
-        )
-        .map_err(SessionsCommandError::Stdout)?;
+        write_codex_resume_dry_run(stdout, &codex_args, &record.session_id)?;
         return Ok(());
     }
 
-    runner.run_codex_resume(&record.session_id)
+    runner.run_codex_resume(&codex_args, &record.session_id)
+}
+
+fn write_codex_new_dry_run<W: Write>(
+    stdout: &mut W,
+    codex_args: &[OsString],
+) -> Result<(), SessionsCommandError> {
+    write!(stdout, "codex --profile codex-router").map_err(SessionsCommandError::Stdout)?;
+    write_codex_args(stdout, codex_args)?;
+    writeln!(stdout).map_err(SessionsCommandError::Stdout)
+}
+
+fn write_codex_resume_dry_run<W: Write>(
+    stdout: &mut W,
+    codex_args: &[OsString],
+    session_id: &str,
+) -> Result<(), SessionsCommandError> {
+    write!(stdout, "codex --profile codex-router").map_err(SessionsCommandError::Stdout)?;
+    write_codex_args(stdout, codex_args)?;
+    writeln!(stdout, " resume -- {session_id}").map_err(SessionsCommandError::Stdout)
+}
+
+fn write_codex_args<W: Write>(
+    stdout: &mut W,
+    codex_args: &[OsString],
+) -> Result<(), SessionsCommandError> {
+    for argument in codex_args {
+        write!(stdout, " {}", argument.to_string_lossy()).map_err(SessionsCommandError::Stdout)?;
+    }
+    Ok(())
 }
 
 /// Interactive session picker.
@@ -384,7 +448,7 @@ pub(crate) trait SessionsPicker {
     fn select_session(
         &mut self,
         choices: Vec<SessionPickerChoice>,
-    ) -> Result<Option<String>, SessionsCommandError>;
+    ) -> Result<Option<SessionPickerSelection>, SessionsCommandError>;
 }
 
 struct InquireSessionsPicker;
@@ -393,27 +457,55 @@ impl SessionsPicker for InquireSessionsPicker {
     fn select_session(
         &mut self,
         choices: Vec<SessionPickerChoice>,
-    ) -> Result<Option<String>, SessionsCommandError> {
+    ) -> Result<Option<SessionPickerSelection>, SessionsCommandError> {
         Select::new("Resume Codex session", choices)
             .prompt_skippable()
-            .map(|choice| choice.map(|choice| choice.session_id().to_owned()))
+            .map(|choice| choice.map(SessionPickerChoice::into_selection))
             .map_err(SessionsCommandError::Picker)
     }
 }
 
 /// Runs a selected Codex session.
 pub(crate) trait SessionsCommandRunner {
+    /// Launches `codex --profile codex-router`.
+    fn run_codex_new(&mut self, codex_args: &[OsString]) -> Result<(), SessionsCommandError>;
+
     /// Launches `codex --profile codex-router resume <session_id>`.
-    fn run_codex_resume(&mut self, session_id: &str) -> Result<(), SessionsCommandError>;
+    fn run_codex_resume(
+        &mut self,
+        codex_args: &[OsString],
+        session_id: &str,
+    ) -> Result<(), SessionsCommandError>;
 }
 
 struct ProcessSessionsCommandRunner;
 
 impl SessionsCommandRunner for ProcessSessionsCommandRunner {
-    fn run_codex_resume(&mut self, session_id: &str) -> Result<(), SessionsCommandError> {
+    fn run_codex_new(&mut self, codex_args: &[OsString]) -> Result<(), SessionsCommandError> {
         let status = Command::new("codex")
             .arg("--profile")
             .arg("codex-router")
+            .args(codex_args)
+            .status()
+            .map_err(SessionsCommandError::CodexLaunch)?;
+        if !status.success() {
+            return Err(SessionsCommandError::CodexExit {
+                status: status.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn run_codex_resume(
+        &mut self,
+        codex_args: &[OsString],
+        session_id: &str,
+    ) -> Result<(), SessionsCommandError> {
+        let status = Command::new("codex")
+            .arg("--profile")
+            .arg("codex-router")
+            .args(codex_args)
             .arg("resume")
             .arg("--")
             .arg(session_id)
@@ -707,23 +799,58 @@ impl SessionRecord {
 /// Picker display row for one session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionPickerChoice {
-    session_id: String,
+    selection: SessionPickerSelection,
     label: String,
 }
 
 impl SessionPickerChoice {
-    fn from_record(record: SessionRecord) -> Self {
+    fn new_session(codex_args: &[OsString]) -> Self {
+        let label = if codex_args.is_empty() {
+            "New Codex session".to_owned()
+        } else {
+            let args = codex_args
+                .iter()
+                .map(|argument| argument.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("New Codex session\n  {args}")
+        };
         Self {
-            session_id: record.session_id.clone(),
-            label: human_session_row(&record),
+            selection: SessionPickerSelection::New,
+            label,
         }
     }
 
-    /// Returns the session id represented by this picker row.
-    #[must_use]
-    pub(crate) fn session_id(&self) -> &str {
-        &self.session_id
+    fn from_record(record: SessionRecord) -> Self {
+        let label = human_session_row(&record);
+        Self {
+            selection: SessionPickerSelection::Resume(record.session_id),
+            label,
+        }
     }
+
+    /// Returns the resume session id represented by this picker row, if any.
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn resume_session_id(&self) -> Option<&str> {
+        match &self.selection {
+            SessionPickerSelection::New => None,
+            SessionPickerSelection::Resume(session_id) => Some(session_id),
+        }
+    }
+
+    fn into_selection(self) -> SessionPickerSelection {
+        self.selection
+    }
+}
+
+/// Picker target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionPickerSelection {
+    /// Start a new Codex session.
+    New,
+    /// Resume a selected Codex session.
+    Resume(String),
 }
 
 fn human_session_row(record: &SessionRecord) -> String {

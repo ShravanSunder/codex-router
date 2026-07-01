@@ -203,7 +203,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64",
  "clap",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hmac",
  "serde",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "codex-router-core",
  "thiserror",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",

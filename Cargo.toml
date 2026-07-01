@@ -13,14 +13,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-codex-router-core = { path = "crates/codex-router-core", version = "0.1.0" }
-codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.0" }
+codex-router-core = { path = "crates/codex-router-core", version = "0.1.2" }
+codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.2" }
 base64 = "0.22.1"
 bytes = "1.11.0"
 clap = { version = "4.5.53", features = ["derive", "env", "wrap_help"] }

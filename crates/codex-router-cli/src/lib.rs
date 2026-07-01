@@ -1162,9 +1162,11 @@ commands:
   quota                         Show quota, refresh state, and next account
   quota refresh                 Refresh quota data now
   sessions                      Pick and resume a Codex session from this folder
+  sessions --new                Start a new Codex session with the router profile
   sessions --checkout           Pick from this git checkout
   sessions --repo               Pick from all checkouts for this repo
   sessions --any                Pick from all Codex sessions
+  sessions --new --yolo         Pass Codex flags through after router options
   doctor                        Diagnose local router setup
   profile print                 Print the Codex profile snippet
 ";
@@ -4785,7 +4787,9 @@ exit 42
         assert!(!command.list);
         assert_eq!(command.format, crate::sessions::SessionsFormat::Table);
         assert!(!command.last);
+        assert!(!command.new);
         assert!(!command.dry_run);
+        assert!(command.codex_args.is_empty());
     }
 
     #[test]
@@ -4803,6 +4807,9 @@ exit 42
             OsString::from("--format"),
             OsString::from("json"),
             OsString::from("--last"),
+            OsString::from("--yolo"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.4-mini"),
         ]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
@@ -4816,7 +4823,37 @@ exit 42
         assert!(command.list);
         assert_eq!(command.format, crate::sessions::SessionsFormat::Json);
         assert!(command.last);
+        assert!(!command.new);
         assert!(!command.dry_run);
+        assert_eq!(
+            command.codex_args,
+            [
+                OsString::from("--yolo"),
+                OsString::from("--model"),
+                OsString::from("gpt-5.4-mini")
+            ]
+        );
+    }
+
+    #[test]
+    fn sessions_new_dry_run_prints_codex_command_with_passthrough_flags() {
+        let output = run_cli(
+            [
+                "sessions",
+                "--new",
+                "--dry-run",
+                "--yolo",
+                "--model",
+                "gpt-5.4-mini",
+            ],
+            CliContext::new(Vec::new()),
+        );
+
+        assert_eq!(
+            output.stdout,
+            "codex --profile codex-router --yolo --model gpt-5.4-mini\n"
+        );
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -4851,7 +4888,8 @@ exit 42
 
         assert!(
             error.to_string().contains("unexpected argument")
-                || error.to_string().contains("unrecognized option"),
+                || error.to_string().contains("unrecognized option")
+                || error.to_string().contains("--scope was removed"),
             "unexpected legacy sessions scope error: {error}"
         );
     }
@@ -5216,6 +5254,7 @@ exit 42
                 "codex-router",
                 "--last",
                 "--dry-run",
+                "--yolo",
             ],
             CliContext::new(vec![
                 ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
@@ -5226,7 +5265,7 @@ exit 42
 
         assert_eq!(
             output.stdout,
-            "codex --profile codex-router resume -- thread-new\n"
+            "codex --profile codex-router --yolo resume -- thread-new\n"
         );
     }
 
@@ -5324,6 +5363,7 @@ exit 42
             OsString::from("--provider"),
             OsString::from("codex-router"),
             OsString::from("--last"),
+            OsString::from("--yolo"),
         ]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
@@ -5348,6 +5388,8 @@ exit 42
 
         assert!(stdout.is_empty());
         assert_eq!(runner.resumed_session_ids, ["thread-new"]);
+        assert_eq!(runner.resume_codex_args, [vec![OsString::from("--yolo")]]);
+        assert!(runner.new_codex_args.is_empty());
     }
 
     #[test]
@@ -5411,18 +5453,75 @@ exit 42
 
         assert!(stdout.is_empty());
         assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
-        assert_eq!(picker.offered_labels.len(), 2);
+        assert_eq!(picker.offered_labels.len(), 3);
+        assert_eq!(picker.offered_labels[0], "New Codex session");
         assert!(
-            picker.offered_labels[0].starts_with("PICKER_CANARY_SHOULD_NOT_LEAK\n"),
+            picker.offered_labels[1].starts_with("PICKER_CANARY_SHOULD_NOT_LEAK\n"),
             "interactive picker should show the human title first, got {:?}",
-            picker.offered_labels[0]
+            picker.offered_labels[1]
         );
         assert!(
-            picker.offered_labels[0].contains("main  project  id=thread-…"),
+            picker.offered_labels[1].contains("main  project  id=thread-…"),
             "interactive picker should show compact metadata on the second line, got {:?}",
-            picker.offered_labels[0]
+            picker.offered_labels[1]
         );
         assert_eq!(runner.resumed_session_ids, ["thread-old"]);
+    }
+
+    #[test]
+    fn sessions_interactive_new_choice_launches_new_codex_with_passthrough_flags() {
+        let test_root = TestRoot::new("sessions-picker-new");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "NEW_CHOICE_CANARY_SHOULD_NOT_LEAK",
+            &[CodexStateThreadFixture::new(
+                "thread-existing",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                1000,
+            )],
+        );
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--any"),
+            OsString::from("--provider"),
+            OsString::from("codex-router"),
+            OsString::from("--yolo"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new_session();
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(picker.offered_session_ids, ["thread-existing"]);
+        assert_eq!(picker.offered_labels[0], "New Codex session\n  --yolo");
+        assert!(runner.resumed_session_ids.is_empty());
+        assert_eq!(runner.new_codex_args, [vec![OsString::from("--yolo")]]);
     }
 
     #[test]
@@ -6671,21 +6770,33 @@ exit 42
 
     #[derive(Default)]
     struct FakeSessionsCommandRunner {
+        new_codex_args: Vec<Vec<OsString>>,
         resumed_session_ids: Vec<String>,
+        resume_codex_args: Vec<Vec<OsString>>,
     }
 
     impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
+        fn run_codex_new(
+            &mut self,
+            codex_args: &[OsString],
+        ) -> Result<(), crate::sessions::SessionsCommandError> {
+            self.new_codex_args.push(codex_args.to_vec());
+            Ok(())
+        }
+
         fn run_codex_resume(
             &mut self,
+            codex_args: &[OsString],
             session_id: &str,
         ) -> Result<(), crate::sessions::SessionsCommandError> {
+            self.resume_codex_args.push(codex_args.to_vec());
             self.resumed_session_ids.push(session_id.to_owned());
             Ok(())
         }
     }
 
     struct FakeSessionsPicker {
-        selected_session_id: String,
+        selection: crate::sessions::SessionPickerSelection,
         offered_session_ids: Vec<String>,
         offered_labels: Vec<String>,
     }
@@ -6693,7 +6804,17 @@ exit 42
     impl FakeSessionsPicker {
         fn new(selected_session_id: &str) -> Self {
             Self {
-                selected_session_id: selected_session_id.to_owned(),
+                selection: crate::sessions::SessionPickerSelection::Resume(
+                    selected_session_id.to_owned(),
+                ),
+                offered_session_ids: Vec::new(),
+                offered_labels: Vec::new(),
+            }
+        }
+
+        fn new_session() -> Self {
+            Self {
+                selection: crate::sessions::SessionPickerSelection::New,
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
             }
@@ -6704,13 +6825,16 @@ exit 42
         fn select_session(
             &mut self,
             choices: Vec<crate::sessions::SessionPickerChoice>,
-        ) -> Result<Option<String>, crate::sessions::SessionsCommandError> {
+        ) -> Result<
+            Option<crate::sessions::SessionPickerSelection>,
+            crate::sessions::SessionsCommandError,
+        > {
             self.offered_session_ids = choices
                 .iter()
-                .map(|choice| choice.session_id().to_owned())
+                .filter_map(|choice| choice.resume_session_id().map(str::to_owned))
                 .collect();
             self.offered_labels = choices.iter().map(ToString::to_string).collect();
-            Ok(Some(self.selected_session_id.clone()))
+            Ok(Some(self.selection.clone()))
         }
     }
 
