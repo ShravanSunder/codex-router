@@ -2796,33 +2796,29 @@ exit 42
             CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
-        assert!(output.stdout.starts_with("╭ Quota status "));
-        assert!(output.stdout.contains("├"));
-        assert!(output.stdout.contains("╰"));
-        assert!(
-            output
-                .stdout
-                .contains("responses -> primary    [preferred]")
-        );
-        assert!(
-            output
-                .stdout
-                .contains("why: preferred by quota: safest quota")
-        );
-        assert!(output.stdout.contains("│ Account"));
-        assert!(output.stdout.contains("❯ primary"));
-        assert!(output.stdout.contains("preferred"));
-        assert!(output.stdout.contains("25% left, reset 2h 30m"));
-        assert!(output.stdout.contains("80% left, reset 6d 23h"));
-        assert!(output.stdout.contains("Selected account"));
-        assert!(output.stdout.contains("activity"));
-        assert!(output.stdout.contains("burn"));
-        assert!(output.stdout.contains("guards"));
-        assert!(!output.stdout.contains("│ Clients"));
-        assert!(output.stdout.contains("safest quota"));
-        assert!(!output.stdout.contains("account ┆ status"));
-        assert!(!output.stdout.contains("route     ┆ next"));
-        assert!(!output.stdout.contains("acct_primary"));
+        let visible_stdout = strip_ansi_sequences(&output.stdout);
+
+        assert!(visible_stdout.starts_with("╭ Quota status "));
+        assert!(visible_stdout.contains("├"));
+        assert!(visible_stdout.contains("╰"));
+        assert!(visible_stdout.contains("responses -> primary    [preferred]"));
+        assert!(visible_stdout.contains("why: preferred by quota: safest quota"));
+        assert!(visible_stdout.contains("│ Account"));
+        assert!(visible_stdout.contains("❯ primary"));
+        assert!(visible_stdout.contains("preferred"));
+        assert!(visible_stdout.contains("25% left, reset 2h 30m"));
+        assert!(visible_stdout.contains("80% left, reset 6d 23h"));
+        assert!(visible_stdout.contains("Selected account"));
+        assert!(visible_stdout.contains("activity"));
+        assert!(visible_stdout.contains("burn"));
+        assert!(visible_stdout.contains("guards"));
+        assert!(!visible_stdout.contains("│ Clients"));
+        assert!(visible_stdout.contains("safest quota"));
+        assert!(!visible_stdout.contains("account ┆ status"));
+        assert!(!visible_stdout.contains("route     ┆ next"));
+        assert!(!visible_stdout.contains("acct_primary"));
+        assert!(output.stdout.contains("\x1b[36m"));
+        assert!(output.stdout.contains("\x1b[33m"));
         assert!(output.stderr.is_empty());
     }
 
@@ -6839,6 +6835,24 @@ exit 42
             Ok(value) => value,
             Err(error) => panic!("expected Ok, got error: {error}"),
         }
+    }
+
+    fn strip_ansi_sequences(input: &str) -> String {
+        let mut output = String::new();
+        let mut characters = input.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\x1b' && characters.peek() == Some(&'[') {
+                characters.next();
+                for sequence_character in characters.by_ref() {
+                    if sequence_character.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        output
     }
 
     fn lock_test_mutex<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {

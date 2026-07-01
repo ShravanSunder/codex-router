@@ -1288,7 +1288,12 @@ fn render_quota_status_once(
     let unicode_bars = effective_format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
     match effective_format {
-        QuotaStatusFormat::Table => write_quota_table(stdout, &report, stdout_terminal_width),
+        QuotaStatusFormat::Table => write_quota_table_with_style(
+            stdout,
+            &report,
+            stdout_terminal_width,
+            QuotaTableStyle::TerminalColor,
+        ),
         QuotaStatusFormat::Plain => write_quota_plain(stdout, &report),
         QuotaStatusFormat::Json => write_quota_json(stdout, &report),
     }
@@ -1481,14 +1486,61 @@ fn quota_status_report(
     })
 }
 
+#[cfg(test)]
 fn write_quota_table(
     stdout: &mut impl Write,
     report: &QuotaStatusReport,
     terminal_width: Option<usize>,
 ) -> Result<(), QuotaCommandError> {
+    write_quota_table_with_style(stdout, report, terminal_width, QuotaTableStyle::PlainText)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuotaTableStyle {
+    #[cfg(test)]
+    PlainText,
+    TerminalColor,
+}
+
+impl QuotaTableStyle {
+    fn accent(self, value: &str) -> String {
+        self.paint("\x1b[36m", value)
+    }
+
+    fn selected(self, value: &str) -> String {
+        self.paint("\x1b[33m", value)
+    }
+
+    fn healthy(self, value: &str) -> String {
+        self.paint("\x1b[32m", value)
+    }
+
+    fn muted(self, value: &str) -> String {
+        self.paint("\x1b[90m", value)
+    }
+
+    fn selected_background(self, value: &str) -> String {
+        self.paint("\x1b[48;2;58;70;122m", value)
+    }
+
+    fn paint(self, prefix: &str, value: &str) -> String {
+        match self {
+            #[cfg(test)]
+            Self::PlainText => value.to_owned(),
+            Self::TerminalColor => format!("{prefix}{value}\x1b[0m"),
+        }
+    }
+}
+
+fn write_quota_table_with_style(
+    stdout: &mut impl Write,
+    report: &QuotaStatusReport,
+    terminal_width: Option<usize>,
+    style: QuotaTableStyle,
+) -> Result<(), QuotaCommandError> {
     let rows = report.rows();
     let width = terminal_width.unwrap_or(100).max(40);
-    write_quota_border_top(stdout, width, "Quota status")?;
+    write_quota_border_top(stdout, width, "Quota status", style)?;
     write_quota_box_line(
         stdout,
         width,
@@ -1499,23 +1551,37 @@ fn write_quota_table(
             selected_account_badge(rows),
             refresh_summary(rows)
         ),
+        style,
+        QuotaLineStyle::Summary,
     )?;
-    write_quota_box_line(stdout, width, &format!("why: {}", selector_summary(rows)))?;
-    write_quota_border_rule(stdout, width)?;
+    write_quota_box_line(
+        stdout,
+        width,
+        &format!("why: {}", selector_summary(rows)),
+        style,
+        QuotaLineStyle::Normal,
+    )?;
+    write_quota_border_rule(stdout, width, style)?;
 
-    write_quota_box_line(stdout, width, "Account      Status              Quota")?;
-    write_quota_border_rule(stdout, width)?;
+    write_quota_box_line(
+        stdout,
+        width,
+        "Account      Status              Quota",
+        style,
+        QuotaLineStyle::Header,
+    )?;
+    write_quota_border_rule(stdout, width, style)?;
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
-            write_quota_box_line(stdout, width, "")?;
+            write_quota_box_line(stdout, width, "", style, QuotaLineStyle::Normal)?;
         }
-        write_quota_account_block(stdout, width, row)?;
+        write_quota_account_block(stdout, width, row, style)?;
     }
     if let Some(selected_row) = rows.iter().find(|row| row.preferred_next) {
-        write_quota_border_rule(stdout, width)?;
-        write_selected_quota_details(stdout, width, selected_row)?;
+        write_quota_border_rule(stdout, width, style)?;
+        write_selected_quota_details_with_style(stdout, width, selected_row, style)?;
     }
-    write_quota_border_bottom(stdout, width)?;
+    write_quota_border_bottom(stdout, width, style)?;
 
     Ok(())
 }
@@ -1524,6 +1590,7 @@ fn write_quota_account_block(
     stdout: &mut impl Write,
     width: usize,
     row: &QuotaStatusRow,
+    style: QuotaTableStyle,
 ) -> Result<(), QuotaCommandError> {
     let marker = if row.preferred_next { "❯" } else { " " };
     write_quota_box_line(
@@ -1535,16 +1602,34 @@ fn write_quota_account_block(
             quota_state_text(row),
             reason_summary(row)
         ),
+        style,
+        if row.preferred_next {
+            QuotaLineStyle::Selected
+        } else {
+            QuotaLineStyle::Normal
+        },
     )?;
     write_quota_box_line(
         stdout,
         width,
         &format!("    5h       {}", quota_window_summary(&row.short_window)),
+        style,
+        if row.preferred_next {
+            QuotaLineStyle::Healthy
+        } else {
+            QuotaLineStyle::Normal
+        },
     )?;
     write_quota_box_line(
         stdout,
         width,
         &format!("    weekly   {}", quota_window_summary(&row.weekly_window)),
+        style,
+        if row.preferred_next {
+            QuotaLineStyle::Healthy
+        } else {
+            QuotaLineStyle::Normal
+        },
     )?;
     write_quota_box_line(
         stdout,
@@ -1555,15 +1640,28 @@ fn write_quota_account_block(
             quota_burn_bar(row.short_pressure.max(row.long_pressure)),
             first_line(&row.burn)
         ),
+        style,
+        if row.preferred_next {
+            QuotaLineStyle::Selected
+        } else {
+            QuotaLineStyle::Normal
+        },
     )
 }
 
-fn write_selected_quota_details(
+fn write_selected_quota_details_with_style(
     stdout: &mut impl Write,
     width: usize,
     row: &QuotaStatusRow,
+    style: QuotaTableStyle,
 ) -> Result<(), QuotaCommandError> {
-    write_quota_box_line(stdout, width, "Selected account")?;
+    write_quota_box_line(
+        stdout,
+        width,
+        "Selected account",
+        style,
+        QuotaLineStyle::Header,
+    )?;
     write_quota_box_line(
         stdout,
         width,
@@ -1573,16 +1671,22 @@ fn write_selected_quota_details(
             quota_state_text(row),
             first_line(&row.routing)
         ),
+        style,
+        QuotaLineStyle::Selected,
     )?;
     write_quota_box_line(
         stdout,
         width,
         &format!("5h       {}", quota_window_summary(&row.short_window)),
+        style,
+        QuotaLineStyle::Healthy,
     )?;
     write_quota_box_line(
         stdout,
         width,
         &format!("weekly   {}", quota_window_summary(&row.weekly_window)),
+        style,
+        QuotaLineStyle::Healthy,
     )?;
     write_quota_box_line(
         stdout,
@@ -1593,6 +1697,8 @@ fn write_selected_quota_details(
             quota_burn_bar(row.short_pressure.max(row.long_pressure)),
             first_line(&row.burn)
         ),
+        style,
+        QuotaLineStyle::Selected,
     )?;
     write_quota_box_line(
         stdout,
@@ -1601,16 +1707,22 @@ fn write_selected_quota_details(
             "guards   5h {}% / weekly {}%",
             row.short_pressure, row.long_pressure
         ),
+        style,
+        QuotaLineStyle::Normal,
     )?;
     write_quota_box_line(
         stdout,
         width,
         &format!("reset    {}", row.reset_credits_available),
+        style,
+        QuotaLineStyle::Normal,
     )?;
     write_quota_box_line(
         stdout,
         width,
         &format!("note     {}", first_line(&row.routing)),
+        style,
+        QuotaLineStyle::Normal,
     )
 }
 
@@ -1618,31 +1730,70 @@ fn write_quota_border_top(
     stdout: &mut impl Write,
     width: usize,
     title: &str,
+    style: QuotaTableStyle,
 ) -> Result<(), QuotaCommandError> {
     let label = format!(" {title} ");
     let fill = width.saturating_sub(2 + label.chars().count());
-    writeln!(stdout, "╭{label}{}╮", "─".repeat(fill)).map_err(QuotaCommandError::Stdout)
+    writeln!(
+        stdout,
+        "{}",
+        style.accent(&format!("╭{label}{}╮", "─".repeat(fill)))
+    )
+    .map_err(QuotaCommandError::Stdout)
 }
 
-fn write_quota_border_rule(stdout: &mut impl Write, width: usize) -> Result<(), QuotaCommandError> {
-    writeln!(stdout, "├{}┤", "─".repeat(width.saturating_sub(2))).map_err(QuotaCommandError::Stdout)
+fn write_quota_border_rule(
+    stdout: &mut impl Write,
+    width: usize,
+    style: QuotaTableStyle,
+) -> Result<(), QuotaCommandError> {
+    writeln!(
+        stdout,
+        "{}",
+        style.muted(&format!("├{}┤", "─".repeat(width.saturating_sub(2))))
+    )
+    .map_err(QuotaCommandError::Stdout)
 }
 
 fn write_quota_border_bottom(
     stdout: &mut impl Write,
     width: usize,
+    style: QuotaTableStyle,
 ) -> Result<(), QuotaCommandError> {
-    writeln!(stdout, "╰{}╯", "─".repeat(width.saturating_sub(2))).map_err(QuotaCommandError::Stdout)
+    writeln!(
+        stdout,
+        "{}",
+        style.accent(&format!("╰{}╯", "─".repeat(width.saturating_sub(2))))
+    )
+    .map_err(QuotaCommandError::Stdout)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuotaLineStyle {
+    Normal,
+    Header,
+    Summary,
+    Selected,
+    Healthy,
 }
 
 fn write_quota_box_line(
     stdout: &mut impl Write,
     width: usize,
     content: &str,
+    style: QuotaTableStyle,
+    line_style: QuotaLineStyle,
 ) -> Result<(), QuotaCommandError> {
     let inner_width = width.saturating_sub(4);
-    writeln!(stdout, "│ {} │", fit_quota_cell(content, inner_width))
-        .map_err(QuotaCommandError::Stdout)
+    let fitted = fit_quota_cell(content, inner_width);
+    let fitted = match line_style {
+        QuotaLineStyle::Normal => fitted,
+        QuotaLineStyle::Header => style.accent(&fitted),
+        QuotaLineStyle::Summary => style.selected(&fitted),
+        QuotaLineStyle::Selected => style.selected_background(&style.selected(&fitted)),
+        QuotaLineStyle::Healthy => style.healthy(&fitted),
+    };
+    writeln!(stdout, "│ {fitted} │").map_err(QuotaCommandError::Stdout)
 }
 
 fn write_quota_plain(
@@ -3338,6 +3489,37 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_table_can_emit_terminal_color() {
+        let report = quota_capture_report();
+        let mut output = Vec::new();
+
+        must_ok(write_quota_table_with_style(
+            &mut output,
+            &report,
+            Some(120),
+            QuotaTableStyle::TerminalColor,
+        ));
+        let text = must_ok(String::from_utf8(output));
+
+        assert!(
+            text.contains("\x1b[36m"),
+            "quota title and section labels should use cyan ANSI color:\n{text:?}"
+        );
+        assert!(
+            text.contains("\x1b[33m"),
+            "selected account text should use yellow ANSI color:\n{text:?}"
+        );
+        assert!(
+            text.contains("\x1b[32m"),
+            "healthy quota and preferred state should use green ANSI color:\n{text:?}"
+        );
+        assert!(
+            text.contains("\x1b[48;2;58;70;122m"),
+            "selected account row should use a background ANSI color:\n{text:?}"
+        );
+    }
+
+    #[test]
     #[ignore = "writes visual quota capture artifacts for design review"]
     fn quota_status_capture_artifacts_for_design_review() {
         let capture_dir = capture_dir();
@@ -3347,14 +3529,35 @@ mod tests {
             let mut output = Vec::new();
             must_ok(write_quota_table(&mut output, &report, Some(width)));
             let text = must_ok(String::from_utf8(output));
-            write_capture_pair(&capture_dir, &format!("quota-{width}"), &text);
+            let mut ansi_output = Vec::new();
+            must_ok(write_quota_table_with_style(
+                &mut ansi_output,
+                &report,
+                Some(width),
+                QuotaTableStyle::TerminalColor,
+            ));
+            let ansi_text = must_ok(String::from_utf8(ansi_output));
+            write_capture_pair_with_svg_text(
+                &capture_dir,
+                &format!("quota-{width}"),
+                &text,
+                &ansi_text,
+            );
         }
 
         let blocked_report = blocked_quota_capture_report();
         let mut output = Vec::new();
         must_ok(write_quota_table(&mut output, &blocked_report, Some(80)));
         let text = must_ok(String::from_utf8(output));
-        write_capture_pair(&capture_dir, "quota-all-blocked-80", &text);
+        let mut ansi_output = Vec::new();
+        must_ok(write_quota_table_with_style(
+            &mut ansi_output,
+            &blocked_report,
+            Some(80),
+            QuotaTableStyle::TerminalColor,
+        ));
+        let ansi_text = must_ok(String::from_utf8(ansi_output));
+        write_capture_pair_with_svg_text(&capture_dir, "quota-all-blocked-80", &text, &ansi_text);
     }
 
     #[test]
@@ -3628,11 +3831,11 @@ mod tests {
         dir
     }
 
-    fn write_capture_pair(dir: &Path, name: &str, text: &str) {
+    fn write_capture_pair_with_svg_text(dir: &Path, name: &str, text: &str, svg_text: &str) {
         must_ok(std::fs::write(dir.join(format!("{name}.txt")), text));
         must_ok(std::fs::write(
             dir.join(format!("{name}.svg")),
-            terminal_svg(name, text),
+            terminal_svg(name, svg_text),
         ));
     }
 
@@ -3640,7 +3843,7 @@ mod tests {
         let lines = text.lines().collect::<Vec<_>>();
         let width = lines
             .iter()
-            .map(|line| line.chars().count())
+            .map(|line| ansi_visible_text(line).chars().count())
             .max()
             .unwrap_or(1);
         let height = lines.len().max(1);
@@ -3650,28 +3853,115 @@ mod tests {
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pixel_width}\" height=\"{pixel_height}\" viewBox=\"0 0 {pixel_width} {pixel_height}\"><rect width=\"100%\" height=\"100%\" fill=\"#111318\"/>"
         );
         for (index, line) in lines.iter().enumerate() {
-            if line.contains('*') || line.contains("[blocked]") {
+            let selected_background = line.contains("\x1b[48;2;58;70;122m");
+            if line.contains('*') || line.contains("[blocked]") || selected_background {
                 let y = 36 + index * 18;
+                let (x, rect_width) = if selected_background {
+                    (
+                        34,
+                        ((width.saturating_sub(4) as f64) * 8.4).round() as usize,
+                    )
+                } else {
+                    (8, pixel_width.saturating_sub(16))
+                };
                 svg.push_str(&format!(
-                    "<rect x=\"8\" y=\"{}\" width=\"{}\" height=\"18\" fill=\"#2d333b\"/>",
+                    "<rect x=\"{x}\" y=\"{}\" width=\"{rect_width}\" height=\"18\" fill=\"#2d333b\"/>",
                     y.saturating_sub(14),
-                    pixel_width.saturating_sub(16)
                 ));
             }
         }
-        svg.push_str(&format!(
-            "<text x=\"16\" y=\"24\" xml:space=\"preserve\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"14\" fill=\"#e6edf3\"><tspan>{}</tspan>",
-            escape_xml(title)
-        ));
+        svg.push_str(&svg_text(16, 24, "#e6edf3", title));
         for (index, line) in lines.iter().enumerate() {
-            svg.push_str(&format!(
-                "<tspan x=\"16\" dy=\"{}\">{}</tspan>",
-                if index == 0 { 20 } else { 18 },
-                escape_xml(line)
+            let y = 44 + index * 18;
+            svg.push_str(&svg_line_text(16, y, &ansi_svg_segments(line)));
+        }
+        svg.push_str("</svg>");
+        svg
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct SvgTextSegment {
+        color: &'static str,
+        text: String,
+    }
+
+    fn ansi_visible_text(line: &str) -> String {
+        ansi_svg_segments(line)
+            .into_iter()
+            .map(|segment| segment.text)
+            .collect::<String>()
+    }
+
+    fn ansi_svg_segments(line: &str) -> Vec<SvgTextSegment> {
+        let mut segments = Vec::new();
+        let mut current_text = String::new();
+        let mut current_color = "#e6edf3";
+        let mut characters = line.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\x1b' && characters.peek() == Some(&'[') {
+                characters.next();
+                let mut sequence = String::new();
+                for sequence_character in characters.by_ref() {
+                    sequence.push(sequence_character);
+                    if sequence_character.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                if sequence.ends_with('m') {
+                    if !current_text.is_empty() {
+                        segments.push(SvgTextSegment {
+                            color: current_color,
+                            text: current_text,
+                        });
+                        current_text = String::new();
+                    }
+                    current_color = ansi_sgr_color(&sequence);
+                }
+                continue;
+            }
+            current_text.push(character);
+        }
+        if !current_text.is_empty() {
+            segments.push(SvgTextSegment {
+                color: current_color,
+                text: current_text,
+            });
+        }
+        segments
+    }
+
+    fn ansi_sgr_color(sequence: &str) -> &'static str {
+        match sequence.trim_end_matches('m') {
+            "0" => "#e6edf3",
+            "32" => "#7ee787",
+            "33" => "#ffe75c",
+            "36" => "#8ae8f0",
+            "90" => "#8b949e",
+            "48;2;58;70;122" => "#e6edf3",
+            _ => "#e6edf3",
+        }
+    }
+
+    fn svg_text(x: usize, y: usize, color: &str, text: &str) -> String {
+        format!(
+            "<text x=\"{x}\" y=\"{y}\" xml:space=\"preserve\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"14\" fill=\"{color}\">{}</text>",
+            escape_xml(text)
+        )
+    }
+
+    fn svg_line_text(x: usize, y: usize, segments: &[SvgTextSegment]) -> String {
+        let mut text = format!(
+            "<text x=\"{x}\" y=\"{y}\" xml:space=\"preserve\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"14\">"
+        );
+        for segment in segments {
+            text.push_str(&format!(
+                "<tspan fill=\"{}\">{}</tspan>",
+                segment.color,
+                escape_xml(&segment.text)
             ));
         }
-        svg.push_str("</text></svg>");
-        svg
+        text.push_str("</text>");
+        text
     }
 
     fn escape_xml(value: &str) -> String {
