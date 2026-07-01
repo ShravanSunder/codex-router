@@ -12,6 +12,8 @@ pub(crate) struct SessionsPickerRequest {
     pub(crate) provider: SessionsProvider,
     pub(crate) source: SessionsSource,
     pub(crate) current_dir: PathBuf,
+    pub(crate) checkout_root: PathBuf,
+    pub(crate) repo_roots: Vec<PathBuf>,
     pub(crate) current_provider: Option<String>,
     pub(crate) records: Vec<SessionPickerRecord>,
 }
@@ -23,6 +25,8 @@ impl Default for SessionsPickerRequest {
             provider: SessionsProvider::Any,
             source: SessionsSource::Interactive,
             current_dir: PathBuf::new(),
+            checkout_root: PathBuf::new(),
+            repo_roots: Vec::new(),
             current_provider: None,
             records: Vec::new(),
         }

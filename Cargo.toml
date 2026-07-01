@@ -10,6 +10,7 @@ members = [
     "crates/codex-router-selection",
     "crates/codex-router-state",
     "crates/codex-router-test-support",
+    "prototypes/ux_prototype",
 ]
 
 [workspace.package]

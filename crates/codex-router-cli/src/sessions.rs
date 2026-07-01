@@ -3,6 +3,9 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::IsTerminal;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -28,6 +31,9 @@ use crate::presentation::session_picker::run_sessions_picker;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
+const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 256 * 1024;
+const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
+const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 
 /// Session search root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,7 +274,7 @@ async fn load_session_records(
     let rows = sqlx::query(
         r#"
         SELECT
-            id, cwd, model_provider, model, source, thread_source, git_branch,
+            id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
             title, preview, first_user_message,
             created_at_ms, updated_at_ms, recency_at_ms
         FROM threads
@@ -299,6 +305,10 @@ async fn load_session_records(
         }
         records.push(SessionRecord {
             session_id: row.get("id"),
+            rollout_path: validated_rollout_path(
+                &codex_home_path,
+                row.get::<Option<String>, _>("rollout_path").as_deref(),
+            ),
             cwd,
             provider: row.get::<Option<String>, _>("model_provider"),
             model: row.get::<Option<String>, _>("model"),
@@ -344,7 +354,9 @@ fn run_interactive_session(
         root: picker_root,
         provider: picker_provider,
         source: picker_source,
-        current_dir: context.current_dir().to_path_buf(),
+        current_dir: normalize_path(context.current_dir()),
+        checkout_root: checkout_root(context.current_dir()),
+        repo_roots: repo_roots(context.current_dir()),
         current_provider: current_provider_for_picker(context),
         records: records
             .iter()
@@ -739,9 +751,28 @@ fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
     candidate == parent || candidate.starts_with(parent)
 }
 
+fn validated_rollout_path(codex_home_path: &Path, rollout_path: Option<&str>) -> Option<String> {
+    let rollout_path = rollout_path.and_then(non_empty_trimmed)?;
+    let path = Path::new(rollout_path);
+    let Ok(canonical_path) = path.canonicalize() else {
+        return None;
+    };
+    let session_history_root = codex_home_path.join("sessions");
+    let trusted_root = session_history_root
+        .canonicalize()
+        .or_else(|_| codex_home_path.canonicalize())
+        .ok()?;
+    if !canonical_path.starts_with(&trusted_root) {
+        return None;
+    }
+    Some(canonical_path.display().to_string())
+}
+
 #[derive(Debug, Serialize)]
 struct SessionRecord {
     session_id: String,
+    #[serde(skip)]
+    rollout_path: Option<String>,
     #[serde(skip)]
     display_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -782,14 +813,24 @@ pub(crate) struct SessionPickerRecord {
     pub(crate) session_id: String,
     pub(crate) title: String,
     pub(crate) recency: String,
+    pub(crate) created: String,
     pub(crate) branch: String,
     pub(crate) context: String,
     pub(crate) cwd: Option<String>,
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) preview: Option<String>,
+    pub(crate) conversation: SessionConversationPreview,
+    pub(crate) conversation_source: Option<String>,
     pub(crate) source: Option<String>,
     pub(crate) thread_source: Option<String>,
+}
+
+/// Sanitized conversation snippets for human-only session detail UI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionConversationPreview {
+    pub(crate) snippets: Vec<String>,
+    pub(crate) unavailable_reason: Option<String>,
 }
 
 impl SessionPickerRecord {
@@ -798,6 +839,7 @@ impl SessionPickerRecord {
             session_id: record.session_id.clone(),
             title: record.display_title().to_owned(),
             recency: format_recency_at_ms(record.recency_at_ms),
+            created: format_recency_at_ms(record.created_at_ms),
             branch: record.branch().to_owned(),
             context: record
                 .cwd
@@ -811,10 +853,174 @@ impl SessionPickerRecord {
                 .preview
                 .clone()
                 .or_else(|| Some(record.display_title().to_owned())),
+            conversation: SessionConversationPreview::unavailable("history not loaded"),
+            conversation_source: record.rollout_path.clone(),
             source: record.source.clone(),
             thread_source: record.thread_source.clone(),
         }
     }
+}
+
+impl SessionConversationPreview {
+    pub(crate) fn from_rollout_path(rollout_path: Option<&str>) -> Self {
+        let Some(rollout_path) = rollout_path.and_then(non_empty_trimmed) else {
+            return Self::unavailable("history unavailable");
+        };
+        let path = Path::new(rollout_path);
+        if !path.is_file() {
+            return Self::unavailable("history unavailable");
+        }
+
+        let Ok(text) = read_history_tail(path) else {
+            return Self::unavailable("history unavailable");
+        };
+        let snippets = extract_recent_conversation_snippets(&text);
+        if snippets.is_empty() {
+            return Self::unavailable("no recent messages");
+        }
+        Self {
+            snippets,
+            unavailable_reason: None,
+        }
+    }
+
+    pub(crate) fn unavailable(reason: &str) -> Self {
+        Self {
+            snippets: Vec::new(),
+            unavailable_reason: Some(reason.to_owned()),
+        }
+    }
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn read_history_tail(path: &Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    let file_len = metadata.len();
+    let start = file_len.saturating_sub(SESSION_CONVERSATION_MAX_READ_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    if start > 0
+        && let Some((_, remaining)) = text.split_once('\n')
+    {
+        return Ok(remaining.to_owned());
+    }
+    Ok(text)
+}
+
+fn extract_recent_conversation_snippets(text: &str) -> Vec<String> {
+    let mut snippets = Vec::new();
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(snippet) = conversation_snippet_from_event(&event) else {
+            continue;
+        };
+        snippets.push(snippet);
+        if snippets.len() > SESSION_CONVERSATION_MAX_SNIPPETS {
+            snippets.remove(0);
+        }
+    }
+    snippets
+}
+
+fn conversation_snippet_from_event(event: &Value) -> Option<String> {
+    if event.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = event.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let role = payload.get("role").and_then(Value::as_str)?;
+    if !matches!(role, "user" | "assistant") {
+        return None;
+    }
+    let content = payload.get("content")?;
+    let mut fragments = Vec::new();
+    collect_text_fragments(content, &mut fragments);
+    let text = fragments.join(" ");
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.trim();
+    if normalized.is_empty() || is_control_conversation_text(normalized) {
+        return None;
+    }
+    Some(truncate_end(
+        normalized,
+        SESSION_CONVERSATION_SNIPPET_MAX_CHARS,
+    ))
+}
+
+fn collect_text_fragments(value: &Value, fragments: &mut Vec<String>) {
+    match value {
+        Value::String(text) => fragments.push(text.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_text_fragments(item, fragments);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(text) = object.get("text").and_then(Value::as_str) {
+                fragments.push(text.to_owned());
+                return;
+            }
+            for key in ["content", "output_text"] {
+                if let Some(value) = object.get(key) {
+                    collect_text_fragments(value, fragments);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_control_conversation_text(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    text.chars().count() > 5_000
+        || lower.contains("agents.md instructions")
+        || lower.contains("# agents.md")
+        || lower.contains("<instructions>")
+        || lower.contains("</instructions>")
+        || lower.contains("<hook_prompt")
+        || lower.contains("hook_run_id=")
+        || lower.contains("<turn_aborted>")
+        || lower.contains("<environment_context>")
+        || lower.contains("<permissions instructions>")
+        || lower.contains("<skills_instructions>")
+        || lower.contains("<plugins_instructions>")
+        || lower.contains("<subagent_notification>")
+        || lower.contains("<user_instructions>")
+        || lower.contains("<developer_instructions>")
+        || lower.contains("<system_instructions>")
+        || lower.contains("<context_summary>")
+        || lower.contains("<tool_call>")
+        || lower.contains("filesystem sandboxing")
+        || lower.contains("available tools and usage guidelines")
+        || lower.contains("the following is the codex agent history")
+        || lower.contains("tool call arguments")
+        || lower.contains(">>> transcript start")
+        || lower.contains("transcript start")
+        || lower.contains("transcript end")
+        || lower.contains("review only p0-p2")
+        || lower.contains("read-only implementation review")
+        || lower.contains("scope: current uncommitted diff")
+        || lower.contains("knowledge cutoff:")
+        || lower.contains("you are codex")
+        || lower.contains("available skills")
+        || lower.contains("response_item")
+        || lower.contains("api_key")
+        || lower.contains("access_token")
+        || lower.contains("refresh_token")
 }
 
 fn human_session_row(record: &SessionRecord) -> String {
@@ -940,13 +1146,249 @@ fn format_duration_ms(duration_ms: u128) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::SessionConversationPreview;
+    use super::extract_recent_conversation_snippets;
     use super::format_duration_ms;
+    use super::validated_rollout_path;
+    use serde_json::json;
+    use std::fs;
 
     #[test]
     fn duration_format_uses_now_without_suffix_for_subminute_values() {
         assert_eq!(format_duration_ms(0), "now");
         assert_eq!(format_duration_ms(59_000), "now");
         assert_eq!(format_duration_ms(60_000), "1m");
+    }
+
+    #[test]
+    fn conversation_snippets_use_recent_jsonl_user_and_assistant_messages() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "please pull main"}]
+                }
+            })
+            .to_string(),
+            "not-json".to_owned(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "checking branch and upstream state"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "tool_call",
+                    "role": "assistant",
+                    "content": [{"text": "SECRET_TOOL_OUTPUT"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"text": "system content"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        let snippets = extract_recent_conversation_snippets(&jsonl);
+
+        assert_eq!(
+            snippets,
+            vec![
+                "please pull main".to_owned(),
+                "checking branch and upstream state".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_skip_control_payloads() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "# AGENTS.md instructions\n<INSTRUCTIONS>do not display</INSTRUCTIONS>"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "<hook_prompt hook_run_id=\"x\">control</hook_prompt>"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "real assistant reply"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            extract_recent_conversation_snippets(&jsonl),
+            vec!["real assistant reply".to_owned()]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_skip_review_wrapper_prompts() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Read-only implementation review. Scope: current uncommitted diff. Review only P0-P2 findings."}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "actual assistant answer"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            extract_recent_conversation_snippets(&jsonl),
+            vec!["actual assistant answer".to_owned()]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_skip_codex_transcript_wrappers() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "The following is the Codex agent history for review. It includes tool call arguments.\n>>> TRANSCRIPT START\nuser: keep the working tree clean"
+                    }]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "actual resumed thread message"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            extract_recent_conversation_snippets(&jsonl),
+            vec!["actual resumed thread message".to_owned()]
+        );
+    }
+
+    #[test]
+    fn conversation_preview_reads_rollout_path_with_fallback() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-router-session-history-{}.jsonl",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "real local history"}]
+                }
+            })
+            .to_string(),
+        )
+        .expect("test should write history fixture");
+
+        let preview = SessionConversationPreview::from_rollout_path(Some(
+            path.to_str().expect("temp path should be utf-8"),
+        ));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(preview.snippets, vec!["real local history".to_owned()]);
+        assert_eq!(preview.unavailable_reason, None);
+
+        let missing = SessionConversationPreview::from_rollout_path(None);
+        assert_eq!(missing.snippets, Vec::<String>::new());
+        assert_eq!(
+            missing.unavailable_reason,
+            Some("history unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn rollout_path_validation_rejects_paths_outside_codex_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "codex-router-rollout-validation-{}",
+            std::process::id()
+        ));
+        let codex_home = root.join("codex-home");
+        let sessions_dir = codex_home.join("sessions");
+        let outside_dir = root.join("outside");
+        fs::create_dir_all(&sessions_dir).expect("test should create sessions dir");
+        fs::create_dir_all(&outside_dir).expect("test should create outside dir");
+        let inside = sessions_dir.join("rollout.jsonl");
+        let outside = outside_dir.join("rollout.jsonl");
+        fs::write(&inside, "").expect("test should write inside rollout");
+        fs::write(&outside, "").expect("test should write outside rollout");
+
+        assert_eq!(
+            validated_rollout_path(
+                &codex_home,
+                Some(inside.to_str().expect("inside path should be utf-8"))
+            ),
+            Some(
+                inside
+                    .canonicalize()
+                    .expect("inside path should canonicalize")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            validated_rollout_path(
+                &codex_home,
+                Some(outside.to_str().expect("outside path should be utf-8"))
+            ),
+            None
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

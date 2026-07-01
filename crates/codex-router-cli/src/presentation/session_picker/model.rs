@@ -2,10 +2,10 @@ use crate::presentation::session_picker::action::SessionsPickerKey;
 use crate::presentation::session_picker::action::SessionsPickerOutcome;
 use crate::presentation::session_picker::filters::next_root_filter;
 use crate::presentation::session_picker::filters::next_source_filter;
-use crate::presentation::session_picker::filters::provider_choices;
 use crate::presentation::session_picker::filters::provider_matches;
 use crate::presentation::session_picker::filters::root_matches;
 use crate::presentation::session_picker::filters::source_matches;
+#[cfg(test)]
 use crate::presentation::session_picker::render::render_model_snapshot;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionPickerRecord;
@@ -23,12 +23,10 @@ pub(crate) struct SessionsPickerModel {
     pub(super) source: SessionsSource,
     pub(super) search: String,
     pub(super) selected_index: usize,
-    provider_choices: Vec<SessionsProvider>,
 }
 
 impl SessionsPickerModel {
     pub(crate) fn new(request: SessionsPickerRequest, width: usize) -> Self {
-        let provider_choices = provider_choices(&request);
         Self {
             root: request.root,
             provider: request.provider.clone(),
@@ -37,7 +35,6 @@ impl SessionsPickerModel {
             width,
             search: String::new(),
             selected_index: 0,
-            provider_choices,
         }
     }
 
@@ -54,18 +51,6 @@ impl SessionsPickerModel {
             }
             SessionsPickerKey::CycleRoot => {
                 self.root = next_root_filter(self.root);
-                self.clamp_selection();
-            }
-            SessionsPickerKey::CycleProvider => {
-                let current_index = self
-                    .provider_choices
-                    .iter()
-                    .position(|provider| provider == &self.provider)
-                    .unwrap_or(0);
-                let next_index = (current_index + 1) % self.provider_choices.len().max(1);
-                if let Some(provider) = self.provider_choices.get(next_index) {
-                    self.provider = provider.clone();
-                }
                 self.clamp_selection();
             }
             SessionsPickerKey::CycleSource => {
@@ -98,6 +83,7 @@ impl SessionsPickerModel {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn render_snapshot(&self) -> String {
         render_model_snapshot(self)
     }

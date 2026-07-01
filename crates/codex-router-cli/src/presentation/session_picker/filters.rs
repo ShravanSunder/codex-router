@@ -6,25 +6,6 @@ use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSource;
 
-pub(super) fn provider_choices(request: &SessionsPickerRequest) -> Vec<SessionsProvider> {
-    let mut choices = vec![SessionsProvider::Any];
-    if request.current_provider.is_some() {
-        choices.push(SessionsProvider::Current);
-    }
-    let mut provider_ids = request
-        .records
-        .iter()
-        .filter_map(|record| record.provider.clone())
-        .collect::<Vec<_>>();
-    provider_ids.sort();
-    provider_ids.dedup();
-    choices.extend(provider_ids.into_iter().map(SessionsProvider::Id));
-    if !choices.contains(&request.provider) {
-        choices.push(request.provider.clone());
-    }
-    choices
-}
-
 pub(super) fn root_matches(
     root: SessionsRoot,
     request: &SessionsPickerRequest,
@@ -33,13 +14,14 @@ pub(super) fn root_matches(
     let Some(cwd) = record.cwd.as_deref().map(Path::new) else {
         return matches!(root, SessionsRoot::Any);
     };
+    let cwd = normalize_path(cwd);
     match root {
-        SessionsRoot::Cwd => cwd == request.current_dir,
-        SessionsRoot::Checkout => cwd.starts_with(&request.current_dir),
+        SessionsRoot::Cwd => cwd == normalize_path(&request.current_dir),
+        SessionsRoot::Checkout => path_is_equal_or_child(&cwd, &request.checkout_root),
         SessionsRoot::Repo => request
-            .current_dir
-            .parent()
-            .is_some_and(|repo_root| cwd.starts_with(repo_root)),
+            .repo_roots
+            .iter()
+            .any(|repo_root| path_is_equal_or_child(&cwd, repo_root)),
         SessionsRoot::Any => true,
     }
 }
@@ -88,4 +70,12 @@ pub(super) fn next_source_filter(source: SessionsSource) -> SessionsSource {
         SessionsSource::All => SessionsSource::Subagents,
         SessionsSource::Subagents => SessionsSource::Interactive,
     }
+}
+
+fn normalize_path(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_error| path.to_path_buf())
+}
+
+fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
+    candidate == parent || candidate.starts_with(parent)
 }

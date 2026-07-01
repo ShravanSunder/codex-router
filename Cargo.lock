@@ -357,6 +357,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-router-ux-prototype"
+version = "0.1.1"
+dependencies = [
+ "iocraft",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

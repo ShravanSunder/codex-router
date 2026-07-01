@@ -204,7 +204,12 @@ where
         }
         CliCommand::Account(command) => account::run_account_command(stdout, command)?,
         CliCommand::Quota(command) => {
-            quota::run_quota_command(stdout, command, context.stdout_is_terminal())?;
+            quota::run_quota_command(
+                stdout,
+                command,
+                context.stdout_is_terminal(),
+                context.stdout_terminal_width(),
+            )?;
         }
         CliCommand::Live(command) => live::run_live_command(stdout, command)?,
         CliCommand::Sessions(command) => sessions::run_sessions_command(stdout, command, context)?,
@@ -465,6 +470,13 @@ impl CliContext {
             return false;
         }
         std::io::stdout().is_terminal()
+    }
+
+    fn stdout_terminal_width(&self) -> Option<usize> {
+        self.env_var("CODEX_ROUTER_FORCE_TTY_WIDTH")
+            .or_else(|| self.env_var("COLUMNS"))
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|width| *width > 0)
     }
 
     fn current_dir(&self) -> &std::path::Path {
@@ -2784,19 +2796,30 @@ exit 42
             CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
-        assert!(output.stdout.starts_with("codex-router "));
-        assert!(output.stdout.contains("responses -> primary"));
+        assert!(output.stdout.starts_with("╭ Quota status "));
+        assert!(output.stdout.contains("├"));
+        assert!(output.stdout.contains("╰"));
+        assert!(
+            output
+                .stdout
+                .contains("responses -> primary    [preferred]")
+        );
         assert!(
             output
                 .stdout
                 .contains("why: preferred by quota: safest quota")
         );
-        assert!(output.stdout.contains("primary   preferred"));
-        assert!(output.stdout.contains("quota      5h 25% left"));
-        assert!(output.stdout.contains("weekly 80% left"));
-        assert!(output.stdout.contains("activity   0 clients"));
-        assert!(output.stdout.contains("reset      1 available"));
-        assert!(!output.stdout.contains("┌"));
+        assert!(output.stdout.contains("│ Account"));
+        assert!(output.stdout.contains("❯ primary"));
+        assert!(output.stdout.contains("preferred"));
+        assert!(output.stdout.contains("25% left, reset 2h 30m"));
+        assert!(output.stdout.contains("80% left, reset 6d 23h"));
+        assert!(output.stdout.contains("Selected account"));
+        assert!(output.stdout.contains("activity"));
+        assert!(output.stdout.contains("burn"));
+        assert!(output.stdout.contains("guards"));
+        assert!(!output.stdout.contains("│ Clients"));
+        assert!(output.stdout.contains("safest quota"));
         assert!(!output.stdout.contains("account ┆ status"));
         assert!(!output.stdout.contains("route     ┆ next"));
         assert!(!output.stdout.contains("acct_primary"));
@@ -2847,7 +2870,7 @@ exit 42
             CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
-        assert_eq!(output.stdout.matches("codex-router ").count(), 1);
+        assert_eq!(output.stdout.matches("Quota status").count(), 1);
         assert!(output.stdout.contains("responses -> primary"));
         assert!(output.stdout.contains("refresh failed:"));
         assert!(!output.stdout.contains("refreshing quota..."));

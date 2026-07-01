@@ -4,7 +4,6 @@ pub(crate) enum SessionsPickerKey {
     MoveDown,
     MoveUp,
     CycleRoot,
-    CycleProvider,
     CycleSource,
     SearchChar(char),
     SearchBackspace,
