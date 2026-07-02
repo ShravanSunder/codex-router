@@ -54,6 +54,12 @@ use token::export_token_assignment;
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
+#[cfg(all(debug_assertions, not(test)))]
+const DEBUG_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_DEBUG_ROUTER_ROOT";
+#[cfg(all(debug_assertions, not(test)))]
+const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
+#[cfg(all(debug_assertions, not(test)))]
+const DEFAULT_DEBUG_ROUTER_ROOT: &str = "tmp/dev-state/router-root";
 
 /// Runs the process CLI.
 pub fn run() -> i32 {
@@ -245,6 +251,24 @@ pub(crate) fn router_secret_root_or_default(
 }
 
 fn default_router_root() -> Result<PathBuf, CliError> {
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        if std::env::var_os(USE_HOME_DEFAULT_ENV).is_none() {
+            if let Some(debug_root) = std::env::var_os(DEBUG_ROUTER_ROOT_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+            {
+                return Ok(debug_root);
+            }
+
+            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+            return Ok(workspace_root.join(DEFAULT_DEBUG_ROUTER_ROOT));
+        }
+    }
+
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -2519,6 +2543,8 @@ exit 42
             .with_route_band("models", 44)
             .with_reset_unix_seconds(3_000),
         ));
+        drop(state);
+        ensure_async_state_schema(&router_root);
 
         let output = run_cli(
             [
@@ -2576,6 +2602,8 @@ exit 42
             .with_reset_unix_seconds(20_000)
             .with_stale_penalty(false),
         ));
+        drop(state);
+        ensure_async_state_schema(&router_root);
 
         let output = run_cli(
             [
@@ -2672,6 +2700,8 @@ exit 42
             .with_reset_credits_available(1)
             .with_stale_penalty(false),
         ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
 
         let output = run_cli(
             [
@@ -2778,6 +2808,8 @@ exit 42
             .with_reset_credits_available(1)
             .with_stale_penalty(false),
         ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
 
         let output = run_cli(
             [
@@ -2798,18 +2830,19 @@ exit 42
 
         let visible_stdout = strip_ansi_sequences(&output.stdout);
 
-        assert!(visible_stdout.starts_with("╭ Quota status "));
-        assert!(visible_stdout.contains("├"));
+        assert!(visible_stdout.starts_with("╭"));
+        assert!(visible_stdout.contains("Quota status"));
+        assert!(visible_stdout.contains("─"));
         assert!(visible_stdout.contains("╰"));
         assert!(visible_stdout.contains("responses -> primary    [preferred]"));
         assert!(visible_stdout.contains("why: preferred by quota: safest quota"));
-        assert!(visible_stdout.contains("│ Account"));
+        assert!(visible_stdout.contains("  Account"));
         assert!(visible_stdout.contains("❯ primary"));
         assert!(visible_stdout.contains("preferred"));
         assert!(visible_stdout.contains("25% left, reset 2h 30m"));
         assert!(visible_stdout.contains("80% left, reset 6d 23h"));
         assert!(visible_stdout.contains("Selected account"));
-        assert!(visible_stdout.contains("activity"));
+        assert!(visible_stdout.contains("Activity"));
         assert!(visible_stdout.contains("pace"));
         assert!(visible_stdout.contains("rate"));
         assert!(visible_stdout.contains("guards"));
@@ -2818,14 +2851,14 @@ exit 42
         assert!(!visible_stdout.contains("account ┆ status"));
         assert!(!visible_stdout.contains("route     ┆ next"));
         assert!(!visible_stdout.contains("acct_primary"));
-        assert!(output.stdout.contains("\x1b[36m"));
-        assert!(output.stdout.contains("\x1b[33m"));
+        assert!(output.stdout.contains("\x1b["));
+        assert!(output.stdout.contains("\x1b[1m"));
         assert!(output.stderr.is_empty());
     }
 
     #[test]
-    fn quota_status_auto_refresh_failure_keeps_single_human_status_block() {
-        let test_root = TestRoot::new("quota-status-auto-refresh-single-block");
+    fn quota_status_default_keeps_single_human_status_block_without_refresh() {
+        let test_root = TestRoot::new("quota-status-default-readonly-single-block");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
         must_ok(fs::create_dir_all(&router_root));
@@ -2851,6 +2884,8 @@ exit 42
             .with_reset_unix_seconds(20_000)
             .with_stale_penalty(false),
         ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
 
         let output = run_cli(
             [
@@ -2869,10 +2904,11 @@ exit 42
 
         assert_eq!(output.stdout.matches("Quota status").count(), 1);
         assert!(output.stdout.contains("responses -> primary"));
-        assert!(output.stdout.contains("refresh failed:"));
+        assert!(!output.stdout.contains("refresh failed:"));
         assert!(!output.stdout.contains("refreshing quota..."));
         assert!(!output.stdout.contains("updated quota:"));
-        assert!(!output.stdout.contains("┌"));
+        assert!(output.stdout.contains("┌"));
+        assert!(output.stdout.contains("Selected account"));
         assert!(output.stderr.is_empty());
     }
 
@@ -2934,6 +2970,8 @@ exit 42
             .with_reset_credits_available(1)
             .with_stale_penalty(false),
         ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
 
         let output = run_cli(
             [
@@ -3119,6 +3157,7 @@ exit 42
             10_900,
             8,
         )));
+        must_ok(runtime.block_on(async_state.close()));
 
         let output = run_cli(
             [
@@ -3210,7 +3249,7 @@ exit 42
                 .build(),
         );
         let async_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
-        drop(async_state);
+        must_ok(runtime.block_on(async_state.close()));
         runtime.block_on(async {
             let pool = must_ok(
                 sqlx::sqlite::SqlitePoolOptions::new()
@@ -3342,6 +3381,7 @@ exit 42
             .with_effective(true);
             must_ok(runtime.block_on(async_state.append_quota_history_observation(&observation)));
         }
+        must_ok(runtime.block_on(async_state.close()));
 
         let output = run_cli(
             [
@@ -4878,16 +4918,10 @@ exit 42
             Err(error) => panic!("quota command should parse: {error}"),
         };
 
-        let QuotaCommand::Status {
-            router_root,
-            auto_refresh,
-            ..
-        } = command
-        else {
+        let QuotaCommand::Status { router_root, .. } = command else {
             panic!("quota status command should parse");
         };
         assert_eq!(router_root, default_router_root_for_test());
-        assert!(auto_refresh);
     }
 
     #[test]
@@ -4946,10 +4980,9 @@ exit 42
                 Err(error) => panic!("quota command should parse: {error}"),
             };
 
-            let QuotaCommand::Status { auto_refresh, .. } = command else {
+            let QuotaCommand::Status { .. } = command else {
                 panic!("quota --no-refresh should parse as status");
             };
-            assert!(!auto_refresh);
         }
     }
 
@@ -4968,6 +5001,7 @@ exit 42
         assert!(!command.list);
         assert_eq!(command.format, crate::sessions::SessionsFormat::Table);
         assert!(!command.last);
+        assert_eq!(command.limit, 100);
         assert!(!command.dry_run);
     }
 
@@ -4985,6 +5019,8 @@ exit 42
             OsString::from("--list"),
             OsString::from("--format"),
             OsString::from("json"),
+            OsString::from("--limit"),
+            OsString::from("25"),
             OsString::from("--last"),
         ]) {
             Ok(CliCommand::Sessions(command)) => command,
@@ -4999,6 +5035,7 @@ exit 42
         assert!(command.list);
         assert_eq!(command.format, crate::sessions::SessionsFormat::Json);
         assert!(command.last);
+        assert_eq!(command.limit, 25);
         assert!(!command.dry_run);
     }
 
@@ -5079,6 +5116,73 @@ exit 42
             test_root.path().join("project-a").display().to_string()
         );
         assert_eq!(sessions[1]["session_id"], "thread-older");
+    }
+
+    #[test]
+    fn sessions_list_json_respects_limit_after_filtering_matches() {
+        const PROMPT_CANARY: &str = "LIMIT_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-limit");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            PROMPT_CANARY,
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-third",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    3_000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-second",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2_000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-first",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    1_000,
+                ),
+            ],
+        );
+
+        let output = run_cli(
+            [
+                "sessions",
+                "--any",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+                "--limit",
+                "2",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(project),
+        );
+
+        assert_session_ids(&output.stdout, &["thread-third", "thread-second"]);
+        assert!(!output.stdout.contains(PROMPT_CANARY));
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -6916,6 +7020,18 @@ exit 42
             stdout: must_ok(String::from_utf8(stdout)),
             stderr: must_ok(String::from_utf8(stderr)),
         }
+    }
+
+    fn ensure_async_state_schema(router_root: &Path) {
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(
+            &router_root.join("state.sqlite"),
+        )));
+        must_ok(runtime.block_on(state.close()));
     }
 
     fn assert_session_ids(stdout: &str, expected_session_ids: &[&str]) {

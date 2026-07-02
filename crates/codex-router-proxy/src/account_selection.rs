@@ -43,7 +43,7 @@ use codex_router_state::repositories::AffinityRepository;
 #[cfg(test)]
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::selection_projection::AsyncSelectionProjectionRepository;
-use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts;
+use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts_read_only;
 use codex_router_state::sqlite::AsyncAffinityRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
@@ -845,7 +845,7 @@ where
             let active_session_overrides = active_reservation_book
                 .as_ref()
                 .map(active_session_counts_by_account);
-            let projection = project_route_band_selection_inputs_with_active_counts(
+            let projection = project_route_band_selection_inputs_with_active_counts_read_only(
                 self.state_repository,
                 route_band.as_str(),
                 now_unix_seconds,
@@ -1375,7 +1375,7 @@ where
         }
         None => None,
     };
-    let projection = project_route_band_selection_inputs_with_active_counts(
+    let projection = project_route_band_selection_inputs_with_active_counts_read_only(
         state_repository,
         route_band.as_str(),
         now_unix_seconds,

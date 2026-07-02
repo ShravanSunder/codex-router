@@ -421,7 +421,8 @@ impl LoopbackRouterRuntimeConfig {
 pub struct LoopbackRouterRuntime {
     runtime: tokio::runtime::Runtime,
     server: AsyncLoopbackServerRuntime,
-    state_database_path: PathBuf,
+    writable_state_store: AsyncSqliteStateStore,
+    selection_state_store: AsyncSqliteStateStore,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
@@ -452,8 +453,12 @@ impl LoopbackRouterRuntime {
         let credential_factory = credential_resources.credential_factory();
         let affinity_state_store =
             runtime.block_on(AsyncSqliteStateStore::open(&config.state_database_path))?;
-        let affinity_owner_recorder =
-            Arc::new(AsyncSqliteAffinityOwnerRecorder::new(affinity_state_store));
+        let selection_state_store = runtime.block_on(AsyncSqliteStateStore::open_read_only(
+            &config.state_database_path,
+        ))?;
+        let affinity_owner_recorder = Arc::new(AsyncSqliteAffinityOwnerRecorder::new(
+            affinity_state_store.clone(),
+        ));
         let auth_gate = match config.local_token {
             Some(local_token) => crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
                 local_token,
@@ -470,7 +475,8 @@ impl LoopbackRouterRuntime {
         Ok(Self {
             runtime,
             server,
-            state_database_path: config.state_database_path,
+            writable_state_store: affinity_state_store,
+            selection_state_store,
             affinity_secret_provider,
             affinity_owner_recorder,
             auth_gate,
@@ -665,7 +671,8 @@ impl LoopbackRouterRuntime {
         affinity_record_tasks: TaskTracker,
     ) -> LoopbackProtocolConnectionHandler {
         LoopbackProtocolConnectionHandler {
-            state_database_path: self.state_database_path.clone(),
+            writable_state_store: self.writable_state_store.clone(),
+            selection_state_store: self.selection_state_store.clone(),
             credential_factory: self.credential_factory.clone(),
             affinity_secret_provider: self.affinity_secret_provider.clone(),
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
@@ -738,7 +745,8 @@ fn supervise_detached_connection_handler(
 
 #[derive(Clone)]
 struct LoopbackProtocolConnectionHandler {
-    state_database_path: PathBuf,
+    writable_state_store: AsyncSqliteStateStore,
+    selection_state_store: AsyncSqliteStateStore,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
@@ -871,9 +879,8 @@ impl LoopbackProtocolConnectionHandler {
         path: String,
         local_peer_addr: Option<SocketAddr>,
     ) -> Result<(), LoopbackRouterRuntimeError> {
-        let state_store = AsyncSqliteStateStore::open(&self.state_database_path).await?;
         let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
-            &state_store,
+            &self.selection_state_store,
             Arc::clone(&self.weighted_selectors),
             Arc::clone(&self.account_holds),
             Arc::clone(&self.active_reservations),
@@ -881,13 +888,13 @@ impl LoopbackProtocolConnectionHandler {
             self.runtime_clock(),
         )
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
-            state_store.clone(),
+            self.writable_state_store.clone(),
             self.affinity_record_tasks.clone(),
             self.runtime_clock(),
         )));
         let credential_resolver = self
             .credential_factory
-            .resolver_for_state(state_store.clone());
+            .resolver_for_state(self.writable_state_store.clone());
         let protocol_router = WebSocketProtocolRouter::new();
         let tunnel = if let Some(audit_sink) = &self.audit_sink {
             AsyncWebSocketTunnel::new_with_audit_sink(
@@ -911,7 +918,7 @@ impl LoopbackProtocolConnectionHandler {
         .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))
         .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone())
         .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
-            state_store.clone(),
+            self.writable_state_store.clone(),
             Arc::clone(&self.active_reservations),
         )))
         .with_local_peer_addr(local_peer_addr);
@@ -1044,10 +1051,7 @@ impl LoopbackProtocolConnectionHandler {
     }
 
     async fn enabled_account_attempt_limit(&self) -> usize {
-        let Ok(state_store) = AsyncSqliteStateStore::open(&self.state_database_path).await else {
-            return 1;
-        };
-        let Ok(accounts) = state_store.list_accounts().await else {
+        let Ok(accounts) = self.selection_state_store.list_accounts().await else {
             return 1;
         };
         accounts
@@ -1062,16 +1066,11 @@ impl LoopbackProtocolConnectionHandler {
         request: HttpProxyRequest,
         body: BoxBody<Bytes, AsyncHttpBodyError>,
     ) -> Result<PreparedAsyncStreamingHttpProxyRequest, HttpProxyError> {
-        let state_store = AsyncSqliteStateStore::open(&self.state_database_path)
-            .await
-            .map_err(|_error| HttpProxyError::Selection {
-                reason: crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
-            })?;
         let credential_resolver = self
             .credential_factory
-            .resolver_for_state(state_store.clone());
+            .resolver_for_state(self.writable_state_store.clone());
         let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
-            &state_store,
+            &self.selection_state_store,
             Arc::clone(&self.weighted_selectors),
             Arc::clone(&self.account_holds),
             Arc::clone(&self.active_reservations),
@@ -1079,7 +1078,7 @@ impl LoopbackProtocolConnectionHandler {
             self.runtime_clock(),
         )
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
-            state_store.clone(),
+            self.writable_state_store.clone(),
             self.affinity_record_tasks.clone(),
             self.runtime_clock(),
         )));
@@ -1091,7 +1090,7 @@ impl LoopbackProtocolConnectionHandler {
         )
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
-            state_store.clone(),
+            self.writable_state_store.clone(),
             Arc::clone(&self.active_reservations),
         )));
         let service = if let Some(audit_sink) = &self.audit_sink {

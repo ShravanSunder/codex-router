@@ -56,7 +56,7 @@ use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
-use codex_router_state::selection_projection::project_route_band_selection_inputs;
+use codex_router_state::selection_projection::project_route_band_selection_inputs_read_only;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use opentelemetry::KeyValue;
@@ -71,12 +71,17 @@ use crate::ArgumentParser;
 use crate::CliError;
 use crate::credential_runtime::CliCredentialResolver;
 use crate::credential_runtime::CliCredentialResolverOpenError;
+use crate::presentation::quota::QuotaSelectedAccountViewModel;
+use crate::presentation::quota::QuotaStatusAccountViewModel;
+use crate::presentation::quota::QuotaStatusViewModel;
+use crate::presentation::quota::write_quota_status_view;
 use crate::router_root_or_default;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
 const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 600;
 const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
+const QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 
 /// Quota CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,8 +98,6 @@ pub enum QuotaCommand {
         all_limits: bool,
         /// Current clock used for pace and runout math.
         now_unix_seconds: u64,
-        /// Whether human status should refresh after rendering cached data.
-        auto_refresh: bool,
     },
     /// Refreshes persisted quota from the provider.
     Refresh {
@@ -135,7 +138,6 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
-                    auto_refresh: options.auto_refresh,
                 })
             }
             Some(unknown) if !unknown.starts_with('-') => Err(CliError::UnknownCommand {
@@ -149,7 +151,6 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
-                    auto_refresh: options.auto_refresh,
                 })
             }
         }
@@ -236,7 +237,6 @@ pub fn run_quota_command(
             format,
             all_limits,
             now_unix_seconds,
-            auto_refresh,
         } => render_quota_status(
             stdout,
             router_root,
@@ -245,7 +245,6 @@ pub fn run_quota_command(
             stdout_terminal_width,
             all_limits,
             now_unix_seconds,
-            auto_refresh,
         ),
         QuotaCommand::Refresh {
             router_root,
@@ -258,7 +257,7 @@ const QUOTA_HELP_TEXT: &str = "\
 codex-router quota
 
 commands:
-  quota          Show quota, refresh state, and next account
+  quota          Show persisted quota status and next account
   quota refresh  Refresh quota data now
 ";
 
@@ -772,13 +771,16 @@ where
     if failed_count > 0 {
         writeln!(stdout, "failed: {failed_count}").map_err(QuotaCommandError::Stdout)?;
     }
-    if refreshed_count == 0 && failed_count > 0 {
-        return Err(QuotaCommandError::ProviderResponse {
+    let refresh_result = if refreshed_count == 0 && failed_count > 0 {
+        Err(QuotaCommandError::ProviderResponse {
             message: "quota refresh failed for all eligible route bands".to_owned(),
-        });
-    }
+        })
+    } else {
+        Ok(())
+    };
+    quota_history_runtime.block_on(quota_history_state.close())?;
 
-    Ok(())
+    refresh_result
 }
 
 fn append_success_quota_history_observation(
@@ -1212,66 +1214,16 @@ fn render_quota_status(
     stdout_terminal_width: Option<usize>,
     all_limits: bool,
     now_unix_seconds: u64,
-    auto_refresh: bool,
 ) -> Result<(), QuotaCommandError> {
-    if format == QuotaStatusFormat::Json && auto_refresh {
-        let _refresh_result = refresh_quota(
-            &mut Vec::new(),
-            router_root.clone(),
-            DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-        );
-        return render_quota_status_once(
-            stdout,
-            &router_root,
-            format,
-            stdout_is_terminal,
-            stdout_terminal_width,
-            all_limits,
-            current_unix_seconds(),
-        );
-    }
-
-    if !auto_refresh {
-        return render_quota_status_once(
-            stdout,
-            &router_root,
-            format,
-            stdout_is_terminal,
-            stdout_terminal_width,
-            all_limits,
-            now_unix_seconds,
-        );
-    }
-
-    let mut refresh_output = Vec::new();
-    match refresh_quota(
-        &mut refresh_output,
-        router_root.clone(),
-        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-    ) {
-        Ok(()) => render_quota_status_once(
-            stdout,
-            &router_root,
-            format,
-            stdout_is_terminal,
-            stdout_terminal_width,
-            all_limits,
-            current_unix_seconds(),
-        ),
-        Err(error) => {
-            render_quota_status_once(
-                stdout,
-                &router_root,
-                format,
-                stdout_is_terminal,
-                stdout_terminal_width,
-                all_limits,
-                now_unix_seconds,
-            )?;
-            writeln!(stdout, "refresh failed: {error}").map_err(QuotaCommandError::Stdout)?;
-            Ok(())
-        }
-    }
+    render_quota_status_once(
+        stdout,
+        &router_root,
+        format,
+        stdout_is_terminal,
+        stdout_terminal_width,
+        all_limits,
+        now_unix_seconds,
+    )
 }
 
 fn render_quota_status_once(
@@ -1321,16 +1273,18 @@ fn load_quota_status_report(
         .build()
         .map_err(QuotaCommandError::Runtime)?;
     let quota_history_state =
-        quota_history_runtime.block_on(AsyncSqliteStateStore::open(&state_db_path))?;
+        quota_history_runtime.block_on(AsyncSqliteStateStore::open_read_only(&state_db_path))?;
     let accounts = quota_history_runtime.block_on(quota_history_state.list_accounts())?;
-    quota_status_report(
+    let report = quota_status_report(
         &quota_history_runtime,
         &quota_history_state,
         &accounts,
         all_limits,
         now_unix_seconds,
         unicode_bars,
-    )
+    )?;
+    quota_history_runtime.block_on(quota_history_state.close())?;
+    Ok(report)
 }
 
 fn quota_status_report(
@@ -1351,12 +1305,13 @@ fn quota_status_report(
         .into_iter()
         .map(|status| (status.account_id().clone(), status))
         .collect::<HashMap<_, _>>();
-    let active_client_counts_result =
-        quota_history_runtime.block_on(quota_history_state.active_client_counts_for_route_band(
+    let active_client_counts_result = quota_history_runtime.block_on(
+        quota_history_state.active_client_counts_for_route_band_read_only(
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
             ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
-        ));
+        ),
+    );
     let active_client_mirror_source = if active_client_counts_result.is_ok() {
         "sqlx_mirror"
     } else {
@@ -1377,7 +1332,7 @@ fn quota_status_report(
             .collect::<HashMap<_, _>>()
     });
     let selection_projection =
-        quota_history_runtime.block_on(project_route_band_selection_inputs(
+        quota_history_runtime.block_on(project_route_band_selection_inputs_read_only(
             quota_history_state,
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
@@ -1515,27 +1470,11 @@ enum QuotaTableStyle {
 }
 
 impl QuotaTableStyle {
-    fn accent(self, value: &str) -> String {
-        self.paint("\x1b[36m", value)
-    }
-
-    fn selected(self, value: &str) -> String {
-        self.paint("\x1b[33m", value)
-    }
-
-    fn healthy(self, value: &str) -> String {
-        self.paint("\x1b[32m", value)
-    }
-
-    fn muted(self, value: &str) -> String {
-        self.paint("\x1b[90m", value)
-    }
-
-    fn paint(self, prefix: &str, value: &str) -> String {
+    const fn ansi(self) -> bool {
         match self {
             #[cfg(test)]
-            Self::PlainText => value.to_owned(),
-            Self::TerminalColor => format!("{prefix}{value}\x1b[0m"),
+            Self::PlainText => false,
+            Self::TerminalColor => true,
         }
     }
 }
@@ -1548,313 +1487,75 @@ fn write_quota_table_with_style(
 ) -> Result<(), QuotaCommandError> {
     let rows = report.rows();
     let width = terminal_width.unwrap_or(100).max(40);
-    write_quota_border_top(stdout, width, "Quota status", style)?;
-    write_quota_box_line(
-        stdout,
+    let view_model = quota_status_view_model(report, rows, width);
+    write_quota_status_view(stdout, view_model, style.ansi()).map_err(QuotaCommandError::Stdout)
+}
+
+fn quota_status_view_model(
+    report: &QuotaStatusReport,
+    rows: &[QuotaStatusRow],
+    width: usize,
+) -> QuotaStatusViewModel {
+    let selected_row = rows.iter().find(|row| row.preferred_next);
+    QuotaStatusViewModel {
         width,
-        &format!(
+        route_line: format!(
             "{} -> {}    {}    {}",
             report.route_band,
             selected_account_label(rows),
             selected_account_badge(rows),
             refresh_summary(rows)
         ),
-        style,
-        QuotaLineStyle::Summary,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!("why: {}", selector_summary(rows)),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_border_rule(stdout, width, style)?;
-
-    write_quota_box_line(
-        stdout,
-        width,
-        "Account      Status              Quota / burn",
-        style,
-        QuotaLineStyle::Header,
-    )?;
-    write_quota_border_rule(stdout, width, style)?;
-    for (index, row) in rows.iter().enumerate() {
-        if index > 0 {
-            write_quota_box_line(stdout, width, "", style, QuotaLineStyle::Normal)?;
-        }
-        write_quota_account_block(stdout, width, row, report.now_unix_seconds, style)?;
-    }
-    if let Some(selected_row) = rows.iter().find(|row| row.preferred_next) {
-        write_quota_border_rule(stdout, width, style)?;
-        write_selected_quota_details_with_style(
-            stdout,
-            width,
-            selected_row,
-            report.now_unix_seconds,
-            style,
-        )?;
-    }
-    write_quota_border_bottom(stdout, width, style)?;
-
-    Ok(())
-}
-
-fn write_quota_account_block(
-    stdout: &mut impl Write,
-    width: usize,
-    row: &QuotaStatusRow,
-    now_unix_seconds: u64,
-    style: QuotaTableStyle,
-) -> Result<(), QuotaCommandError> {
-    let marker = if row.preferred_next { "❯" } else { " " };
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "{marker} {:<12} {:<18} {}",
-            row.account_label,
-            quota_state_text(row),
-            reason_summary(row)
-        ),
-        style,
-        if row.preferred_next {
-            QuotaLineStyle::Selected
-        } else {
-            QuotaLineStyle::Normal
-        },
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "    {}",
-            quota_window_visual_summary(
+        why_line: format!("why: {}", selector_summary(rows)),
+        rows: rows
+            .iter()
+            .map(|row| QuotaStatusAccountViewModel {
+                selected: row.preferred_next,
+                account: row.account_label.clone(),
+                status: quota_state_text(row).to_owned(),
+                active_clients: active_clients_label(row),
+                reason: reason_summary(row),
+                weekly_window: quota_window_visual_summary(
+                    &row.windows,
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    "weekly",
+                    report.now_unix_seconds,
+                ),
+                burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
+                weekly_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds),
+            })
+            .collect(),
+        selected: selected_row.map(|row| QuotaSelectedAccountViewModel {
+            account: row.account_label.clone(),
+            status: quota_state_text(row).to_owned(),
+            reason: first_line(&row.routing).to_owned(),
+            short_window: quota_window_visual_summary(
                 &row.windows,
                 V1_SHORT_WINDOW_SECONDS,
-                "5h",
-                now_unix_seconds,
+                "",
+                report.now_unix_seconds,
             )
-        ),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "    {}",
-            quota_window_visual_summary(
+            .trim()
+            .to_owned(),
+            weekly_window: quota_window_visual_summary(
                 &row.windows,
                 V1_WEEKLY_WINDOW_SECONDS,
-                "weekly",
-                now_unix_seconds,
+                "",
+                report.now_unix_seconds,
             )
-        ),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "    {}",
-            quota_pace_summary(row.weekly_pace, now_unix_seconds)
-        ),
-        style,
-        if row.preferred_next {
-            QuotaLineStyle::Healthy
-        } else {
-            QuotaLineStyle::Normal
-        },
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "    activity {:<8} {}",
-            active_clients_count(row),
-            quota_rate_summary(row.weekly_pace)
-        ),
-        style,
-        QuotaLineStyle::Normal,
-    )
-}
-
-fn write_selected_quota_details_with_style(
-    stdout: &mut impl Write,
-    width: usize,
-    row: &QuotaStatusRow,
-    now_unix_seconds: u64,
-    style: QuotaTableStyle,
-) -> Result<(), QuotaCommandError> {
-    write_quota_box_line(
-        stdout,
-        width,
-        "Selected account",
-        style,
-        QuotaLineStyle::Header,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "{}    {}    {}",
-            row.account_label,
-            quota_state_text(row),
-            first_line(&row.routing)
-        ),
-        style,
-        QuotaLineStyle::Selected,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "quota    {}",
-            quota_window_visual_summary(
-                &row.windows,
-                V1_SHORT_WINDOW_SECONDS,
-                "5h",
-                now_unix_seconds,
-            )
-        ),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "         {}",
-            quota_window_visual_summary(
-                &row.windows,
-                V1_WEEKLY_WINDOW_SECONDS,
-                "weekly",
-                now_unix_seconds,
-            )
-        ),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "pace     {}",
-            quota_pace_summary(row.weekly_pace, now_unix_seconds)
-        ),
-        style,
-        QuotaLineStyle::Healthy,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &quota_rate_summary(row.weekly_pace),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!("clients  {}", active_clients_count(row)),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!(
-            "guards   5h {}% / weekly {}%",
-            row.short_pressure, row.long_pressure
-        ),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!("reset    {}", row.reset_credits_available),
-        style,
-        QuotaLineStyle::Normal,
-    )?;
-    write_quota_box_line(
-        stdout,
-        width,
-        &format!("note     {}", first_line(&row.routing)),
-        style,
-        QuotaLineStyle::Normal,
-    )
-}
-
-fn write_quota_border_top(
-    stdout: &mut impl Write,
-    width: usize,
-    title: &str,
-    style: QuotaTableStyle,
-) -> Result<(), QuotaCommandError> {
-    let label = format!(" {title} ");
-    let fill = width.saturating_sub(2 + label.chars().count());
-    writeln!(
-        stdout,
-        "{}",
-        style.accent(&format!("╭{label}{}╮", "─".repeat(fill)))
-    )
-    .map_err(QuotaCommandError::Stdout)
-}
-
-fn write_quota_border_rule(
-    stdout: &mut impl Write,
-    width: usize,
-    style: QuotaTableStyle,
-) -> Result<(), QuotaCommandError> {
-    writeln!(
-        stdout,
-        "{}",
-        style.muted(&format!("├{}┤", "─".repeat(width.saturating_sub(2))))
-    )
-    .map_err(QuotaCommandError::Stdout)
-}
-
-fn write_quota_border_bottom(
-    stdout: &mut impl Write,
-    width: usize,
-    style: QuotaTableStyle,
-) -> Result<(), QuotaCommandError> {
-    writeln!(
-        stdout,
-        "{}",
-        style.accent(&format!("╰{}╯", "─".repeat(width.saturating_sub(2))))
-    )
-    .map_err(QuotaCommandError::Stdout)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum QuotaLineStyle {
-    Normal,
-    Header,
-    Summary,
-    Selected,
-    Healthy,
-}
-
-fn write_quota_box_line(
-    stdout: &mut impl Write,
-    width: usize,
-    content: &str,
-    style: QuotaTableStyle,
-    line_style: QuotaLineStyle,
-) -> Result<(), QuotaCommandError> {
-    let inner_width = width.saturating_sub(4);
-    let fitted = fit_quota_cell(content, inner_width);
-    let fitted = match line_style {
-        QuotaLineStyle::Normal => fitted,
-        QuotaLineStyle::Header => style.accent(&fitted),
-        QuotaLineStyle::Summary => style.selected(&fitted),
-        QuotaLineStyle::Selected => style.selected(&fitted),
-        QuotaLineStyle::Healthy => style.healthy(&fitted),
-    };
-    writeln!(stdout, "│ {fitted} │").map_err(QuotaCommandError::Stdout)
+            .trim()
+            .to_owned(),
+            burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
+            burn_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds)
+                .replace("  ", " "),
+            total_rate: quota_total_rate_summary(row.weekly_pace),
+            connection_rate: quota_connection_rate_summary(row.weekly_pace),
+            active_clients: active_clients_label(row),
+            guards: format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure),
+            reset: row.reset_credits_available.clone(),
+            note: first_line(&row.routing).to_owned(),
+        }),
+    }
 }
 
 fn write_quota_plain(
@@ -2029,30 +1730,17 @@ fn first_line(value: &str) -> &str {
     value.lines().next().unwrap_or(value).trim()
 }
 
-fn fit_quota_cell(value: &str, width: usize) -> String {
-    let fitted = fit_quota_line(value, width);
-    let padding = width.saturating_sub(fitted.chars().count());
-    format!("{fitted}{}", " ".repeat(padding))
-}
-
-fn fit_quota_line(line: &str, width: usize) -> String {
-    let line = line.replace('\n', " ");
-    let character_count = line.chars().count();
-    if character_count <= width {
-        return line;
-    }
-    if width <= 3 {
-        return ".".repeat(width);
-    }
-    let keep = width - 3;
-    let mut fitted = line.chars().take(keep).collect::<String>();
-    fitted.push_str("...");
-    fitted
-}
-
-fn active_clients_count(row: &QuotaStatusRow) -> String {
-    row.active_clients_value
-        .map_or_else(|| "?".to_owned(), |count| count.to_string())
+fn active_clients_label(row: &QuotaStatusRow) -> String {
+    row.active_clients_value.map_or_else(
+        || "unknown clients".to_owned(),
+        |count| {
+            if count == 1 {
+                "1 client".to_owned()
+            } else {
+                format!("{count} clients")
+            }
+        },
+    )
 }
 
 fn reason_summary(row: &QuotaStatusRow) -> String {
@@ -2263,7 +1951,8 @@ fn attach_history_estimates_to_display_windows(
     windows: &mut [DisplayQuotaWindow],
 ) -> Result<(), QuotaCommandError> {
     let estimator = QuotaRunRateEstimator::new(DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS);
-    let observed_from_unix_seconds = now_unix_seconds.saturating_sub(V1_WEEKLY_WINDOW_SECONDS);
+    let observed_from_unix_seconds =
+        now_unix_seconds.saturating_sub(QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS);
     for window in windows {
         let Some(reset_unix_seconds) = window.reset_unix_seconds else {
             continue;
@@ -2586,13 +2275,10 @@ fn quota_pace_summary(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64
         || "safe pace unknown".to_owned(),
         |load| format!("{load}% safe pace"),
     );
-    format!(
-        "{direction}  burn {}  {pace_load}",
-        quota_burn_bar(snapshot, now_unix_seconds)
-    )
+    format!("{direction}  {pace_load}")
 }
 
-fn quota_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
+fn quota_total_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
     let Some(snapshot) = snapshot else {
         return "rate unknown".to_owned();
     };
@@ -2603,19 +2289,24 @@ fn quota_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
             || "unknown".to_owned(),
             format_burn_rate_basis_points_per_hour,
         );
+    format!(
+        "{total_rate} total ({})",
+        run_rate_confidence_label(snapshot.confidence)
+    )
+}
+
+fn quota_connection_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return "connection rate unknown".to_owned();
+    };
     let per_connection_rate = snapshot
         .per_connection_burn_basis_points_per_hour
         .map_or_else(
             || "unknown".to_owned(),
-            |basis_points| {
-                format!(
-                    "{}/conn",
-                    format_burn_rate_basis_points_per_hour(basis_points)
-                )
-            },
+            |basis_points| format_burn_rate_basis_points_per_hour(basis_points),
         );
     format!(
-        "rate {total_rate} total, {per_connection_rate} ({})",
+        "{per_connection_rate}/conn ({})",
         run_rate_confidence_label(snapshot.confidence)
     )
 }
@@ -2645,7 +2336,10 @@ fn quota_pace_direction(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> S
     }
 }
 
-fn quota_burn_bar(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> String {
+fn quota_safe_pace_meter(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64) -> String {
+    let Some(snapshot) = snapshot else {
+        return "??????????".to_owned();
+    };
     let load = quota_pace_load(snapshot, now_unix_seconds).unwrap_or(0);
     let filled = load.min(100).div_ceil(10) as usize;
     let empty = 10_usize.saturating_sub(filled);
@@ -3444,7 +3138,6 @@ struct QuotaStatusOptions {
     format: QuotaStatusFormat,
     all_limits: bool,
     now_unix_seconds: u64,
-    auto_refresh: bool,
 }
 
 impl Default for QuotaStatusOptions {
@@ -3454,7 +3147,6 @@ impl Default for QuotaStatusOptions {
             format: QuotaStatusFormat::Table,
             all_limits: false,
             now_unix_seconds: current_unix_seconds(),
-            auto_refresh: true,
         }
     }
 }
@@ -3477,7 +3169,9 @@ impl QuotaStatusOptions {
                     options.all_limits = true;
                 }
                 "--no-refresh" => {
-                    options.auto_refresh = false;
+                    // Status is read-only. Keep accepting the old explicit
+                    // flag so scripts can state intent without changing
+                    // behavior.
                 }
                 "--now-unix-seconds" => {
                     let value = parser.next_required_value("--now-unix-seconds")?;
@@ -3697,8 +3391,20 @@ mod tests {
         let text = must_ok(String::from_utf8(output));
 
         assert!(
-            text.contains("Quota / burn"),
-            "quota table should label the quota and burn section:\n{text}"
+            text.contains("Weekly pace"),
+            "quota table should make weekly pace the main-list quota column:\n{text}"
+        );
+        assert!(
+            text.contains("  Account"),
+            "account header should reserve selector-marker space:\n{text}"
+        );
+        assert!(
+            text.contains("Quota windows") && text.contains("Burn pace"),
+            "selected account details should separate quota windows from burn pace:\n{text}"
+        );
+        assert!(
+            text.contains("0 clients") || text.contains("1 client"),
+            "main account rows should expose active clients under Status:\n{text}"
         );
         assert!(
             text.contains("%/h") && text.contains("%/h/conn"),
@@ -3713,12 +3419,16 @@ mod tests {
             "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
         );
         assert!(
-            text.contains("burn ▰") || text.contains("burn ▱"),
-            "quota table should show burn pace with a distinct burn bar glyph:\n{text}"
+            text.contains("current") && text.contains("▰"),
+            "quota table should show the selected burn pace as an explicit block meter:\n{text}"
         );
         assert!(
-            !text.contains("[████") && !text.contains("[░░░"),
-            "quota table should not use bracketed quota glyphs for burn pace:\n{text}"
+            text.contains("burn ▰") || text.contains("burn ▱"),
+            "main account rows should show a burn/pace meter in Weekly pace:\n{text}"
+        );
+        assert!(
+            !text.contains("current [") && !text.contains('■'),
+            "quota table should not use the old bracketed burn meter:\n{text}"
         );
     }
 
@@ -3736,16 +3446,16 @@ mod tests {
         let text = must_ok(String::from_utf8(output));
 
         assert!(
-            text.contains("\x1b[36m"),
-            "quota title and section labels should use cyan ANSI color:\n{text:?}"
+            text.contains("\x1b["),
+            "quota table should emit ANSI styling through iocraft:\n{text:?}"
         );
         assert!(
-            text.contains("\x1b[33m"),
-            "selected account text should use yellow ANSI color:\n{text:?}"
+            text.contains("\x1b[1m"),
+            "quota title and selected text should use emphasized iocraft styling:\n{text:?}"
         );
         assert!(
-            text.contains("\x1b[32m"),
-            "healthy quota and preferred state should use green ANSI color:\n{text:?}"
+            !text.contains("\x1b[32m"),
+            "quota status should avoid the old mixed green/yellow status palette:\n{text:?}"
         );
         assert!(
             !text.contains("\x1b[48;2;58;70;122m"),
@@ -4013,7 +3723,7 @@ mod tests {
             "quota capture width {width} overflowed:\n{text}"
         );
         assert!(
-            text.contains('╭') && text.contains('╰') && text.contains("│ Account"),
+            text.contains('╭') && text.contains('╰') && text.contains("  Account"),
             "quota capture should render boxed quota blocks:\n{text}"
         );
         if width == 72 {

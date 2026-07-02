@@ -34,6 +34,14 @@ const SESSION_CONTEXT_MAX_CHARS: usize = 32;
 const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 256 * 1024;
 const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
+const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
+const SESSION_RECORD_PAGE_SIZE: usize = 250;
+#[cfg(all(debug_assertions, not(test)))]
+const DEBUG_CODEX_HOME_ENV: &str = "CODEX_ROUTER_DEBUG_CODEX_HOME";
+#[cfg(all(debug_assertions, not(test)))]
+const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
+#[cfg(all(debug_assertions, not(test)))]
+const DEFAULT_DEBUG_CODEX_HOME: &str = "tmp/dev-state/codex-home";
 
 /// Session search root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +132,8 @@ pub struct SessionsCommand {
     pub format: SessionsFormat,
     /// Resume the latest session matching filters.
     pub last: bool,
+    /// Maximum matching sessions to load.
+    pub limit: usize,
     /// Print the command that would be launched instead of executing it.
     pub dry_run: bool,
 }
@@ -143,6 +153,7 @@ impl SessionsCommand {
             list: parsed.list,
             format: parsed.format,
             last: parsed.last,
+            limit: parsed.limit,
             dry_run: parsed.dry_run,
         })
     }
@@ -169,6 +180,8 @@ struct ClapSessionsCommand {
     format: SessionsFormat,
     #[arg(long)]
     last: bool,
+    #[arg(long, default_value_t = DEFAULT_SESSION_RECORD_LIMIT)]
+    limit: usize,
     #[arg(long)]
     dry_run: bool,
 }
@@ -271,61 +284,94 @@ async fn load_session_records(
         .await
         .map_err(SessionsCommandError::Sqlx)?;
 
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
-            title, preview, first_user_message,
-            created_at_ms, updated_at_ms, recency_at_ms
-        FROM threads
-        WHERE archived = 0
-        ORDER BY
-            CASE ? WHEN 'created' THEN created_at_ms ELSE recency_at_ms END DESC,
-            id DESC
-        "#,
-    )
-    .bind(sort_key(command.sort))
-    .fetch_all(&pool)
-    .await
-    .map_err(SessionsCommandError::Sqlx)?;
-
     let mut records = Vec::new();
-    for row in rows {
-        let source = row.get::<Option<String>, _>("source");
-        let thread_source = row.get::<Option<String>, _>("thread_source");
-        let cwd = row.get::<Option<String>, _>("cwd");
-        if !source_matches(command.source, source.as_deref(), thread_source.as_deref()) {
-            continue;
+    let target_limit = if command.last { 1 } else { command.limit };
+    let mut offset = 0_i64;
+    while target_limit == 0 || records.len() < target_limit {
+        let page_size = target_limit
+            .checked_sub(records.len())
+            .filter(|remaining| *remaining > 0)
+            .map_or(SESSION_RECORD_PAGE_SIZE, |remaining| {
+                remaining.min(SESSION_RECORD_PAGE_SIZE)
+            });
+        let query = match command.sort {
+            SessionsSort::Created => {
+                r#"
+                SELECT
+                    id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
+                    title, preview, first_user_message,
+                    created_at_ms, updated_at_ms, recency_at_ms
+                FROM threads
+                WHERE archived = 0
+                ORDER BY created_at_ms DESC, id DESC
+                LIMIT ? OFFSET ?
+                "#
+            }
+            SessionsSort::Updated => {
+                r#"
+                SELECT
+                    id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
+                    title, preview, first_user_message,
+                    created_at_ms, updated_at_ms, recency_at_ms
+                FROM threads
+                WHERE archived = 0
+                ORDER BY recency_at_ms DESC, id DESC
+                LIMIT ? OFFSET ?
+                "#
+            }
+        };
+        let rows = sqlx::query(query)
+            .bind(i64::try_from(page_size).unwrap_or(i64::MAX))
+            .bind(offset)
+            .fetch_all(&pool)
+            .await
+            .map_err(SessionsCommandError::Sqlx)?;
+
+        if rows.is_empty() {
+            break;
         }
-        if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
-            continue;
+        offset = offset.saturating_add(i64::try_from(rows.len()).unwrap_or(i64::MAX));
+
+        for row in rows {
+            let source = row.get::<Option<String>, _>("source");
+            let thread_source = row.get::<Option<String>, _>("thread_source");
+            let cwd = row.get::<Option<String>, _>("cwd");
+            if !source_matches(command.source, source.as_deref(), thread_source.as_deref()) {
+                continue;
+            }
+            if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
+                continue;
+            }
+            if !root_filter.matches(cwd.as_deref()) {
+                continue;
+            }
+            records.push(SessionRecord {
+                session_id: row.get("id"),
+                rollout_path: deferred_rollout_source(
+                    &codex_home_path,
+                    row.get::<Option<String>, _>("rollout_path").as_deref(),
+                ),
+                cwd,
+                provider: row.get::<Option<String>, _>("model_provider"),
+                model: row.get::<Option<String>, _>("model"),
+                source,
+                thread_source,
+                git_branch: row.get::<Option<String>, _>("git_branch"),
+                preview: row.get::<Option<String>, _>("preview"),
+                display_title: display_title_from_session_fields(
+                    row.get::<Option<String>, _>("title").as_deref(),
+                    row.get::<Option<String>, _>("preview").as_deref(),
+                    row.get::<Option<String>, _>("first_user_message")
+                        .as_deref(),
+                ),
+                created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
+                updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
+                recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
+            });
+            if target_limit != 0 && records.len() >= target_limit {
+                break;
+            }
         }
-        if !root_filter.matches(cwd.as_deref()) {
-            continue;
-        }
-        records.push(SessionRecord {
-            session_id: row.get("id"),
-            rollout_path: deferred_rollout_source(
-                &codex_home_path,
-                row.get::<Option<String>, _>("rollout_path").as_deref(),
-            ),
-            cwd,
-            provider: row.get::<Option<String>, _>("model_provider"),
-            model: row.get::<Option<String>, _>("model"),
-            source,
-            thread_source,
-            git_branch: row.get::<Option<String>, _>("git_branch"),
-            preview: row.get::<Option<String>, _>("preview"),
-            display_title: display_title_from_session_fields(
-                row.get::<Option<String>, _>("title").as_deref(),
-                row.get::<Option<String>, _>("preview").as_deref(),
-                row.get::<Option<String>, _>("first_user_message")
-                    .as_deref(),
-            ),
-            created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
-            updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
-            recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
-        });
     }
     pool.close().await;
 
@@ -579,17 +625,26 @@ fn codex_home(context: &CliContext) -> Result<PathBuf, SessionsCommandError> {
     if let Some(codex_home) = context.env_var("CODEX_HOME") {
         return Ok(PathBuf::from(codex_home));
     }
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        if context.env_var(USE_HOME_DEFAULT_ENV).is_none() {
+            if let Some(debug_home) = context.env_var(DEBUG_CODEX_HOME_ENV)
+                && !debug_home.is_empty()
+            {
+                return Ok(PathBuf::from(debug_home));
+            }
+
+            let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
+            return Ok(workspace_root.join(DEFAULT_DEBUG_CODEX_HOME));
+        }
+    }
     let Some(home) = context.env_var("HOME") else {
         return Err(SessionsCommandError::CodexHomeUnavailable);
     };
     Ok(PathBuf::from(home).join(".codex"))
-}
-
-fn sort_key(sort: SessionsSort) -> &'static str {
-    match sort {
-        SessionsSort::Updated => "updated",
-        SessionsSort::Created => "created",
-    }
 }
 
 fn resolve_current_provider(codex_home: &Path) -> Result<String, SessionsCommandError> {

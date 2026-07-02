@@ -21,7 +21,7 @@ use crate::sqlite::ActiveSessionRollup;
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
 
-const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 604_800;
+const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 /// Projected selector inputs for one route band.
@@ -55,6 +55,14 @@ pub trait AsyncSelectionProjectionRepository {
 
     /// Loads current active client counts for one route band.
     fn active_client_counts_for_route_band<'a>(
+        &'a self,
+        route_band: &'a str,
+        now_unix_seconds: u64,
+        max_age_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>>;
+
+    /// Loads current active client counts for one route band without stale-lease cleanup.
+    fn active_client_counts_for_route_band_read_only<'a>(
         &'a self,
         route_band: &'a str,
         now_unix_seconds: u64,
@@ -108,8 +116,30 @@ impl AsyncSelectionProjectionRepository for AsyncSqliteStateStore {
         max_age_seconds: u64,
     ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
         Box::pin(async move {
-            self.active_client_counts_for_route_band(route_band, now_unix_seconds, max_age_seconds)
-                .await
+            AsyncSqliteStateStore::active_client_counts_for_route_band(
+                self,
+                route_band,
+                now_unix_seconds,
+                max_age_seconds,
+            )
+            .await
+        })
+    }
+
+    fn active_client_counts_for_route_band_read_only<'a>(
+        &'a self,
+        route_band: &'a str,
+        now_unix_seconds: u64,
+        max_age_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
+        Box::pin(async move {
+            AsyncSqliteStateStore::active_client_counts_for_route_band_read_only(
+                self,
+                route_band,
+                now_unix_seconds,
+                max_age_seconds,
+            )
+            .await
         })
     }
 
@@ -178,12 +208,34 @@ pub async fn project_route_band_selection_inputs<R>(
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
-    project_route_band_selection_inputs_with_active_counts(
+    project_route_band_selection_inputs_with_active_counts_internal(
         state,
         route_band,
         now_unix_seconds,
         active_client_max_age_seconds,
         None,
+        true,
+    )
+    .await
+}
+
+/// Projects persisted state for read-only observer surfaces.
+pub async fn project_route_band_selection_inputs_read_only<R>(
+    state: &R,
+    route_band: &str,
+    now_unix_seconds: u64,
+    active_client_max_age_seconds: u64,
+) -> Result<RouteBandSelectionProjection, StateStoreError>
+where
+    R: AsyncSelectionProjectionRepository + Sync,
+{
+    project_route_band_selection_inputs_with_active_counts_internal(
+        state,
+        route_band,
+        now_unix_seconds,
+        active_client_max_age_seconds,
+        None,
+        false,
     )
     .await
 }
@@ -199,17 +251,71 @@ pub async fn project_route_band_selection_inputs_with_active_counts<R>(
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
+    project_route_band_selection_inputs_with_active_counts_internal(
+        state,
+        route_band,
+        now_unix_seconds,
+        active_client_max_age_seconds,
+        active_session_overrides,
+        true,
+    )
+    .await
+}
+
+/// Projects persisted state with caller-owned current active-session overrides for read-only observer paths.
+pub async fn project_route_band_selection_inputs_with_active_counts_read_only<R>(
+    state: &R,
+    route_band: &str,
+    now_unix_seconds: u64,
+    active_client_max_age_seconds: u64,
+    active_session_overrides: Option<&HashMap<AccountId, u32>>,
+) -> Result<RouteBandSelectionProjection, StateStoreError>
+where
+    R: AsyncSelectionProjectionRepository + Sync,
+{
+    project_route_band_selection_inputs_with_active_counts_internal(
+        state,
+        route_band,
+        now_unix_seconds,
+        active_client_max_age_seconds,
+        active_session_overrides,
+        false,
+    )
+    .await
+}
+
+async fn project_route_band_selection_inputs_with_active_counts_internal<R>(
+    state: &R,
+    route_band: &str,
+    now_unix_seconds: u64,
+    active_client_max_age_seconds: u64,
+    active_session_overrides: Option<&HashMap<AccountId, u32>>,
+    refresh_rollups: bool,
+) -> Result<RouteBandSelectionProjection, StateStoreError>
+where
+    R: AsyncSelectionProjectionRepository + Sync,
+{
     let selector_inputs = state
         .selector_inputs_for_route_band(route_band, now_unix_seconds)
         .await?;
-    let active_counts = state
-        .active_client_counts_for_route_band(
-            route_band,
-            now_unix_seconds,
-            active_client_max_age_seconds,
-        )
-        .await
-        .unwrap_or_default();
+    let active_counts = if refresh_rollups {
+        state
+            .active_client_counts_for_route_band(
+                route_band,
+                now_unix_seconds,
+                active_client_max_age_seconds,
+            )
+            .await
+    } else {
+        state
+            .active_client_counts_for_route_band_read_only(
+                route_band,
+                now_unix_seconds,
+                active_client_max_age_seconds,
+            )
+            .await
+    }
+    .unwrap_or_default();
     let mut projected_accounts = Vec::with_capacity(selector_inputs.len());
 
     for input in selector_inputs {
@@ -230,6 +336,7 @@ where
                 route_band,
                 window,
                 now_unix_seconds,
+                refresh_rollups,
             )
             .await?;
             if let Some(per_connection_burn_basis_points_per_hour) =
@@ -298,6 +405,7 @@ async fn estimate_window_burn_rate(
     route_band: &str,
     window: &PersistedSelectorQuotaWindow,
     now_unix_seconds: u64,
+    refresh_rollups: bool,
 ) -> Result<ProjectedBurnRateEstimate, StateStoreError> {
     let Some(reset_unix_seconds) = window.reset_unix_seconds() else {
         return Ok(ProjectedBurnRateEstimate {
@@ -366,14 +474,16 @@ async fn estimate_window_burn_rate(
         });
     }
 
-    state
-        .refresh_active_session_rollups_for_interval(
-            route_band,
-            first_observation.observed_unix_seconds(),
-            latest_observation.observed_unix_seconds(),
-            ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS,
-        )
-        .await?;
+    if refresh_rollups {
+        state
+            .refresh_active_session_rollups_for_interval(
+                route_band,
+                first_observation.observed_unix_seconds(),
+                latest_observation.observed_unix_seconds(),
+                ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS,
+            )
+            .await?;
+    }
     let rollups = state
         .active_session_rollups_for_route_band(
             route_band,

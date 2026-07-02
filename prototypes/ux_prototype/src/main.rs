@@ -2,6 +2,7 @@ use iocraft::prelude::*;
 
 const SIDECAR_BREAKPOINT: u16 = 96;
 const FULL_DETAIL_BREAKPOINT: u16 = 128;
+const QUOTA_SIDECAR_BREAKPOINT: u16 = 140;
 
 fn accent_color() -> Color {
     Color::Rgb {
@@ -372,11 +373,21 @@ fn detail_line(label: &'static str, value: &'static str, color: Color) -> AnyEle
 
 #[component]
 fn QuotaSurface(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let (terminal_width, _) = hooks.use_terminal_size();
-    let show_detail_sidecar = terminal_width >= SIDECAR_BREAKPOINT;
-    let root_height = if show_detail_sidecar { 32 } else { 54 };
-    let list_height = if show_detail_sidecar { 23 } else { 20 };
-    let detail_height = if show_detail_sidecar { 23 } else { 23 };
+    let (terminal_width, terminal_height) = hooks.use_terminal_size();
+    let show_detail_sidecar = terminal_width >= QUOTA_SIDECAR_BREAKPOINT;
+    let terminal_height = u32::from(terminal_height);
+    let minimum_height = if show_detail_sidecar { 38 } else { 50 };
+    let root_height = terminal_height.saturating_sub(2).max(minimum_height);
+    let list_height = if show_detail_sidecar {
+        root_height.saturating_sub(9).max(27)
+    } else {
+        18
+    };
+    let detail_height = if show_detail_sidecar {
+        list_height
+    } else {
+        root_height.saturating_sub(list_height + 9).max(22)
+    };
     let compact = terminal_width < FULL_DETAIL_BREAKPOINT;
 
     element! {
@@ -410,9 +421,9 @@ fn QuotaSurface(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(if show_detail_sidecar {
                 element! {
                     View(width: 100pct) {
-                        #(quota_list_panel(Size::Percent(68.0), list_height, compact))
-                        View(width: 1) { Text(content: "") }
-                        #(quota_detail_panel(Size::Percent(29.0), detail_height, compact))
+                        #(quota_list_panel(Size::Percent(66.0), list_height, compact))
+                        View(width: 3) { Text(content: "") }
+                        #(quota_detail_panel(Size::Percent(30.0), detail_height, compact))
                     }
                 }.into_any()
             } else {
@@ -435,17 +446,17 @@ fn quota_accounts(compact: bool) -> Vec<AnyElement<'static>> {
         account_status_row(
             AccountStatusProps {
                 account: "askluna",
-                status: "held by quota",
-                five_hour_percent: 88,
-                five_hour_reset: "3h 40m",
-                weekly_percent: 91,
-                weekly_reset: "6d 3h",
+                status: "available",
+                reason: "same pool",
+                weekly_percent: 76,
+                weekly_reset: "4d 15h",
+                pace_state: "ahead 2d 17h",
+                safe_pace_percent: 63,
+                rate: "rate 0.43%/h (low)",
                 activity: "1 client",
-                guard_short: "not selectable",
+                guard_short: "wk guard 0%",
                 _reset: "1 available",
-                _note: "held by quota: 5h guard",
-                burn_percent: 100,
-                _burn_short: "5h guard",
+                _note: "available by quota: same pool",
                 selected: false,
             },
             compact,
@@ -454,17 +465,17 @@ fn quota_accounts(compact: bool) -> Vec<AnyElement<'static>> {
         account_status_row(
             AccountStatusProps {
                 account: "matches",
-                status: "available by quota",
-                five_hour_percent: 98,
-                five_hour_reset: "3h 33m",
-                weekly_percent: 88,
-                weekly_reset: "6d 2h",
+                status: "available",
+                reason: "same pool",
+                weekly_percent: 70,
+                weekly_reset: "4d 15h",
+                pace_state: "ahead 20h 42m",
+                safe_pace_percent: 85,
+                rate: "rate 0.53%/h (low)",
                 activity: "0 clients",
-                guard_short: "guard 5h 0% / wk 3%",
+                guard_short: "wk guard 3%",
                 _reset: "1 available",
                 _note: "available by quota: same pool",
-                burn_percent: 3,
-                _burn_short: "wk 3%",
                 selected: false,
             },
             compact,
@@ -474,16 +485,16 @@ fn quota_accounts(compact: bool) -> Vec<AnyElement<'static>> {
             AccountStatusProps {
                 account: "ssdev",
                 status: "preferred",
-                five_hour_percent: 91,
-                five_hour_reset: "3h 7m",
-                weekly_percent: 76,
-                weekly_reset: "6d 2h",
+                reason: "safest quota",
+                weekly_percent: 45,
+                weekly_reset: "4d 15h",
+                pace_state: "ahead 1d 14h",
+                safe_pace_percent: 75,
+                rate: "rate 0.30%/h (normal)",
                 activity: "0 clients",
-                guard_short: "guard 5h 0% / wk 12%",
+                guard_short: "wk guard 22%",
                 _reset: "2 available",
-                _note: "preferred by quota: projected burn",
-                burn_percent: 12,
-                _burn_short: "wk 12%",
+                _note: "preferred by quota: safest quota",
                 selected: true,
             },
             compact,
@@ -526,9 +537,8 @@ fn quota_header(compact: bool) -> AnyElement<'static> {
             View(width: 100pct) {
                 #(cell("", 3, accent_color(), Weight::Bold))
                 #(cell("Account", 14, accent_color(), Weight::Bold))
-                #(cell("Status", 20, accent_color(), Weight::Bold))
-                #(cell("Quota", 19, accent_color(), Weight::Bold))
-                #(cell("Burn", 14, accent_color(), Weight::Bold))
+                #(cell("Status", 18, accent_color(), Weight::Bold))
+                #(cell("Weekly pace", 26, accent_color(), Weight::Bold))
             }
         }
         .into_any()
@@ -536,10 +546,10 @@ fn quota_header(compact: bool) -> AnyElement<'static> {
         element! {
             View(width: 100pct) {
                 #(cell("", 3, accent_color(), Weight::Bold))
-                #(cell("Account", 16, accent_color(), Weight::Bold))
-                #(cell("Status", 21, accent_color(), Weight::Bold))
-                #(cell("Quota", 24, accent_color(), Weight::Bold))
-                #(cell("Burn", 18, accent_color(), Weight::Bold))
+                #(cell("Account", 14, accent_color(), Weight::Bold))
+                #(cell("Status", 17, accent_color(), Weight::Bold))
+                #(cell("Weekly pace", 42, accent_color(), Weight::Bold))
+                #(cell("Activity", 14, accent_color(), Weight::Bold))
             }
         }
         .into_any()
@@ -549,16 +559,16 @@ fn quota_header(compact: bool) -> AnyElement<'static> {
 struct AccountStatusProps<'a> {
     account: &'a str,
     status: &'a str,
-    five_hour_percent: u8,
-    five_hour_reset: &'a str,
+    reason: &'a str,
     weekly_percent: u8,
     weekly_reset: &'a str,
+    pace_state: &'a str,
+    safe_pace_percent: u8,
+    rate: &'a str,
     activity: &'a str,
     guard_short: &'a str,
     _reset: &'a str,
     _note: &'a str,
-    burn_percent: u8,
-    _burn_short: &'a str,
     selected: bool,
 }
 
@@ -577,15 +587,11 @@ fn account_status_row(props: AccountStatusProps<'static>, compact: bool) -> AnyE
     } else {
         Color::White
     };
-    let five_hour_summary = format!(
-        "{:>2}% left, reset {}",
-        props.five_hour_percent, props.five_hour_reset
-    );
     let weekly_summary = format!(
         "{:>2}% left, reset {}",
         props.weekly_percent, props.weekly_reset
     );
-    let activity_summary = format!("{}", props.activity);
+    let safe_pace_summary = format!("{}% safe pace", props.safe_pace_percent);
 
     if compact {
         element! {
@@ -599,25 +605,21 @@ fn account_status_row(props: AccountStatusProps<'static>, compact: bool) -> AnyE
                 View(width: 100pct) {
                     #(cell(marker, 3, selected_text_color(), Weight::Bold))
                     #(cell(props.account, 14, account_color, Weight::Bold))
-                    #(cell(props.status, 20, status_color, Weight::Bold))
-                }
-                View(width: 100pct) {
-                    #(cell("", 3, Color::Grey, Weight::Normal))
-                    #(cell("5h", 14, Color::Grey, Weight::Normal))
-                    #(quota_bar(props.five_hour_percent, 17))
-                    Text(content: five_hour_summary, color: Color::Grey)
+                    #(cell(props.status, 18, status_color, Weight::Bold))
+                    Text(content: props.reason, color: Color::Grey)
                 }
                 View(width: 100pct) {
                     #(cell("", 3, Color::Grey, Weight::Normal))
                     #(cell("weekly", 14, Color::Grey, Weight::Normal))
-                    #(quota_bar(props.weekly_percent, 17))
+                    #(inline_quota_bar(props.weekly_percent, 12))
                     Text(content: weekly_summary, color: Color::Grey)
                 }
                 View(width: 100pct) {
                     #(cell("", 3, Color::Grey, Weight::Normal))
-                    #(cell("activity", 14, Color::Grey, Weight::Normal))
-                    #(cell(activity_summary, 14, Color::Grey, Weight::Normal))
-                    #(burn_bar(props.burn_percent, 17))
+                    #(cell("pace", 14, Color::Grey, Weight::Normal))
+                    Text(content: props.pace_state, color: Color::Grey)
+                    Text(content: " · burn ", color: Color::Grey)
+                    Text(content: safe_pace_summary, color: Color::Grey)
                 }
             }
         }
@@ -633,29 +635,26 @@ fn account_status_row(props: AccountStatusProps<'static>, compact: bool) -> AnyE
             ) {
                 View(width: 100pct) {
                     #(cell(marker, 3, selected_text_color(), Weight::Bold))
-                    #(cell(props.account, 16, account_color, Weight::Bold))
-                    #(cell(props.status, 21, status_color, Weight::Bold))
+                    #(cell(props.account, 14, account_color, Weight::Bold))
+                    #(cell(props.status, 17, status_color, Weight::Bold))
+                    #(cell(props.reason, 42, Color::Grey, Weight::Normal))
+                    Text(content: props.activity, color: Color::Grey)
                 }
                 View(width: 100pct) {
                     #(cell("", 3, Color::Grey, Weight::Normal))
-                    #(cell("5h", 16, Color::Grey, Weight::Normal))
-                    #(cell("", 21, Color::Grey, Weight::Normal))
-                    #(quota_bar(props.five_hour_percent, 24))
-                    Text(content: five_hour_summary, color: Color::Grey)
-                }
-                View(width: 100pct) {
-                    #(cell("", 3, Color::Grey, Weight::Normal))
-                    #(cell("weekly", 16, Color::Grey, Weight::Normal))
-                    #(cell("", 21, Color::Grey, Weight::Normal))
-                    #(quota_bar(props.weekly_percent, 24))
-                    Text(content: weekly_summary, color: Color::Grey)
-                }
-                View(width: 100pct) {
-                    #(cell("", 3, Color::Grey, Weight::Normal))
-                    #(cell("activity", 16, Color::Grey, Weight::Normal))
-                    #(cell(activity_summary, 21, Color::Grey, Weight::Normal))
-                    #(burn_bar(props.burn_percent, 24))
+                    #(cell("", 14, Color::Grey, Weight::Normal))
+                    #(cell("", 17, Color::Grey, Weight::Normal))
+                    #(inline_quota_bar(props.weekly_percent, 12))
+                    #(cell(weekly_summary, 30, Color::Grey, Weight::Normal))
                     Text(content: props.guard_short, color: Color::Grey)
+                }
+                View(width: 100pct) {
+                    #(cell("", 3, Color::Grey, Weight::Normal))
+                    #(cell("", 14, Color::Grey, Weight::Normal))
+                    #(cell("", 17, Color::Grey, Weight::Normal))
+                    #(cell(props.pace_state, 16, Color::Grey, Weight::Normal))
+                    #(cell(safe_pace_summary, 16, Color::Grey, Weight::Normal))
+                    Text(content: props.rate, color: Color::Grey)
                 }
             }
         }
@@ -680,34 +679,39 @@ fn quota_detail_panel(width: Size, height: u32, compact: bool) -> AnyElement<'st
             ) {
                 Text(content: "Selected account", color: accent_color(), weight: Weight::Bold)
                 Text(content: "ssdev", color: selected_text_color(), weight: Weight::Bold)
-                Text(content: "preferred by quota", color: success_color())
+                Text(content: "preferred · safest quota", color: Color::Grey)
                 View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
                     Text(content: "")
                 }
-                Text(content: "quota", color: Color::Grey, weight: Weight::Bold)
+                Text(content: "Quota windows", color: accent_color(), weight: Weight::Bold)
                 View(width: 100pct) {
                     #(cell("5h", 5, Color::Grey, Weight::Normal))
-                    #(quota_bar(91, 15))
-                    Text(content: "reset 3h 7m", color: Color::Grey)
+                    #(inline_quota_bar(92, 13))
+                    Text(content: "92% left, reset 4h 12m", color: Color::Grey)
                 }
                 View(width: 100pct) {
                     #(cell("wk", 5, Color::Grey, Weight::Normal))
-                    #(quota_bar(76, 15))
-                    Text(content: "reset 6d 2h", color: Color::Grey)
+                    #(inline_quota_bar(45, 13))
+                    Text(content: "45% left, reset 4d 15h", color: Color::Grey)
                 }
                 View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
                     Text(content: "")
                 }
-                Text(content: "activity", color: Color::Grey, weight: Weight::Bold)
-                Text(content: "clients 0", color: Color::Grey)
+                Text(content: "Burn pace", color: accent_color(), weight: Weight::Bold)
                 View(width: 100pct) {
-                    #(cell("rate", 6, Color::Grey, Weight::Normal))
-                    #(burn_bar(12, 14))
-                    Text(content: "wk 12%", color: Color::Grey)
+                    #(safe_pace_meter(75, 13))
+                    Text(content: "75% safe pace", color: Color::Grey)
                 }
-                Text(content: "guards 5h 0% / weekly 12%", color: Color::Grey)
+                Text(content: "ahead 1d 14h", color: Color::Grey)
+                Text(content: "rate 0.30%/h total", color: Color::Grey)
+                Text(content: "per-conn 0.30%/h (normal)", color: Color::Grey)
+                View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
+                    Text(content: "")
+                }
+                Text(content: "activity 0 clients", color: Color::Grey)
+                Text(content: "guards 5h 0% / weekly 22%", color: Color::Grey)
                 Text(content: "reset  2 available", color: Color::Grey)
-                Text(content: "note   projected burn", color: Color::Grey)
+                Text(content: "note   preferred by quota: safest quota", color: Color::Grey)
             }
         }
         .into_any()
@@ -727,71 +731,67 @@ fn quota_detail_panel(width: Size, height: u32, compact: bool) -> AnyElement<'st
             ) {
                 Text(content: "Selected account", color: accent_color(), weight: Weight::Bold)
                 Text(content: "ssdev", color: selected_text_color(), weight: Weight::Bold)
-                Text(content: "preferred by quota", color: success_color())
+                Text(content: "preferred · safest quota", color: Color::Grey)
                 View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
                     Text(content: "")
                 }
-                Text(content: "quota", color: Color::Grey, weight: Weight::Bold)
+                Text(content: "Quota windows", color: accent_color(), weight: Weight::Bold)
                 View(width: 100pct) {
                     #(cell("5h", 8, Color::Grey, Weight::Normal))
-                    #(quota_bar(91, 16))
-                    Text(content: "91%, reset 3h 7m", color: Color::Grey)
+                    #(inline_quota_bar(92, 16))
+                    Text(content: "92% left, reset 4h 12m", color: Color::Grey)
                 }
                 View(width: 100pct) {
                     #(cell("weekly", 8, Color::Grey, Weight::Normal))
-                    #(quota_bar(76, 16))
-                    Text(content: "76%, reset 6d 2h", color: Color::Grey)
+                    #(inline_quota_bar(45, 16))
+                    Text(content: "45% left, reset 4d 15h", color: Color::Grey)
                 }
                 View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
                     Text(content: "")
                 }
-                Text(content: "activity", color: Color::Grey, weight: Weight::Bold)
-                Text(content: "clients 0", color: Color::Grey)
+                Text(content: "Burn pace", color: accent_color(), weight: Weight::Bold)
                 View(width: 100pct) {
-                    #(cell("burn", 8, Color::Grey, Weight::Normal))
-                    #(burn_bar(12, 16))
-                    Text(content: "weekly 12%", color: Color::Grey)
+                    #(cell("current", 8, Color::Grey, Weight::Normal))
+                    #(safe_pace_meter(75, 13))
+                    Text(content: "75% safe pace", color: Color::Grey)
                 }
-                Text(content: "guards  5h 0% / weekly 12%", color: Color::Grey)
+                Text(content: "ahead   1d 14h before projected runout", color: Color::Grey)
+                Text(content: "rate    0.30%/h total", color: Color::Grey)
+                Text(content: "conn    0.30%/h per connection (normal)", color: Color::Grey)
+                View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
+                    Text(content: "")
+                }
+                Text(content: "activity 0 clients", color: Color::Grey)
+                Text(content: "guards  5h 0% / weekly 22%", color: Color::Grey)
                 Text(content: "reset   2 available", color: Color::Grey)
-                Text(content: "note    preferred by quota: projected burn", color: Color::Grey)
+                Text(content: "note    preferred by quota: safest quota", color: Color::Grey)
             }
         }
         .into_any()
     }
 }
 
-fn quota_bar(percent: u8, width: u32) -> AnyElement<'static> {
+fn inline_quota_bar(percent: u8, width: u32) -> AnyElement<'static> {
     let filled_count = usize::from((percent + 9) / 10).min(10);
     let empty_count = 10usize.saturating_sub(filled_count);
-    let bar = format!(
-        "{}{} {:>3}%",
-        "█".repeat(filled_count),
-        "░".repeat(empty_count),
-        percent
-    );
+    let bar = format!("{}{}", "█".repeat(filled_count), "░".repeat(empty_count));
 
     element! {
         View(width, padding_right: 1) {
-            Text(content: bar, color: success_color(), weight: Weight::Bold)
+            Text(content: bar, color: Color::Grey, weight: Weight::Normal)
         }
     }
     .into_any()
 }
 
-fn burn_bar(percent: u8, width: u32) -> AnyElement<'static> {
+fn safe_pace_meter(percent: u8, width: u32) -> AnyElement<'static> {
     let filled_count = usize::from((percent + 9) / 10).min(10);
     let empty_count = 10usize.saturating_sub(filled_count);
-    let bar = format!(
-        "{}{} {:>3}%",
-        "▰".repeat(filled_count),
-        "▱".repeat(empty_count),
-        percent
-    );
+    let bar = format!("[{}{}]", "■".repeat(filled_count), "□".repeat(empty_count));
 
     element! {
         View(width, padding_right: 1) {
-            Text(content: bar, color: warning_color(), weight: Weight::Bold)
+            Text(content: bar, color: Color::Grey, weight: Weight::Normal)
         }
     }
     .into_any()
