@@ -44,14 +44,9 @@ impl Drop for TelemetryGuard {
 
 pub(crate) fn init_from_env() -> TelemetryGuard {
     let filter = env::var("RUST_LOG").unwrap_or_else(|_error| DEFAULT_LOG_FILTER.to_owned());
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(true)
-        .compact();
     let Some(endpoint) = otlp_endpoint() else {
         let _ = tracing_subscriber::registry()
             .with(EnvFilter::new(filter))
-            .with(fmt_layer)
             .try_init();
         tracing::info!(
             service.name = SERVICE_NAME,
@@ -69,7 +64,6 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
         Err(error) => {
             let _ = tracing_subscriber::registry()
                 .with(EnvFilter::new(filter))
-                .with(fmt_layer)
                 .try_init();
             tracing::warn!(
                 error.kind = "otel_init_failed",
@@ -100,7 +94,6 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     let _ = tracing_subscriber::registry()
         .with(EnvFilter::new(filter))
-        .with(fmt_layer)
         .with(otel_layer)
         .try_init();
     tracing::info!(

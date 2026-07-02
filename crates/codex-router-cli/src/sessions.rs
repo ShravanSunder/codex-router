@@ -2,8 +2,11 @@
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::fmt;
 use std::fs;
+use std::io::IsTerminal;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -15,10 +18,6 @@ use std::time::UNIX_EPOCH;
 
 use clap::Parser;
 use clap::ValueEnum;
-use comfy_table::Table;
-use comfy_table::presets::UTF8_FULL;
-use inquire::Select;
-use inquire::error::InquireError;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
@@ -27,9 +26,23 @@ use sqlx::sqlite::SqlitePoolOptions;
 use thiserror::Error;
 
 use crate::CliContext;
+use crate::presentation::session_picker::SessionsPickerOutcome;
+use crate::presentation::session_picker::SessionsPickerRequest;
+use crate::presentation::session_picker::run_sessions_picker;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
+const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 256 * 1024;
+const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
+const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
+const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
+const SESSION_RECORD_PAGE_SIZE: usize = 250;
+#[cfg(all(debug_assertions, not(test)))]
+const DEBUG_CODEX_HOME_ENV: &str = "CODEX_ROUTER_DEBUG_CODEX_HOME";
+#[cfg(all(debug_assertions, not(test)))]
+const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
+#[cfg(all(debug_assertions, not(test)))]
+const DEFAULT_DEBUG_CODEX_HOME: &str = "tmp/dev-state/codex-home";
 
 /// Session search root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +135,8 @@ pub struct SessionsCommand {
     pub last: bool,
     /// Launch a new Codex session instead of resuming one.
     pub new: bool,
+    /// Maximum matching sessions to load.
+    pub limit: usize,
     /// Print the command that would be launched instead of executing it.
     pub dry_run: bool,
     /// Arguments passed through to Codex after the router profile is selected.
@@ -145,6 +160,7 @@ impl SessionsCommand {
             format: parsed.format,
             last: parsed.last,
             new: parsed.new,
+            limit: parsed.limit,
             dry_run: parsed.dry_run,
             codex_args: parsed.codex_args,
         })
@@ -184,6 +200,8 @@ struct ClapSessionsCommand {
     last: bool,
     #[arg(long, conflicts_with_all = ["list", "last"])]
     new: bool,
+    #[arg(long, default_value_t = DEFAULT_SESSION_RECORD_LIMIT)]
+    limit: usize,
     #[arg(long)]
     dry_run: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -209,7 +227,7 @@ pub fn run_sessions_command<W: Write>(
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
     let mut runner = ProcessSessionsCommandRunner;
-    let mut picker = InquireSessionsPicker;
+    let mut picker = TerminalSessionsPicker::for_context(context);
     run_sessions_command_with_dependencies(stdout, command, context, &mut runner, &mut picker)
 }
 
@@ -261,13 +279,12 @@ fn write_sessions_table<W: Write>(
         .build()
         .map_err(SessionsCommandError::Runtime)?;
     let records = runtime.block_on(load_session_records(command, context))?;
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
-    table.set_header(["session"]);
-    for record in records {
-        table.add_row([human_session_row(&record)]);
+    for (index, record) in records.iter().enumerate() {
+        if index > 0 {
+            writeln!(stdout).map_err(SessionsCommandError::Stdout)?;
+        }
+        writeln!(stdout, "{}", human_session_row(record)).map_err(SessionsCommandError::Stdout)?;
     }
-    writeln!(stdout, "{table}").map_err(SessionsCommandError::Stdout)?;
     Ok(())
 }
 
@@ -292,56 +309,94 @@ async fn load_session_records(
         .await
         .map_err(SessionsCommandError::Sqlx)?;
 
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            id, cwd, model_provider, model, source, thread_source, git_branch,
-            title, preview, first_user_message,
-            created_at_ms, updated_at_ms, recency_at_ms
-        FROM threads
-        WHERE archived = 0
-        ORDER BY
-            CASE ? WHEN 'created' THEN created_at_ms ELSE recency_at_ms END DESC,
-            id DESC
-        "#,
-    )
-    .bind(sort_key(command.sort))
-    .fetch_all(&pool)
-    .await
-    .map_err(SessionsCommandError::Sqlx)?;
-
     let mut records = Vec::new();
-    for row in rows {
-        let source = row.get::<Option<String>, _>("source");
-        let thread_source = row.get::<Option<String>, _>("thread_source");
-        let cwd = row.get::<Option<String>, _>("cwd");
-        if !source_matches(command.source, source.as_deref(), thread_source.as_deref()) {
-            continue;
+    let target_limit = if command.last { 1 } else { command.limit };
+    let mut offset = 0_i64;
+    while target_limit == 0 || records.len() < target_limit {
+        let page_size = target_limit
+            .checked_sub(records.len())
+            .filter(|remaining| *remaining > 0)
+            .map_or(SESSION_RECORD_PAGE_SIZE, |remaining| {
+                remaining.min(SESSION_RECORD_PAGE_SIZE)
+            });
+        let query = match command.sort {
+            SessionsSort::Created => {
+                r#"
+                SELECT
+                    id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
+                    title, preview, first_user_message,
+                    created_at_ms, updated_at_ms, recency_at_ms
+                FROM threads
+                WHERE archived = 0
+                ORDER BY created_at_ms DESC, id DESC
+                LIMIT ? OFFSET ?
+                "#
+            }
+            SessionsSort::Updated => {
+                r#"
+                SELECT
+                    id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
+                    title, preview, first_user_message,
+                    created_at_ms, updated_at_ms, recency_at_ms
+                FROM threads
+                WHERE archived = 0
+                ORDER BY recency_at_ms DESC, id DESC
+                LIMIT ? OFFSET ?
+                "#
+            }
+        };
+        let rows = sqlx::query(query)
+            .bind(i64::try_from(page_size).unwrap_or(i64::MAX))
+            .bind(offset)
+            .fetch_all(&pool)
+            .await
+            .map_err(SessionsCommandError::Sqlx)?;
+
+        if rows.is_empty() {
+            break;
         }
-        if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
-            continue;
+        offset = offset.saturating_add(i64::try_from(rows.len()).unwrap_or(i64::MAX));
+
+        for row in rows {
+            let source = row.get::<Option<String>, _>("source");
+            let thread_source = row.get::<Option<String>, _>("thread_source");
+            let cwd = row.get::<Option<String>, _>("cwd");
+            if !source_matches(command.source, source.as_deref(), thread_source.as_deref()) {
+                continue;
+            }
+            if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
+                continue;
+            }
+            if !root_filter.matches(cwd.as_deref()) {
+                continue;
+            }
+            records.push(SessionRecord {
+                session_id: row.get("id"),
+                rollout_path: deferred_rollout_source(
+                    &codex_home_path,
+                    row.get::<Option<String>, _>("rollout_path").as_deref(),
+                ),
+                cwd,
+                provider: row.get::<Option<String>, _>("model_provider"),
+                model: row.get::<Option<String>, _>("model"),
+                source,
+                thread_source,
+                git_branch: row.get::<Option<String>, _>("git_branch"),
+                preview: row.get::<Option<String>, _>("preview"),
+                display_title: display_title_from_session_fields(
+                    row.get::<Option<String>, _>("title").as_deref(),
+                    row.get::<Option<String>, _>("preview").as_deref(),
+                    row.get::<Option<String>, _>("first_user_message")
+                        .as_deref(),
+                ),
+                created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
+                updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
+                recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
+            });
+            if target_limit != 0 && records.len() >= target_limit {
+                break;
+            }
         }
-        if !root_filter.matches(cwd.as_deref()) {
-            continue;
-        }
-        records.push(SessionRecord {
-            session_id: row.get("id"),
-            cwd,
-            provider: row.get::<Option<String>, _>("model_provider"),
-            model: row.get::<Option<String>, _>("model"),
-            source,
-            thread_source,
-            git_branch: row.get::<Option<String>, _>("git_branch"),
-            display_title: display_title_from_session_fields(
-                row.get::<Option<String>, _>("title").as_deref(),
-                row.get::<Option<String>, _>("preview").as_deref(),
-                row.get::<Option<String>, _>("first_user_message")
-                    .as_deref(),
-            ),
-            created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
-            updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
-            recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
-        });
     }
     pool.close().await;
 
@@ -354,37 +409,52 @@ fn run_interactive_session(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
-    let codex_args = command.codex_args.clone();
+    picker.ensure_available()?;
+    let picker_root = command.root;
+    let picker_provider = command.provider.clone();
+    let picker_source = command.source;
+    let picker_sort = command.sort;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(SessionsCommandError::Runtime)?;
-    let records = runtime.block_on(load_session_records(command, context))?;
-    let mut choices = vec![SessionPickerChoice::new_session(&codex_args)];
-    choices.extend(records.into_iter().map(SessionPickerChoice::from_record));
-    let Some(selection) = picker.select_session(choices)? else {
+    let records = runtime.block_on(load_session_records(
+        interactive_candidate_command(&command),
+        context,
+    ))?;
+    let request = SessionsPickerRequest {
+        root: picker_root,
+        provider: picker_provider,
+        source: picker_source,
+        sort: picker_sort,
+        current_dir: normalize_path(context.current_dir()),
+        checkout_root: checkout_root(context.current_dir()),
+        repo_roots: repo_roots(context.current_dir()),
+        current_provider: current_provider_for_picker(context),
+        records: records
+            .iter()
+            .map(SessionPickerRecord::from_record)
+            .collect(),
+    };
+    let Some(outcome) = picker.select_session(request)? else {
         return Err(SessionsCommandError::PickerCanceled);
     };
-    match selection {
-        SessionPickerSelection::New => runner.run_codex_new(&codex_args),
-        SessionPickerSelection::Resume(session_id) => {
+    match outcome {
+        SessionsPickerOutcome::ResumeSession(session_id) => {
             validate_resume_session_id(&session_id)?;
-            runner.run_codex_resume(&codex_args, &session_id)
+            runner.run_codex_resume(&command.codex_args, &session_id)
         }
+        SessionsPickerOutcome::StartNewSession => runner.run_codex_new(&command.codex_args),
+        SessionsPickerOutcome::TerminalTooNarrow => Err(SessionsCommandError::TerminalTooNarrow),
     }
 }
 
-fn run_new_session<W: Write>(
-    stdout: &mut W,
-    command: SessionsCommand,
-    runner: &mut impl SessionsCommandRunner,
-) -> Result<(), SessionsCommandError> {
-    if command.dry_run {
-        write_codex_new_dry_run(stdout, &command.codex_args)?;
-        return Ok(());
-    }
-
-    runner.run_codex_new(&command.codex_args)
+fn interactive_candidate_command(command: &SessionsCommand) -> SessionsCommand {
+    let mut candidate_command = command.clone();
+    candidate_command.root = SessionsRoot::Any;
+    candidate_command.provider = SessionsProvider::Any;
+    candidate_command.source = SessionsSource::All;
+    candidate_command
 }
 
 fn run_last_session<W: Write>(
@@ -411,6 +481,19 @@ fn run_last_session<W: Write>(
     }
 
     runner.run_codex_resume(&codex_args, &record.session_id)
+}
+
+fn run_new_session<W: Write>(
+    stdout: &mut W,
+    command: SessionsCommand,
+    runner: &mut impl SessionsCommandRunner,
+) -> Result<(), SessionsCommandError> {
+    if command.dry_run {
+        write_codex_new_dry_run(stdout, &command.codex_args)?;
+        return Ok(());
+    }
+
+    runner.run_codex_new(&command.codex_args)
 }
 
 fn write_codex_new_dry_run<W: Write>(
@@ -444,24 +527,46 @@ fn write_codex_args<W: Write>(
 
 /// Interactive session picker.
 pub(crate) trait SessionsPicker {
+    /// Verifies the picker can run before expensive session loading.
+    fn ensure_available(&self) -> Result<(), SessionsCommandError> {
+        Ok(())
+    }
+
     /// Selects one session id, or `None` when the picker was canceled.
     fn select_session(
         &mut self,
-        choices: Vec<SessionPickerChoice>,
-    ) -> Result<Option<SessionPickerSelection>, SessionsCommandError>;
+        request: SessionsPickerRequest,
+    ) -> Result<Option<SessionsPickerOutcome>, SessionsCommandError>;
 }
 
-struct InquireSessionsPicker;
+struct TerminalSessionsPicker {
+    terminal_available: bool,
+}
 
-impl SessionsPicker for InquireSessionsPicker {
+impl TerminalSessionsPicker {
+    fn for_context(context: &CliContext) -> Self {
+        let forced_non_tty = context.env_var("CODEX_ROUTER_FORCE_NON_TTY").is_some();
+        Self {
+            terminal_available: !forced_non_tty
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal(),
+        }
+    }
+}
+
+impl SessionsPicker for TerminalSessionsPicker {
+    fn ensure_available(&self) -> Result<(), SessionsCommandError> {
+        if !self.terminal_available {
+            return Err(SessionsCommandError::InteractiveRequiresTerminal);
+        }
+        Ok(())
+    }
+
     fn select_session(
         &mut self,
-        choices: Vec<SessionPickerChoice>,
-    ) -> Result<Option<SessionPickerSelection>, SessionsCommandError> {
-        Select::new("Resume Codex session", choices)
-            .prompt_skippable()
-            .map(|choice| choice.map(SessionPickerChoice::into_selection))
-            .map_err(SessionsCommandError::Picker)
+        request: SessionsPickerRequest,
+    ) -> Result<Option<SessionsPickerOutcome>, SessionsCommandError> {
+        run_sessions_picker(request).map_err(SessionsCommandError::Picker)
     }
 }
 
@@ -593,17 +698,26 @@ fn codex_home(context: &CliContext) -> Result<PathBuf, SessionsCommandError> {
     if let Some(codex_home) = context.env_var("CODEX_HOME") {
         return Ok(PathBuf::from(codex_home));
     }
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        if context.env_var(USE_HOME_DEFAULT_ENV).is_none() {
+            if let Some(debug_home) = context.env_var(DEBUG_CODEX_HOME_ENV)
+                && !debug_home.is_empty()
+            {
+                return Ok(PathBuf::from(debug_home));
+            }
+
+            let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
+            return Ok(workspace_root.join(DEFAULT_DEBUG_CODEX_HOME));
+        }
+    }
     let Some(home) = context.env_var("HOME") else {
         return Err(SessionsCommandError::CodexHomeUnavailable);
     };
     Ok(PathBuf::from(home).join(".codex"))
-}
-
-fn sort_key(sort: SessionsSort) -> &'static str {
-    match sort {
-        SessionsSort::Updated => "updated",
-        SessionsSort::Created => "created",
-    }
 }
 
 fn resolve_current_provider(codex_home: &Path) -> Result<String, SessionsCommandError> {
@@ -627,6 +741,12 @@ fn resolve_current_provider(codex_home: &Path) -> Result<String, SessionsCommand
         }
     }
     Err(SessionsCommandError::CurrentProviderUnavailable)
+}
+
+fn current_provider_for_picker(context: &CliContext) -> Option<String> {
+    codex_home(context)
+        .ok()
+        .and_then(|codex_home| resolve_current_provider(&codex_home).ok())
 }
 
 fn parse_model_provider(content: &str) -> Option<String> {
@@ -761,9 +881,51 @@ fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
     candidate == parent || candidate.starts_with(parent)
 }
 
+fn deferred_rollout_source(
+    codex_home_path: &Path,
+    rollout_path: Option<&str>,
+) -> Option<SessionConversationSource> {
+    let rollout_path = rollout_path.and_then(non_empty_trimmed)?;
+    let path = Path::new(rollout_path);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let session_history_root = codex_home_path.join("sessions");
+    if !path.starts_with(&session_history_root) {
+        return None;
+    }
+    Some(SessionConversationSource {
+        rollout_path: rollout_path.to_owned(),
+        codex_home_path: codex_home_path.to_path_buf(),
+    })
+}
+
+fn validated_rollout_path(codex_home_path: &Path, rollout_path: Option<&str>) -> Option<String> {
+    let rollout_path = rollout_path.and_then(non_empty_trimmed)?;
+    let path = Path::new(rollout_path);
+    let Ok(canonical_path) = path.canonicalize() else {
+        return None;
+    };
+    let session_history_root = codex_home_path.join("sessions");
+    let trusted_root = session_history_root
+        .canonicalize()
+        .or_else(|_| codex_home_path.canonicalize())
+        .ok()?;
+    if !canonical_path.starts_with(&trusted_root) {
+        return None;
+    }
+    Some(canonical_path.display().to_string())
+}
+
 #[derive(Debug, Serialize)]
 struct SessionRecord {
     session_id: String,
+    #[serde(skip)]
+    rollout_path: Option<SessionConversationSource>,
     #[serde(skip)]
     display_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -778,6 +940,8 @@ struct SessionRecord {
     thread_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_branch: Option<String>,
+    #[serde(skip)]
+    preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -798,59 +962,251 @@ impl SessionRecord {
 
 /// Picker display row for one session.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SessionPickerChoice {
-    selection: SessionPickerSelection,
-    label: String,
+pub(crate) struct SessionPickerRecord {
+    pub(crate) session_id: String,
+    pub(crate) title: String,
+    pub(crate) recency: String,
+    pub(crate) created: String,
+    pub(crate) recency_at_ms: Option<i64>,
+    pub(crate) created_at_ms: Option<i64>,
+    pub(crate) branch: String,
+    pub(crate) context: String,
+    pub(crate) cwd: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) preview: Option<String>,
+    pub(crate) conversation: SessionConversationPreview,
+    pub(crate) conversation_source: Option<SessionConversationSource>,
+    pub(crate) source: Option<String>,
+    pub(crate) thread_source: Option<String>,
 }
 
-impl SessionPickerChoice {
-    fn new_session(codex_args: &[OsString]) -> Self {
-        let label = if codex_args.is_empty() {
-            "New Codex session".to_owned()
-        } else {
-            let args = codex_args
-                .iter()
-                .map(|argument| argument.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ");
-            format!("New Codex session\n  {args}")
-        };
-        Self {
-            selection: SessionPickerSelection::New,
-            label,
-        }
-    }
-
-    fn from_record(record: SessionRecord) -> Self {
-        let label = human_session_row(&record);
-        Self {
-            selection: SessionPickerSelection::Resume(record.session_id),
-            label,
-        }
-    }
-
-    /// Returns the resume session id represented by this picker row, if any.
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn resume_session_id(&self) -> Option<&str> {
-        match &self.selection {
-            SessionPickerSelection::New => None,
-            SessionPickerSelection::Resume(session_id) => Some(session_id),
-        }
-    }
-
-    fn into_selection(self) -> SessionPickerSelection {
-        self.selection
-    }
-}
-
-/// Picker target.
+/// Sanitized conversation snippets for human-only session detail UI.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SessionPickerSelection {
-    /// Start a new Codex session.
-    New,
-    /// Resume a selected Codex session.
-    Resume(String),
+pub(crate) struct SessionConversationPreview {
+    pub(crate) snippets: Vec<String>,
+    pub(crate) unavailable_reason: Option<String>,
+}
+
+/// Deferred, validated-on-read conversation history source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionConversationSource {
+    rollout_path: String,
+    codex_home_path: PathBuf,
+}
+
+#[cfg(test)]
+impl SessionConversationSource {
+    pub(crate) fn for_test(rollout_path: impl Into<String>, codex_home_path: PathBuf) -> Self {
+        Self {
+            rollout_path: rollout_path.into(),
+            codex_home_path,
+        }
+    }
+}
+
+impl SessionPickerRecord {
+    fn from_record(record: &SessionRecord) -> Self {
+        Self {
+            session_id: record.session_id.clone(),
+            title: record.display_title().to_owned(),
+            recency: format_recency_at_ms(record.recency_at_ms),
+            created: format_recency_at_ms(record.created_at_ms),
+            recency_at_ms: record.recency_at_ms,
+            created_at_ms: record.created_at_ms,
+            branch: record.branch().to_owned(),
+            context: record
+                .cwd
+                .as_deref()
+                .map(session_context_from_cwd)
+                .unwrap_or_else(|| "-".to_owned()),
+            cwd: record.cwd.clone(),
+            provider: record.provider.clone(),
+            model: record.model.clone(),
+            preview: record
+                .preview
+                .clone()
+                .or_else(|| Some(record.display_title().to_owned())),
+            conversation: SessionConversationPreview::unavailable("history not loaded"),
+            conversation_source: record.rollout_path.clone(),
+            source: record.source.clone(),
+            thread_source: record.thread_source.clone(),
+        }
+    }
+}
+
+impl SessionConversationPreview {
+    pub(crate) fn from_rollout_source(source: Option<&SessionConversationSource>) -> Self {
+        let Some(source) = source else {
+            return Self::unavailable("history unavailable");
+        };
+        let Some(path) =
+            validated_rollout_path(&source.codex_home_path, Some(&source.rollout_path))
+        else {
+            return Self::unavailable("history unavailable");
+        };
+        Self::from_rollout_path(Some(&path))
+    }
+
+    pub(crate) fn from_rollout_path(rollout_path: Option<&str>) -> Self {
+        let Some(rollout_path) = rollout_path.and_then(non_empty_trimmed) else {
+            return Self::unavailable("history unavailable");
+        };
+        let path = Path::new(rollout_path);
+        if !path.is_file() {
+            return Self::unavailable("history unavailable");
+        }
+
+        let Ok(text) = read_history_tail(path) else {
+            return Self::unavailable("history unavailable");
+        };
+        let snippets = extract_recent_conversation_snippets(&text);
+        if snippets.is_empty() {
+            return Self::unavailable("no recent messages");
+        }
+        Self {
+            snippets,
+            unavailable_reason: None,
+        }
+    }
+
+    pub(crate) fn unavailable(reason: &str) -> Self {
+        Self {
+            snippets: Vec::new(),
+            unavailable_reason: Some(reason.to_owned()),
+        }
+    }
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn read_history_tail(path: &Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    let file_len = metadata.len();
+    let start = file_len.saturating_sub(SESSION_CONVERSATION_MAX_READ_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    if start > 0
+        && let Some((_, remaining)) = text.split_once('\n')
+    {
+        return Ok(remaining.to_owned());
+    }
+    Ok(text)
+}
+
+fn extract_recent_conversation_snippets(text: &str) -> Vec<String> {
+    let mut snippets = Vec::new();
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(snippet) = conversation_snippet_from_event(&event) else {
+            continue;
+        };
+        snippets.push(snippet);
+        if snippets.len() > SESSION_CONVERSATION_MAX_SNIPPETS {
+            snippets.remove(0);
+        }
+    }
+    snippets
+}
+
+fn conversation_snippet_from_event(event: &Value) -> Option<String> {
+    if event.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = event.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let role = payload.get("role").and_then(Value::as_str)?;
+    if !matches!(role, "user" | "assistant") {
+        return None;
+    }
+    let content = payload.get("content")?;
+    let mut fragments = Vec::new();
+    collect_text_fragments(content, &mut fragments);
+    let text = fragments.join(" ");
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.trim();
+    if normalized.is_empty() || is_control_conversation_text(normalized) {
+        return None;
+    }
+    Some(truncate_end(
+        normalized,
+        SESSION_CONVERSATION_SNIPPET_MAX_CHARS,
+    ))
+}
+
+fn collect_text_fragments(value: &Value, fragments: &mut Vec<String>) {
+    match value {
+        Value::String(text) => fragments.push(text.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_text_fragments(item, fragments);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(text) = object.get("text").and_then(Value::as_str) {
+                fragments.push(text.to_owned());
+                return;
+            }
+            for key in ["content", "output_text"] {
+                if let Some(value) = object.get(key) {
+                    collect_text_fragments(value, fragments);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_control_conversation_text(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    text.chars().count() > 5_000
+        || lower.contains("agents.md instructions")
+        || lower.contains("# agents.md")
+        || lower.contains("<instructions>")
+        || lower.contains("</instructions>")
+        || lower.contains("<hook_prompt")
+        || lower.contains("hook_run_id=")
+        || lower.contains("<turn_aborted>")
+        || lower.contains("<environment_context>")
+        || lower.contains("<permissions instructions>")
+        || lower.contains("<skills_instructions>")
+        || lower.contains("<plugins_instructions>")
+        || lower.contains("<subagent_notification>")
+        || lower.contains("<user_instructions>")
+        || lower.contains("<developer_instructions>")
+        || lower.contains("<system_instructions>")
+        || lower.contains("<context_summary>")
+        || lower.contains("<tool_call>")
+        || lower.contains("filesystem sandboxing")
+        || lower.contains("available tools and usage guidelines")
+        || lower.contains("the following is the codex agent history")
+        || lower.contains("tool call arguments")
+        || lower.contains(">>> transcript start")
+        || lower.contains("transcript start")
+        || lower.contains("transcript end")
+        || lower.contains("review only p0-p2")
+        || lower.contains("read-only implementation review")
+        || lower.contains("scope: current uncommitted diff")
+        || lower.contains("knowledge cutoff:")
+        || lower.contains("you are codex")
+        || lower.contains("available skills")
+        || lower.contains("response_item")
+        || lower.contains("api_key")
+        || lower.contains("access_token")
+        || lower.contains("refresh_token")
 }
 
 fn human_session_row(record: &SessionRecord) -> String {
@@ -976,7 +1332,13 @@ fn format_duration_ms(duration_ms: u128) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::SessionConversationPreview;
+    use super::deferred_rollout_source;
+    use super::extract_recent_conversation_snippets;
     use super::format_duration_ms;
+    use super::validated_rollout_path;
+    use serde_json::json;
+    use std::fs;
 
     #[test]
     fn duration_format_uses_now_without_suffix_for_subminute_values() {
@@ -984,11 +1346,273 @@ mod tests {
         assert_eq!(format_duration_ms(59_000), "now");
         assert_eq!(format_duration_ms(60_000), "1m");
     }
-}
 
-impl fmt::Display for SessionPickerChoice {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.label)
+    #[test]
+    fn conversation_snippets_use_recent_jsonl_user_and_assistant_messages() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "please pull main"}]
+                }
+            })
+            .to_string(),
+            "not-json".to_owned(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "checking branch and upstream state"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "tool_call",
+                    "role": "assistant",
+                    "content": [{"text": "SECRET_TOOL_OUTPUT"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"text": "system content"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        let snippets = extract_recent_conversation_snippets(&jsonl);
+
+        assert_eq!(
+            snippets,
+            vec![
+                "please pull main".to_owned(),
+                "checking branch and upstream state".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_skip_control_payloads() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "# AGENTS.md instructions\n<INSTRUCTIONS>do not display</INSTRUCTIONS>"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "<hook_prompt hook_run_id=\"x\">control</hook_prompt>"}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "real assistant reply"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            extract_recent_conversation_snippets(&jsonl),
+            vec!["real assistant reply".to_owned()]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_skip_review_wrapper_prompts() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Read-only implementation review. Scope: current uncommitted diff. Review only P0-P2 findings."}]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "actual assistant answer"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            extract_recent_conversation_snippets(&jsonl),
+            vec!["actual assistant answer".to_owned()]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_skip_codex_transcript_wrappers() {
+        let jsonl = [
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "The following is the Codex agent history for review. It includes tool call arguments.\n>>> TRANSCRIPT START\nuser: keep the working tree clean"
+                    }]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "actual resumed thread message"}]
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            extract_recent_conversation_snippets(&jsonl),
+            vec!["actual resumed thread message".to_owned()]
+        );
+    }
+
+    #[test]
+    fn conversation_preview_reads_rollout_path_with_fallback() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-router-session-history-{}.jsonl",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "real local history"}]
+                }
+            })
+            .to_string(),
+        )
+        .expect("test should write history fixture");
+
+        let preview = SessionConversationPreview::from_rollout_path(Some(
+            path.to_str().expect("temp path should be utf-8"),
+        ));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(preview.snippets, vec!["real local history".to_owned()]);
+        assert_eq!(preview.unavailable_reason, None);
+
+        let missing = SessionConversationPreview::from_rollout_path(None);
+        assert_eq!(missing.snippets, Vec::<String>::new());
+        assert_eq!(
+            missing.unavailable_reason,
+            Some("history unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn rollout_path_validation_rejects_paths_outside_codex_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "codex-router-rollout-validation-{}",
+            std::process::id()
+        ));
+        let codex_home = root.join("codex-home");
+        let sessions_dir = codex_home.join("sessions");
+        let outside_dir = root.join("outside");
+        fs::create_dir_all(&sessions_dir).expect("test should create sessions dir");
+        fs::create_dir_all(&outside_dir).expect("test should create outside dir");
+        let inside = sessions_dir.join("rollout.jsonl");
+        let outside = outside_dir.join("rollout.jsonl");
+        fs::write(&inside, "").expect("test should write inside rollout");
+        fs::write(&outside, "").expect("test should write outside rollout");
+
+        assert_eq!(
+            validated_rollout_path(
+                &codex_home,
+                Some(inside.to_str().expect("inside path should be utf-8"))
+            ),
+            Some(
+                inside
+                    .canonicalize()
+                    .expect("inside path should canonicalize")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            validated_rollout_path(
+                &codex_home,
+                Some(outside.to_str().expect("outside path should be utf-8"))
+            ),
+            None
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deferred_rollout_source_avoids_filesystem_validation_during_session_load() {
+        let root = std::env::temp_dir().join(format!(
+            "codex-router-deferred-rollout-{}",
+            std::process::id()
+        ));
+        let codex_home = root.join("codex-home");
+        let missing_inside = codex_home.join("sessions").join("missing.jsonl");
+        let outside = root.join("outside").join("missing.jsonl");
+
+        assert!(
+            deferred_rollout_source(
+                &codex_home,
+                Some(
+                    missing_inside
+                        .to_str()
+                        .expect("inside path should be utf-8")
+                ),
+            )
+            .is_some(),
+            "startup should keep an inside source candidate without canonicalizing every file"
+        );
+        assert_eq!(
+            deferred_rollout_source(
+                &codex_home,
+                Some(outside.to_str().expect("outside path should be utf-8")),
+            ),
+            None,
+            "startup should still reject lexically outside rollout paths"
+        );
+        assert_eq!(
+            deferred_rollout_source(&codex_home, Some("../sessions/escape.jsonl")),
+            None,
+            "startup should reject parent-directory escape paths"
+        );
     }
 }
 
@@ -1006,7 +1630,13 @@ pub enum SessionsCommandError {
     PickerCanceled,
     /// Interactive picker failed.
     #[error("sessions picker failed: {0}")]
-    Picker(InquireError),
+    Picker(std::io::Error),
+    /// Interactive picker cannot run without a terminal.
+    #[error("sessions interactive picker requires a terminal; use --list or --last")]
+    InteractiveRequiresTerminal,
+    /// Interactive picker cannot render inside the current terminal width.
+    #[error("sessions interactive picker requires a wider terminal")]
+    TerminalTooNarrow,
     /// Codex failed to launch.
     #[error("failed to launch codex resume command: {0}")]
     CodexLaunch(std::io::Error),

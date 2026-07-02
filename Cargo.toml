@@ -10,6 +10,7 @@ members = [
     "crates/codex-router-selection",
     "crates/codex-router-state",
     "crates/codex-router-test-support",
+    "prototypes/ux_prototype",
 ]
 
 [workspace.package]
@@ -35,7 +36,7 @@ hyper-tungstenite = "0.20.0"
 hyper-rustls = { version = "0.27.7", default-features = false, features = ["http1", "http2", "tls12", "webpki-roots"] }
 hyper-util = { version = "0.1.19", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
 indicatif = "0.18.3"
-inquire = "0.9.1"
+iocraft = "0.8.3"
 opentelemetry = { version = "0.31.0", features = ["metrics", "trace"] }
 opentelemetry-otlp = { version = "0.31.0", features = ["http-proto", "metrics", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["metrics", "rt-tokio", "trace"] }

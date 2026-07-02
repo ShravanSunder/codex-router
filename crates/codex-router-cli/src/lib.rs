@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ pub mod account;
 mod credential_runtime;
 pub mod doctor;
 mod live;
+mod presentation;
 pub mod profile;
 pub mod quota;
 mod secret_store_factory;
@@ -52,6 +54,12 @@ use token::export_token_assignment;
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
+#[cfg(all(debug_assertions, not(test)))]
+const DEBUG_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_DEBUG_ROUTER_ROOT";
+#[cfg(all(debug_assertions, not(test)))]
+const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
+#[cfg(all(debug_assertions, not(test)))]
+const DEFAULT_DEBUG_ROUTER_ROOT: &str = "tmp/dev-state/router-root";
 
 /// Runs the process CLI.
 pub fn run() -> i32 {
@@ -201,7 +209,14 @@ where
             }
         }
         CliCommand::Account(command) => account::run_account_command(stdout, command)?,
-        CliCommand::Quota(command) => quota::run_quota_command(stdout, command)?,
+        CliCommand::Quota(command) => {
+            quota::run_quota_command(
+                stdout,
+                command,
+                context.stdout_is_terminal(),
+                context.stdout_terminal_width(),
+            )?;
+        }
         CliCommand::Live(command) => live::run_live_command(stdout, command)?,
         CliCommand::Sessions(command) => sessions::run_sessions_command(stdout, command, context)?,
         CliCommand::Version => {
@@ -236,6 +251,24 @@ pub(crate) fn router_secret_root_or_default(
 }
 
 fn default_router_root() -> Result<PathBuf, CliError> {
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        if std::env::var_os(USE_HOME_DEFAULT_ENV).is_none() {
+            if let Some(debug_root) = std::env::var_os(DEBUG_ROUTER_ROOT_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+            {
+                return Ok(debug_root);
+            }
+
+            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+            return Ok(workspace_root.join(DEFAULT_DEBUG_ROUTER_ROOT));
+        }
+    }
+
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -451,6 +484,23 @@ impl CliContext {
             .find(|(env_name, _)| env_name == name)
             .map(|(_, env_value)| env_value.as_str())
             .filter(|env_value| !env_value.is_empty())
+    }
+
+    fn stdout_is_terminal(&self) -> bool {
+        if self.env_var("CODEX_ROUTER_FORCE_TTY").is_some() {
+            return true;
+        }
+        if self.env_var("CODEX_ROUTER_FORCE_NON_TTY").is_some() {
+            return false;
+        }
+        std::io::stdout().is_terminal()
+    }
+
+    fn stdout_terminal_width(&self) -> Option<usize> {
+        self.env_var("CODEX_ROUTER_FORCE_TTY_WIDTH")
+            .or_else(|| self.env_var("COLUMNS"))
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|width| *width > 0)
     }
 
     fn current_dir(&self) -> &std::path::Path {
@@ -1162,11 +1212,9 @@ commands:
   quota                         Show quota, refresh state, and next account
   quota refresh                 Refresh quota data now
   sessions                      Pick and resume a Codex session from this folder
-  sessions --new                Start a new Codex session with the router profile
   sessions --checkout           Pick from this git checkout
   sessions --repo               Pick from all checkouts for this repo
   sessions --any                Pick from all Codex sessions
-  sessions --new --yolo         Pass Codex flags through after router options
   doctor                        Diagnose local router setup
   profile print                 Print the Codex profile snippet
 ";
@@ -1362,7 +1410,7 @@ mod tests {
     fn process_binary_path_supports_top_level_version() {
         let output = run_cli(
             ["/tmp/build/target/debug/codex-router", "--version"],
-            CliContext::new(Vec::new()),
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
         assert_eq!(
@@ -1376,7 +1424,7 @@ mod tests {
     fn process_binary_path_is_skipped_before_command_parse() {
         let output = run_cli(
             ["/tmp/build/target/debug/codex-router", "--help"],
-            CliContext::new(Vec::new()),
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
         for expected_line in [
@@ -1440,7 +1488,7 @@ mod tests {
                 &["codex-router", "quota", "--help"][..],
                 &[
                     "codex-router quota",
-                    "quota          Show quota, refresh state, and next account",
+                    "quota          Show persisted quota status and next account",
                     "quota refresh  Refresh quota data now",
                 ][..],
             ),
@@ -1604,7 +1652,7 @@ mod tests {
                 "--codex-home",
                 path_to_str(&codex_home),
             ],
-            CliContext::new(Vec::new()),
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
         assert!(!output.stdout.contains("[profiles.codex-router]\n"));
@@ -1639,7 +1687,7 @@ mod tests {
                 "--codex-home",
                 path_to_str(&codex_home),
             ],
-            CliContext::new(Vec::new()),
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
         assert_router_profile_contract(&output.stdout, 9876);
@@ -2495,6 +2543,8 @@ exit 42
             .with_route_band("models", 44)
             .with_reset_unix_seconds(3_000),
         ));
+        drop(state);
+        ensure_async_state_schema(&router_root);
 
         let output = run_cli(
             [
@@ -2503,11 +2553,11 @@ exit 42
                 "status",
                 "--router-root",
                 path_to_str(&router_root),
+                "--no-refresh",
             ],
             CliContext::new(Vec::new()),
         );
 
-        assert!(output.stdout.contains("account"));
         assert!(output.stdout.contains("primary"));
         assert!(output.stdout.contains("72%"));
         assert!(output.stdout.contains("needs refresh"));
@@ -2552,6 +2602,8 @@ exit 42
             .with_reset_unix_seconds(20_000)
             .with_stale_penalty(false),
         ));
+        drop(state);
+        ensure_async_state_schema(&router_root);
 
         let output = run_cli(
             [
@@ -2648,6 +2700,8 @@ exit 42
             .with_reset_credits_available(1)
             .with_stale_penalty(false),
         ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
 
         let output = run_cli(
             [
@@ -2663,7 +2717,7 @@ exit 42
                 "--now-unix-seconds",
                 "11000",
             ],
-            CliContext::new(Vec::new()),
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
         );
 
         let lines = output.stdout.lines().collect::<Vec<_>>();
@@ -2693,6 +2747,168 @@ exit 42
         assert!(!output.stdout.contains("active_pressure"));
         assert!(!output.stdout.contains("headroom_cost"));
         assert!(!output.stdout.contains("bottleneck"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_table_format_renders_account_rows_without_legacy_tables() {
+        let test_root = TestRoot::new("quota-status-account-rows");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let primary_account = AccountRecord::new(
+            account_id("acct_primary"),
+            "primary",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        let five_hour_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary"),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(25)
+        .with_reset_unix_seconds(20_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(10_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id("acct_primary"),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(614_800)
+        .with_observed_unix_seconds(10_000);
+        must_ok(
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                primary_account.account_id(),
+                "responses",
+                &[five_hour_window, weekly_window],
+                10_000,
+                20_000,
+            ),
+        );
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_primary"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(10_000)
+            .with_route_band("responses", 25)
+            .with_reset_unix_seconds(20_000)
+            .with_reset_credits_available(1)
+            .with_stale_penalty(false),
+        ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "table",
+                "--all-limits",
+                "--no-refresh",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
+        );
+
+        let visible_stdout = strip_ansi_sequences(&output.stdout);
+
+        assert!(visible_stdout.starts_with("╭"));
+        assert!(visible_stdout.contains("Quota status"));
+        assert!(visible_stdout.contains("─"));
+        assert!(visible_stdout.contains("╰"));
+        assert!(visible_stdout.contains("responses -> primary    [preferred]"));
+        assert!(visible_stdout.contains("why: preferred by quota: safest quota"));
+        assert!(visible_stdout.contains("  Account"));
+        assert!(visible_stdout.contains("❯ primary"));
+        assert!(visible_stdout.contains("preferred"));
+        assert!(visible_stdout.contains("25% left, reset 2h 30m"));
+        assert!(visible_stdout.contains("80% left, reset 6d 23h"));
+        assert!(visible_stdout.contains("Selected account"));
+        assert!(visible_stdout.contains("Activity"));
+        assert!(visible_stdout.contains("pace"));
+        assert!(visible_stdout.contains("rate"));
+        assert!(visible_stdout.contains("guards"));
+        assert!(!visible_stdout.contains("│ Clients"));
+        assert!(visible_stdout.contains("safest quota"));
+        assert!(!visible_stdout.contains("account ┆ status"));
+        assert!(!visible_stdout.contains("route     ┆ next"));
+        assert!(!visible_stdout.contains("acct_primary"));
+        assert!(output.stdout.contains("\x1b["));
+        assert!(output.stdout.contains("\x1b[1m"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_default_keeps_single_human_status_block_without_refresh() {
+        let test_root = TestRoot::new("quota-status-default-readonly-single-block");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let primary_account = AccountRecord::new(
+            account_id("acct_primary"),
+            "primary",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &primary_account,
+        ));
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_primary"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(10_000)
+            .with_route_band("responses", 25)
+            .with_reset_unix_seconds(20_000)
+            .with_stale_penalty(false),
+        ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "table",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
+        );
+
+        assert_eq!(output.stdout.matches("Quota status").count(), 1);
+        assert!(output.stdout.contains("responses -> primary"));
+        assert!(!output.stdout.contains("refresh failed:"));
+        assert!(!output.stdout.contains("refreshing quota..."));
+        assert!(!output.stdout.contains("updated quota:"));
+        assert!(output.stdout.contains("┌"));
+        assert!(output.stdout.contains("Selected account"));
         assert!(output.stderr.is_empty());
     }
 
@@ -2754,6 +2970,8 @@ exit 42
             .with_reset_credits_available(1)
             .with_stale_penalty(false),
         ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
 
         let output = run_cli(
             [
@@ -2864,11 +3082,11 @@ exit 42
         );
         let auto_parsed: serde_json::Value = must_ok(serde_json::from_str(&auto_output.stdout));
         assert_eq!(auto_parsed["route_result"], "ok");
-        assert_eq!(auto_parsed["cached"]["route_band"], "responses");
-        assert_eq!(auto_parsed["cached"]["selected_pool"], "usable");
-        assert_eq!(auto_parsed["refresh"]["route_result"], "error");
-        assert!(auto_parsed["refresh"]["error"].as_str().is_some());
-        assert_eq!(auto_parsed["updated"], serde_json::Value::Null);
+        assert_eq!(auto_parsed["route_band"], "responses");
+        assert_eq!(auto_parsed["selected_pool"], "usable");
+        assert!(auto_parsed.get("cached").is_none());
+        assert!(auto_parsed.get("refresh").is_none());
+        assert!(auto_parsed.get("updated").is_none());
         assert!(!auto_output.stdout.contains("acct_primary"));
     }
 
@@ -2939,6 +3157,7 @@ exit 42
             10_900,
             8,
         )));
+        must_ok(runtime.block_on(async_state.close()));
 
         let output = run_cli(
             [
@@ -3030,7 +3249,7 @@ exit 42
                 .build(),
         );
         let async_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
-        drop(async_state);
+        must_ok(runtime.block_on(async_state.close()));
         runtime.block_on(async {
             let pool = must_ok(
                 sqlx::sqlite::SqlitePoolOptions::new()
@@ -3162,6 +3381,7 @@ exit 42
             .with_effective(true);
             must_ok(runtime.block_on(async_state.append_quota_history_observation(&observation)));
         }
+        must_ok(runtime.block_on(async_state.close()));
 
         let output = run_cli(
             [
@@ -3172,6 +3392,7 @@ exit 42
                 path_to_str(&router_root),
                 "--format",
                 "plain",
+                "--no-refresh",
                 "--now-unix-seconds",
                 "11000",
             ],
@@ -4697,16 +4918,10 @@ exit 42
             Err(error) => panic!("quota command should parse: {error}"),
         };
 
-        let QuotaCommand::Status {
-            router_root,
-            auto_refresh,
-            ..
-        } = command
-        else {
+        let QuotaCommand::Status { router_root, .. } = command else {
             panic!("quota status command should parse");
         };
         assert_eq!(router_root, default_router_root_for_test());
-        assert!(auto_refresh);
     }
 
     #[test]
@@ -4765,10 +4980,9 @@ exit 42
                 Err(error) => panic!("quota command should parse: {error}"),
             };
 
-            let QuotaCommand::Status { auto_refresh, .. } = command else {
+            let QuotaCommand::Status { .. } = command else {
                 panic!("quota --no-refresh should parse as status");
             };
-            assert!(!auto_refresh);
         }
     }
 
@@ -4788,6 +5002,7 @@ exit 42
         assert_eq!(command.format, crate::sessions::SessionsFormat::Table);
         assert!(!command.last);
         assert!(!command.new);
+        assert_eq!(command.limit, 100);
         assert!(!command.dry_run);
         assert!(command.codex_args.is_empty());
     }
@@ -4806,6 +5021,8 @@ exit 42
             OsString::from("--list"),
             OsString::from("--format"),
             OsString::from("json"),
+            OsString::from("--limit"),
+            OsString::from("25"),
             OsString::from("--last"),
             OsString::from("--yolo"),
             OsString::from("--model"),
@@ -4824,6 +5041,7 @@ exit 42
         assert_eq!(command.format, crate::sessions::SessionsFormat::Json);
         assert!(command.last);
         assert!(!command.new);
+        assert_eq!(command.limit, 25);
         assert!(!command.dry_run);
         assert_eq!(
             command.codex_args,
@@ -4837,23 +5055,36 @@ exit 42
 
     #[test]
     fn sessions_new_dry_run_prints_codex_command_with_passthrough_flags() {
-        let output = run_cli(
-            [
-                "sessions",
-                "--new",
-                "--dry-run",
-                "--yolo",
-                "--model",
-                "gpt-5.4-mini",
-            ],
-            CliContext::new(Vec::new()),
-        );
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--new"),
+            OsString::from("--dry-run"),
+            OsString::from("--yolo"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.4-mini"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new_start_new();
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &CliContext::new(Vec::new()),
+            &mut runner,
+            &mut picker,
+        ));
 
         assert_eq!(
-            output.stdout,
+            String::from_utf8(stdout).unwrap_or_else(|error| panic!("stdout utf8: {error}")),
             "codex --profile codex-router --yolo --model gpt-5.4-mini\n"
         );
-        assert!(output.stderr.is_empty());
+        assert!(runner.new_codex_args.is_empty());
+        assert!(runner.resumed_session_ids.is_empty());
     }
 
     #[test]
@@ -4889,7 +5120,9 @@ exit 42
         assert!(
             error.to_string().contains("unexpected argument")
                 || error.to_string().contains("unrecognized option")
-                || error.to_string().contains("--scope was removed"),
+                || error
+                    .to_string()
+                    .contains("--scope was removed; use --checkout, --repo, or --any"),
             "unexpected legacy sessions scope error: {error}"
         );
     }
@@ -4934,6 +5167,73 @@ exit 42
             test_root.path().join("project-a").display().to_string()
         );
         assert_eq!(sessions[1]["session_id"], "thread-older");
+    }
+
+    #[test]
+    fn sessions_list_json_respects_limit_after_filtering_matches() {
+        const PROMPT_CANARY: &str = "LIMIT_CANARY_SHOULD_NOT_LEAK";
+        let test_root = TestRoot::new("sessions-limit");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            PROMPT_CANARY,
+            &[
+                CodexStateThreadFixture::new(
+                    "thread-third",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    3_000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-second",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2_000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-first",
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    1_000,
+                ),
+            ],
+        );
+
+        let output = run_cli(
+            [
+                "sessions",
+                "--any",
+                "--source",
+                "interactive",
+                "--list",
+                "--format",
+                "json",
+                "--limit",
+                "2",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(project),
+        );
+
+        assert_session_ids(&output.stdout, &["thread-third", "thread-second"]);
+        assert!(!output.stdout.contains(PROMPT_CANARY));
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -5024,6 +5324,7 @@ exit 42
         let context = CliContext::new(vec![
             ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
             ("HOME".to_owned(), test_root.path().display().to_string()),
+            ("CODEX_ROUTER_FORCE_NON_TTY".to_owned(), "1".to_owned()),
         ])
         .with_current_dir(project_a_src);
 
@@ -5209,6 +5510,11 @@ exit 42
 
         assert!(output.stdout.contains(SESSION_TITLE));
         assert!(output.stdout.contains("main"));
+        assert!(output.stdout.contains("thread-…"));
+        assert!(!output.stdout.contains("┌"));
+        assert!(!output.stdout.contains("╞"));
+        assert!(!output.stdout.contains("│ session"));
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -5254,7 +5560,6 @@ exit 42
                 "codex-router",
                 "--last",
                 "--dry-run",
-                "--yolo",
             ],
             CliContext::new(vec![
                 ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
@@ -5265,7 +5570,7 @@ exit 42
 
         assert_eq!(
             output.stdout,
-            "codex --profile codex-router --yolo resume -- thread-new\n"
+            "codex --profile codex-router resume -- thread-new\n"
         );
     }
 
@@ -5363,7 +5668,6 @@ exit 42
             OsString::from("--provider"),
             OsString::from("codex-router"),
             OsString::from("--last"),
-            OsString::from("--yolo"),
         ]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
@@ -5372,6 +5676,7 @@ exit 42
         let context = CliContext::new(vec![
             ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
             ("HOME".to_owned(), test_root.path().display().to_string()),
+            ("CODEX_ROUTER_FORCE_NON_TTY".to_owned(), "1".to_owned()),
         ])
         .with_current_dir(project);
         let mut runner = FakeSessionsCommandRunner::default();
@@ -5388,8 +5693,6 @@ exit 42
 
         assert!(stdout.is_empty());
         assert_eq!(runner.resumed_session_ids, ["thread-new"]);
-        assert_eq!(runner.resume_codex_args, [vec![OsString::from("--yolo")]]);
-        assert!(runner.new_codex_args.is_empty());
     }
 
     #[test]
@@ -5422,14 +5725,27 @@ exit 42
                     "main",
                     2000,
                 ),
+                CodexStateThreadFixture::new(
+                    "thread-sibling",
+                    &test_root.path().join("sibling-project"),
+                    "openai",
+                    "cli",
+                    "cli",
+                    "feature",
+                    3000,
+                ),
+                CodexStateThreadFixture::new(
+                    "thread-subagent",
+                    &project,
+                    "codex-router",
+                    "subagent",
+                    "subagent",
+                    "main",
+                    4000,
+                ),
             ],
         );
-        let command = match CliCommand::parse([
-            OsString::from("sessions"),
-            OsString::from("--any"),
-            OsString::from("--provider"),
-            OsString::from("codex-router"),
-        ]) {
+        let command = match CliCommand::parse([OsString::from("sessions")]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
             Err(error) => panic!("sessions command should parse: {error}"),
@@ -5452,50 +5768,30 @@ exit 42
         ));
 
         assert!(stdout.is_empty());
-        assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
-        assert_eq!(picker.offered_labels.len(), 3);
-        assert_eq!(picker.offered_labels[0], "New Codex session");
-        assert!(
-            picker.offered_labels[1].starts_with("PICKER_CANARY_SHOULD_NOT_LEAK\n"),
-            "interactive picker should show the human title first, got {:?}",
-            picker.offered_labels[1]
+        assert_eq!(
+            picker.offered_session_ids,
+            [
+                "thread-subagent",
+                "thread-sibling",
+                "thread-new",
+                "thread-old"
+            ]
         );
-        assert!(
-            picker.offered_labels[1].contains("main  project  id=thread-…"),
-            "interactive picker should show compact metadata on the second line, got {:?}",
-            picker.offered_labels[1]
-        );
+        assert_eq!(picker.offered_labels.len(), 4);
+        assert_eq!(picker.offered_labels[0], "PICKER_CANARY_SHOULD_NOT_LEAK");
         assert_eq!(runner.resumed_session_ids, ["thread-old"]);
     }
 
     #[test]
-    fn sessions_interactive_new_choice_launches_new_codex_with_passthrough_flags() {
-        let test_root = TestRoot::new("sessions-picker-new");
+    fn sessions_interactive_empty_filter_can_start_new_router_profile_session() {
+        let test_root = TestRoot::new("sessions-picker-start-new");
         must_ok(fs::create_dir(test_root.path()));
         let codex_home = test_root.path().join("codex-home");
         let project = test_root.path().join("project");
         must_ok(fs::create_dir(&codex_home));
         must_ok(fs::create_dir(&project));
-        create_codex_state_db_with_thread_rows(
-            &codex_home.join("state_5.sqlite"),
-            "NEW_CHOICE_CANARY_SHOULD_NOT_LEAK",
-            &[CodexStateThreadFixture::new(
-                "thread-existing",
-                &project,
-                "codex-router",
-                "cli",
-                "cli",
-                "main",
-                1000,
-            )],
-        );
-        let command = match CliCommand::parse([
-            OsString::from("sessions"),
-            OsString::from("--any"),
-            OsString::from("--provider"),
-            OsString::from("codex-router"),
-            OsString::from("--yolo"),
-        ]) {
+        create_codex_state_db_with_thread_rows(&codex_home.join("state_5.sqlite"), "EMPTY", &[]);
+        let command = match CliCommand::parse([OsString::from("sessions")]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
             Err(error) => panic!("sessions command should parse: {error}"),
@@ -5506,7 +5802,7 @@ exit 42
         ])
         .with_current_dir(project);
         let mut runner = FakeSessionsCommandRunner::default();
-        let mut picker = FakeSessionsPicker::new_session();
+        let mut picker = FakeSessionsPicker::new_start_new();
         let mut stdout = Vec::new();
 
         must_ok(crate::sessions::run_sessions_command_with_dependencies(
@@ -5518,14 +5814,48 @@ exit 42
         ));
 
         assert!(stdout.is_empty());
-        assert_eq!(picker.offered_session_ids, ["thread-existing"]);
-        assert_eq!(picker.offered_labels[0], "New Codex session\n  --yolo");
-        assert!(runner.resumed_session_ids.is_empty());
-        assert_eq!(runner.new_codex_args, [vec![OsString::from("--yolo")]]);
+        assert!(picker.offered_session_ids.is_empty());
+        assert_eq!(runner.resumed_session_ids, Vec::<String>::new());
+        assert_eq!(runner.new_codex_args, [Vec::<OsString>::new()]);
     }
 
     #[test]
-    fn sessions_dependency_contract_uses_inquire_without_disallowed_direct_tui_crates() {
+    fn sessions_interactive_non_tty_errors_concisely_without_logs() {
+        let test_root = TestRoot::new("sessions-non-tty");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+            ("CODEX_ROUTER_FORCE_NON_TTY".to_owned(), "1".to_owned()),
+        ])
+        .with_current_dir(project);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let error = match run_with_io(
+            [OsString::from("sessions")],
+            &context,
+            &mut stdout,
+            &mut stderr,
+        ) {
+            Ok(()) => panic!("non-TTY interactive sessions should fail concisely"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "sessions interactive picker requires a terminal; use --list or --last"
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn terminal_ui_dependency_contract_uses_iocraft_presentation_boundary() {
         let workspace_manifest = must_ok(fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
@@ -5537,16 +5867,28 @@ exit 42
             Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
         ));
 
-        assert!(workspace_manifest.contains("inquire = "));
-        assert!(cli_manifest.contains("inquire.workspace = true"));
+        assert!(workspace_manifest.contains("iocraft = "));
+        assert!(cli_manifest.contains("iocraft.workspace = true"));
         assert!(cli_manifest.contains("comfy-table.workspace = true"));
-        for disallowed_dependency in ["ratatui", "dialoguer", "crossterm"] {
+        for disallowed_dependency in ["inquire", "ratatui", "dialoguer"] {
             assert!(
                 !cli_manifest.contains(&format!("{disallowed_dependency}.workspace"))
                     && !cli_manifest.contains(&format!("{disallowed_dependency} =")),
-                "sessions V1 must not add direct {disallowed_dependency} dependency"
+                "terminal UI must not add direct {disallowed_dependency} dependency"
             );
         }
+
+        let presentation_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation");
+        let terminal_ui_sources = must_ok(fs::read_dir(&presentation_root))
+            .map(|entry| must_ok(entry).path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .map(|path| must_ok(fs::read_to_string(path)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            terminal_ui_sources.contains("iocraft"),
+            "iocraft usage should be isolated inside the CLI presentation layer"
+        );
     }
 
     #[test]
@@ -6651,6 +6993,24 @@ exit 42
         }
     }
 
+    fn strip_ansi_sequences(input: &str) -> String {
+        let mut output = String::new();
+        let mut characters = input.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\x1b' && characters.peek() == Some(&'[') {
+                characters.next();
+                for sequence_character in characters.by_ref() {
+                    if sequence_character.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        output
+    }
+
     fn lock_test_mutex<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
         match mutex.lock() {
             Ok(guard) => guard,
@@ -6711,6 +7071,18 @@ exit 42
             stdout: must_ok(String::from_utf8(stdout)),
             stderr: must_ok(String::from_utf8(stderr)),
         }
+    }
+
+    fn ensure_async_state_schema(router_root: &Path) {
+        let runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(
+            &router_root.join("state.sqlite"),
+        )));
+        must_ok(runtime.block_on(state.close()));
     }
 
     fn assert_session_ids(stdout: &str, expected_session_ids: &[&str]) {
@@ -6796,7 +7168,7 @@ exit 42
     }
 
     struct FakeSessionsPicker {
-        selection: crate::sessions::SessionPickerSelection,
+        selected_outcome: crate::presentation::session_picker::SessionsPickerOutcome,
         offered_session_ids: Vec<String>,
         offered_labels: Vec<String>,
     }
@@ -6804,17 +7176,19 @@ exit 42
     impl FakeSessionsPicker {
         fn new(selected_session_id: &str) -> Self {
             Self {
-                selection: crate::sessions::SessionPickerSelection::Resume(
-                    selected_session_id.to_owned(),
-                ),
+                selected_outcome:
+                    crate::presentation::session_picker::SessionsPickerOutcome::ResumeSession(
+                        selected_session_id.to_owned(),
+                    ),
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
             }
         }
 
-        fn new_session() -> Self {
+        fn new_start_new() -> Self {
             Self {
-                selection: crate::sessions::SessionPickerSelection::New,
+                selected_outcome:
+                    crate::presentation::session_picker::SessionsPickerOutcome::StartNewSession,
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
             }
@@ -6824,17 +7198,22 @@ exit 42
     impl crate::sessions::SessionsPicker for FakeSessionsPicker {
         fn select_session(
             &mut self,
-            choices: Vec<crate::sessions::SessionPickerChoice>,
+            request: crate::presentation::session_picker::SessionsPickerRequest,
         ) -> Result<
-            Option<crate::sessions::SessionPickerSelection>,
+            Option<crate::presentation::session_picker::SessionsPickerOutcome>,
             crate::sessions::SessionsCommandError,
         > {
-            self.offered_session_ids = choices
+            self.offered_session_ids = request
+                .records
                 .iter()
-                .filter_map(|choice| choice.resume_session_id().map(str::to_owned))
+                .map(|record| record.session_id.to_owned())
                 .collect();
-            self.offered_labels = choices.iter().map(ToString::to_string).collect();
-            Ok(Some(self.selection.clone()))
+            self.offered_labels = request
+                .records
+                .iter()
+                .map(|record| record.title.clone())
+                .collect();
+            Ok(Some(self.selected_outcome.clone()))
         }
     }
 

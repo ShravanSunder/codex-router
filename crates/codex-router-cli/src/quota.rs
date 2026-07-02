@@ -32,7 +32,6 @@ use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
 use codex_router_selection::burn_down::LimitingWindow;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaEvidenceReason;
-#[cfg(test)]
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
 use codex_router_selection::burn_down::RoutingExclusion;
@@ -57,11 +56,9 @@ use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
-use codex_router_state::selection_projection::project_route_band_selection_inputs;
+use codex_router_state::selection_projection::project_route_band_selection_inputs_read_only;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
-use comfy_table::Table;
-use comfy_table::presets::UTF8_FULL;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use serde::Serialize;
@@ -74,12 +71,17 @@ use crate::ArgumentParser;
 use crate::CliError;
 use crate::credential_runtime::CliCredentialResolver;
 use crate::credential_runtime::CliCredentialResolverOpenError;
+use crate::presentation::quota::QuotaSelectedAccountViewModel;
+use crate::presentation::quota::QuotaStatusAccountViewModel;
+use crate::presentation::quota::QuotaStatusViewModel;
+use crate::presentation::quota::write_quota_status_view;
 use crate::router_root_or_default;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
 const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 600;
 const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
+const QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 
 /// Quota CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,8 +98,6 @@ pub enum QuotaCommand {
         all_limits: bool,
         /// Current clock used for pace and runout math.
         now_unix_seconds: u64,
-        /// Whether human status should refresh after rendering cached data.
-        auto_refresh: bool,
     },
     /// Refreshes persisted quota from the provider.
     Refresh {
@@ -138,7 +138,6 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
-                    auto_refresh: options.auto_refresh,
                 })
             }
             Some(unknown) if !unknown.starts_with('-') => Err(CliError::UnknownCommand {
@@ -152,7 +151,6 @@ impl QuotaCommand {
                     format: options.format,
                     all_limits: options.all_limits,
                     now_unix_seconds: options.now_unix_seconds,
-                    auto_refresh: options.auto_refresh,
                 })
             }
         }
@@ -227,6 +225,8 @@ pub enum QuotaCommandError {
 pub fn run_quota_command(
     stdout: &mut impl Write,
     command: QuotaCommand,
+    stdout_is_terminal: bool,
+    stdout_terminal_width: Option<usize>,
 ) -> Result<(), QuotaCommandError> {
     match command {
         QuotaCommand::Help(help_text) => stdout
@@ -237,14 +237,14 @@ pub fn run_quota_command(
             format,
             all_limits,
             now_unix_seconds,
-            auto_refresh,
         } => render_quota_status(
             stdout,
             router_root,
             format,
+            stdout_is_terminal,
+            stdout_terminal_width,
             all_limits,
             now_unix_seconds,
-            auto_refresh,
         ),
         QuotaCommand::Refresh {
             router_root,
@@ -257,7 +257,7 @@ const QUOTA_HELP_TEXT: &str = "\
 codex-router quota
 
 commands:
-  quota          Show quota, refresh state, and next account
+  quota          Show persisted quota status and next account
   quota refresh  Refresh quota data now
 ";
 
@@ -771,13 +771,16 @@ where
     if failed_count > 0 {
         writeln!(stdout, "failed: {failed_count}").map_err(QuotaCommandError::Stdout)?;
     }
-    if refreshed_count == 0 && failed_count > 0 {
-        return Err(QuotaCommandError::ProviderResponse {
+    let refresh_result = if refreshed_count == 0 && failed_count > 0 {
+        Err(QuotaCommandError::ProviderResponse {
             message: "quota refresh failed for all eligible route bands".to_owned(),
-        });
-    }
+        })
+    } else {
+        Ok(())
+    };
+    quota_history_runtime.block_on(quota_history_state.close())?;
 
-    Ok(())
+    refresh_result
 }
 
 fn append_success_quota_history_observation(
@@ -1207,110 +1210,54 @@ fn render_quota_status(
     stdout: &mut impl Write,
     router_root: PathBuf,
     format: QuotaStatusFormat,
-    all_limits: bool,
-    now_unix_seconds: u64,
-    auto_refresh: bool,
-) -> Result<(), QuotaCommandError> {
-    if format == QuotaStatusFormat::Json && auto_refresh {
-        return render_quota_status_json_with_refresh(
-            stdout,
-            router_root,
-            all_limits,
-            now_unix_seconds,
-        );
-    }
-
-    render_quota_status_once(stdout, &router_root, format, all_limits, now_unix_seconds)?;
-    if !auto_refresh {
-        return Ok(());
-    }
-
-    writeln!(stdout, "refreshing quota...").map_err(QuotaCommandError::Stdout)?;
-    let mut refresh_output = Vec::new();
-    match refresh_quota(
-        &mut refresh_output,
-        router_root.clone(),
-        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-    ) {
-        Ok(()) => {
-            write!(stdout, "{}", String::from_utf8_lossy(&refresh_output))
-                .map_err(QuotaCommandError::Stdout)?;
-            writeln!(stdout, "updated quota:").map_err(QuotaCommandError::Stdout)?;
-            render_quota_status_once(
-                stdout,
-                &router_root,
-                format,
-                all_limits,
-                current_unix_seconds(),
-            )
-        }
-        Err(error) => {
-            writeln!(stdout, "refresh failed: {error}").map_err(QuotaCommandError::Stdout)?;
-            Ok(())
-        }
-    }
-}
-
-fn render_quota_status_json_with_refresh(
-    stdout: &mut impl Write,
-    router_root: PathBuf,
+    stdout_is_terminal: bool,
+    stdout_terminal_width: Option<usize>,
     all_limits: bool,
     now_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
-    let cached_report = load_quota_status_report(&router_root, all_limits, now_unix_seconds, true)?;
-    let refresh_result = match refresh_quota(
-        &mut Vec::new(),
-        router_root.clone(),
-        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-    ) {
-        Ok(()) => JsonQuotaRefreshResult {
-            route_result: "ok",
-            error: None,
-        },
-        Err(error) => JsonQuotaRefreshResult {
-            route_result: "error",
-            error: Some(error.to_string()),
-        },
-    };
-    let updated_report = if refresh_result.route_result == "ok" {
-        Some(load_quota_status_report(
-            &router_root,
-            all_limits,
-            current_unix_seconds(),
-            true,
-        )?)
-    } else {
-        None
-    };
-    let json_report = JsonQuotaStatusRefreshReport {
-        route_result: "ok",
-        cached: JsonQuotaStatusReport::from_report(&cached_report),
-        refresh: refresh_result,
-        updated: updated_report
-            .as_ref()
-            .map(JsonQuotaStatusReport::from_report),
-    };
-    serde_json::to_writer_pretty(&mut *stdout, &json_report).map_err(|error| {
-        QuotaCommandError::Stdout(std::io::Error::other(format!(
-            "failed to serialize quota status json: {error}"
-        )))
-    })?;
-    writeln!(stdout).map_err(QuotaCommandError::Stdout)
+    render_quota_status_once(
+        stdout,
+        &router_root,
+        format,
+        stdout_is_terminal,
+        stdout_terminal_width,
+        all_limits,
+        now_unix_seconds,
+    )
 }
 
 fn render_quota_status_once(
     stdout: &mut impl Write,
     router_root: &Path,
     format: QuotaStatusFormat,
+    stdout_is_terminal: bool,
+    stdout_terminal_width: Option<usize>,
     all_limits: bool,
     now_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
-    let unicode_bars = format != QuotaStatusFormat::Plain;
+    let effective_format = effective_human_quota_format(format, stdout_is_terminal);
+    let unicode_bars = effective_format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
-    match format {
-        QuotaStatusFormat::Table => write_quota_table(stdout, &report),
+    match effective_format {
+        QuotaStatusFormat::Table => write_quota_table_with_style(
+            stdout,
+            &report,
+            stdout_terminal_width,
+            QuotaTableStyle::TerminalColor,
+        ),
         QuotaStatusFormat::Plain => write_quota_plain(stdout, &report),
         QuotaStatusFormat::Json => write_quota_json(stdout, &report),
+    }
+}
+
+fn effective_human_quota_format(
+    format: QuotaStatusFormat,
+    stdout_is_terminal: bool,
+) -> QuotaStatusFormat {
+    match format {
+        QuotaStatusFormat::Json | QuotaStatusFormat::Plain => format,
+        QuotaStatusFormat::Table if stdout_is_terminal => QuotaStatusFormat::Table,
+        QuotaStatusFormat::Table => QuotaStatusFormat::Plain,
     }
 }
 
@@ -1326,16 +1273,18 @@ fn load_quota_status_report(
         .build()
         .map_err(QuotaCommandError::Runtime)?;
     let quota_history_state =
-        quota_history_runtime.block_on(AsyncSqliteStateStore::open(&state_db_path))?;
+        quota_history_runtime.block_on(AsyncSqliteStateStore::open_read_only(&state_db_path))?;
     let accounts = quota_history_runtime.block_on(quota_history_state.list_accounts())?;
-    quota_status_report(
+    let report = quota_status_report(
         &quota_history_runtime,
         &quota_history_state,
         &accounts,
         all_limits,
         now_unix_seconds,
         unicode_bars,
-    )
+    )?;
+    quota_history_runtime.block_on(quota_history_state.close())?;
+    Ok(report)
 }
 
 fn quota_status_report(
@@ -1356,12 +1305,13 @@ fn quota_status_report(
         .into_iter()
         .map(|status| (status.account_id().clone(), status))
         .collect::<HashMap<_, _>>();
-    let active_client_counts_result =
-        quota_history_runtime.block_on(quota_history_state.active_client_counts_for_route_band(
+    let active_client_counts_result = quota_history_runtime.block_on(
+        quota_history_state.active_client_counts_for_route_band_read_only(
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
             ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
-        ));
+        ),
+    );
     let active_client_mirror_source = if active_client_counts_result.is_ok() {
         "sqlx_mirror"
     } else {
@@ -1382,7 +1332,7 @@ fn quota_status_report(
             .collect::<HashMap<_, _>>()
     });
     let selection_projection =
-        quota_history_runtime.block_on(project_route_band_selection_inputs(
+        quota_history_runtime.block_on(project_route_band_selection_inputs_read_only(
             quota_history_state,
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
@@ -1415,6 +1365,18 @@ fn quota_status_report(
             now_unix_seconds,
             &mut display_windows,
         )?;
+        let projected_weekly_window = selection_projection
+            .accounts()
+            .iter()
+            .find(|projected_account| projected_account.account_id() == account.account_id())
+            .and_then(|projected_account| {
+                projected_account
+                    .windows()
+                    .iter()
+                    .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+            });
+        let weekly_pace =
+            quota_pace_snapshot(&display_windows, projected_weekly_window, now_unix_seconds);
         let active_clients =
             active_client_counts
                 .as_ref()
@@ -1440,6 +1402,7 @@ fn quota_status_report(
             ),
             active_clients,
             windows: display_windows,
+            weekly_pace,
         });
     }
 
@@ -1490,45 +1453,109 @@ fn quota_status_report(
     })
 }
 
+#[cfg(test)]
 fn write_quota_table(
     stdout: &mut impl Write,
     report: &QuotaStatusReport,
+    terminal_width: Option<usize>,
+) -> Result<(), QuotaCommandError> {
+    write_quota_table_with_style(stdout, report, terminal_width, QuotaTableStyle::PlainText)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuotaTableStyle {
+    #[cfg(test)]
+    PlainText,
+    TerminalColor,
+}
+
+impl QuotaTableStyle {
+    const fn ansi(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::PlainText => false,
+            Self::TerminalColor => true,
+        }
+    }
+}
+
+fn write_quota_table_with_style(
+    stdout: &mut impl Write,
+    report: &QuotaStatusReport,
+    terminal_width: Option<usize>,
+    style: QuotaTableStyle,
 ) -> Result<(), QuotaCommandError> {
     let rows = report.rows();
-    writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
-    table.set_header([
-        "account",
-        "status",
-        "5h",
-        "weekly",
-        "pace",
-        "burn",
-        "updated",
-        "clients",
-        "resets available",
-        "routing",
-        "next use",
-    ]);
-    for row in rows {
-        table.add_row([
-            row.account_label.as_str(),
-            row.account_status.as_str(),
-            row.short_window.as_str(),
-            row.weekly_window.as_str(),
-            row.pace.as_str(),
-            row.burn.as_str(),
-            row.updated.as_str(),
-            row.active_clients.as_str(),
-            row.reset_credits_available.as_str(),
-            row.routing.as_str(),
-            row.next_use.as_str(),
-        ]);
-    }
+    let width = terminal_width.unwrap_or(100).max(40);
+    let view_model = quota_status_view_model(report, rows, width);
+    write_quota_status_view(stdout, view_model, style.ansi()).map_err(QuotaCommandError::Stdout)
+}
 
-    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)?;
-    write_selector_summary_table(stdout, rows)
+fn quota_status_view_model(
+    report: &QuotaStatusReport,
+    rows: &[QuotaStatusRow],
+    width: usize,
+) -> QuotaStatusViewModel {
+    let selected_row = rows.iter().find(|row| row.preferred_next);
+    QuotaStatusViewModel {
+        width,
+        route_line: format!(
+            "{} -> {}    {}    {}",
+            report.route_band,
+            selected_account_label(rows),
+            selected_account_badge(rows),
+            refresh_summary(rows)
+        ),
+        why_line: format!("why: {}", selector_summary(rows)),
+        rows: rows
+            .iter()
+            .map(|row| QuotaStatusAccountViewModel {
+                selected: row.preferred_next,
+                account: row.account_label.clone(),
+                status: quota_state_text(row).to_owned(),
+                active_clients: active_clients_label(row),
+                reason: reason_summary(row),
+                weekly_window: quota_window_visual_summary(
+                    &row.windows,
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    "weekly",
+                    report.now_unix_seconds,
+                ),
+                burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
+                weekly_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds),
+            })
+            .collect(),
+        selected: selected_row.map(|row| QuotaSelectedAccountViewModel {
+            account: row.account_label.clone(),
+            status: quota_state_text(row).to_owned(),
+            reason: first_line(&row.routing).to_owned(),
+            short_window: quota_window_visual_summary(
+                &row.windows,
+                V1_SHORT_WINDOW_SECONDS,
+                "",
+                report.now_unix_seconds,
+            )
+            .trim()
+            .to_owned(),
+            weekly_window: quota_window_visual_summary(
+                &row.windows,
+                V1_WEEKLY_WINDOW_SECONDS,
+                "",
+                report.now_unix_seconds,
+            )
+            .trim()
+            .to_owned(),
+            burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
+            burn_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds)
+                .replace("  ", " "),
+            total_rate: quota_total_rate_summary(row.weekly_pace),
+            connection_rate: quota_connection_rate_summary(row.weekly_pace),
+            active_clients: active_clients_label(row),
+            guards: format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure),
+            reset: row.reset_credits_available.clone(),
+            note: first_line(&row.routing).to_owned(),
+        }),
+    }
 }
 
 fn write_quota_plain(
@@ -1564,20 +1591,6 @@ fn write_quota_plain(
     write_selector_summary_plain(stdout, rows)
 }
 
-fn write_selector_summary_table(
-    stdout: &mut impl Write,
-    rows: &[QuotaStatusRow],
-) -> Result<(), QuotaCommandError> {
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
-    table.set_header(["route", "next", "why"]);
-    let next = selected_account_label(rows).to_owned();
-    let summary = selector_summary(rows);
-    table.add_row(["responses".to_owned(), next, summary]);
-
-    writeln!(stdout, "{table}").map_err(QuotaCommandError::Stdout)
-}
-
 fn write_selector_summary_plain(
     stdout: &mut impl Write,
     rows: &[QuotaStatusRow],
@@ -1598,11 +1611,145 @@ fn selected_account_label(rows: &[QuotaStatusRow]) -> &str {
         .unwrap_or("none")
 }
 
+fn selected_account_badge(rows: &[QuotaStatusRow]) -> &'static str {
+    rows.iter()
+        .find(|row| row.preferred_next)
+        .map_or("[blocked]", quota_state_badge)
+}
+
 fn selector_summary(rows: &[QuotaStatusRow]) -> String {
     let Some(selected_row) = rows.iter().find(|row| row.preferred_next) else {
         return "no usable accounts".to_owned();
     };
     selected_row.routing.replace('\n', " ")
+}
+
+fn refresh_summary(rows: &[QuotaStatusRow]) -> String {
+    let Some(selected_row) = rows.iter().find(|row| row.preferred_next) else {
+        return "no selectable account".to_owned();
+    };
+    let updated = selected_row.updated.replace('\n', ", ");
+    if updated.contains("failed") || updated.contains("needs refresh") {
+        format!("refresh {updated}")
+    } else {
+        format!("fresh {updated}")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuotaHumanGroup {
+    Preferred,
+    Available,
+    Held,
+    BlockedOrStale,
+}
+
+fn quota_human_group(row: &QuotaStatusRow) -> QuotaHumanGroup {
+    if row.preferred_next {
+        return QuotaHumanGroup::Preferred;
+    }
+    if row.freshness != QuotaEvidenceFreshness::Fresh {
+        return QuotaHumanGroup::BlockedOrStale;
+    }
+    match row.routing_reason {
+        RoutingReason::AvailableSamePool => QuotaHumanGroup::Available,
+        RoutingReason::HeldReserve
+        | RoutingReason::HeldUnknown
+        | RoutingReason::HeldShortWindowGuard => QuotaHumanGroup::Held,
+        RoutingReason::UnknownFallbackAvailable => QuotaHumanGroup::BlockedOrStale,
+        _ => match row.availability {
+            AccountAvailability::Usable => QuotaHumanGroup::Available,
+            AccountAvailability::Reserve => QuotaHumanGroup::Held,
+            AccountAvailability::Retiring
+            | AccountAvailability::Blocked
+            | AccountAvailability::Unknown
+            | AccountAvailability::Excluded => QuotaHumanGroup::BlockedOrStale,
+        },
+    }
+}
+
+fn quota_state_badge(row: &QuotaStatusRow) -> &'static str {
+    if row.preferred_next {
+        return "[preferred]";
+    }
+    if row.freshness == QuotaEvidenceFreshness::Stale {
+        return "[stale]";
+    }
+    if row.freshness == QuotaEvidenceFreshness::Unknown {
+        return "[unknown]";
+    }
+    match quota_human_group(row) {
+        QuotaHumanGroup::Preferred => "[preferred]",
+        QuotaHumanGroup::Available => "[available]",
+        QuotaHumanGroup::Held => "[held]",
+        QuotaHumanGroup::BlockedOrStale => "[blocked]",
+    }
+}
+
+fn quota_state_text(row: &QuotaStatusRow) -> &'static str {
+    if row.preferred_next {
+        return "preferred";
+    }
+    if row.freshness == QuotaEvidenceFreshness::Stale {
+        return "stale";
+    }
+    if row.freshness == QuotaEvidenceFreshness::Unknown {
+        return "unknown";
+    }
+    match quota_human_group(row) {
+        QuotaHumanGroup::Preferred => "preferred",
+        QuotaHumanGroup::Available => "available",
+        QuotaHumanGroup::Held => "held",
+        QuotaHumanGroup::BlockedOrStale => "blocked",
+    }
+}
+
+fn quota_window_visual_summary(
+    windows: &[DisplayQuotaWindow],
+    window_seconds: u64,
+    label: &'static str,
+    now_unix_seconds: u64,
+) -> String {
+    let Some(window) = windows
+        .iter()
+        .find(|window| window.window_seconds == window_seconds)
+    else {
+        return format!("{label} {} no data", quota_bar(0, true));
+    };
+    let note = window_display_note(window, now_unix_seconds)
+        .replace("resets in ", "reset ")
+        .replace("resets ", "reset ");
+    format!(
+        "{label} {} {} left, {note}",
+        quota_bar(window.remaining_headroom, true),
+        format_percent(window.remaining_headroom)
+    )
+}
+
+fn first_line(value: &str) -> &str {
+    value.lines().next().unwrap_or(value).trim()
+}
+
+fn active_clients_label(row: &QuotaStatusRow) -> String {
+    row.active_clients_value.map_or_else(
+        || "unknown clients".to_owned(),
+        |count| {
+            if count == 1 {
+                "1 client".to_owned()
+            } else {
+                format!("{count} clients")
+            }
+        },
+    )
+}
+
+fn reason_summary(row: &QuotaStatusRow) -> String {
+    first_line(&row.routing)
+        .replace("preferred by quota: ", "")
+        .replace("available by quota: ", "")
+        .replace("held by quota: ", "")
+        .replace("fallback by quota: ", "")
+        .replace("blocked: ", "")
 }
 
 fn write_quota_json(
@@ -1643,6 +1790,7 @@ struct QuotaStatusAccountInput {
     updated: String,
     active_clients: ActiveClientMirrorStatus,
     windows: Vec<DisplayQuotaWindow>,
+    weekly_pace: Option<QuotaPaceSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1662,6 +1810,7 @@ struct QuotaStatusRow {
     reset_credits_available_value: Option<u32>,
     routing: String,
     next_use: String,
+    weekly_pace: Option<QuotaPaceSnapshot>,
     windows: Vec<DisplayQuotaWindow>,
     availability: AccountAvailability,
     freshness: QuotaEvidenceFreshness,
@@ -1712,6 +1861,7 @@ impl QuotaStatusRow {
             reset_credits_available_value: input.reset_credits_available,
             routing: format_routing_cell(assessment),
             next_use: format_next_use(assessment).to_owned(),
+            weekly_pace: input.weekly_pace,
             windows: input.windows.clone(),
             availability: assessment.availability(),
             freshness: assessment.freshness(),
@@ -1730,6 +1880,17 @@ impl QuotaStatusRow {
             weekly_burn_rate_confidence: assessment.weekly_burn_rate_confidence(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QuotaPaceSnapshot {
+    remaining_headroom: u32,
+    reset_unix_seconds: Option<u64>,
+    projected_exhaustion_unix_seconds: Option<u64>,
+    projected_candidate_burn_basis_points_per_hour: Option<u32>,
+    aggregate_burn_basis_points_per_hour: Option<u32>,
+    per_connection_burn_basis_points_per_hour: Option<u32>,
+    confidence: QuotaRunRateConfidence,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1790,7 +1951,8 @@ fn attach_history_estimates_to_display_windows(
     windows: &mut [DisplayQuotaWindow],
 ) -> Result<(), QuotaCommandError> {
     let estimator = QuotaRunRateEstimator::new(DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS);
-    let observed_from_unix_seconds = now_unix_seconds.saturating_sub(V1_WEEKLY_WINDOW_SECONDS);
+    let observed_from_unix_seconds =
+        now_unix_seconds.saturating_sub(QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS);
     for window in windows {
         let Some(reset_unix_seconds) = window.reset_unix_seconds else {
             continue;
@@ -2064,6 +2226,143 @@ fn format_burn_cell(assessment: &BurnDownAccountAssessment) -> String {
     }
 }
 
+fn quota_pace_snapshot(
+    windows: &[DisplayQuotaWindow],
+    projected_weekly_window: Option<&QuotaWindowFact>,
+    now_unix_seconds: u64,
+) -> Option<QuotaPaceSnapshot> {
+    let weekly_window = windows
+        .iter()
+        .find(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS)?;
+    let aggregate_rate = projected_weekly_window
+        .and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour)
+        .or_else(|| {
+            weekly_window
+                .run_rate_estimate
+                .burn_rate_basis_points_per_hour()
+        });
+    let candidate_rate = projected_weekly_window
+        .and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour)
+        .or(aggregate_rate);
+    let projected_exhaustion = projected_weekly_window
+        .and_then(QuotaWindowFact::projected_exhaustion_unix_seconds)
+        .or_else(|| {
+            weekly_window
+                .run_rate_estimate
+                .projected_exhaustion_unix_seconds(now_unix_seconds)
+        });
+    Some(QuotaPaceSnapshot {
+        remaining_headroom: weekly_window.remaining_headroom,
+        reset_unix_seconds: weekly_window.reset_unix_seconds,
+        projected_exhaustion_unix_seconds: projected_exhaustion,
+        projected_candidate_burn_basis_points_per_hour: candidate_rate,
+        aggregate_burn_basis_points_per_hour: aggregate_rate,
+        per_connection_burn_basis_points_per_hour: projected_weekly_window
+            .and_then(QuotaWindowFact::per_connection_burn_basis_points_per_hour),
+        confidence: projected_weekly_window.map_or(
+            weekly_window.run_rate_estimate.confidence(),
+            QuotaWindowFact::burn_rate_confidence,
+        ),
+    })
+}
+
+fn quota_pace_summary(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64) -> String {
+    let Some(snapshot) = snapshot else {
+        return "pace unknown".to_owned();
+    };
+    let direction = quota_pace_direction(snapshot, now_unix_seconds);
+    let pace_load = quota_pace_load(snapshot, now_unix_seconds).map_or_else(
+        || "safe pace unknown".to_owned(),
+        |load| format!("{load}% safe pace"),
+    );
+    format!("{direction}  {pace_load}")
+}
+
+fn quota_total_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return "rate unknown".to_owned();
+    };
+    let total_rate = snapshot
+        .projected_candidate_burn_basis_points_per_hour
+        .or(snapshot.aggregate_burn_basis_points_per_hour)
+        .map_or_else(
+            || "unknown".to_owned(),
+            format_burn_rate_basis_points_per_hour,
+        );
+    format!(
+        "{total_rate} total ({})",
+        run_rate_confidence_label(snapshot.confidence)
+    )
+}
+
+fn quota_connection_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return "connection rate unknown".to_owned();
+    };
+    let per_connection_rate = snapshot
+        .per_connection_burn_basis_points_per_hour
+        .map_or_else(
+            || "unknown".to_owned(),
+            |basis_points| format_burn_rate_basis_points_per_hour(basis_points),
+        );
+    format!(
+        "{per_connection_rate}/conn ({})",
+        run_rate_confidence_label(snapshot.confidence)
+    )
+}
+
+fn quota_pace_direction(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> String {
+    match (
+        snapshot.projected_exhaustion_unix_seconds,
+        snapshot.reset_unix_seconds,
+    ) {
+        (Some(projected_exhaustion), Some(reset)) if projected_exhaustion < reset => {
+            format!(
+                "behind {}",
+                format_duration(reset.saturating_sub(projected_exhaustion))
+            )
+        }
+        (Some(projected_exhaustion), Some(reset)) => {
+            format!(
+                "ahead {}",
+                format_duration(projected_exhaustion.saturating_sub(reset))
+            )
+        }
+        (None, Some(reset)) => format!(
+            "ahead to reset ({})",
+            format_relative_time(reset, now_unix_seconds)
+        ),
+        _ => "pace unknown".to_owned(),
+    }
+}
+
+fn quota_safe_pace_meter(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64) -> String {
+    let Some(snapshot) = snapshot else {
+        return "??????????".to_owned();
+    };
+    let load = quota_pace_load(snapshot, now_unix_seconds).unwrap_or(0);
+    let filled = load.min(100).div_ceil(10) as usize;
+    let empty = 10_usize.saturating_sub(filled);
+    format!("{}{}", "▰".repeat(filled), "▱".repeat(empty))
+}
+
+fn quota_pace_load(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> Option<u32> {
+    let reset_unix_seconds = snapshot.reset_unix_seconds?;
+    let time_left_seconds = reset_unix_seconds.saturating_sub(now_unix_seconds);
+    if time_left_seconds == 0 {
+        return None;
+    }
+    let candidate_rate = u128::from(snapshot.projected_candidate_burn_basis_points_per_hour?);
+    let safe_rate = u128::from(snapshot.remaining_headroom)
+        .saturating_mul(100)
+        .saturating_mul(3_600)
+        .checked_div(u128::from(time_left_seconds))?;
+    if safe_rate == 0 {
+        return None;
+    }
+    Some(((candidate_rate.saturating_mul(100)) / safe_rate).min(999) as u32)
+}
+
 fn format_window_pace(
     windows: &[DisplayQuotaWindow],
     window_seconds: u64,
@@ -2208,20 +2507,6 @@ fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
 
 fn format_percent(value: u32) -> String {
     format!("{}%", value.min(100))
-}
-
-#[derive(Serialize)]
-struct JsonQuotaStatusRefreshReport {
-    route_result: &'static str,
-    cached: JsonQuotaStatusReport,
-    refresh: JsonQuotaRefreshResult,
-    updated: Option<JsonQuotaStatusReport>,
-}
-
-#[derive(Serialize)]
-struct JsonQuotaRefreshResult {
-    route_result: &'static str,
-    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2853,7 +3138,6 @@ struct QuotaStatusOptions {
     format: QuotaStatusFormat,
     all_limits: bool,
     now_unix_seconds: u64,
-    auto_refresh: bool,
 }
 
 impl Default for QuotaStatusOptions {
@@ -2863,7 +3147,6 @@ impl Default for QuotaStatusOptions {
             format: QuotaStatusFormat::Table,
             all_limits: false,
             now_unix_seconds: current_unix_seconds(),
-            auto_refresh: true,
         }
     }
 }
@@ -2886,7 +3169,9 @@ impl QuotaStatusOptions {
                     options.all_limits = true;
                 }
                 "--no-refresh" => {
-                    options.auto_refresh = false;
+                    // Status is read-only. Keep accepting the old explicit
+                    // flag so scripts can state intent without changing
+                    // behavior.
                 }
                 "--now-unix-seconds" => {
                     let value = parser.next_required_value("--now-unix-seconds")?;
@@ -3073,6 +3358,153 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_width_contract_preserves_layout() {
+        let report = quota_capture_report();
+
+        for width in [48, 72, 90, 120] {
+            let mut output = Vec::new();
+            must_ok(write_quota_table(&mut output, &report, Some(width)));
+            let text = must_ok(String::from_utf8(output));
+            assert_quota_capture_width_contract(width, &text);
+        }
+
+        let blocked_report = blocked_quota_capture_report();
+        let mut output = Vec::new();
+        must_ok(write_quota_table(&mut output, &blocked_report, Some(80)));
+        let text = must_ok(String::from_utf8(output));
+        assert!(
+            text.contains("[blocked]"),
+            "blocked capture should expose route state:\n{text}"
+        );
+        assert!(
+            text.lines().all(|line| line.chars().count() <= 80),
+            "blocked quota capture overflowed:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quota_status_table_separates_quota_bars_from_burn_bars() {
+        let report = quota_capture_report();
+        let mut output = Vec::new();
+
+        must_ok(write_quota_table(&mut output, &report, Some(120)));
+        let text = must_ok(String::from_utf8(output));
+
+        assert!(
+            text.contains("Weekly pace"),
+            "quota table should make weekly pace the main-list quota column:\n{text}"
+        );
+        assert!(
+            text.contains("  Account"),
+            "account header should reserve selector-marker space:\n{text}"
+        );
+        assert!(
+            text.contains("Quota windows") && text.contains("Burn pace"),
+            "selected account details should separate quota windows from burn pace:\n{text}"
+        );
+        assert!(
+            text.contains("0 clients") || text.contains("1 client"),
+            "main account rows should expose active clients under Status:\n{text}"
+        );
+        assert!(
+            text.contains("%/h") && text.contains("%/h/conn"),
+            "quota table should expose total and per-connection rate units:\n{text}"
+        );
+        assert!(
+            text.contains("ahead") || text.contains("behind"),
+            "quota table should say whether the account is ahead or behind reset:\n{text}"
+        );
+        assert!(
+            text.contains("weekly █"),
+            "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
+        );
+        assert!(
+            text.contains("current") && text.contains("▰"),
+            "quota table should show the selected burn pace as an explicit block meter:\n{text}"
+        );
+        assert!(
+            text.contains("burn ▰") || text.contains("burn ▱"),
+            "main account rows should show a burn/pace meter in Weekly pace:\n{text}"
+        );
+        assert!(
+            !text.contains("current [") && !text.contains('■'),
+            "quota table should not use the old bracketed burn meter:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quota_status_table_can_emit_terminal_color() {
+        let report = quota_capture_report();
+        let mut output = Vec::new();
+
+        must_ok(write_quota_table_with_style(
+            &mut output,
+            &report,
+            Some(120),
+            QuotaTableStyle::TerminalColor,
+        ));
+        let text = must_ok(String::from_utf8(output));
+
+        assert!(
+            text.contains("\x1b["),
+            "quota table should emit ANSI styling through iocraft:\n{text:?}"
+        );
+        assert!(
+            text.contains("\x1b[1m"),
+            "quota title and selected text should use emphasized iocraft styling:\n{text:?}"
+        );
+        assert!(
+            !text.contains("\x1b[32m"),
+            "quota status should avoid the old mixed green/yellow status palette:\n{text:?}"
+        );
+        assert!(
+            !text.contains("\x1b[48;2;58;70;122m"),
+            "quota colors should not use the old blue selected-row background:\n{text:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "writes visual quota capture artifacts for design review"]
+    fn quota_status_capture_artifacts_for_design_review() {
+        let capture_dir = capture_dir();
+        let report = quota_capture_report();
+
+        for width in [48, 72, 90, 120] {
+            let mut output = Vec::new();
+            must_ok(write_quota_table(&mut output, &report, Some(width)));
+            let text = must_ok(String::from_utf8(output));
+            let mut ansi_output = Vec::new();
+            must_ok(write_quota_table_with_style(
+                &mut ansi_output,
+                &report,
+                Some(width),
+                QuotaTableStyle::TerminalColor,
+            ));
+            let ansi_text = must_ok(String::from_utf8(ansi_output));
+            write_capture_pair_with_svg_text(
+                &capture_dir,
+                &format!("quota-{width}"),
+                &text,
+                &ansi_text,
+            );
+        }
+
+        let blocked_report = blocked_quota_capture_report();
+        let mut output = Vec::new();
+        must_ok(write_quota_table(&mut output, &blocked_report, Some(80)));
+        let text = must_ok(String::from_utf8(output));
+        let mut ansi_output = Vec::new();
+        must_ok(write_quota_table_with_style(
+            &mut ansi_output,
+            &blocked_report,
+            Some(80),
+            QuotaTableStyle::TerminalColor,
+        ));
+        let ansi_text = must_ok(String::from_utf8(ansi_output));
+        write_capture_pair_with_svg_text(&capture_dir, "quota-all-blocked-80", &text, &ansi_text);
+    }
+
+    #[test]
     fn quota_status_telemetry_contract_uses_scrubbed_low_cardinality_labels() {
         let source = include_str!("quota.rs");
         let Some(after_function_name) = source.split("fn emit_quota_status_metrics").nth(1) else {
@@ -3113,16 +3545,416 @@ mod tests {
         }
     }
 
-    fn account(account_id: &str, label: &str) -> AccountRecord {
-        AccountRecord::new(
-            match AccountId::new(account_id) {
-                Ok(account_id) => account_id,
-                Err(error) => panic!("test account id is valid: {error}"),
+    fn quota_capture_row(
+        account_id_value: &str,
+        account_label: &str,
+        preferred_next: bool,
+        short_remaining: u32,
+        weekly_remaining: u32,
+        freshness: QuotaEvidenceFreshness,
+        availability: AccountAvailability,
+        routing_reason: RoutingReason,
+    ) -> QuotaStatusRow {
+        let windows = vec![
+            display_window(
+                V1_SHORT_WINDOW_SECONDS,
+                short_remaining,
+                NOW + V1_SHORT_WINDOW_SECONDS,
+                QuotaRunRateEstimate::unknown(),
+            ),
+            display_window(
+                V1_WEEKLY_WINDOW_SECONDS,
+                weekly_remaining,
+                NOW + V1_WEEKLY_WINDOW_SECONDS,
+                QuotaRunRateEstimate::unknown(),
+            ),
+        ];
+        let quota_evidence_reason = if freshness == QuotaEvidenceFreshness::Stale {
+            QuotaEvidenceReason::WindowExhausted
+        } else if routing_reason == RoutingReason::HeldShortWindowGuard {
+            QuotaEvidenceReason::ShortWindowGuard
+        } else {
+            QuotaEvidenceReason::Ok
+        };
+
+        QuotaStatusRow {
+            account_id: account_id(account_id_value),
+            account_label: account_label.to_owned(),
+            account_status: "enabled".to_owned(),
+            short_window: format_window_cell(&windows, V1_SHORT_WINDOW_SECONDS, NOW, false),
+            weekly_window: format_window_cell(&windows, V1_WEEKLY_WINDOW_SECONDS, NOW, false),
+            pace: "history unknown".to_owned(),
+            burn: "quota guard 5h 0% / weekly 8%".to_owned(),
+            updated: if freshness == QuotaEvidenceFreshness::Stale {
+                "failed 42m ago: network".to_owned()
+            } else {
+                "ok 14s ago".to_owned()
             },
-            label,
-            AccountStatus::Enabled,
+            active_clients: "0 clients\nmirror <= 2h".to_owned(),
+            active_clients_value: Some(if routing_reason == RoutingReason::HeldShortWindowGuard {
+                5
+            } else {
+                0
+            }),
+            active_clients_source: "sqlx_mirror",
+            reset_credits_available: "2 available".to_owned(),
+            reset_credits_available_value: Some(2),
+            routing: format_routing_reason(routing_reason).to_owned(),
+            next_use: format_next_use_for_capture(routing_reason).to_owned(),
+            weekly_pace: Some(QuotaPaceSnapshot {
+                remaining_headroom: weekly_remaining,
+                reset_unix_seconds: Some(NOW + V1_WEEKLY_WINDOW_SECONDS),
+                projected_exhaustion_unix_seconds: Some(
+                    NOW + u64::from(weekly_remaining)
+                        .saturating_mul(100)
+                        .saturating_mul(3_600)
+                        / 10,
+                ),
+                projected_candidate_burn_basis_points_per_hour: Some(10),
+                aggregate_burn_basis_points_per_hour: Some(8),
+                per_connection_burn_basis_points_per_hour: Some(5),
+                confidence: QuotaRunRateConfidence::Normal,
+            }),
+            windows,
+            availability,
+            freshness,
+            routing_exclusion: RoutingExclusion::None,
+            quota_evidence_reason,
+            routing_reason,
+            preferred_next,
+            short_pressure: 0,
+            long_pressure: 8,
+            short_salvage: short_remaining,
+            long_salvage: weekly_remaining,
+            limiting_window: None,
+            weekly_survival_margin_basis_points: None,
+            weekly_projected_exhaustion_unix_seconds: None,
+            weekly_burn_rate_confidence: QuotaRunRateConfidence::Unknown,
+        }
+    }
+
+    fn quota_capture_report() -> QuotaStatusReport {
+        QuotaStatusReport {
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            route_band: "responses".to_owned(),
+            selected_pool: SelectedPool::Usable,
+            preferred_next_account_id: Some(account_id("acct_ssdev")),
+            now_unix_seconds: NOW,
+            rows: vec![
+                quota_capture_row(
+                    "acct_ssdev",
+                    "ssdev",
+                    true,
+                    99,
+                    83,
+                    QuotaEvidenceFreshness::Fresh,
+                    AccountAvailability::Usable,
+                    RoutingReason::PreferredSafestQuota,
+                ),
+                quota_capture_row(
+                    "acct_askluna",
+                    "askluna",
+                    false,
+                    100,
+                    99,
+                    QuotaEvidenceFreshness::Fresh,
+                    AccountAvailability::Usable,
+                    RoutingReason::AvailableSamePool,
+                ),
+                quota_capture_row(
+                    "acct_matches",
+                    "matches",
+                    false,
+                    94,
+                    94,
+                    QuotaEvidenceFreshness::Fresh,
+                    AccountAvailability::Reserve,
+                    RoutingReason::HeldShortWindowGuard,
+                ),
+                quota_capture_row(
+                    "acct_legacy",
+                    "legacy",
+                    false,
+                    0,
+                    0,
+                    QuotaEvidenceFreshness::Stale,
+                    AccountAvailability::Blocked,
+                    RoutingReason::BlockedWindowExhausted,
+                ),
+            ],
+        }
+    }
+
+    fn blocked_quota_capture_report() -> QuotaStatusReport {
+        QuotaStatusReport {
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            route_band: "responses".to_owned(),
+            selected_pool: SelectedPool::None,
+            preferred_next_account_id: None,
+            now_unix_seconds: NOW,
+            rows: vec![
+                quota_capture_row(
+                    "acct_ssdev",
+                    "ssdev",
+                    false,
+                    0,
+                    0,
+                    QuotaEvidenceFreshness::Fresh,
+                    AccountAvailability::Blocked,
+                    RoutingReason::BlockedWindowExhausted,
+                ),
+                quota_capture_row(
+                    "acct_legacy",
+                    "legacy",
+                    false,
+                    0,
+                    0,
+                    QuotaEvidenceFreshness::Stale,
+                    AccountAvailability::Blocked,
+                    RoutingReason::BlockedWindowExhausted,
+                ),
+            ],
+        }
+    }
+
+    fn assert_quota_capture_width_contract(width: usize, text: &str) {
+        assert!(
+            text.lines().all(|line| line.chars().count() <= width),
+            "quota capture width {width} overflowed:\n{text}"
+        );
+        assert!(
+            text.contains('╭') && text.contains('╰') && text.contains("  Account"),
+            "quota capture should render boxed quota blocks:\n{text}"
+        );
+        if width == 72 {
+            for account_label in ["ssdev", "askluna", "matches", "legacy"] {
+                assert!(
+                    text.lines().any(|line| {
+                        line.contains(account_label)
+                            && line.starts_with('│')
+                            && !line.contains("responses ->")
+                    }),
+                    "quota capture should include {account_label}:\n{text}"
+                );
+                assert!(
+                    text.contains("weekly") && text.contains("left, reset"),
+                    "quota capture width 72 should preserve weekly reset facts for {account_label}:\n{text}"
+                );
+            }
+            assert!(
+                !text.contains("..."),
+                "quota capture width 72 should avoid clipping normal account rows:\n{text}"
+            );
+        }
+        if width == 90 {
+            for reason in ["safest quota", "same pool", "5h guard", "quota empty"] {
+                assert!(
+                    text.contains(reason),
+                    "quota capture width 90 should preserve readable reasons, missing {reason}:\n{text}"
+                );
+            }
+            assert!(
+                !text.contains("..."),
+                "quota capture width 90 should not clip table cells:\n{text}"
+            );
+        }
+    }
+
+    fn format_next_use_for_capture(reason: RoutingReason) -> &'static str {
+        match reason {
+            RoutingReason::PreferredNearResetDrainable
+            | RoutingReason::PreferredNearResetControlledDrain
+            | RoutingReason::PreferredWeeklyHealthier
+            | RoutingReason::PreferredWeeklyResetSoon
+            | RoutingReason::PreferredShortResetSoon
+            | RoutingReason::PreferredProjectedBurn
+            | RoutingReason::PreferredSafestQuota => "preferred by quota",
+            RoutingReason::AvailableSamePool => "available by quota",
+            RoutingReason::HeldReserve
+            | RoutingReason::HeldUnknown
+            | RoutingReason::HeldShortWindowGuard => "held by quota",
+            RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
+                "fallback by quota"
+            }
+            RoutingReason::RetiringNearZero => "retiring",
+            RoutingReason::ExcludedDisabled
+            | RoutingReason::ExcludedMissingCredential
+            | RoutingReason::BlockedWindowExhausted
+            | RoutingReason::BlockedWindowIneligible => "blocked",
+        }
+    }
+
+    fn capture_dir() -> PathBuf {
+        let dir = std::env::var_os("CODEX_ROUTER_CAPTURE_DIR").map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tmp/ux-proof/production"),
+            PathBuf::from,
+        );
+        must_ok(std::fs::create_dir_all(&dir));
+        dir
+    }
+
+    fn write_capture_pair_with_svg_text(dir: &Path, name: &str, text: &str, svg_text: &str) {
+        must_ok(std::fs::write(dir.join(format!("{name}.txt")), text));
+        must_ok(std::fs::write(
+            dir.join(format!("{name}.svg")),
+            terminal_svg(name, svg_text),
+        ));
+    }
+
+    fn terminal_svg(title: &str, text: &str) -> String {
+        let lines = text.lines().collect::<Vec<_>>();
+        let width = lines
+            .iter()
+            .map(|line| ansi_visible_text(line).chars().count())
+            .max()
+            .unwrap_or(1);
+        let height = lines.len().max(1);
+        let pixel_width = width * 9 + 32;
+        let pixel_height = height * 18 + 34;
+        let mut svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pixel_width}\" height=\"{pixel_height}\" viewBox=\"0 0 {pixel_width} {pixel_height}\"><rect width=\"100%\" height=\"100%\" fill=\"#111318\"/>"
+        );
+        for (index, line) in lines.iter().enumerate() {
+            let selected_background = line.contains("\x1b[48;2;58;70;122m");
+            if line.contains('*') || line.contains("[blocked]") || selected_background {
+                let y = 36 + index * 18;
+                let (x, rect_width) = if selected_background {
+                    (
+                        34,
+                        ((width.saturating_sub(4) as f64) * 8.4).round() as usize,
+                    )
+                } else {
+                    (8, pixel_width.saturating_sub(16))
+                };
+                svg.push_str(&format!(
+                    "<rect x=\"{x}\" y=\"{}\" width=\"{rect_width}\" height=\"18\" fill=\"#2d333b\"/>",
+                    y.saturating_sub(14),
+                ));
+            }
+        }
+        svg.push_str(&svg_text(16, 24, "#e6edf3", title));
+        for (index, line) in lines.iter().enumerate() {
+            let y = 44 + index * 18;
+            svg.push_str(&svg_line_text(16, y, &ansi_svg_segments(line)));
+        }
+        svg.push_str("</svg>");
+        svg
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct SvgTextSegment {
+        color: &'static str,
+        text: String,
+    }
+
+    fn ansi_visible_text(line: &str) -> String {
+        ansi_svg_segments(line)
+            .into_iter()
+            .map(|segment| segment.text)
+            .collect::<String>()
+    }
+
+    fn ansi_svg_segments(line: &str) -> Vec<SvgTextSegment> {
+        let mut segments = Vec::new();
+        let mut current_text = String::new();
+        let mut current_color = "#e6edf3";
+        let mut characters = line.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\x1b' && characters.peek() == Some(&'[') {
+                characters.next();
+                let mut sequence = String::new();
+                for sequence_character in characters.by_ref() {
+                    sequence.push(sequence_character);
+                    if sequence_character.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                if sequence.ends_with('m') {
+                    if !current_text.is_empty() {
+                        segments.push(SvgTextSegment {
+                            color: current_color,
+                            text: current_text,
+                        });
+                        current_text = String::new();
+                    }
+                    current_color = ansi_sgr_color(&sequence);
+                }
+                continue;
+            }
+            current_text.push(character);
+        }
+        if !current_text.is_empty() {
+            segments.push(SvgTextSegment {
+                color: current_color,
+                text: current_text,
+            });
+        }
+        segments
+    }
+
+    fn ansi_sgr_color(sequence: &str) -> &'static str {
+        match sequence.trim_end_matches('m') {
+            "0" => "#e6edf3",
+            "32" => "#7ee787",
+            "33" => "#ffe75c",
+            "36" => "#8ae8f0",
+            "90" => "#8b949e",
+            "48;2;58;70;122" => "#e6edf3",
+            _ => "#e6edf3",
+        }
+    }
+
+    fn svg_text(x: usize, y: usize, color: &str, text: &str) -> String {
+        format!(
+            "<text x=\"{x}\" y=\"{y}\" xml:space=\"preserve\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"14\" fill=\"{color}\">{}</text>",
+            escape_xml(text)
         )
-        .with_active_credential_generation(1)
+    }
+
+    fn svg_line_text(x: usize, y: usize, segments: &[SvgTextSegment]) -> String {
+        let mut text = format!(
+            "<text x=\"{x}\" y=\"{y}\" xml:space=\"preserve\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"14\">"
+        );
+        for segment in segments {
+            text.push_str(&format!(
+                "<tspan fill=\"{}\">{}</tspan>",
+                segment.color,
+                escape_xml(&segment.text)
+            ));
+        }
+        text.push_str("</text>");
+        text
+    }
+
+    fn escape_xml(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("expected Ok, got error: {error}"),
+        }
+    }
+
+    fn account(account_id: &str, label: &str) -> AccountRecord {
+        AccountRecord::new(test_account_id(account_id), label, AccountStatus::Enabled)
+            .with_active_credential_generation(1)
+    }
+
+    fn account_id(value: &str) -> AccountId {
+        test_account_id(value)
+    }
+
+    fn test_account_id(value: &str) -> AccountId {
+        match AccountId::new(value) {
+            Ok(account_id) => account_id,
+            Err(error) => panic!("test account id is valid: {error}"),
+        }
     }
 
     fn display_window(

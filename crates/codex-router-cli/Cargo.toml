@@ -23,7 +23,7 @@ codex-router-state = { path = "../codex-router-state", version = "0.1.2" }
 clap.workspace = true
 comfy-table.workspace = true
 indicatif.workspace = true
-inquire.workspace = true
+iocraft.workspace = true
 opentelemetry.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
@@ -41,4 +41,5 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
+futures-util.workspace = true
 tungstenite = "0.28.0"
