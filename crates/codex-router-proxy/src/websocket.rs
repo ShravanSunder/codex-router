@@ -1141,6 +1141,39 @@ fn is_reset_without_closing_handshake(error: &tungstenite::Error) -> bool {
     )
 }
 
+fn is_normal_websocket_cleanup_close(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed
+    ) || is_reset_without_closing_handshake(error)
+}
+
+async fn close_websocket_stream_best_effort<Stream>(
+    websocket: &mut WebSocketStream<Stream>,
+) -> Result<(), WebSocketTunnelError>
+where
+    Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    match websocket.close(None).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_normal_websocket_cleanup_close(&error) => Ok(()),
+        Err(error) => Err(WebSocketTunnelError::Transport(error)),
+    }
+}
+
+async fn close_websocket_sink_best_effort<Stream>(
+    websocket: &mut SplitSink<WebSocketStream<Stream>, Message>,
+) -> Result<(), WebSocketTunnelError>
+where
+    Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    match websocket.close().await {
+        Ok(()) => Ok(()),
+        Err(error) if is_normal_websocket_cleanup_close(&error) => Ok(()),
+        Err(error) => Err(WebSocketTunnelError::Transport(error)),
+    }
+}
+
 impl WebSocketSessionRegistration {
     fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
@@ -4677,7 +4710,7 @@ where
         let first_frame = frame_from_message(first_message);
         let decision = tokio::select! {
             () = self.session_shutdown.cancelled() => {
-                local_websocket.close(None).await?;
+                close_websocket_stream_best_effort(&mut local_websocket).await?;
                 return Ok(());
             }
             decision = self.router.route_first_frame(handshake, first_frame) => {
@@ -4707,11 +4740,11 @@ where
         apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
         let (mut upstream_websocket, _response) = tokio::select! {
             () = self.session_shutdown.cancelled() => {
-                local_websocket.close(None).await?;
+                close_websocket_stream_best_effort(&mut local_websocket).await?;
                 return Ok(());
             }
             () = revocation.cancelled() => {
-                local_websocket.close(None).await?;
+                close_websocket_stream_best_effort(&mut local_websocket).await?;
                 return Ok(());
             }
             connection = connect_async_with_config(upstream_request, Some(router_websocket_config()), false) => connection?,
@@ -4719,13 +4752,13 @@ where
         let upstream_first_message = message_from_frame(first_frame)?;
         tokio::select! {
             () = self.session_shutdown.cancelled() => {
-                local_websocket.close(None).await?;
-                upstream_websocket.close(None).await?;
+                close_websocket_stream_best_effort(&mut local_websocket).await?;
+                close_websocket_stream_best_effort(&mut upstream_websocket).await?;
                 return Ok(());
             }
             () = revocation.cancelled() => {
-                local_websocket.close(None).await?;
-                upstream_websocket.close(None).await?;
+                close_websocket_stream_best_effort(&mut local_websocket).await?;
+                close_websocket_stream_best_effort(&mut upstream_websocket).await?;
                 return Ok(());
             }
             result = upstream_websocket.send(upstream_first_message) => {
@@ -4762,7 +4795,7 @@ where
         return Ok(false);
     };
     local_websocket.send(Message::text(router_signal)).await?;
-    local_websocket.close(None).await?;
+    close_websocket_stream_best_effort(local_websocket).await?;
     Ok(true)
 }
 
@@ -4790,7 +4823,7 @@ where
     loop {
         let message = tokio::select! {
             () = session_shutdown.cancelled() => {
-                local_websocket.close(None).await?;
+                close_websocket_stream_best_effort(local_websocket).await?;
                 return Ok(None);
             }
             message = local_websocket.next() => message,
@@ -4929,26 +4962,26 @@ where
         tokio::select! {
             biased;
             () = tunnel_shutdown.cancelled() => {
-                upstream_write.close().await?;
+                close_websocket_sink_best_effort(&mut upstream_write).await?;
                 return Ok(());
             }
             () = revocation.cancelled() => {
-                upstream_write.close().await?;
+                close_websocket_sink_best_effort(&mut upstream_write).await?;
                 return Ok(());
             }
             () = session_shutdown.cancelled() => {
-                upstream_write.close().await?;
+                close_websocket_sink_best_effort(&mut upstream_write).await?;
                 return Ok(());
             }
             local_message = local_read.next() => {
                 let Some(local_message) = local_message else {
-                    upstream_write.close().await?;
+                    close_websocket_sink_best_effort(&mut upstream_write).await?;
                     return Ok(());
                 };
                 let local_message = match local_message {
                     Ok(message) => message,
                     Err(error) if is_reset_without_closing_handshake(&error) => {
-                        upstream_write.close().await?;
+                        close_websocket_sink_best_effort(&mut upstream_write).await?;
                         return Ok(());
                     }
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
@@ -4957,10 +4990,11 @@ where
                 if is_response_create(&local_message) {
                     active_turn_reservation.reserve_if_idle(current_unix_seconds());
                 }
-                upstream_write.send(local_message).await?;
                 if is_close {
+                    close_websocket_sink_best_effort(&mut upstream_write).await?;
                     return Ok(());
                 }
+                upstream_write.send(local_message).await?;
             }
         }
     }
@@ -4992,22 +5026,22 @@ where
     loop {
         tokio::select! {
             () = context.revocation.cancelled() => {
-                local_write.close().await?;
+                close_websocket_sink_best_effort(&mut local_write).await?;
                 return Ok(());
             }
             () = context.session_shutdown.cancelled() => {
-                local_write.close().await?;
+                close_websocket_sink_best_effort(&mut local_write).await?;
                 return Ok(());
             }
             upstream_message = upstream_read.next() => {
                 let Some(upstream_message) = upstream_message else {
-                    local_write.close().await?;
+                    close_websocket_sink_best_effort(&mut local_write).await?;
                     return Ok(());
                 };
                 let upstream_message = match upstream_message {
                     Ok(message) => message,
                     Err(error) if is_reset_without_closing_handshake(&error) => {
-                        local_write.close().await?;
+                        close_websocket_sink_best_effort(&mut local_write).await?;
                         return Ok(());
                     }
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
@@ -5029,6 +5063,10 @@ where
                         &context,
                     )
                     .await;
+                if is_close {
+                    close_websocket_sink_best_effort(&mut local_write).await?;
+                    return Ok(());
+                }
                 local_write.send(upstream_message.message).await?;
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
                 if let Some(metadata_text) = metadata_text {
@@ -5069,10 +5107,7 @@ where
                 }
                 if upstream_message.close_after_send {
                     context.tunnel_shutdown.cancel();
-                    local_write.close().await?;
-                    return Ok(());
-                }
-                if is_close {
+                    close_websocket_sink_best_effort(&mut local_write).await?;
                     return Ok(());
                 }
             }
