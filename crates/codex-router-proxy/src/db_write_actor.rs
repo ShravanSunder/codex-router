@@ -351,6 +351,18 @@ pub struct DbWriteActor {
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
+struct DbWriteActorRuntime {
+    repository: Arc<dyn DbWriteRepository>,
+    provider_exhaustion_receiver: mpsc::Receiver<QueuedDbWriteCommand>,
+    affinity_owner_receiver: mpsc::Receiver<QueuedDbWriteCommand>,
+    active_mirror_receiver: mpsc::Receiver<QueuedDbWriteCommand>,
+    shutdown: CancellationToken,
+    closed: Arc<AtomicBool>,
+    route_band_queue_health: RouteBandQueueHealth,
+    low_water_depth: usize,
+    last_queue_lag_event: Arc<Mutex<Option<QueueLagEvent>>>,
+}
+
 impl DbWriteActor {
     /// Starts a bounded write actor on the current Tokio runtime.
     #[must_use]
@@ -383,17 +395,17 @@ impl DbWriteActor {
         let task_last_queue_lag_event = Arc::clone(&last_queue_lag_event);
         let low_water_depth = capacity / 4;
         let task = runtime_handle.spawn(async move {
-            run_db_write_actor(
+            run_db_write_actor(DbWriteActorRuntime {
                 repository,
                 provider_exhaustion_receiver,
                 affinity_owner_receiver,
                 active_mirror_receiver,
-                task_shutdown,
-                task_closed,
-                task_route_band_queue_health,
+                shutdown: task_shutdown,
+                closed: task_closed,
+                route_band_queue_health: task_route_band_queue_health,
                 low_water_depth,
-                task_last_queue_lag_event,
-            )
+                last_queue_lag_event: task_last_queue_lag_event,
+            })
             .await;
         });
         Self {
@@ -543,64 +555,54 @@ impl DbWriteActor {
     }
 }
 
-async fn run_db_write_actor(
-    repository: Arc<dyn DbWriteRepository>,
-    mut provider_exhaustion_receiver: mpsc::Receiver<QueuedDbWriteCommand>,
-    mut affinity_owner_receiver: mpsc::Receiver<QueuedDbWriteCommand>,
-    mut active_mirror_receiver: mpsc::Receiver<QueuedDbWriteCommand>,
-    shutdown: CancellationToken,
-    closed: Arc<AtomicBool>,
-    route_band_queue_health: RouteBandQueueHealth,
-    low_water_depth: usize,
-    last_queue_lag_event: Arc<Mutex<Option<QueueLagEvent>>>,
-) {
+async fn run_db_write_actor(mut runtime: DbWriteActorRuntime) {
     loop {
         tokio::select! {
             biased;
-            command = provider_exhaustion_receiver.recv() => {
+            command = runtime.provider_exhaustion_receiver.recv() => {
                 if !handle_db_write_actor_command(
-                    repository.as_ref(),
+                    runtime.repository.as_ref(),
                     command,
-                    &mut provider_exhaustion_receiver,
-                    &route_band_queue_health,
-                    low_water_depth,
-                    &last_queue_lag_event,
+                    &mut runtime.provider_exhaustion_receiver,
+                    &runtime.route_band_queue_health,
+                    runtime.low_water_depth,
+                    &runtime.last_queue_lag_event,
                 ).await {
                     break;
                 }
             }
-            command = affinity_owner_receiver.recv() => {
+            command = runtime.affinity_owner_receiver.recv() => {
                 if !handle_db_write_actor_command(
-                    repository.as_ref(),
+                    runtime.repository.as_ref(),
                     command,
-                    &mut affinity_owner_receiver,
-                    &route_band_queue_health,
-                    low_water_depth,
-                    &last_queue_lag_event,
+                    &mut runtime.affinity_owner_receiver,
+                    &runtime.route_band_queue_health,
+                    runtime.low_water_depth,
+                    &runtime.last_queue_lag_event,
                 ).await {
                     break;
                 }
             }
-            command = active_mirror_receiver.recv() => {
+            command = runtime.active_mirror_receiver.recv() => {
                 if !handle_db_write_actor_command(
-                    repository.as_ref(),
+                    runtime.repository.as_ref(),
                     command,
-                    &mut active_mirror_receiver,
-                    &route_band_queue_health,
-                    low_water_depth,
-                    &last_queue_lag_event,
+                    &mut runtime.active_mirror_receiver,
+                    &runtime.route_band_queue_health,
+                    runtime.low_water_depth,
+                    &runtime.last_queue_lag_event,
                 ).await {
                     break;
                 }
             }
-            () = shutdown.cancelled() => {
-                provider_exhaustion_receiver.close();
-                affinity_owner_receiver.close();
-                active_mirror_receiver.close();
+            () = runtime.shutdown.cancelled() => {
+                runtime.provider_exhaustion_receiver.close();
+                runtime.affinity_owner_receiver.close();
+                runtime.active_mirror_receiver.close();
             }
         }
     }
-    closed.store(true, Ordering::Release);
+    runtime.closed.store(true, Ordering::Release);
 }
 
 async fn handle_db_write_actor_command(
@@ -758,7 +760,7 @@ async fn handle_db_write_command(
         } => {
             let result = repository
                 .record_active_client_acquired(
-                    route_band.clone(),
+                    route_band,
                     process_run_id.clone(),
                     reservation_id.clone(),
                     account_id.clone(),
@@ -786,7 +788,7 @@ async fn handle_db_write_command(
         } => {
             let result = repository
                 .record_active_client_released(
-                    route_band.clone(),
+                    route_band,
                     process_run_id.clone(),
                     reservation_id.clone(),
                     released_unix_seconds,

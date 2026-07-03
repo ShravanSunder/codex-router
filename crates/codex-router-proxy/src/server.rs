@@ -63,6 +63,7 @@ use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
+use crate::account_selection::AsyncAccountSelectorRuntimeState;
 use crate::account_selection::AsyncRepositoryBackedAccountSelector;
 use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RouteBandAccountHolds;
@@ -1111,24 +1112,23 @@ impl LoopbackProtocolConnectionHandler {
         path: String,
         local_peer_addr: Option<SocketAddr>,
     ) -> Result<(), LoopbackRouterRuntimeError> {
-        let selector =
-            AsyncRepositoryBackedAccountSelector::new_with_runtime_state_queue_health_and_selection_lock(
-                &self.selection_state_store,
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &self.selection_state_store,
+            AsyncAccountSelectorRuntimeState::new_with_selection_lock(
                 Arc::clone(&self.weighted_selectors),
                 Arc::clone(&self.account_holds),
                 Arc::clone(&self.active_reservations),
                 Arc::clone(&self.runtime_exhaustions),
                 Arc::clone(&self.route_band_queue_health),
                 Arc::clone(&self.selection_reservation_lock),
-                DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
-                self.runtime_clock(),
-            )
-            .with_active_client_lease_reporter(Arc::new(
-                SqliteActiveClientLeaseReporter::new(
-                    self.db_write_actor.clone(),
-                    self.runtime_clock(),
-                ),
-            ));
+            ),
+            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            self.runtime_clock(),
+        )
+        .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
+            self.db_write_actor.clone(),
+            self.runtime_clock(),
+        )));
         let credential_resolver = self
             .credential_factory
             .resolver_for_state(self.credential_state_store.clone());
@@ -1320,24 +1320,23 @@ impl LoopbackProtocolConnectionHandler {
         let credential_resolver = self
             .credential_factory
             .resolver_for_state(self.credential_state_store.clone());
-        let selector =
-            AsyncRepositoryBackedAccountSelector::new_with_runtime_state_queue_health_and_selection_lock(
-                &self.selection_state_store,
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &self.selection_state_store,
+            AsyncAccountSelectorRuntimeState::new_with_selection_lock(
                 Arc::clone(&self.weighted_selectors),
                 Arc::clone(&self.account_holds),
                 Arc::clone(&self.active_reservations),
                 Arc::clone(&self.runtime_exhaustions),
                 Arc::clone(&self.route_band_queue_health),
                 Arc::clone(&self.selection_reservation_lock),
-                DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
-                self.runtime_clock(),
-            )
-            .with_active_client_lease_reporter(Arc::new(
-                SqliteActiveClientLeaseReporter::new(
-                    self.db_write_actor.clone(),
-                    self.runtime_clock(),
-                ),
-            ));
+            ),
+            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            self.runtime_clock(),
+        )
+        .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
+            self.db_write_actor.clone(),
+            self.runtime_clock(),
+        )));
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,

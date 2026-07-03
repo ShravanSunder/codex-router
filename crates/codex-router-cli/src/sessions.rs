@@ -1504,6 +1504,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn conversation_preview_reads_rollout_path_with_fallback() {
         let path = std::env::temp_dir().join(format!(
             "codex-router-session-history-{}.jsonl",
@@ -1540,6 +1541,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn rollout_path_validation_rejects_paths_outside_codex_sessions() {
         let root = std::env::temp_dir().join(format!(
             "codex-router-rollout-validation-{}",
@@ -1579,6 +1581,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn deferred_rollout_source_avoids_filesystem_validation_during_session_load() {
         let root = std::env::temp_dir().join(format!(
             "codex-router-deferred-rollout-{}",

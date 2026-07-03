@@ -54,6 +54,8 @@ use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::repositories::QuotaSnapshotRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::SqliteStateStore;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use tungstenite::Message;
 use tungstenite::WebSocket;
@@ -77,6 +79,7 @@ const SOAK_PROOF_MARGIN: Duration = Duration::from_secs(1);
 const QUICK_CONCURRENT_HOLD_DURATION: Duration = Duration::from_secs(2);
 const ROUTER_REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 const RETAIN_SMOKE_ROOT_ENV: &str = "CODEX_ROUTER_RETAIN_SMOKE_ROOT";
+type PressureHandles = Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>;
 const INSTALLED_SMOKE_RUNTIME_ROOT_MODE_ENV: &str =
     "CODEX_ROUTER_INSTALLED_SMOKE_RUNTIME_ROOT_MODE";
 const INSTALLED_SMOKE_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_INSTALLED_SMOKE_ROUTER_ROOT";
@@ -257,7 +260,7 @@ struct InstalledCodexRuntimeRoots {
     process_home: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct UpstreamClientSessionObservation {
     client_index: usize,
     upstream_session_id: u64,
@@ -740,10 +743,10 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
             Err(error) => output_errors.push(format!("client{client_index}:{error}")),
         }
     }
-    if let Some(handle) = quota_probe_handle {
-        if let Err(error) = join_result(handle, "S8 overlap quota local probe") {
-            output_errors.push(format!("quota_probe:{error}"));
-        }
+    if let Some(handle) = quota_probe_handle
+        && let Err(error) = join_result(handle, "S8 overlap quota local probe")
+    {
+        output_errors.push(format!("quota_probe:{error}"));
     }
     if !output_errors.is_empty() {
         return Err(format!(
@@ -2518,7 +2521,7 @@ struct RouterProcessObservation {
     cleanup_result: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 struct RouterWebSocketRegistryReport {
     handled_connections: Option<usize>,
     active_sessions: usize,
@@ -2534,8 +2537,16 @@ struct RouterWebSocketRegistryReport {
     session_peer_join_observable: bool,
     completed_session_forwarded_upstream_message_counts: Vec<usize>,
     final_session_forwarded_upstream_message_counts: Vec<usize>,
+    #[serde(default)]
     quota_reconnect_signal_count: usize,
     quota_reconnect_signal_unix_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+struct RouterWebSocketRegistryReportFile {
+    schema_version: usize,
+    handled_connections: Option<usize>,
+    websocket_registry: RouterWebSocketRegistryReport,
 }
 
 impl RouterWebSocketRegistryReport {
@@ -2546,129 +2557,24 @@ impl RouterWebSocketRegistryReport {
                 path.display()
             )
         })?;
-        let value = serde_json::from_str::<Value>(&contents).map_err(|error| {
-            format!(
-                "router websocket registry report {} was invalid JSON: {error}",
-                path.display()
-            )
-        })?;
-        let registry = value
-            .get("websocket_registry")
-            .ok_or_else(|| "router websocket registry report was missing registry".to_owned())?;
-        let schema_version = required_usize_field(&value, "schema_version")?;
-        if schema_version != 2 {
+        let report = serde_json::from_str::<RouterWebSocketRegistryReportFile>(&contents).map_err(
+            |error| {
+                format!(
+                    "router websocket registry report {} was invalid JSON: {error}",
+                    path.display()
+                )
+            },
+        )?;
+        if report.schema_version != 2 {
             return Err(format!(
-                "router websocket registry report schema_version={schema_version}, expected 2"
+                "router websocket registry report schema_version={}, expected 2",
+                report.schema_version
             ));
         }
-        Ok(Self {
-            handled_connections: optional_usize_field(&value, "handled_connections")?,
-            active_sessions: required_usize_field(registry, "active_sessions")?,
-            high_water_sessions: required_usize_field(registry, "high_water_sessions")?,
-            registered_sessions: required_usize_field(registry, "registered_sessions")?,
-            closed_sessions: required_usize_field(registry, "closed_sessions")?,
-            completed_response_sessions: required_usize_field(
-                registry,
-                "completed_response_sessions",
-            )?,
-            forwarded_upstream_messages: required_usize_field(
-                registry,
-                "forwarded_upstream_messages",
-            )?,
-            registered_session_id_count: required_usize_field(
-                registry,
-                "registered_session_id_count",
-            )?,
-            completed_session_id_count: required_usize_field(
-                registry,
-                "completed_session_id_count",
-            )?,
-            closed_session_id_count: required_usize_field(registry, "closed_session_id_count")?,
-            session_peer_addr_count: required_usize_field(registry, "session_peer_addr_count")?,
-            session_peer_join_observable: required_bool_field(
-                registry,
-                "session_peer_join_observable",
-            )?,
-            completed_session_forwarded_upstream_message_counts: required_usize_array_field(
-                registry,
-                "completed_session_forwarded_upstream_message_counts",
-            )?,
-            final_session_forwarded_upstream_message_counts: required_usize_array_field(
-                registry,
-                "final_session_forwarded_upstream_message_counts",
-            )?,
-            quota_reconnect_signal_count: optional_usize_field(
-                registry,
-                "quota_reconnect_signal_count",
-            )?
-            .unwrap_or_default(),
-            quota_reconnect_signal_unix_ms: optional_u128_field(
-                registry,
-                "quota_reconnect_signal_unix_ms",
-            )?,
-        })
+        let mut registry = report.websocket_registry;
+        registry.handled_connections = report.handled_connections;
+        Ok(registry)
     }
-}
-
-fn required_bool_field(value: &Value, field: &'static str) -> Result<bool, String> {
-    value
-        .get(field)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| format!("router websocket registry report missing boolean {field}"))
-}
-
-fn required_usize_field(value: &Value, field: &'static str) -> Result<usize, String> {
-    let raw = value
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| format!("router websocket registry report missing numeric {field}"))?;
-    usize::try_from(raw)
-        .map_err(|_| format!("router websocket registry report field {field} overflowed usize"))
-}
-
-fn optional_usize_field(value: &Value, field: &'static str) -> Result<Option<usize>, String> {
-    let Some(raw) = value.get(field) else {
-        return Ok(None);
-    };
-    if raw.is_null() {
-        return Ok(None);
-    }
-    let raw = raw
-        .as_u64()
-        .ok_or_else(|| format!("router websocket registry report field {field} was not numeric"))?;
-    usize::try_from(raw)
-        .map(Some)
-        .map_err(|_| format!("router websocket registry report field {field} overflowed usize"))
-}
-
-fn optional_u128_field(value: &Value, field: &'static str) -> Result<Option<u128>, String> {
-    let Some(raw) = value.get(field) else {
-        return Ok(None);
-    };
-    if raw.is_null() {
-        return Ok(None);
-    }
-    raw.as_u64()
-        .map(u128::from)
-        .ok_or_else(|| format!("router websocket registry report field {field} was not numeric"))
-        .map(Some)
-}
-
-fn required_usize_array_field(value: &Value, field: &'static str) -> Result<Vec<usize>, String> {
-    let raw = value
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("router websocket registry report missing numeric array {field}"))?;
-    raw.iter()
-        .map(|item| {
-            let raw = item.as_u64().ok_or_else(|| {
-                format!("router websocket registry report field {field} contained non-number")
-            })?;
-            usize::try_from(raw).map_err(|_| {
-                format!("router websocket registry report field {field} overflowed usize")
-            })
-        })
-        .collect()
 }
 
 impl RouterAuditObservation {
@@ -3208,7 +3114,7 @@ fn write_redacted_three_websocket_transcript(
         "artifact": transcript_path.file_name().and_then(|name| name.to_str()),
         "s8_run_id": s8_smoke_run_id(),
         "git_head": current_git_head()?,
-        "runtime_roots": runtime_roots.clone(),
+        "runtime_roots": runtime_roots,
         "mode": input.mode,
     });
     let socket_cleanup = serde_json::json!({
@@ -3240,7 +3146,7 @@ fn write_redacted_three_websocket_transcript(
         },
         "quota_reconnect_progress": quota_reconnect_progress,
         "source_artifacts": {
-            "three_websocket_soak": source_artifact.clone(),
+            "three_websocket_soak": source_artifact,
             "quota_reconnect": source_artifact,
         },
         "router_process": router_process,
@@ -3735,7 +3641,7 @@ struct MockConcurrentWebSocketUpstream {
     address: String,
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
-    pressure_handles: Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>,
+    pressure_handles: PressureHandles,
     handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
@@ -3743,8 +3649,17 @@ struct MockQuotaReconnectWebSocketUpstream {
     address: String,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
     shutdown: Arc<AtomicBool>,
-    pressure_handles: Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>,
+    pressure_handles: PressureHandles,
     handle: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+struct S8OverlapQuotaErrorContext {
+    shared: Arc<ConcurrentUpstreamSharedState>,
+    overlap_started_at: Instant,
+    config: ConcurrentUpstreamConfig,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    pressure_handles: PressureHandles,
+    frame_count: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -4540,7 +4455,7 @@ fn run_quota_reconnect_mock_upstream(
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
     shutdown: Arc<AtomicBool>,
     sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
-    pressure_handles: Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     let deadline = Instant::now() + UPSTREAM_ACCEPT_TIMEOUT;
     loop {
@@ -4586,7 +4501,7 @@ fn run_quota_reconnect_mock_websocket_session(
     stream: std::net::TcpStream,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
     sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
-    pressure_handles: Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -4684,7 +4599,7 @@ fn run_quota_reconnect_mock_websocket_session(
             }
         };
         if send_quota_error {
-            if let Some(sqlite_pressure) = sqlite_pressure.clone() {
+            if let Some(sqlite_pressure) = sqlite_pressure {
                 let pressure_handle =
                     start_quota_reconnect_sqlite_pressure(sqlite_pressure, Arc::clone(&state))?;
                 pressure_handles
@@ -4953,7 +4868,7 @@ fn run_concurrent_mock_upstream(
     shutdown: Arc<AtomicBool>,
     config: ConcurrentUpstreamConfig,
     sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
-    pressure_handles: Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     let deadline = Instant::now()
         + Duration::from_secs(45)
@@ -5037,7 +4952,7 @@ fn run_concurrent_mock_websocket_session(
     shutdown: Arc<AtomicBool>,
     config: ConcurrentUpstreamConfig,
     sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
-    pressure_handles: Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(
@@ -5113,13 +5028,15 @@ fn run_concurrent_mock_websocket_session(
         if claim_quota_reconnect_interleave(&state, &token, &frame)? {
             return send_s8_overlap_quota_error(
                 &mut websocket,
-                Arc::clone(&state),
                 &token,
-                overlap_started_at,
-                config,
-                sqlite_pressure,
-                pressure_handles,
-                frame_count,
+                S8OverlapQuotaErrorContext {
+                    shared: Arc::clone(&state),
+                    overlap_started_at,
+                    config,
+                    sqlite_pressure,
+                    pressure_handles,
+                    frame_count,
+                },
             );
         }
         let quota_completion_session = record_quota_reconnect_completion_if_needed(&state, &token)?;
@@ -5410,25 +5327,21 @@ fn record_quota_reconnect_completion_if_needed(
 
 fn send_s8_overlap_quota_error(
     websocket: &mut WebSocket<std::net::TcpStream>,
-    shared: Arc<ConcurrentUpstreamSharedState>,
     token: &str,
-    overlap_started_at: Instant,
-    config: ConcurrentUpstreamConfig,
-    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
-    pressure_handles: Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>,
-    frame_count: usize,
+    context: S8OverlapQuotaErrorContext,
 ) -> Result<(), String> {
-    if !config.hold_duration.is_zero() {
-        let quota_deadline = overlap_started_at + config.hold_duration;
+    if !context.config.hold_duration.is_zero() {
+        let quota_deadline = context.overlap_started_at + context.config.hold_duration;
         let remaining = quota_deadline.saturating_duration_since(Instant::now());
         if !remaining.is_zero() {
             thread::sleep(remaining);
         }
     }
-    if let Some(sqlite_pressure) = sqlite_pressure {
+    if let Some(sqlite_pressure) = context.sqlite_pressure {
         let pressure_handle =
-            start_s8_overlap_quota_sqlite_pressure(sqlite_pressure, Arc::clone(&shared))?;
-        pressure_handles
+            start_s8_overlap_quota_sqlite_pressure(sqlite_pressure, Arc::clone(&context.shared))?;
+        context
+            .pressure_handles
             .lock()
             .map_err(|_| "S8 overlap quota pressure handle mutex poisoned".to_owned())?
             .push(pressure_handle);
@@ -5439,7 +5352,8 @@ fn send_s8_overlap_quota_error(
             format!("S8 overlap quota upstream failed to send usage limit: {error}")
         })?;
     {
-        let mut state = shared
+        let mut state = context
+            .shared
             .state
             .lock()
             .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
@@ -5449,10 +5363,10 @@ fn send_s8_overlap_quota_error(
     }
     let _close_result = websocket.close(None);
     finish_concurrent_non_prewarm_session(
-        &shared,
-        frame_count,
+        &context.shared,
+        context.frame_count,
         1,
-        usize::from(is_concurrent_overlap_active(&shared)?),
+        usize::from(is_concurrent_overlap_active(&context.shared)?),
         "normal".to_owned(),
     )?;
     Ok(())
@@ -6495,6 +6409,13 @@ mod tests {
     use super::validate_copied_dev_state_roots;
     use super::write_redacted_transcript;
 
+    fn expect_string_error(result: Result<(), String>, context: &'static str) -> String {
+        match result {
+            Ok(()) => panic!("{context}"),
+            Err(error) => error,
+        }
+    }
+
     fn success_status() -> ExitStatus {
         ExitStatus::from_raw(0)
     }
@@ -6830,8 +6751,10 @@ mod tests {
         let router_root = live_style_home.join(".codex-router");
         let codex_home = live_style_home.join(".codex");
 
-        let error = validate_copied_dev_state_roots(&router_root, &codex_home, &live_style_home)
-            .expect_err("live-style copied-dev-state roots must be rejected");
+        let error = expect_string_error(
+            validate_copied_dev_state_roots(&router_root, &codex_home, &live_style_home),
+            "live-style copied-dev-state roots must be rejected",
+        );
 
         assert!(
             error.contains("tmp/dev-state"),
@@ -6866,8 +6789,10 @@ mod tests {
         let codex_home = dev_state_root.join(format!("codex-home-{}", std::process::id()));
         let process_home = dev_state_root.join(format!("process-home-{}", std::process::id()));
 
-        let error = validate_copied_dev_state_roots(&router_root, &codex_home, &process_home)
-            .expect_err("symlinked router root must be rejected");
+        let error = expect_string_error(
+            validate_copied_dev_state_roots(&router_root, &codex_home, &process_home),
+            "symlinked router root must be rejected",
+        );
 
         assert!(
             error.contains("symlink") || error.contains("tmp/dev-state"),
@@ -6915,8 +6840,10 @@ mod tests {
         unix_fs::symlink(&external_secrets, router_root.join("secrets"))
             .unwrap_or_else(|error| panic!("failed to create secrets symlink: {error}"));
 
-        let error = validate_copied_dev_state_roots(&router_root, &codex_home, &process_home)
-            .expect_err("symlinked copied-dev-state DB/secret targets must be rejected");
+        let error = expect_string_error(
+            validate_copied_dev_state_roots(&router_root, &codex_home, &process_home),
+            "symlinked copied-dev-state DB/secret targets must be rejected",
+        );
 
         assert!(
             error.contains("symlink") || error.contains("tmp/dev-state"),
@@ -7083,8 +7010,10 @@ mod tests {
             },
         });
 
-        let error = assert_redacted_three_websocket_payload(&payload.to_string(), &[], &seed)
-            .expect_err("raw session identifiers and local ports must be rejected");
+        let error = expect_string_error(
+            assert_redacted_three_websocket_payload(&payload.to_string(), &[], &seed),
+            "raw session identifiers and local ports must be rejected",
+        );
 
         assert!(
             error.contains("forbidden structural key")

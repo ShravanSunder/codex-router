@@ -128,12 +128,12 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     should_cancel.set(true);
                 }
                 KeyCode::Backspace => model_value.handle_key(SessionsPickerKey::SearchBackspace),
-                KeyCode::Char(character) => {
-                    if !modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-                    {
-                        model_value.handle_key(SessionsPickerKey::SearchChar(character));
-                    }
+                KeyCode::Char(character)
+                    if !modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    ) =>
+                {
+                    model_value.handle_key(SessionsPickerKey::SearchChar(character));
                 }
                 KeyCode::Enter => selected_outcome.set(model_value.selected_outcome()),
                 KeyCode::Esc => {
@@ -1011,7 +1011,9 @@ mod tests {
         )))
         .collect::<Vec<_>>()
         .await;
-        let canvas = actual.last().expect("picker should render a canvas");
+        let Some(canvas) = actual.last() else {
+            panic!("picker should render a canvas");
+        };
         let snapshot = canvas.to_string();
         assert!(
             snapshot.contains("❯ Feature design session"),
@@ -1022,9 +1024,8 @@ mod tests {
             "selected row should keep branch and cwd on the metadata row: {canvas}"
         );
         assert!(
-            canvas.to_string().contains('╭') && canvas.to_string().contains('╰'),
-            "picker should render an iocraft bordered panel: {}",
-            canvas
+            snapshot.contains('╭') && snapshot.contains('╰'),
+            "picker should render an iocraft bordered panel: {canvas}"
         );
     }
 

@@ -61,6 +61,13 @@ mod tests {
     use crate::sqlite::SqliteStateStore;
     use crate::sqlite::StateStoreError;
 
+    fn expect_error<T, E>(result: Result<T, E>, context: &'static str) -> E {
+        match result {
+            Ok(_) => panic!("{context}"),
+            Err(error) => error,
+        }
+    }
+
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
@@ -361,9 +368,10 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         create_v10_database_missing_async_projection_tables(&database_path);
 
-        let error = AsyncSqliteStateStore::open_read_only(&database_path)
-            .await
-            .expect_err("read-only open should fail before status queries hit missing tables");
+        let error = expect_error(
+            AsyncSqliteStateStore::open_read_only(&database_path).await,
+            "read-only open should fail before status queries hit missing tables",
+        );
 
         assert_eq!(
             error,

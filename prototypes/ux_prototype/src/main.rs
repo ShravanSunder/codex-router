@@ -772,7 +772,7 @@ fn quota_detail_panel(width: Size, height: u32, compact: bool) -> AnyElement<'st
 }
 
 fn inline_quota_bar(percent: u8, width: u32) -> AnyElement<'static> {
-    let filled_count = usize::from((percent + 9) / 10).min(10);
+    let filled_count = usize::from(percent.div_ceil(10)).min(10);
     let empty_count = 10usize.saturating_sub(filled_count);
     let bar = format!("{}{}", "█".repeat(filled_count), "░".repeat(empty_count));
 
@@ -785,7 +785,7 @@ fn inline_quota_bar(percent: u8, width: u32) -> AnyElement<'static> {
 }
 
 fn safe_pace_meter(percent: u8, width: u32) -> AnyElement<'static> {
-    let filled_count = usize::from((percent + 9) / 10).min(10);
+    let filled_count = usize::from(percent.div_ceil(10)).min(10);
     let empty_count = 10usize.saturating_sub(filled_count);
     let bar = format!("[{}{}]", "■".repeat(filled_count), "□".repeat(empty_count));
 

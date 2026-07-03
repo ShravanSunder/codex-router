@@ -352,6 +352,7 @@ dependencies = [
  "codex-router-proxy",
  "codex-router-secret-store",
  "codex-router-state",
+ "serde",
  "serde_json",
  "sha2",
  "tungstenite 0.28.0",

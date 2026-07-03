@@ -255,12 +255,12 @@ fn default_router_root() -> Result<PathBuf, CliError> {
 
     #[cfg(all(debug_assertions, not(test)))]
     {
-        return default_router_root_from_environment(
+        default_router_root_from_environment(
             home,
             std::env::var_os(DEBUG_ROUTER_ROOT_ENV),
             std::env::var_os(USE_HOME_DEFAULT_ENV),
             true,
-        );
+        )
     }
 
     #[cfg(not(all(debug_assertions, not(test))))]
@@ -276,13 +276,12 @@ fn default_router_root_from_environment(
     use_debug_defaults: bool,
 ) -> Result<PathBuf, CliError> {
     let should_use_debug_defaults = use_debug_defaults && use_home_default.is_none();
-    if should_use_debug_defaults {
-        if let Some(debug_root) = debug_router_root
+    if should_use_debug_defaults
+        && let Some(debug_root) = debug_router_root
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-        {
-            return Ok(debug_root);
-        }
+    {
+        return Ok(debug_root);
     }
 
     let home = home

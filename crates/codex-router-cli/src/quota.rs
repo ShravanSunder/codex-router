@@ -2350,7 +2350,7 @@ fn quota_connection_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String 
         .per_connection_burn_basis_points_per_hour
         .map_or_else(
             || "unknown".to_owned(),
-            |basis_points| format_burn_rate_basis_points_per_hour(basis_points),
+            format_burn_rate_basis_points_per_hour,
         );
     format!(
         "{per_connection_rate}/conn ({})",
@@ -3603,67 +3603,71 @@ mod tests {
         }
     }
 
-    fn quota_capture_row(
-        account_id_value: &str,
-        account_label: &str,
+    struct QuotaCaptureRowFixture {
+        account_id_value: &'static str,
+        account_label: &'static str,
         preferred_next: bool,
         short_remaining: u32,
         weekly_remaining: u32,
         freshness: QuotaEvidenceFreshness,
         availability: AccountAvailability,
         routing_reason: RoutingReason,
-    ) -> QuotaStatusRow {
+    }
+
+    fn quota_capture_row(fixture: QuotaCaptureRowFixture) -> QuotaStatusRow {
         let windows = vec![
             display_window(
                 V1_SHORT_WINDOW_SECONDS,
-                short_remaining,
+                fixture.short_remaining,
                 NOW + V1_SHORT_WINDOW_SECONDS,
                 QuotaRunRateEstimate::unknown(),
             ),
             display_window(
                 V1_WEEKLY_WINDOW_SECONDS,
-                weekly_remaining,
+                fixture.weekly_remaining,
                 NOW + V1_WEEKLY_WINDOW_SECONDS,
                 QuotaRunRateEstimate::unknown(),
             ),
         ];
-        let quota_evidence_reason = if freshness == QuotaEvidenceFreshness::Stale {
+        let quota_evidence_reason = if fixture.freshness == QuotaEvidenceFreshness::Stale {
             QuotaEvidenceReason::WindowExhausted
-        } else if routing_reason == RoutingReason::HeldShortWindowGuard {
+        } else if fixture.routing_reason == RoutingReason::HeldShortWindowGuard {
             QuotaEvidenceReason::ShortWindowGuard
         } else {
             QuotaEvidenceReason::Ok
         };
 
         QuotaStatusRow {
-            account_id: account_id(account_id_value),
-            account_label: account_label.to_owned(),
+            account_id: account_id(fixture.account_id_value),
+            account_label: fixture.account_label.to_owned(),
             account_status: "enabled".to_owned(),
             short_window: format_window_cell(&windows, V1_SHORT_WINDOW_SECONDS, NOW, false),
             weekly_window: format_window_cell(&windows, V1_WEEKLY_WINDOW_SECONDS, NOW, false),
             pace: "history unknown".to_owned(),
             burn: "quota guard 5h 0% / weekly 8%".to_owned(),
-            updated: if freshness == QuotaEvidenceFreshness::Stale {
+            updated: if fixture.freshness == QuotaEvidenceFreshness::Stale {
                 "failed 42m ago: network".to_owned()
             } else {
                 "ok 14s ago".to_owned()
             },
             active_clients: "0 clients\nmirror <= 2h".to_owned(),
-            active_clients_value: Some(if routing_reason == RoutingReason::HeldShortWindowGuard {
-                5
-            } else {
-                0
-            }),
+            active_clients_value: Some(
+                if fixture.routing_reason == RoutingReason::HeldShortWindowGuard {
+                    5
+                } else {
+                    0
+                },
+            ),
             active_clients_source: "sqlx_mirror",
             reset_credits_available: "2 available".to_owned(),
             reset_credits_available_value: Some(2),
-            routing: format_routing_reason(routing_reason).to_owned(),
-            next_use: format_next_use_for_capture(routing_reason).to_owned(),
+            routing: format_routing_reason(fixture.routing_reason).to_owned(),
+            next_use: format_next_use_for_capture(fixture.routing_reason).to_owned(),
             weekly_pace: Some(QuotaPaceSnapshot {
-                remaining_headroom: weekly_remaining,
+                remaining_headroom: fixture.weekly_remaining,
                 reset_unix_seconds: Some(NOW + V1_WEEKLY_WINDOW_SECONDS),
                 projected_exhaustion_unix_seconds: Some(
-                    NOW + u64::from(weekly_remaining)
+                    NOW + u64::from(fixture.weekly_remaining)
                         .saturating_mul(100)
                         .saturating_mul(3_600)
                         / 10,
@@ -3674,16 +3678,16 @@ mod tests {
                 confidence: QuotaRunRateConfidence::Normal,
             }),
             windows,
-            availability,
-            freshness,
+            availability: fixture.availability,
+            freshness: fixture.freshness,
             routing_exclusion: RoutingExclusion::None,
             quota_evidence_reason,
-            routing_reason,
-            preferred_next,
+            routing_reason: fixture.routing_reason,
+            preferred_next: fixture.preferred_next,
             short_pressure: 0,
             long_pressure: 8,
-            short_salvage: short_remaining,
-            long_salvage: weekly_remaining,
+            short_salvage: fixture.short_remaining,
+            long_salvage: fixture.weekly_remaining,
             limiting_window: None,
             weekly_survival_margin_basis_points: None,
             weekly_projected_exhaustion_unix_seconds: None,
@@ -3700,46 +3704,46 @@ mod tests {
             selection_projection_source: SelectionProjectionSource::SqlxProjection,
             now_unix_seconds: NOW,
             rows: vec![
-                quota_capture_row(
-                    "acct_ssdev",
-                    "ssdev",
-                    true,
-                    99,
-                    83,
-                    QuotaEvidenceFreshness::Fresh,
-                    AccountAvailability::Usable,
-                    RoutingReason::PreferredSafestQuota,
-                ),
-                quota_capture_row(
-                    "acct_askluna",
-                    "askluna",
-                    false,
-                    100,
-                    99,
-                    QuotaEvidenceFreshness::Fresh,
-                    AccountAvailability::Usable,
-                    RoutingReason::AvailableSamePool,
-                ),
-                quota_capture_row(
-                    "acct_matches",
-                    "matches",
-                    false,
-                    94,
-                    94,
-                    QuotaEvidenceFreshness::Fresh,
-                    AccountAvailability::Reserve,
-                    RoutingReason::HeldShortWindowGuard,
-                ),
-                quota_capture_row(
-                    "acct_legacy",
-                    "legacy",
-                    false,
-                    0,
-                    0,
-                    QuotaEvidenceFreshness::Stale,
-                    AccountAvailability::Blocked,
-                    RoutingReason::BlockedWindowExhausted,
-                ),
+                quota_capture_row(QuotaCaptureRowFixture {
+                    account_id_value: "acct_ssdev",
+                    account_label: "ssdev",
+                    preferred_next: true,
+                    short_remaining: 99,
+                    weekly_remaining: 83,
+                    freshness: QuotaEvidenceFreshness::Fresh,
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::PreferredSafestQuota,
+                }),
+                quota_capture_row(QuotaCaptureRowFixture {
+                    account_id_value: "acct_askluna",
+                    account_label: "askluna",
+                    preferred_next: false,
+                    short_remaining: 100,
+                    weekly_remaining: 99,
+                    freshness: QuotaEvidenceFreshness::Fresh,
+                    availability: AccountAvailability::Usable,
+                    routing_reason: RoutingReason::AvailableSamePool,
+                }),
+                quota_capture_row(QuotaCaptureRowFixture {
+                    account_id_value: "acct_matches",
+                    account_label: "matches",
+                    preferred_next: false,
+                    short_remaining: 94,
+                    weekly_remaining: 94,
+                    freshness: QuotaEvidenceFreshness::Fresh,
+                    availability: AccountAvailability::Reserve,
+                    routing_reason: RoutingReason::HeldShortWindowGuard,
+                }),
+                quota_capture_row(QuotaCaptureRowFixture {
+                    account_id_value: "acct_legacy",
+                    account_label: "legacy",
+                    preferred_next: false,
+                    short_remaining: 0,
+                    weekly_remaining: 0,
+                    freshness: QuotaEvidenceFreshness::Stale,
+                    availability: AccountAvailability::Blocked,
+                    routing_reason: RoutingReason::BlockedWindowExhausted,
+                }),
             ],
         }
     }
@@ -3753,26 +3757,26 @@ mod tests {
             selection_projection_source: SelectionProjectionSource::SqlxProjection,
             now_unix_seconds: NOW,
             rows: vec![
-                quota_capture_row(
-                    "acct_ssdev",
-                    "ssdev",
-                    false,
-                    0,
-                    0,
-                    QuotaEvidenceFreshness::Fresh,
-                    AccountAvailability::Blocked,
-                    RoutingReason::BlockedWindowExhausted,
-                ),
-                quota_capture_row(
-                    "acct_legacy",
-                    "legacy",
-                    false,
-                    0,
-                    0,
-                    QuotaEvidenceFreshness::Stale,
-                    AccountAvailability::Blocked,
-                    RoutingReason::BlockedWindowExhausted,
-                ),
+                quota_capture_row(QuotaCaptureRowFixture {
+                    account_id_value: "acct_ssdev",
+                    account_label: "ssdev",
+                    preferred_next: false,
+                    short_remaining: 0,
+                    weekly_remaining: 0,
+                    freshness: QuotaEvidenceFreshness::Fresh,
+                    availability: AccountAvailability::Blocked,
+                    routing_reason: RoutingReason::BlockedWindowExhausted,
+                }),
+                quota_capture_row(QuotaCaptureRowFixture {
+                    account_id_value: "acct_legacy",
+                    account_label: "legacy",
+                    preferred_next: false,
+                    short_remaining: 0,
+                    weekly_remaining: 0,
+                    freshness: QuotaEvidenceFreshness::Stale,
+                    availability: AccountAvailability::Blocked,
+                    routing_reason: RoutingReason::BlockedWindowExhausted,
+                }),
             ],
         }
     }

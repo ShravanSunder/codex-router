@@ -73,6 +73,58 @@ pub type RouteBandQueueHealth = Arc<Mutex<HashMap<String, RouteBandQueueDegraded
 /// Async critical section for active-count projection and reservation.
 pub(crate) type SelectionReservationLock = Arc<AsyncMutex<()>>;
 
+/// Process-local dependencies shared by async account selectors.
+#[derive(Clone)]
+pub struct AsyncAccountSelectorRuntimeState {
+    weighted_selectors: RouteBandWeightedSelectors,
+    account_holds: RouteBandAccountHolds,
+    active_reservations: RouteBandReservationBooks,
+    runtime_exhaustions: RouteBandRuntimeExhaustions,
+    route_band_queue_health: RouteBandQueueHealth,
+    selection_reservation_lock: SelectionReservationLock,
+}
+
+impl AsyncAccountSelectorRuntimeState {
+    /// Creates selector runtime dependencies with a fresh selection lock.
+    #[must_use]
+    pub fn new(
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        active_reservations: RouteBandReservationBooks,
+        runtime_exhaustions: RouteBandRuntimeExhaustions,
+        route_band_queue_health: RouteBandQueueHealth,
+    ) -> Self {
+        Self::new_with_selection_lock(
+            weighted_selectors,
+            account_holds,
+            active_reservations,
+            runtime_exhaustions,
+            route_band_queue_health,
+            Arc::new(AsyncMutex::new(())),
+        )
+    }
+
+    /// Creates selector runtime dependencies with a shared selection lock.
+    #[must_use]
+    pub(crate) fn new_with_selection_lock(
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        active_reservations: RouteBandReservationBooks,
+        runtime_exhaustions: RouteBandRuntimeExhaustions,
+        route_band_queue_health: RouteBandQueueHealth,
+        selection_reservation_lock: SelectionReservationLock,
+    ) -> Self {
+        Self {
+            weighted_selectors,
+            account_holds,
+            active_reservations,
+            runtime_exhaustions,
+            route_band_queue_health,
+            selection_reservation_lock,
+        }
+    }
+}
+
 const ROUTING_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
 const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 
@@ -761,65 +813,37 @@ where
         minimum_account_hold_cooldown_seconds: u64,
         clock: UnixClock,
     ) -> Self {
-        Self::new_with_runtime_state_and_queue_health(
+        Self::new_with_runtime_dependencies(
             state_repository,
-            weighted_selectors,
-            account_holds,
-            active_reservations,
-            runtime_exhaustions,
-            Arc::new(Mutex::new(HashMap::new())),
+            AsyncAccountSelectorRuntimeState::new(
+                weighted_selectors,
+                account_holds,
+                active_reservations,
+                runtime_exhaustions,
+                Arc::new(Mutex::new(HashMap::new())),
+            ),
             minimum_account_hold_cooldown_seconds,
             clock,
         )
     }
 
-    /// Creates an async selector with explicit process-local runtime and queue health state.
+    /// Creates an async selector with explicit process-local runtime dependencies.
     #[must_use]
-    pub fn new_with_runtime_state_and_queue_health(
+    pub fn new_with_runtime_dependencies(
         state_repository: &'a R,
-        weighted_selectors: RouteBandWeightedSelectors,
-        account_holds: RouteBandAccountHolds,
-        active_reservations: RouteBandReservationBooks,
-        runtime_exhaustions: RouteBandRuntimeExhaustions,
-        route_band_queue_health: RouteBandQueueHealth,
-        minimum_account_hold_cooldown_seconds: u64,
-        clock: UnixClock,
-    ) -> Self {
-        Self::new_with_runtime_state_queue_health_and_selection_lock(
-            state_repository,
-            weighted_selectors,
-            account_holds,
-            active_reservations,
-            runtime_exhaustions,
-            route_band_queue_health,
-            Arc::new(AsyncMutex::new(())),
-            minimum_account_hold_cooldown_seconds,
-            clock,
-        )
-    }
-
-    /// Creates an async selector with explicit process-local runtime, queue health, and selection lock state.
-    #[must_use]
-    pub fn new_with_runtime_state_queue_health_and_selection_lock(
-        state_repository: &'a R,
-        weighted_selectors: RouteBandWeightedSelectors,
-        account_holds: RouteBandAccountHolds,
-        active_reservations: RouteBandReservationBooks,
-        runtime_exhaustions: RouteBandRuntimeExhaustions,
-        route_band_queue_health: RouteBandQueueHealth,
-        selection_reservation_lock: SelectionReservationLock,
+        runtime_state: AsyncAccountSelectorRuntimeState,
         minimum_account_hold_cooldown_seconds: u64,
         clock: UnixClock,
     ) -> Self {
         Self {
             state_repository,
-            weighted_selectors,
-            account_holds,
-            active_reservations,
-            runtime_exhaustions,
-            route_band_queue_health,
+            weighted_selectors: runtime_state.weighted_selectors,
+            account_holds: runtime_state.account_holds,
+            active_reservations: runtime_state.active_reservations,
+            runtime_exhaustions: runtime_state.runtime_exhaustions,
+            route_band_queue_health: runtime_state.route_band_queue_health,
             active_client_leases: None,
-            selection_reservation_lock,
+            selection_reservation_lock: runtime_state.selection_reservation_lock,
             minimum_account_hold_cooldown_seconds,
             clock,
         }
@@ -2423,26 +2447,30 @@ mod tests {
         let request =
             crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses");
         let first_selector =
-            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_state_queue_health_and_selection_lock(
+            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
                 &repository,
-                Arc::clone(&weighted_selectors),
-                Arc::clone(&account_holds),
-                Arc::clone(&active_reservations),
-                Arc::clone(&runtime_exhaustions),
-                Arc::clone(&route_band_queue_health),
-                Arc::clone(&selection_reservation_lock),
+                super::AsyncAccountSelectorRuntimeState::new_with_selection_lock(
+                    Arc::clone(&weighted_selectors),
+                    Arc::clone(&account_holds),
+                    Arc::clone(&active_reservations),
+                    Arc::clone(&runtime_exhaustions),
+                    Arc::clone(&route_band_queue_health),
+                    Arc::clone(&selection_reservation_lock),
+                ),
                 super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
                 Arc::new(|| 1_000),
             );
         let second_selector =
-            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_state_queue_health_and_selection_lock(
+            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
                 &repository,
-                Arc::clone(&weighted_selectors),
-                Arc::clone(&account_holds),
-                Arc::clone(&active_reservations),
-                Arc::clone(&runtime_exhaustions),
-                Arc::clone(&route_band_queue_health),
-                Arc::clone(&selection_reservation_lock),
+                super::AsyncAccountSelectorRuntimeState::new_with_selection_lock(
+                    Arc::clone(&weighted_selectors),
+                    Arc::clone(&account_holds),
+                    Arc::clone(&active_reservations),
+                    Arc::clone(&runtime_exhaustions),
+                    Arc::clone(&route_band_queue_health),
+                    Arc::clone(&selection_reservation_lock),
+                ),
                 super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
                 Arc::new(|| 1_000),
             );
