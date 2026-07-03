@@ -167,7 +167,7 @@ const ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS: &[&str] =
         expires_unix_seconds INTEGER,
         PRIMARY KEY (account_id, route_band)
     )"];
-const ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
+const ASYNC_ACTIVE_SESSION_HISTORY_TABLE_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS active_session_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         account_id TEXT NOT NULL,
@@ -181,6 +181,19 @@ const ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         session_ended_unix_seconds INTEGER,
         transport_kind TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS active_session_rollups (
+        account_id TEXT NOT NULL,
+        route_band TEXT NOT NULL,
+        bucket_start_unix_seconds INTEGER NOT NULL,
+        bucket_end_unix_seconds INTEGER NOT NULL,
+        active_session_seconds INTEGER NOT NULL,
+        max_concurrent_sessions INTEGER NOT NULL,
+        completed_sessions INTEGER NOT NULL,
+        stale_purged_sessions INTEGER NOT NULL,
+        PRIMARY KEY (account_id, route_band, bucket_start_unix_seconds, bucket_end_unix_seconds)
+    )",
+];
+const ASYNC_ACTIVE_SESSION_HISTORY_INDEX_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
         ON active_session_events (
             route_band, account_id, event_unix_seconds
@@ -193,17 +206,6 @@ const ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         ON active_session_events (
             route_band, process_run_id, reservation_id, event_kind, event_unix_seconds
         )",
-    "CREATE TABLE IF NOT EXISTS active_session_rollups (
-        account_id TEXT NOT NULL,
-        route_band TEXT NOT NULL,
-        bucket_start_unix_seconds INTEGER NOT NULL,
-        bucket_end_unix_seconds INTEGER NOT NULL,
-        active_session_seconds INTEGER NOT NULL,
-        max_concurrent_sessions INTEGER NOT NULL,
-        completed_sessions INTEGER NOT NULL,
-        stale_purged_sessions INTEGER NOT NULL,
-        PRIMARY KEY (account_id, route_band, bucket_start_unix_seconds, bucket_end_unix_seconds)
-    )",
 ];
 
 /// Active client count for one account and route band.
@@ -334,6 +336,18 @@ impl ActiveSessionEvent {
     #[must_use]
     pub fn logical_session_id(&self) -> &str {
         &self.logical_session_id
+    }
+
+    /// Returns the reservation id associated with this session event.
+    #[must_use]
+    pub const fn reservation_id(&self) -> &ReservationId {
+        &self.reservation_id
+    }
+
+    /// Returns the durable event kind.
+    #[must_use]
+    pub const fn event_kind(&self) -> ActiveSessionEventKind {
+        self.event_kind
     }
 }
 
@@ -628,6 +642,14 @@ impl AsyncSqliteStateStore {
             .await
             .map(|row| row.get::<i64, _>(0))
             .map_err(sqlx_error)
+    }
+
+    /// Acquires and holds one connection from this store's pool for isolation tests.
+    #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
+    pub async fn acquire_connection_for_test(
+        &self,
+    ) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, StateStoreError> {
+        self.pool.acquire().await.map_err(sqlx_error)
     }
 
     /// Loads selector input rows for one route band.
@@ -2123,7 +2145,54 @@ impl AsyncSqliteStateStore {
     }
 
     async fn ensure_active_session_history_schema(&self) -> Result<(), StateStoreError> {
-        for statement in ASYNC_ACTIVE_SESSION_HISTORY_SCHEMA_STATEMENTS {
+        for statement in ASYNC_ACTIVE_SESSION_HISTORY_TABLE_STATEMENTS {
+            sqlx::query(*statement)
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+        }
+
+        for (table_name, column_name, alter_statement) in [
+            (
+                "active_session_events",
+                "logical_session_id",
+                "ALTER TABLE active_session_events ADD COLUMN logical_session_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "active_session_events",
+                "session_started_unix_seconds",
+                "ALTER TABLE active_session_events ADD COLUMN session_started_unix_seconds INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "active_session_events",
+                "session_ended_unix_seconds",
+                "ALTER TABLE active_session_events ADD COLUMN session_ended_unix_seconds INTEGER",
+            ),
+            (
+                "active_session_events",
+                "transport_kind",
+                "ALTER TABLE active_session_events ADD COLUMN transport_kind TEXT NOT NULL DEFAULT 'unknown'",
+            ),
+            (
+                "active_session_rollups",
+                "completed_sessions",
+                "ALTER TABLE active_session_rollups ADD COLUMN completed_sessions INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "active_session_rollups",
+                "stale_purged_sessions",
+                "ALTER TABLE active_session_rollups ADD COLUMN stale_purged_sessions INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            if !self.table_has_column(table_name, column_name).await? {
+                sqlx::query(alter_statement)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(sqlx_error)?;
+            }
+        }
+
+        for statement in ASYNC_ACTIVE_SESSION_HISTORY_INDEX_STATEMENTS {
             sqlx::query(*statement)
                 .execute(&self.pool)
                 .await
@@ -2265,45 +2334,6 @@ impl AsyncSqliteStateStore {
 
     async fn apply_v10(&self) -> Result<(), StateStoreError> {
         self.ensure_active_session_history_schema().await?;
-        for (table_name, column_name, alter_statement) in [
-            (
-                "active_session_events",
-                "logical_session_id",
-                "ALTER TABLE active_session_events ADD COLUMN logical_session_id TEXT NOT NULL DEFAULT ''",
-            ),
-            (
-                "active_session_events",
-                "session_started_unix_seconds",
-                "ALTER TABLE active_session_events ADD COLUMN session_started_unix_seconds INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "active_session_events",
-                "session_ended_unix_seconds",
-                "ALTER TABLE active_session_events ADD COLUMN session_ended_unix_seconds INTEGER",
-            ),
-            (
-                "active_session_events",
-                "transport_kind",
-                "ALTER TABLE active_session_events ADD COLUMN transport_kind TEXT NOT NULL DEFAULT 'unknown'",
-            ),
-            (
-                "active_session_rollups",
-                "completed_sessions",
-                "ALTER TABLE active_session_rollups ADD COLUMN completed_sessions INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "active_session_rollups",
-                "stale_purged_sessions",
-                "ALTER TABLE active_session_rollups ADD COLUMN stale_purged_sessions INTEGER NOT NULL DEFAULT 0",
-            ),
-        ] {
-            if !self.table_has_column(table_name, column_name).await? {
-                sqlx::query(alter_statement)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(sqlx_error)?;
-            }
-        }
         sqlx::query("PRAGMA user_version = 10")
             .execute(&self.pool)
             .await
@@ -2516,6 +2546,7 @@ impl SqliteStateStore {
             connection,
         };
         store.migrate()?;
+        store.ensure_async_read_only_schema()?;
 
         Ok(store)
     }
@@ -3913,6 +3944,22 @@ impl SqliteStateStore {
         self.connection
             .execute_batch("PRAGMA user_version = 10;")
             .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
+    fn ensure_async_read_only_schema(&self) -> Result<(), StateStoreError> {
+        for statement in ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS
+            .iter()
+            .chain(ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS)
+            .chain(ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS)
+            .chain(ASYNC_ACTIVE_SESSION_HISTORY_TABLE_STATEMENTS)
+            .chain(ASYNC_ACTIVE_SESSION_HISTORY_INDEX_STATEMENTS)
+        {
+            self.connection
+                .execute_batch(statement)
+                .map_err(sqlite_error)?;
+        }
 
         Ok(())
     }

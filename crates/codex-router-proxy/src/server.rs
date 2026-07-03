@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::net::TcpListener;
 #[cfg(test)]
 use std::net::TcpStream;
+use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_core::routes::RouteBand;
+use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
@@ -64,14 +66,23 @@ use codex_router_state::sqlite::StateStoreError;
 use crate::account_selection::AsyncRepositoryBackedAccountSelector;
 use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RouteBandAccountHolds;
+use crate::account_selection::RouteBandQueueHealth;
 use crate::account_selection::RouteBandReservationBooks;
+use crate::account_selection::RouteBandRuntimeExhaustions;
 use crate::account_selection::RouteBandWeightedSelectors;
+use crate::account_selection::SelectionReservationLock;
 use crate::account_selection::SqliteActiveClientLeaseReporter;
+use crate::account_selection::mark_runtime_quota_exhausted;
 use crate::account_selection::route_band_has_selectable_alternative;
 use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
 use crate::credential_runtime::ProxyRuntimeCredentialResources;
 use crate::credential_runtime::ProxyRuntimeCredentialResourcesOpenError;
 use crate::credential_runtime::RuntimeAffinitySecretProvider;
+use crate::db_write_actor::DbWriteActor;
+use crate::db_write_actor::DbWriteCommand;
+use crate::db_write_actor::DbWriteEnqueueResult;
+use crate::db_write_actor::PROVIDER_EXHAUSTION_QUEUE_CAPACITY;
+use crate::db_write_actor::SqliteDbWriteRepository;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::http_sse::AsyncHttpAffinityOwnerRecorder;
@@ -96,6 +107,9 @@ use crate::http_sse::append_audit_event_with_reporter;
 use crate::http_sse::extract_response_id_from_body;
 use crate::http_sse::local_auth_rejection_audit_event;
 use crate::local_auth::extract_presented_local_token_from_request;
+use crate::maintenance_actor::MAINTENANCE_QUEUE_CAPACITY;
+use crate::maintenance_actor::MaintenanceActor;
+use crate::maintenance_actor::MaintenanceHint;
 use crate::provider_error::AsyncProviderErrorObserver;
 use crate::provider_error::ProviderErrorClassification;
 use crate::provider_error::ProviderErrorObservationError;
@@ -330,6 +344,26 @@ pub trait LoopbackConnectionErrorReporter: Send + Sync {
     fn report_connection_error(&self, diagnostic: &str);
 }
 
+#[derive(Clone, Debug)]
+struct RuntimeWritableStateStores {
+    credential_state_store: AsyncSqliteStateStore,
+    db_write_state_store: AsyncSqliteStateStore,
+    maintenance_state_store: AsyncSqliteStateStore,
+}
+
+async fn open_runtime_writable_state_stores(
+    state_database_path: &Path,
+) -> Result<RuntimeWritableStateStores, StateStoreError> {
+    let credential_state_store = AsyncSqliteStateStore::open(state_database_path).await?;
+    let db_write_state_store = AsyncSqliteStateStore::open(state_database_path).await?;
+    let maintenance_state_store = AsyncSqliteStateStore::open(state_database_path).await?;
+    Ok(RuntimeWritableStateStores {
+        credential_state_store,
+        db_write_state_store,
+        maintenance_state_store,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StderrLoopbackConnectionErrorReporter;
 
@@ -421,7 +455,8 @@ impl LoopbackRouterRuntimeConfig {
 pub struct LoopbackRouterRuntime {
     runtime: tokio::runtime::Runtime,
     server: AsyncLoopbackServerRuntime,
-    writable_state_store: AsyncSqliteStateStore,
+    credential_state_store: AsyncSqliteStateStore,
+    provider_error_state_store: AsyncSqliteStateStore,
     selection_state_store: AsyncSqliteStateStore,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
@@ -434,6 +469,11 @@ pub struct LoopbackRouterRuntime {
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
+    selection_reservation_lock: SelectionReservationLock,
+    runtime_exhaustions: RouteBandRuntimeExhaustions,
+    route_band_queue_health: RouteBandQueueHealth,
+    db_write_actor: DbWriteActor,
+    maintenance_actor: MaintenanceActor,
     fixed_now_unix_seconds: Option<u64>,
     connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
 }
@@ -445,20 +485,19 @@ impl LoopbackRouterRuntime {
             .enable_all()
             .build()
             .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
+        let fixed_now_unix_seconds = config.fixed_now_unix_seconds;
         let credential_resources = ProxyRuntimeCredentialResources::open(
             &config.secret_store_root,
-            config.fixed_now_unix_seconds,
+            fixed_now_unix_seconds,
         )?;
         let affinity_secret_provider = credential_resources.affinity_secret_provider();
         let credential_factory = credential_resources.credential_factory();
-        let affinity_state_store =
-            runtime.block_on(AsyncSqliteStateStore::open(&config.state_database_path))?;
+        let writable_state_stores = runtime.block_on(open_runtime_writable_state_stores(
+            &config.state_database_path,
+        ))?;
         let selection_state_store = runtime.block_on(AsyncSqliteStateStore::open_read_only(
             &config.state_database_path,
         ))?;
-        let affinity_owner_recorder = Arc::new(AsyncSqliteAffinityOwnerRecorder::new(
-            affinity_state_store.clone(),
-        ));
         let auth_gate = match config.local_token {
             Some(local_token) => crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
                 local_token,
@@ -471,11 +510,29 @@ impl LoopbackRouterRuntime {
         let server = runtime.block_on(AsyncLoopbackServerRuntime::bind(config.bind_address))?;
         let audit_sink = config.audit_file_path.map(AuditFileSink::new);
         let websocket_revocations = WebSocketRevocationRegistry::new();
+        let route_band_queue_health = RouteBandQueueHealth::default();
+        let selection_reservation_lock = SelectionReservationLock::default();
+        let db_write_actor = DbWriteActor::start_on_handle(
+            runtime.handle(),
+            Arc::new(SqliteDbWriteRepository::new(
+                writable_state_stores.db_write_state_store.clone(),
+            )),
+            Arc::clone(&route_band_queue_health),
+            PROVIDER_EXHAUSTION_QUEUE_CAPACITY,
+        );
+        let affinity_owner_recorder =
+            Arc::new(DbWriteAffinityOwnerRecorder::new(db_write_actor.clone()));
+        let maintenance_actor = MaintenanceActor::start_on_handle(
+            runtime.handle(),
+            Arc::new(writable_state_stores.maintenance_state_store.clone()),
+            MAINTENANCE_QUEUE_CAPACITY,
+        );
 
-        Ok(Self {
+        let loopback_runtime = Self {
             runtime,
             server,
-            writable_state_store: affinity_state_store,
+            credential_state_store: writable_state_stores.credential_state_store,
+            provider_error_state_store: writable_state_stores.db_write_state_store,
             selection_state_store,
             affinity_secret_provider,
             affinity_owner_recorder,
@@ -487,10 +544,19 @@ impl LoopbackRouterRuntime {
             weighted_selectors: Default::default(),
             account_holds: Default::default(),
             active_reservations: Default::default(),
+            selection_reservation_lock,
+            runtime_exhaustions: Default::default(),
+            route_band_queue_health,
+            db_write_actor,
+            maintenance_actor,
             credential_factory,
-            fixed_now_unix_seconds: config.fixed_now_unix_seconds,
+            fixed_now_unix_seconds,
             connection_error_reporter: Arc::new(StderrLoopbackConnectionErrorReporter),
-        })
+        };
+        loopback_runtime.enqueue_runtime_maintenance_hints(
+            fixed_now_unix_seconds.unwrap_or_else(|| current_unix_seconds().unwrap_or(0)),
+        );
+        Ok(loopback_runtime)
     }
 
     /// Returns the active loopback address.
@@ -645,6 +711,10 @@ impl LoopbackRouterRuntime {
                 });
             }
             handled_connections += 1;
+            self.enqueue_runtime_maintenance_hints(
+                self.fixed_now_unix_seconds
+                    .unwrap_or_else(|| current_unix_seconds().unwrap_or(0)),
+            );
         }
 
         if first_connection_error.is_some()
@@ -658,6 +728,8 @@ impl LoopbackRouterRuntime {
         }
         affinity_record_tasks.close();
         affinity_record_tasks.wait().await;
+        self.db_write_actor.shutdown().await;
+        self.maintenance_actor.shutdown().await;
 
         match first_connection_error {
             Some(error) => Err(error),
@@ -671,7 +743,8 @@ impl LoopbackRouterRuntime {
         affinity_record_tasks: TaskTracker,
     ) -> LoopbackProtocolConnectionHandler {
         LoopbackProtocolConnectionHandler {
-            writable_state_store: self.writable_state_store.clone(),
+            credential_state_store: self.credential_state_store.clone(),
+            provider_error_state_store: self.provider_error_state_store.clone(),
             selection_state_store: self.selection_state_store.clone(),
             credential_factory: self.credential_factory.clone(),
             affinity_secret_provider: self.affinity_secret_provider.clone(),
@@ -685,8 +758,59 @@ impl LoopbackRouterRuntime {
             weighted_selectors: Arc::clone(&self.weighted_selectors),
             account_holds: Arc::clone(&self.account_holds),
             active_reservations: Arc::clone(&self.active_reservations),
+            selection_reservation_lock: Arc::clone(&self.selection_reservation_lock),
+            runtime_exhaustions: Arc::clone(&self.runtime_exhaustions),
+            route_band_queue_health: Arc::clone(&self.route_band_queue_health),
+            db_write_actor: self.db_write_actor.clone(),
             fixed_now_unix_seconds: self.fixed_now_unix_seconds,
             session_shutdown,
+        }
+    }
+
+    fn enqueue_runtime_maintenance_hints(&self, now_unix_seconds: u64) {
+        const ROLLUP_BUCKET_SECONDS: u64 = 300;
+        const ACTIVE_CLIENT_STALE_AFTER_SECONDS: u64 = 600;
+        const ACTIVE_SESSION_RETENTION_SECONDS: u64 = 86_400;
+        const ACTIVE_SESSION_COMPACTION_SECONDS: u64 = 86_400;
+
+        let interval_start_unix_seconds =
+            now_unix_seconds.saturating_sub(now_unix_seconds % ROLLUP_BUCKET_SECONDS);
+        let interval_end_unix_seconds = interval_start_unix_seconds + ROLLUP_BUCKET_SECONDS;
+        for route_band in [
+            RouteBand::Responses,
+            RouteBand::ResponsesCompact,
+            RouteBand::Models,
+            RouteBand::MemoriesTraceSummarize,
+        ] {
+            let _cleanup_result =
+                self.maintenance_actor
+                    .try_enqueue(MaintenanceHint::CleanupStaleActiveClients {
+                        route_band,
+                        stale_before_unix_seconds: now_unix_seconds
+                            .saturating_sub(ACTIVE_CLIENT_STALE_AFTER_SECONDS),
+                    });
+            let _rollup_result =
+                self.maintenance_actor
+                    .try_enqueue(MaintenanceHint::RefreshActiveSessionRollups {
+                        route_band,
+                        interval_start_unix_seconds,
+                        interval_end_unix_seconds,
+                        bucket_seconds: ROLLUP_BUCKET_SECONDS,
+                    });
+            let _retention_result =
+                self.maintenance_actor
+                    .try_enqueue(MaintenanceHint::ApplyActiveSessionRetention {
+                        route_band,
+                        retain_after_unix_seconds: now_unix_seconds
+                            .saturating_sub(ACTIVE_SESSION_RETENTION_SECONDS),
+                    });
+            let _compaction_result =
+                self.maintenance_actor
+                    .try_enqueue(MaintenanceHint::CompactActiveSessionHistory {
+                        route_band,
+                        compact_before_unix_seconds: now_unix_seconds
+                            .saturating_sub(ACTIVE_SESSION_COMPACTION_SECONDS),
+                    });
         }
     }
 }
@@ -733,19 +857,134 @@ fn supervise_detached_connection_handler(
     tokio::spawn(async move {
         match handler.await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => reporter.report_connection_error(&format!(
-                "codex-router loopback connection failed: {error}"
-            )),
-            Err(source) => reporter.report_connection_error(&format!(
-                "codex-router loopback connection task failed: {source}"
-            )),
+            Ok(Err(error)) => {
+                reporter.report_connection_error(&loopback_connection_diagnostic(&error).render());
+            }
+            Err(_source) => reporter.report_connection_error(
+                &LoopbackConnectionDiagnostic::new("join_failure", "task_join", "error").render(),
+            ),
         }
     });
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LoopbackConnectionDiagnostic {
+    class: &'static str,
+    safe_reason: &'static str,
+    severity: &'static str,
+}
+
+impl LoopbackConnectionDiagnostic {
+    const fn new(class: &'static str, safe_reason: &'static str, severity: &'static str) -> Self {
+        Self {
+            class,
+            safe_reason,
+            severity,
+        }
+    }
+
+    #[cfg(test)]
+    const fn class(self) -> &'static str {
+        self.class
+    }
+
+    #[cfg(test)]
+    const fn safe_reason(self) -> &'static str {
+        self.safe_reason
+    }
+
+    #[cfg(test)]
+    const fn severity(self) -> &'static str {
+        self.severity
+    }
+
+    fn render(self) -> String {
+        format!(
+            "codex-router loopback connection failed: severity={} class={} reason={}",
+            self.severity, self.class, self.safe_reason
+        )
+    }
+}
+
+fn loopback_connection_diagnostic(
+    error: &LoopbackRouterRuntimeError,
+) -> LoopbackConnectionDiagnostic {
+    match error {
+        LoopbackRouterRuntimeError::HyperConnection(source)
+        | LoopbackRouterRuntimeError::HyperBody(source) => hyper_loopback_error_diagnostic(source),
+        LoopbackRouterRuntimeError::ConnectionJoin(_) => {
+            LoopbackConnectionDiagnostic::new("join_failure", "task_join", "error")
+        }
+        LoopbackRouterRuntimeError::WebSocket(_) => LoopbackConnectionDiagnostic::new(
+            "upstream_tunnel_failure",
+            websocket_runtime_error_kind(error),
+            "error",
+        ),
+        _ => LoopbackConnectionDiagnostic::new(
+            "router_runtime_failure",
+            websocket_runtime_error_kind(error),
+            "error",
+        ),
+    }
+}
+
+fn hyper_loopback_error_diagnostic(error: &hyper::Error) -> LoopbackConnectionDiagnostic {
+    if error.is_incomplete_message() {
+        return LoopbackConnectionDiagnostic::new(
+            "client_disconnect",
+            "hyper_incomplete_message",
+            "debug",
+        );
+    }
+    if error.is_canceled() {
+        return LoopbackConnectionDiagnostic::new("client_disconnect", "hyper_canceled", "debug");
+    }
+    if error.is_closed() {
+        return LoopbackConnectionDiagnostic::new("client_disconnect", "hyper_closed", "debug");
+    }
+    if error.is_body_write_aborted() {
+        return LoopbackConnectionDiagnostic::new(
+            "client_disconnect",
+            "hyper_body_write_aborted",
+            "debug",
+        );
+    }
+    if error.is_shutdown() {
+        return LoopbackConnectionDiagnostic::new("client_disconnect", "hyper_shutdown", "debug");
+    }
+    if hyper_error_source_chain_contains(error, "end of file before message length reached") {
+        return LoopbackConnectionDiagnostic::new(
+            "client_disconnect",
+            "hyper_incomplete_message",
+            "debug",
+        );
+    }
+    if error.is_parse() {
+        return LoopbackConnectionDiagnostic::new("malformed_request", "hyper_parse", "warn");
+    }
+    if error.is_timeout() {
+        return LoopbackConnectionDiagnostic::new("client_disconnect", "hyper_timeout", "debug");
+    }
+
+    LoopbackConnectionDiagnostic::new("unknown", "hyper_unknown", "error")
+}
+
+fn hyper_error_source_chain_contains(error: &hyper::Error, needle: &str) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(error_source) = source {
+        if error_source.to_string().contains(needle) {
+            return true;
+        }
+        source = error_source.source();
+    }
+
+    false
+}
+
 #[derive(Clone)]
 struct LoopbackProtocolConnectionHandler {
-    writable_state_store: AsyncSqliteStateStore,
+    credential_state_store: AsyncSqliteStateStore,
+    provider_error_state_store: AsyncSqliteStateStore,
     selection_state_store: AsyncSqliteStateStore,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
@@ -759,6 +998,10 @@ struct LoopbackProtocolConnectionHandler {
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
+    selection_reservation_lock: SelectionReservationLock,
+    runtime_exhaustions: RouteBandRuntimeExhaustions,
+    route_band_queue_health: RouteBandQueueHealth,
+    db_write_actor: DbWriteActor,
     fixed_now_unix_seconds: Option<u64>,
     session_shutdown: CancellationToken,
 }
@@ -791,23 +1034,12 @@ impl LoopbackProtocolConnectionHandler {
 
         let mut http_builder = http1::Builder::new();
         http_builder.half_close(true);
-        http_builder
+        let serve_result = http_builder
             .serve_connection(io, service)
             .with_upgrades()
             .await
-            .map_err(LoopbackRouterRuntimeError::HyperConnection)?;
-        let mut upgrade_task_guard = upgrade_tasks.lock().await;
-        let drained_upgrade_tasks = std::mem::take(&mut *upgrade_task_guard);
-        drop(upgrade_task_guard);
-        for upgrade_task in drained_upgrade_tasks {
-            match upgrade_task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(source) => return Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
-            }
-        }
-
-        Ok(())
+            .map_err(LoopbackRouterRuntimeError::HyperConnection);
+        finish_hyper_connection_after_serve_result(serve_result, upgrade_tasks).await
     }
 
     async fn handle_hyper_request(
@@ -879,22 +1111,27 @@ impl LoopbackProtocolConnectionHandler {
         path: String,
         local_peer_addr: Option<SocketAddr>,
     ) -> Result<(), LoopbackRouterRuntimeError> {
-        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
-            &self.selection_state_store,
-            Arc::clone(&self.weighted_selectors),
-            Arc::clone(&self.account_holds),
-            Arc::clone(&self.active_reservations),
-            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
-            self.runtime_clock(),
-        )
-        .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
-            self.writable_state_store.clone(),
-            self.affinity_record_tasks.clone(),
-            self.runtime_clock(),
-        )));
+        let selector =
+            AsyncRepositoryBackedAccountSelector::new_with_runtime_state_queue_health_and_selection_lock(
+                &self.selection_state_store,
+                Arc::clone(&self.weighted_selectors),
+                Arc::clone(&self.account_holds),
+                Arc::clone(&self.active_reservations),
+                Arc::clone(&self.runtime_exhaustions),
+                Arc::clone(&self.route_band_queue_health),
+                Arc::clone(&self.selection_reservation_lock),
+                DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+                self.runtime_clock(),
+            )
+            .with_active_client_lease_reporter(Arc::new(
+                SqliteActiveClientLeaseReporter::new(
+                    self.db_write_actor.clone(),
+                    self.runtime_clock(),
+                ),
+            ));
         let credential_resolver = self
             .credential_factory
-            .resolver_for_state(self.writable_state_store.clone());
+            .resolver_for_state(self.credential_state_store.clone());
         let protocol_router = WebSocketProtocolRouter::new();
         let tunnel = if let Some(audit_sink) = &self.audit_sink {
             AsyncWebSocketTunnel::new_with_audit_sink(
@@ -918,8 +1155,12 @@ impl LoopbackProtocolConnectionHandler {
         .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))
         .with_affinity_owner_task_tracker(self.affinity_record_tasks.clone())
         .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
-            self.writable_state_store.clone(),
+            self.provider_error_state_store.clone(),
+            self.selection_state_store.clone(),
             Arc::clone(&self.active_reservations),
+            Arc::clone(&self.runtime_exhaustions),
+            Arc::clone(&self.route_band_queue_health),
+            self.db_write_actor.clone(),
         )))
         .with_local_peer_addr(local_peer_addr);
         let upstream_url = self.upstream_endpoint.websocket_url_for_path(&path);
@@ -988,7 +1229,10 @@ impl LoopbackProtocolConnectionHandler {
             .map(|body| request.clone().with_body(body));
 
         let max_account_attempts = if replayable_request.is_some() {
-            self.enabled_account_attempt_limit().await
+            match self.enabled_account_attempt_limit().await {
+                Ok(limit) => limit,
+                Err(_error) => return quota_state_unavailable_response(),
+            }
         } else {
             1
         };
@@ -1050,17 +1294,24 @@ impl LoopbackProtocolConnectionHandler {
         all_accounts_exhausted_response()
     }
 
-    async fn enabled_account_attempt_limit(&self) -> usize {
-        let Ok(accounts) = self.selection_state_store.list_accounts().await else {
-            return 1;
-        };
-        accounts
-            .iter()
-            .filter(|account| account.status() == AccountStatus::Enabled)
-            .count()
-            .max(1)
+    async fn enabled_account_attempt_limit(&self) -> Result<usize, StateStoreError> {
+        enabled_account_attempt_limit_from_accounts(
+            self.selection_state_store.list_accounts().await,
+        )
     }
+}
 
+fn enabled_account_attempt_limit_from_accounts(
+    accounts: Result<Vec<AccountRecord>, StateStoreError>,
+) -> Result<usize, StateStoreError> {
+    Ok(accounts?
+        .iter()
+        .filter(|account| account.status() == AccountStatus::Enabled)
+        .count()
+        .max(1))
+}
+
+impl LoopbackProtocolConnectionHandler {
     async fn prepare_async_streaming_http_request_async(
         &self,
         request: HttpProxyRequest,
@@ -1068,20 +1319,25 @@ impl LoopbackProtocolConnectionHandler {
     ) -> Result<PreparedAsyncStreamingHttpProxyRequest, HttpProxyError> {
         let credential_resolver = self
             .credential_factory
-            .resolver_for_state(self.writable_state_store.clone());
-        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_and_reservations(
-            &self.selection_state_store,
-            Arc::clone(&self.weighted_selectors),
-            Arc::clone(&self.account_holds),
-            Arc::clone(&self.active_reservations),
-            DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
-            self.runtime_clock(),
-        )
-        .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
-            self.writable_state_store.clone(),
-            self.affinity_record_tasks.clone(),
-            self.runtime_clock(),
-        )));
+            .resolver_for_state(self.credential_state_store.clone());
+        let selector =
+            AsyncRepositoryBackedAccountSelector::new_with_runtime_state_queue_health_and_selection_lock(
+                &self.selection_state_store,
+                Arc::clone(&self.weighted_selectors),
+                Arc::clone(&self.account_holds),
+                Arc::clone(&self.active_reservations),
+                Arc::clone(&self.runtime_exhaustions),
+                Arc::clone(&self.route_band_queue_health),
+                Arc::clone(&self.selection_reservation_lock),
+                DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+                self.runtime_clock(),
+            )
+            .with_active_client_lease_reporter(Arc::new(
+                SqliteActiveClientLeaseReporter::new(
+                    self.db_write_actor.clone(),
+                    self.runtime_clock(),
+                ),
+            ));
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,
@@ -1090,8 +1346,12 @@ impl LoopbackProtocolConnectionHandler {
         )
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_provider_error_observer(Arc::new(AsyncSqliteProviderErrorObserver::new(
-            self.writable_state_store.clone(),
+            self.provider_error_state_store.clone(),
+            self.selection_state_store.clone(),
             Arc::clone(&self.active_reservations),
+            Arc::clone(&self.runtime_exhaustions),
+            Arc::clone(&self.route_band_queue_health),
+            self.db_write_actor.clone(),
         )));
         let service = if let Some(audit_sink) = &self.audit_sink {
             service.with_audit_sink(audit_sink)
@@ -1142,17 +1402,13 @@ impl LoopbackProtocolConnectionHandler {
                 })
             }
             Ok(PrecommitHttpResponseProbe::AccountQuotaExhausted { body }) => {
-                if let Some(observer) = provider_error_observer {
-                    observer
-                        .observe_provider_error(
-                            account_id,
-                            route_band,
-                            body,
-                            current_unix_seconds().map_or(0, |seconds| seconds),
-                        )
-                        .await
-                        .map_err(|_error| PrecommitHttpQuotaResponse::ObservationFailed)?;
-                }
+                drop(body);
+                observe_precommit_http_quota_exhaustion_for_retry(
+                    provider_error_observer,
+                    account_id,
+                    route_band,
+                    current_unix_seconds().map_or(0, |seconds| seconds),
+                )?;
                 Err(PrecommitHttpQuotaResponse::AccountQuotaExhausted)
             }
             Err(error) => Err(PrecommitHttpQuotaResponse::ProbeFailed(error)),
@@ -1375,6 +1631,26 @@ async fn bounded_request_metadata_body(
     })
 }
 
+async fn finish_hyper_connection_after_serve_result(
+    serve_result: Result<(), LoopbackRouterRuntimeError>,
+    upgrade_tasks: SharedUpgradeTasks,
+) -> Result<(), LoopbackRouterRuntimeError> {
+    let mut first_connection_error = serve_result.err();
+    let mut upgrade_task_guard = upgrade_tasks.lock().await;
+    let drained_upgrade_tasks = std::mem::take(&mut *upgrade_task_guard);
+    drop(upgrade_task_guard);
+
+    for upgrade_task in drained_upgrade_tasks {
+        let _stored_error =
+            store_connection_join_error(&mut first_connection_error, upgrade_task.await);
+    }
+
+    match first_connection_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 fn request_metadata_prefix_is_complete_json(metadata_prefix: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(metadata_prefix).is_ok()
 }
@@ -1384,6 +1660,7 @@ struct PreparedHttpResponseForCommit {
     completion: StreamingHttpProxyCompletion,
 }
 
+#[derive(Debug)]
 enum PrecommitHttpQuotaResponse {
     AccountQuotaExhausted,
     ObservationFailed,
@@ -1393,6 +1670,31 @@ enum PrecommitHttpQuotaResponse {
 enum PrecommitHttpResponseProbe {
     Forward(AsyncStreamingHttpProxyResponse),
     AccountQuotaExhausted { body: Vec<u8> },
+}
+
+fn observe_precommit_http_quota_exhaustion_for_retry(
+    provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
+    account_id: codex_router_core::ids::AccountId,
+    route_band: RouteBand,
+    observed_unix_seconds: u64,
+) -> Result<(), PrecommitHttpQuotaResponse> {
+    let Some(observer) = provider_error_observer else {
+        return Ok(());
+    };
+    observer
+        .mark_runtime_account_quota_exhausted(account_id.clone(), route_band, observed_unix_seconds)
+        .map_err(|_error| PrecommitHttpQuotaResponse::ObservationFailed)?;
+    match observer.enqueue_provider_quota_exhaustion(
+        account_id,
+        route_band,
+        ProviderErrorClassification::AccountQuotaExhausted,
+        observed_unix_seconds,
+    ) {
+        DbWriteEnqueueResult::Enqueued => Ok(()),
+        DbWriteEnqueueResult::FullDegraded | DbWriteEnqueueResult::ClosedDegraded => {
+            Err(PrecommitHttpQuotaResponse::ObservationFailed)
+        }
+    }
 }
 
 async fn split_precommit_http_quota_response(
@@ -1640,12 +1942,14 @@ fn record_affinity_owner_from_async_body(
                 && let Some(provider_error_body) = provider_error_body_from_http_buffer(&buffered)
             {
                 provider_error_recorded = true;
+                let provider_error_classification =
+                    classify_provider_error_envelope(&provider_error_body);
                 if let Some(observer) = provider_error_observer.as_ref() {
                     spawn_async_provider_error_observation(
                         Arc::clone(observer),
                         account_id.clone(),
                         route_band,
-                        provider_error_body,
+                        provider_error_classification,
                         affinity_record_tasks.clone(),
                     );
                 }
@@ -1735,16 +2039,32 @@ fn spawn_async_provider_error_observation(
     observer: Arc<dyn AsyncProviderErrorObserver>,
     account_id: codex_router_core::ids::AccountId,
     route_band: RouteBand,
-    body: Vec<u8>,
+    classification: ProviderErrorClassification,
     affinity_record_tasks: TaskTracker,
 ) {
+    let observed_unix_seconds = current_unix_seconds().map_or(0, |seconds| seconds);
+    if classification == ProviderErrorClassification::AccountQuotaExhausted {
+        let _runtime_mark_result = observer.mark_runtime_account_quota_exhausted(
+            account_id.clone(),
+            route_band,
+            observed_unix_seconds,
+        );
+        let _enqueue_result = observer.enqueue_provider_quota_exhaustion(
+            account_id,
+            route_band,
+            classification,
+            observed_unix_seconds,
+        );
+        return;
+    }
+
     affinity_record_tasks.spawn(async move {
         let _observation_result = observer
             .observe_provider_error(
                 account_id,
                 route_band,
-                body,
-                current_unix_seconds().map_or(0, |seconds| seconds),
+                classification,
+                observed_unix_seconds,
             )
             .await;
     });
@@ -1846,71 +2166,119 @@ fn empty_body() -> BoxBody<Bytes, AsyncHttpBodyError> {
 }
 
 #[derive(Clone, Debug)]
-struct AsyncSqliteAffinityOwnerRecorder {
-    state_store: AsyncSqliteStateStore,
+struct DbWriteAffinityOwnerRecorder {
+    db_write_actor: DbWriteActor,
 }
 
-impl AsyncSqliteAffinityOwnerRecorder {
-    const fn new(state_store: AsyncSqliteStateStore) -> Self {
-        Self { state_store }
+impl DbWriteAffinityOwnerRecorder {
+    const fn new(db_write_actor: DbWriteActor) -> Self {
+        Self { db_write_actor }
     }
 }
 
-impl AsyncHttpAffinityOwnerRecorder for AsyncSqliteAffinityOwnerRecorder {
+impl AsyncHttpAffinityOwnerRecorder for DbWriteAffinityOwnerRecorder {
     fn record_affinity_owner<'a>(
         &'a self,
         owner: PreviousResponseAffinityOwnerRecord,
     ) -> BoxFuture<'a, Result<(), HttpProxyError>> {
         Box::pin(async move {
-            self.state_store
-                .write_previous_response_owner(&owner)
-                .await
-                .map_err(|_error| HttpProxyError::Selection {
-                    reason:
-                        crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
-                })
+            match self
+                .db_write_actor
+                .try_enqueue(DbWriteCommand::previous_response_affinity_owner(owner))
+            {
+                DbWriteEnqueueResult::Enqueued => Ok(()),
+                DbWriteEnqueueResult::FullDegraded | DbWriteEnqueueResult::ClosedDegraded => {
+                    Err(HttpProxyError::Selection {
+                        reason:
+                            crate::account_selection::QuotaAwareAccountSelectorError::StateUnavailable,
+                    })
+                }
+            }
         })
     }
 }
 
 #[derive(Clone, Debug)]
 struct AsyncSqliteProviderErrorObserver {
-    state_store: AsyncSqliteStateStore,
+    writable_state_store: AsyncSqliteStateStore,
+    selection_state_store: AsyncSqliteStateStore,
     active_reservations: RouteBandReservationBooks,
+    runtime_exhaustions: RouteBandRuntimeExhaustions,
+    route_band_queue_health: RouteBandQueueHealth,
+    db_write_actor: DbWriteActor,
 }
 
 impl AsyncSqliteProviderErrorObserver {
     fn new(
-        state_store: AsyncSqliteStateStore,
+        writable_state_store: AsyncSqliteStateStore,
+        selection_state_store: AsyncSqliteStateStore,
         active_reservations: RouteBandReservationBooks,
+        runtime_exhaustions: RouteBandRuntimeExhaustions,
+        route_band_queue_health: RouteBandQueueHealth,
+        db_write_actor: DbWriteActor,
     ) -> Self {
         Self {
-            state_store,
+            writable_state_store,
+            selection_state_store,
             active_reservations,
+            runtime_exhaustions,
+            route_band_queue_health,
+            db_write_actor,
         }
     }
 }
 
 impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
+    fn mark_runtime_account_quota_exhausted(
+        &self,
+        account_id: codex_router_core::ids::AccountId,
+        route_band: RouteBand,
+        observed_unix_seconds: u64,
+    ) -> Result<(), ProviderErrorObservationError> {
+        mark_runtime_quota_exhausted(
+            &self.runtime_exhaustions,
+            route_band,
+            account_id,
+            observed_unix_seconds,
+        )
+        .map_err(ProviderErrorObservationError::from)
+    }
+
     fn observe_provider_error<'a>(
         &'a self,
         account_id: codex_router_core::ids::AccountId,
         route_band: RouteBand,
-        body: Vec<u8>,
+        classification: ProviderErrorClassification,
         observed_unix_seconds: u64,
     ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>> {
         Box::pin(async move {
             record_provider_error_observation(
-                &self.state_store,
+                &self.writable_state_store,
                 &account_id,
                 route_band.as_str(),
-                &body,
+                classification,
                 observed_unix_seconds,
             )
             .await
             .map(|_classification| ())
             .map_err(ProviderErrorObservationError::from)
         })
+    }
+
+    fn enqueue_provider_quota_exhaustion(
+        &self,
+        account_id: codex_router_core::ids::AccountId,
+        route_band: RouteBand,
+        classification: ProviderErrorClassification,
+        observed_unix_seconds: u64,
+    ) -> DbWriteEnqueueResult {
+        self.db_write_actor
+            .try_enqueue(DbWriteCommand::provider_quota_exhausted(
+                account_id,
+                route_band,
+                classification,
+                observed_unix_seconds,
+            ))
     }
 
     fn route_band_has_selectable_alternative_after_exhaustion<'a>(
@@ -1921,8 +2289,10 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
     ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
         Box::pin(async move {
             route_band_has_selectable_alternative(
-                &self.state_store,
+                &self.selection_state_store,
                 Some(&self.active_reservations),
+                Some(&self.runtime_exhaustions),
+                Some(&self.route_band_queue_health),
                 route_band,
                 &exhausted_account_id,
                 observed_unix_seconds,
@@ -1936,12 +2306,22 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::MutexGuard;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     use http_body_util::BodyExt;
     use http_body_util::StreamBody;
     use hyper::body::Frame;
+    use tokio::io::AsyncWriteExt;
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Clone, Debug, Default)]
     struct RecordingAsyncAffinityOwnerRecorder {
@@ -1952,7 +2332,7 @@ mod tests {
     struct RecordedHttpProviderError {
         account_id: codex_router_core::ids::AccountId,
         route_band: RouteBand,
-        body: Vec<u8>,
+        classification: ProviderErrorClassification,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1974,7 +2354,7 @@ mod tests {
             &'a self,
             account_id: codex_router_core::ids::AccountId,
             route_band: RouteBand,
-            body: Vec<u8>,
+            classification: ProviderErrorClassification,
             _observed_unix_seconds: u64,
         ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>> {
             Box::pin(async move {
@@ -1982,7 +2362,7 @@ mod tests {
                     Ok(mut records) => records.push(RecordedHttpProviderError {
                         account_id,
                         route_band,
-                        body,
+                        classification,
                     }),
                     Err(error) => {
                         panic!("test provider observer lock should be available: {error}")
@@ -1991,6 +2371,374 @@ mod tests {
                 Ok(())
             })
         }
+
+        fn enqueue_provider_quota_exhaustion(
+            &self,
+            account_id: codex_router_core::ids::AccountId,
+            route_band: RouteBand,
+            classification: ProviderErrorClassification,
+            _observed_unix_seconds: u64,
+        ) -> DbWriteEnqueueResult {
+            match self.records.lock() {
+                Ok(mut records) => records.push(RecordedHttpProviderError {
+                    account_id,
+                    route_band,
+                    classification,
+                }),
+                Err(error) => panic!("test provider observer lock should be available: {error}"),
+            }
+            DbWriteEnqueueResult::Enqueued
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct NonblockingHttpQuotaObserver {
+        durable_observation_called: Arc<AtomicBool>,
+        enqueued_records: Arc<Mutex<Vec<RecordedHttpProviderError>>>,
+    }
+
+    impl NonblockingHttpQuotaObserver {
+        fn enqueued_records(&self) -> Vec<RecordedHttpProviderError> {
+            lock_test_mutex(&self.enqueued_records, "http quota enqueue records").clone()
+        }
+    }
+
+    impl AsyncProviderErrorObserver for NonblockingHttpQuotaObserver {
+        fn mark_runtime_account_quota_exhausted(
+            &self,
+            _account_id: codex_router_core::ids::AccountId,
+            _route_band: RouteBand,
+            _observed_unix_seconds: u64,
+        ) -> Result<(), ProviderErrorObservationError> {
+            Ok(())
+        }
+
+        fn observe_provider_error<'a>(
+            &'a self,
+            _account_id: codex_router_core::ids::AccountId,
+            _route_band: RouteBand,
+            _classification: ProviderErrorClassification,
+            _observed_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>> {
+            Box::pin(async move {
+                self.durable_observation_called
+                    .store(true, Ordering::SeqCst);
+                std::future::pending().await
+            })
+        }
+
+        fn enqueue_provider_quota_exhaustion(
+            &self,
+            account_id: codex_router_core::ids::AccountId,
+            route_band: RouteBand,
+            classification: ProviderErrorClassification,
+            _observed_unix_seconds: u64,
+        ) -> DbWriteEnqueueResult {
+            lock_test_mutex(&self.enqueued_records, "http quota enqueue records").push(
+                RecordedHttpProviderError {
+                    account_id,
+                    route_band,
+                    classification,
+                },
+            );
+            DbWriteEnqueueResult::Enqueued
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingLoopbackConnectionErrorReporter {
+        diagnostics: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingLoopbackConnectionErrorReporter {
+        fn diagnostics(&self) -> Vec<String> {
+            lock_test_mutex(&self.diagnostics, "connection diagnostics").clone()
+        }
+    }
+
+    impl LoopbackConnectionErrorReporter for RecordingLoopbackConnectionErrorReporter {
+        fn report_connection_error(&self, diagnostic: &str) {
+            lock_test_mutex(&self.diagnostics, "connection diagnostics")
+                .push(diagnostic.to_owned());
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingActiveClientLeaseReporter {
+        released: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl RecordingActiveClientLeaseReporter {
+        fn released(&self) -> Vec<(String, String)> {
+            lock_test_mutex(&self.released, "active lease releases").clone()
+        }
+    }
+
+    impl crate::account_selection::ActiveClientLeaseReporter for RecordingActiveClientLeaseReporter {
+        fn record_acquired(
+            &self,
+            _route_band: &str,
+            _reservation_handle: &codex_router_selection::reservation::ReservationHandle,
+            _acquired_unix_seconds: u64,
+            _active_pressure: u32,
+        ) {
+        }
+
+        fn record_released(
+            &self,
+            route_band: &str,
+            reservation_handle: &codex_router_selection::reservation::ReservationHandle,
+        ) {
+            lock_test_mutex(&self.released, "active lease releases").push((
+                route_band.to_owned(),
+                reservation_handle.reservation_id().as_str().to_owned(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn hyper_loopback_classifier_maps_closed_canceled_incomplete_to_client_disconnect() {
+        let incomplete_message = hyper_error_from_client_bytes(
+            b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\n\r\nshort",
+        )
+        .await;
+
+        let diagnostic = loopback_connection_diagnostic(
+            &LoopbackRouterRuntimeError::HyperConnection(incomplete_message),
+        );
+
+        assert_eq!(diagnostic.class(), "client_disconnect");
+        assert_eq!(diagnostic.safe_reason(), "hyper_incomplete_message");
+        assert_eq!(diagnostic.severity(), "debug");
+
+        let malformed_request =
+            hyper_error_from_client_bytes(b"\x16\x03\x01not-http\r\n\r\n").await;
+        let diagnostic = loopback_connection_diagnostic(
+            &LoopbackRouterRuntimeError::HyperConnection(malformed_request),
+        );
+
+        assert_eq!(diagnostic.class(), "malformed_request");
+        assert_eq!(diagnostic.safe_reason(), "hyper_parse");
+        assert_eq!(diagnostic.severity(), "warn");
+    }
+
+    #[tokio::test]
+    async fn detached_hyper_connection_reports_scrubbed_root_cause_class() {
+        let incomplete_message = hyper_error_from_client_bytes(
+            b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\n\r\nshort",
+        )
+        .await;
+        let reporter = Arc::new(RecordingLoopbackConnectionErrorReporter::default());
+        let detached = tokio::spawn(async move {
+            Err(LoopbackRouterRuntimeError::HyperConnection(
+                incomplete_message,
+            ))
+        });
+
+        supervise_detached_connection_handler(detached, reporter.clone());
+        let diagnostic = wait_for_connection_diagnostic(&reporter).await;
+
+        assert!(diagnostic.contains("class=client_disconnect"));
+        assert!(diagnostic.contains("reason=hyper_incomplete_message"));
+        assert!(diagnostic.contains("severity=debug"));
+        assert!(!diagnostic.contains("/v1/responses"));
+        assert!(!diagnostic.contains("Content-Length"));
+    }
+
+    #[tokio::test]
+    async fn failed_hyper_response_body_drop_releases_active_reservation_and_mirror() {
+        let active_reservations = RouteBandReservationBooks::default();
+        let account_id = codex_router_core::ids::AccountId::new("acct_hyper_cleanup")
+            .unwrap_or_else(|error| panic!("test account id should validate: {error}"));
+        let reservation_handle = {
+            let mut reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .entry(RouteBand::Responses.as_str().to_owned())
+                .or_default()
+                .reserve_next_at(account_id.clone(), 1, 1_000)
+        };
+        let lease_reporter = RecordingActiveClientLeaseReporter::default();
+        let active_reservation_guard =
+            crate::account_selection::ActiveReservationGuard::new_with_active_client_leases(
+                active_reservations.clone(),
+                RouteBand::Responses.as_str().to_owned(),
+                reservation_handle.clone(),
+                Some(Arc::new(lease_reporter.clone())),
+            );
+        let body =
+            hold_active_reservation_until_body_drop(empty_body(), Some(active_reservation_guard));
+
+        drop(body);
+
+        let active_count_after_drop = {
+            let reservations = active_reservations
+                .lock()
+                .unwrap_or_else(|error| panic!("reservations lock should be available: {error}"));
+            reservations
+                .get(RouteBand::Responses.as_str())
+                .map_or(0, |book| book.active_session_count(&account_id))
+        };
+        assert_eq!(
+            active_count_after_drop, 0,
+            "failed Hyper serving must release process-local active reservation when the response body is dropped"
+        );
+        assert_eq!(
+            lease_reporter.released(),
+            vec![(
+                RouteBand::Responses.as_str().to_owned(),
+                reservation_handle.reservation_id().as_str().to_owned(),
+            )],
+            "failed Hyper serving must also mirror active-client release"
+        );
+    }
+
+    #[tokio::test]
+    async fn hyper_connection_error_still_drains_upgrade_tasks() {
+        let upgrade_tasks = SharedUpgradeTasks::default();
+        let upgrade_task_was_drained = Arc::new(AtomicBool::new(false));
+        let drained_marker = Arc::clone(&upgrade_task_was_drained);
+        upgrade_tasks.lock().await.push(tokio::spawn(async move {
+            drained_marker.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        let result = finish_hyper_connection_after_serve_result(
+            Err(LoopbackRouterRuntimeError::Connection(
+                ServerConnectionError::PartialRequest,
+            )),
+            Arc::clone(&upgrade_tasks),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            upgrade_task_was_drained.load(Ordering::SeqCst),
+            "Hyper connection cleanup must drain upgrade tasks even when serve_connection fails"
+        );
+        assert!(
+            upgrade_tasks.lock().await.is_empty(),
+            "drained upgrade tasks must be removed from the shared task list"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_error_observer_marks_route_band_queue_health_degraded_when_queue_closed() {
+        let database_path = test_database_path("provider_error_queue_health_closed");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("async state store should open: {error}"));
+        let route_band_queue_health = RouteBandQueueHealth::default();
+        let db_write_actor = DbWriteActor::start_on_handle(
+            &tokio::runtime::Handle::current(),
+            Arc::new(SqliteDbWriteRepository::new(store.clone())),
+            route_band_queue_health.clone(),
+            1,
+        );
+        db_write_actor.shutdown().await;
+        let observer = AsyncSqliteProviderErrorObserver::new(
+            store.clone(),
+            store,
+            RouteBandReservationBooks::default(),
+            RouteBandRuntimeExhaustions::default(),
+            route_band_queue_health.clone(),
+            db_write_actor,
+        );
+        let account_id = codex_router_core::ids::AccountId::new("acct_queue_closed")
+            .unwrap_or_else(|error| panic!("test account id should validate: {error}"));
+
+        let enqueue_result = observer.enqueue_provider_quota_exhaustion(
+            account_id,
+            RouteBand::Responses,
+            ProviderErrorClassification::AccountQuotaExhausted,
+            1_000,
+        );
+
+        assert_eq!(enqueue_result, DbWriteEnqueueResult::ClosedDegraded);
+        assert!(
+            crate::account_selection::route_band_queue_health_allows_selection(
+                &route_band_queue_health,
+                RouteBand::Responses,
+            )
+            .is_err(),
+            "closed DB write queues must degrade the whole route band for new selections"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_writable_state_stores_use_distinct_pools_for_credential_db_write_and_maintenance()
+     {
+        let database_path = test_database_path("runtime_writable_store_pool_isolation");
+        let stores = super::open_runtime_writable_state_stores(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("runtime writable stores should open: {error}"));
+
+        let held_maintenance_connection = stores
+            .maintenance_state_store
+            .acquire_connection_for_test()
+            .await
+            .unwrap_or_else(|error| panic!("maintenance connection should be held: {error}"));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            stores.credential_state_store.schema_version(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| {
+            panic!("credential store must not wait behind a held maintenance pool connection")
+        })
+        .unwrap_or_else(|error| panic!("credential store should remain readable: {error}"));
+        drop(held_maintenance_connection);
+
+        let held_db_write_connection = stores
+            .db_write_state_store
+            .acquire_connection_for_test()
+            .await
+            .unwrap_or_else(|error| panic!("DB-write connection should be held: {error}"));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            stores.credential_state_store.schema_version(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| {
+            panic!("credential store must not wait behind a held DB-write pool connection")
+        })
+        .unwrap_or_else(|error| panic!("credential store should remain readable: {error}"));
+        drop(held_db_write_connection);
+
+        stores
+            .credential_state_store
+            .close()
+            .await
+            .unwrap_or_else(|error| panic!("credential store should close: {error}"));
+
+        stores
+            .db_write_state_store
+            .schema_version()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("DB-write store must not share the credential pool: {error}")
+            });
+        stores
+            .maintenance_state_store
+            .schema_version()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("maintenance store must not share the credential pool: {error}")
+            });
+
+        stores
+            .db_write_state_store
+            .close()
+            .await
+            .unwrap_or_else(|error| panic!("DB-write store should close: {error}"));
+        stores
+            .maintenance_state_store
+            .schema_version()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("maintenance store must not share the DB-write pool: {error}")
+            });
     }
 
     #[tokio::test]
@@ -2013,12 +2761,106 @@ mod tests {
         assert!(!rendered.contains("codex_router_all_accounts_exhausted"));
     }
 
+    #[tokio::test]
+    async fn account_attempt_limit_read_failure_maps_to_state_unavailable_not_all_exhausted() {
+        let read_failure = StateStoreError::Sqlite {
+            message: "list accounts unavailable".to_owned(),
+        };
+
+        let result = enabled_account_attempt_limit_from_accounts(Err(read_failure));
+
+        assert!(
+            result.is_err(),
+            "failed account-list reads must not collapse to a one-attempt retry limit"
+        );
+        let response = quota_state_unavailable_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap_or_else(|error| panic!("router error body should collect: {error}"))
+            .to_bytes();
+        let rendered = String::from_utf8(body.to_vec())
+            .unwrap_or_else(|error| panic!("router error body should be utf-8: {error}"));
+
+        assert!(rendered.contains("codex_router_quota_state_unavailable"));
+        assert!(!rendered.contains("codex_router_all_accounts_exhausted"));
+    }
+
+    async fn hyper_error_from_client_bytes(bytes: &'static [u8]) -> hyper::Error {
+        let listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("test hyper listener should bind: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("test hyper listener address should read: {error}"));
+        let server = tokio::spawn(async move {
+            let (stream, _peer_addr) = listener
+                .accept()
+                .await
+                .unwrap_or_else(|error| panic!("test hyper listener should accept: {error}"));
+            let io = TokioIo::new(stream);
+            let service = service_fn(|request: HttpRequest<Incoming>| async move {
+                request.into_body().collect().await?;
+                Ok::<_, hyper::Error>(HttpResponse::new(Full::new(Bytes::new())))
+            });
+            http1::Builder::new().serve_connection(io, service).await
+        });
+        let mut client = tokio::net::TcpStream::connect(address)
+            .await
+            .unwrap_or_else(|error| panic!("test hyper client should connect: {error}"));
+        client
+            .write_all(bytes)
+            .await
+            .unwrap_or_else(|error| panic!("test hyper client should write: {error}"));
+        client
+            .shutdown()
+            .await
+            .unwrap_or_else(|error| panic!("test hyper client should shutdown: {error}"));
+
+        match server
+            .await
+            .unwrap_or_else(|error| panic!("test hyper server task should join: {error}"))
+        {
+            Ok(()) => panic!("test hyper server should fail for malformed client bytes"),
+            Err(error) => error,
+        }
+    }
+
+    async fn wait_for_connection_diagnostic(
+        reporter: &RecordingLoopbackConnectionErrorReporter,
+    ) -> String {
+        let started_at = tokio::time::Instant::now();
+        loop {
+            if let Some(diagnostic) = reporter.diagnostics().into_iter().next() {
+                return diagnostic;
+            }
+            assert!(
+                started_at.elapsed() < Duration::from_secs(2),
+                "connection diagnostic should be reported"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn test_database_path(name: &str) -> PathBuf {
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!(
+            "codex-router-proxy-server-{name}-{}-{counter}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    fn lock_test_mutex<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
+        mutex
+            .lock()
+            .unwrap_or_else(|error| panic!("{label} lock should be available: {error}"))
+    }
+
     impl RecordingAsyncAffinityOwnerRecorder {
         fn records(&self) -> Vec<PreviousResponseAffinityOwnerRecord> {
-            match self.records.lock() {
-                Ok(records) => records.clone(),
-                Err(error) => panic!("test recorder lock should be available: {error}"),
-            }
+            lock_test_mutex(&self.records, "affinity recorder").clone()
         }
     }
 
@@ -2140,7 +2982,7 @@ mod tests {
             vec![RecordedHttpProviderError {
                 account_id,
                 route_band: RouteBand::Responses,
-                body: usage_limit_body.to_vec(),
+                classification: ProviderErrorClassification::AccountQuotaExhausted,
             }]
         );
     }
@@ -2166,6 +3008,94 @@ mod tests {
             }
             Err(error) => panic!("quota response should classify before commit: {error}"),
         }
+    }
+
+    #[tokio::test]
+    async fn precommit_http_quota_retry_enqueues_without_awaiting_durable_observation() {
+        let observer = Arc::new(NonblockingHttpQuotaObserver::default());
+        let account_id = codex_router_core::ids::AccountId::new("acct_http_quota")
+            .unwrap_or_else(|error| panic!("test account id should validate: {error}"));
+
+        tokio::time::timeout(Duration::from_millis(50), async {
+            observe_precommit_http_quota_exhaustion_for_retry(
+                Some(observer.clone()),
+                account_id.clone(),
+                RouteBand::Responses,
+                1_000,
+            )
+        })
+        .await
+        .unwrap_or_else(|_elapsed| {
+            panic!("precommit quota retry must not await durable provider-error observation")
+        })
+        .unwrap_or_else(|error| panic!("precommit quota enqueue should succeed: {error:?}"));
+
+        assert!(!observer.durable_observation_called.load(Ordering::SeqCst));
+        assert_eq!(
+            observer.enqueued_records(),
+            vec![RecordedHttpProviderError {
+                account_id,
+                route_band: RouteBand::Responses,
+                classification: ProviderErrorClassification::AccountQuotaExhausted,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn postcommit_http_quota_observation_uses_db_write_actor_without_direct_sqlite_wait() {
+        let affinity_recorder = RecordingAsyncAffinityOwnerRecorder::default();
+        let observer = Arc::new(NonblockingHttpQuotaObserver::default());
+        let account_id = codex_router_core::ids::AccountId::new("acct_http_postcommit_quota")
+            .unwrap_or_else(|error| panic!("test account id should validate: {error}"));
+        let completion = StreamingHttpProxyCompletion::new_for_test(
+            None,
+            account_id.clone(),
+            7,
+            crate::http_sse::allowed_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::Responses,
+                "acct_hash".to_owned(),
+            ),
+        )
+        .with_route_band_for_test(RouteBand::Responses);
+        let usage_limit_body = Bytes::from_static(
+            br#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#,
+        );
+        let body_stream = futures_util::stream::iter(std::iter::once(Ok::<_, AsyncHttpBodyError>(
+            Frame::data(usage_limit_body.clone()),
+        )));
+        let body = BodyExt::boxed(StreamBody::new(body_stream));
+        let metadata_tasks = TaskTracker::new();
+        let forwarded_body = record_affinity_owner_from_async_body(
+            body,
+            completion,
+            Arc::new(affinity_recorder),
+            Some(observer.clone()),
+            metadata_tasks.clone(),
+        );
+
+        let forwarded_bytes = forwarded_body
+            .collect()
+            .await
+            .unwrap_or_else(|error| panic!("forwarded body should collect: {error}"))
+            .to_bytes();
+        metadata_tasks.close();
+        tokio::time::timeout(Duration::from_millis(50), metadata_tasks.wait())
+            .await
+            .unwrap_or_else(|_elapsed| {
+                panic!("postcommit quota observation must not wait on direct durable observer")
+            });
+
+        assert_eq!(forwarded_bytes, usage_limit_body);
+        assert!(!observer.durable_observation_called.load(Ordering::SeqCst));
+        assert_eq!(
+            observer.enqueued_records(),
+            vec![RecordedHttpProviderError {
+                account_id,
+                route_band: RouteBand::Responses,
+                classification: ProviderErrorClassification::AccountQuotaExhausted,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -2250,7 +3180,7 @@ mod tests {
             vec![RecordedHttpProviderError {
                 account_id,
                 route_band: RouteBand::Responses,
-                body: provider_error_json.to_vec(),
+                classification: ProviderErrorClassification::AccountQuotaExhausted,
             }]
         );
     }

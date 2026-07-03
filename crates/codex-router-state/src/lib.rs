@@ -375,6 +375,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_seeded_state_store_is_accepted_by_quota_status_read_only_schema() {
+        let temp_dir = TestTempDir::new("sync_seeded_read_only_quota_status");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_sync_seeded_quota_status");
+        let account = AccountRecord::new(account_id.clone(), "sync-seeded", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("sync seed should persist account: {error}");
+        }
+        let short_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(91)
+        .with_reset_unix_seconds(18_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(54)
+        .with_reset_unix_seconds(604_800)
+        .with_observed_unix_seconds(1_000);
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&sync_store, &short_window)
+        {
+            panic!("sync seed should persist short selector window: {error}");
+        }
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&sync_store, &weekly_window)
+        {
+            panic!("sync seed should persist weekly selector window: {error}");
+        }
+        drop(sync_store);
+
+        let read_only_store = match AsyncSqliteStateStore::open_read_only(&database_path).await {
+            Ok(store) => store,
+            Err(error) => {
+                panic!(
+                    "sync-seeded state database should satisfy read-only quota status schema: {error}"
+                )
+            }
+        };
+        let observations = match AsyncQuotaHistoryRepository::quota_history_observations_for_window(
+            &read_only_store,
+            &account_id,
+            "responses",
+            604_800,
+            0,
+            2_000,
+        )
+        .await
+        {
+            Ok(observations) => observations,
+            Err(error) => {
+                panic!(
+                    "quota status read-only quota history query should find current schema: {error}"
+                )
+            }
+        };
+
+        assert!(
+            observations.is_empty(),
+            "sync-seeded state should start with no quota history observations"
+        );
+    }
+
+    #[tokio::test]
     async fn async_writable_store_enables_wal_journal_mode() {
         let temp_dir = TestTempDir::new("async_wal_journal_mode");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -3273,6 +3350,61 @@ mod tests {
             ",
         ) {
             panic!("raw v8 database should initialize: {error}");
+        }
+    }
+
+    fn create_v10_database_missing_async_projection_tables(database_path: &Path) {
+        let connection = match Connection::open(database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("raw v10 database should open: {error}"),
+        };
+        if let Err(error) = connection.execute_batch(
+            "
+            CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                active_credential_generation INTEGER
+            );
+
+            CREATE TABLE quota_snapshots (
+                account_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                route_band TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                reset_credits_available INTEGER,
+                stale_penalty INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE selector_quota_windows (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                limit_window_seconds INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                effective INTEGER NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band, limit_window_seconds)
+            );
+
+            CREATE TABLE quota_refresh_status (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                last_success_unix_seconds INTEGER,
+                last_attempt_unix_seconds INTEGER,
+                last_error_class TEXT,
+                stale_after_unix_seconds INTEGER,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            PRAGMA user_version = 10;
+            ",
+        ) {
+            panic!("raw v10 database should initialize without async projection tables: {error}");
         }
     }
 

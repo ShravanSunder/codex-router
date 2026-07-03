@@ -294,6 +294,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

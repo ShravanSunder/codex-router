@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -58,8 +59,7 @@ const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 const DEBUG_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_DEBUG_ROUTER_ROOT";
 #[cfg(all(debug_assertions, not(test)))]
 const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
-#[cfg(all(debug_assertions, not(test)))]
-const DEFAULT_DEBUG_ROUTER_ROOT: &str = "tmp/dev-state/router-root";
+const DEFAULT_DEBUG_ROUTER_ROOT_DIR: &str = ".codex-router-debug";
 
 /// Runs the process CLI.
 pub fn run() -> i32 {
@@ -251,29 +251,53 @@ pub(crate) fn router_secret_root_or_default(
 }
 
 fn default_router_root() -> Result<PathBuf, CliError> {
+    let home = std::env::var_os("HOME");
+
     #[cfg(all(debug_assertions, not(test)))]
     {
-        if std::env::var_os(USE_HOME_DEFAULT_ENV).is_none() {
-            if let Some(debug_root) = std::env::var_os(DEBUG_ROUTER_ROOT_ENV)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-            {
-                return Ok(debug_root);
-            }
+        return default_router_root_from_environment(
+            home,
+            std::env::var_os(DEBUG_ROUTER_ROOT_ENV),
+            std::env::var_os(USE_HOME_DEFAULT_ENV),
+            true,
+        );
+    }
 
-            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(std::path::Path::parent)
-                .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-            return Ok(workspace_root.join(DEFAULT_DEBUG_ROUTER_ROOT));
+    #[cfg(not(all(debug_assertions, not(test))))]
+    {
+        default_router_root_from_environment(home, None, None, false)
+    }
+}
+
+fn default_router_root_from_environment(
+    home: Option<OsString>,
+    debug_router_root: Option<OsString>,
+    use_home_default: Option<OsString>,
+    use_debug_defaults: bool,
+) -> Result<PathBuf, CliError> {
+    let should_use_debug_defaults = use_debug_defaults && use_home_default.is_none();
+    if should_use_debug_defaults {
+        if let Some(debug_root) = debug_router_root
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        {
+            return Ok(debug_root);
         }
     }
 
-    let home = std::env::var_os("HOME")
+    let home = home
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or(CliError::HomeDirectoryUnavailable)?;
+    if should_use_debug_defaults {
+        return Ok(debug_default_router_root_for_home(&home));
+    }
+
     Ok(home.join(DEFAULT_ROUTER_ROOT_DIR))
+}
+
+fn debug_default_router_root_for_home(home: &Path) -> PathBuf {
+    home.join(DEFAULT_DEBUG_ROUTER_ROOT_DIR)
 }
 
 fn write_websocket_registry_report_file(
@@ -288,8 +312,21 @@ fn write_websocket_registry_report_file(
         })?;
     }
     let snapshot = runtime.websocket_registry_snapshot();
-    let report = serde_json::json!({
-        "schema_version": 1,
+    let report = websocket_registry_report_value(handled_connections, &snapshot);
+    let rendered =
+        serde_json::to_vec_pretty(&report).map_err(CliError::WebSocketRegistryReportRender)?;
+    fs::write(report_file, rendered).map_err(|source| CliError::WebSocketRegistryReportWrite {
+        path: report_file.display().to_string(),
+        source,
+    })
+}
+
+fn websocket_registry_report_value(
+    handled_connections: usize,
+    snapshot: &codex_router_proxy::websocket::WebSocketRegistrySnapshot,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 2,
         "handled_connections": handled_connections,
         "websocket_registry": {
             "active_sessions": snapshot.active_sessions,
@@ -298,22 +335,16 @@ fn write_websocket_registry_report_file(
             "closed_sessions": snapshot.closed_sessions,
             "completed_response_sessions": snapshot.completed_response_sessions,
             "forwarded_upstream_messages": snapshot.forwarded_upstream_messages,
-            "registered_session_ids": snapshot.registered_session_ids,
-            "completed_session_ids": snapshot.completed_session_ids,
-            "closed_session_ids": snapshot.closed_session_ids,
-            "session_peer_addrs": snapshot.session_peer_addrs.iter().map(|peer| serde_json::json!({
-                "session_id": peer.session_id,
-                "peer_addr": peer.peer_addr,
-            })).collect::<Vec<_>>(),
+            "registered_session_id_count": snapshot.registered_session_ids.len(),
+            "completed_session_id_count": snapshot.completed_session_ids.len(),
+            "closed_session_id_count": snapshot.closed_session_ids.len(),
+            "session_peer_addr_count": snapshot.session_peer_addrs.len(),
+            "session_peer_join_observable": !snapshot.session_peer_addrs.is_empty(),
             "completed_session_forwarded_upstream_message_counts": snapshot.completed_session_forwarded_upstream_message_counts,
             "final_session_forwarded_upstream_message_counts": snapshot.final_session_forwarded_upstream_message_counts,
+            "quota_reconnect_signal_count": snapshot.quota_reconnect_signal_count,
+            "quota_reconnect_signal_unix_ms": snapshot.quota_reconnect_signal_unix_ms,
         },
-    });
-    let rendered =
-        serde_json::to_vec_pretty(&report).map_err(CliError::WebSocketRegistryReportRender)?;
-    fs::write(report_file, rendered).map_err(|source| CliError::WebSocketRegistryReportWrite {
-        path: report_file.display().to_string(),
-        source,
     })
 }
 
@@ -1264,6 +1295,8 @@ mod tests {
     use codex_router_proxy::server::LoopbackRouterRuntime;
     use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
     use codex_router_proxy::upstream::UpstreamEndpoint;
+    use codex_router_proxy::websocket::WebSocketRegistrySnapshot;
+    use codex_router_proxy::websocket::WebSocketSessionPeerAddr;
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
@@ -1289,6 +1322,7 @@ mod tests {
     use super::TokenCommand;
     use super::package_name;
     use super::run_with_io;
+    use super::websocket_registry_report_value;
     use crate::account::AccountCommand;
     use crate::account::AccountImportRequest;
     use crate::account::import_codex_auth_from_request;
@@ -1355,6 +1389,75 @@ mod tests {
         default_router_root_for_test().join("secrets")
     }
 
+    #[test]
+    fn development_router_root_defaults_to_home_debug_root() {
+        let home = PathBuf::from("/tmp/codex-router-dev-home");
+
+        assert_eq!(
+            super::default_router_root_from_environment(
+                Some(home.clone().into_os_string()),
+                None,
+                None,
+                true
+            )
+            .unwrap_or_else(|error| panic!("debug default root should resolve: {error}")),
+            home.join(".codex-router-debug")
+        );
+    }
+
+    #[test]
+    fn development_router_root_honors_debug_override_without_home() {
+        let debug_root = PathBuf::from("/tmp/codex-router-explicit-debug-root");
+
+        assert_eq!(
+            super::default_router_root_from_environment(
+                None,
+                Some(debug_root.clone().into_os_string()),
+                None,
+                true,
+            )
+            .unwrap_or_else(|error| panic!("debug override should resolve: {error}")),
+            debug_root
+        );
+    }
+
+    #[test]
+    fn development_router_root_home_default_escape_uses_prod_root() {
+        let home = PathBuf::from("/tmp/codex-router-dev-home");
+        let debug_root = PathBuf::from("/tmp/codex-router-explicit-debug-root");
+
+        assert_eq!(
+            super::default_router_root_from_environment(
+                Some(home.clone().into_os_string()),
+                Some(debug_root.into_os_string()),
+                Some(OsString::from("1")),
+                true,
+            )
+            .unwrap_or_else(|error| panic!("home-default escape should resolve: {error}")),
+            home.join(".codex-router")
+        );
+    }
+
+    #[test]
+    fn explicit_router_root_option_wins_over_defaults() {
+        let explicit_router_root = PathBuf::from("/tmp/codex-router-explicit-root");
+        let command = match CliCommand::parse([
+            OsString::from("account"),
+            OsString::from("list"),
+            OsString::from("--router-root"),
+            explicit_router_root.clone().into_os_string(),
+        ]) {
+            Ok(CliCommand::Account(command)) => command,
+            Ok(other) => panic!("account command should parse, got {other:?}"),
+            Err(error) => panic!("account command should parse: {error}"),
+        };
+
+        let AccountCommand::List { router_root } = command else {
+            panic!("account list command should parse");
+        };
+        assert_eq!(router_root, explicit_router_root);
+    }
+
     impl Drop for TestRoot {
         fn drop(&mut self) {
             if self.path.exists() {
@@ -1404,6 +1507,66 @@ mod tests {
     #[test]
     fn reports_package_name() {
         assert_eq!(package_name(), "codex-router-cli");
+    }
+
+    #[test]
+    fn websocket_registry_report_value_omits_raw_session_ids_and_peer_addrs() {
+        let snapshot = WebSocketRegistrySnapshot {
+            active_sessions: 0,
+            high_water_sessions: 3,
+            registered_sessions: 3,
+            closed_sessions: 3,
+            completed_response_sessions: 2,
+            forwarded_upstream_messages: 9,
+            registered_session_ids: vec![1, 2, 3],
+            completed_session_ids: vec![2, 3],
+            closed_session_ids: vec![1, 2, 3],
+            session_peer_addrs: vec![WebSocketSessionPeerAddr {
+                session_id: 1,
+                peer_addr: "127.0.0.1:61234".to_owned(),
+            }],
+            completed_session_forwarded_upstream_message_counts: vec![3, 4],
+            final_session_forwarded_upstream_message_counts: vec![3, 3, 3],
+            quota_reconnect_signal_count: 1,
+            quota_reconnect_signal_unix_ms: Some(1_720_000_000_000),
+        };
+
+        let report = websocket_registry_report_value(3, &snapshot);
+        let rendered = serde_json::to_string(&report)
+            .unwrap_or_else(|error| panic!("registry report should render: {error}"));
+
+        assert_eq!(report["schema_version"], 2);
+        assert_eq!(
+            report["websocket_registry"]["registered_session_id_count"],
+            3
+        );
+        assert_eq!(
+            report["websocket_registry"]["completed_session_id_count"],
+            2
+        );
+        assert_eq!(report["websocket_registry"]["closed_session_id_count"], 3);
+        assert_eq!(report["websocket_registry"]["session_peer_addr_count"], 1);
+        assert_eq!(
+            report["websocket_registry"]["session_peer_join_observable"],
+            true
+        );
+        for forbidden_key in [
+            "registered_session_ids",
+            "completed_session_ids",
+            "closed_session_ids",
+            "session_peer_addrs",
+            "session_id",
+            "peer_addr",
+        ] {
+            assert!(
+                !rendered.contains(&format!("\"{forbidden_key}\"")),
+                "persisted registry report leaked raw key {forbidden_key}"
+            );
+        }
+        assert!(
+            !rendered.contains("127.0.0.1:61234"),
+            "persisted registry report leaked raw loopback peer address"
+        );
     }
 
     #[test]
@@ -3294,6 +3457,15 @@ exit 42
         );
 
         let parsed: serde_json::Value = must_ok(serde_json::from_str(&output.stdout));
+        assert_eq!(parsed["route_result"], "degraded");
+        assert_eq!(
+            parsed["selection_projection_source"],
+            "display_windows_fallback"
+        );
+        assert_eq!(
+            parsed["preferred_next_account_hash"],
+            serde_json::Value::Null
+        );
         assert_eq!(
             parsed["accounts"][0]["account_hash"].as_str().map(str::len),
             Some(16)
@@ -3307,6 +3479,7 @@ exit 42
             parsed["accounts"][0]["active_clients_source"],
             "unavailable"
         );
+        assert_eq!(parsed["accounts"][0]["preferred_next"], false);
         assert!(output.stderr.is_empty());
     }
 

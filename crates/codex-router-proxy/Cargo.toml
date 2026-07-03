@@ -38,3 +38,4 @@ tracing.workspace = true
 [dev-dependencies]
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
+tracing-subscriber.workspace = true

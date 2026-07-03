@@ -26,7 +26,6 @@ use codex_router_core::redaction::safe_account_label;
 use codex_router_core::routes::RouteBand;
 use codex_router_selection::burn_down::AccountAvailability;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
-#[cfg(test)]
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
 use codex_router_selection::burn_down::LimitingWindow;
@@ -79,7 +78,7 @@ use crate::router_root_or_default;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
-const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 600;
+const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 300;
 const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
 const QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 
@@ -1331,14 +1330,21 @@ fn quota_status_report(
             })
             .collect::<HashMap<_, _>>()
     });
-    let selection_projection =
+    let selection_projection_result =
         quota_history_runtime.block_on(project_route_band_selection_inputs_read_only(
             quota_history_state,
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
             ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
-        ))?;
+        ));
+    let selection_projection_source = if selection_projection_result.is_ok() {
+        SelectionProjectionSource::SqlxProjection
+    } else {
+        SelectionProjectionSource::DisplayWindowsFallback
+    };
+    let selection_projection = selection_projection_result.as_ref().ok();
     let mut status_inputs = Vec::new();
+    let mut assessment_inputs = Vec::new();
     for account in accounts {
         let selector_input = selector_inputs
             .iter()
@@ -1365,18 +1371,23 @@ fn quota_status_report(
             now_unix_seconds,
             &mut display_windows,
         )?;
-        let projected_weekly_window = selection_projection
-            .accounts()
-            .iter()
-            .find(|projected_account| projected_account.account_id() == account.account_id())
-            .and_then(|projected_account| {
-                projected_account
-                    .windows()
-                    .iter()
-                    .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
-            });
+        let projection_account = selection_projection.and_then(|projection| {
+            projection
+                .accounts()
+                .iter()
+                .find(|projected_account| projected_account.account_id() == account.account_id())
+        });
+        let projected_weekly_window = projection_account.and_then(|projected_account| {
+            projected_account
+                .windows()
+                .iter()
+                .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+        });
         let weekly_pace =
             quota_pace_snapshot(&display_windows, projected_weekly_window, now_unix_seconds);
+        let assessment_input = projection_account.cloned().unwrap_or_else(|| {
+            burn_down_input_from_display_windows(account, &display_windows, now_unix_seconds)
+        });
         let active_clients =
             active_client_counts
                 .as_ref()
@@ -1404,15 +1415,19 @@ fn quota_status_report(
             windows: display_windows,
             weekly_pace,
         });
+        assessment_inputs.push(assessment_input);
     }
 
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         now_unix_seconds,
-        selection_projection.accounts().to_vec(),
+        assessment_inputs,
     ));
     let selected_pool = assessment.selected_pool();
-    let preferred_next_account_id = assessment.preferred_next().cloned();
+    let authoritative_projection = selection_projection_source.is_authoritative();
+    let preferred_next_account_id = authoritative_projection
+        .then(|| assessment.preferred_next().cloned())
+        .flatten();
     let preferred_next_hash = preferred_next_account_id
         .as_ref()
         .map(|account_id| telemetry_hash(account_id.as_str()))
@@ -1424,7 +1439,7 @@ fn quota_status_report(
         active_client.source = active_client_mirror_source,
         "codex_router.quota_status_selection"
     );
-    let rows = status_inputs
+    let mut rows = status_inputs
         .iter()
         .filter_map(|input| {
             assessment
@@ -1441,6 +1456,11 @@ fn quota_status_report(
                 })
         })
         .collect::<Vec<_>>();
+    if !authoritative_projection {
+        for row in &mut rows {
+            row.preferred_next = false;
+        }
+    }
     emit_quota_status_metrics(USER_QUOTA_ROUTE_BAND, &rows);
 
     Ok(QuotaStatusReport {
@@ -1448,6 +1468,7 @@ fn quota_status_report(
         route_band: USER_QUOTA_ROUTE_BAND.to_owned(),
         selected_pool,
         preferred_next_account_id,
+        selection_projection_source,
         now_unix_seconds,
         rows,
     })
@@ -1771,6 +1792,7 @@ struct QuotaStatusReport {
     route_band: String,
     selected_pool: SelectedPool,
     preferred_next_account_id: Option<AccountId>,
+    selection_projection_source: SelectionProjectionSource,
     now_unix_seconds: u64,
     rows: Vec<QuotaStatusRow>,
 }
@@ -1778,6 +1800,32 @@ struct QuotaStatusReport {
 impl QuotaStatusReport {
     fn rows(&self) -> &[QuotaStatusRow] {
         &self.rows
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectionProjectionSource {
+    SqlxProjection,
+    DisplayWindowsFallback,
+}
+
+impl SelectionProjectionSource {
+    const fn as_json(self) -> &'static str {
+        match self {
+            Self::SqlxProjection => "sqlx_projection",
+            Self::DisplayWindowsFallback => "display_windows_fallback",
+        }
+    }
+
+    const fn route_result(self) -> &'static str {
+        match self {
+            Self::SqlxProjection => "ok",
+            Self::DisplayWindowsFallback => "degraded",
+        }
+    }
+
+    const fn is_authoritative(self) -> bool {
+        matches!(self, Self::SqlxProjection)
     }
 }
 
@@ -1991,7 +2039,6 @@ fn quota_run_rate_observation_from_history(
     ))
 }
 
-#[cfg(test)]
 fn burn_down_input_from_display_windows(
     account: &AccountRecord,
     windows: &[DisplayQuotaWindow],
@@ -2514,6 +2561,7 @@ struct JsonQuotaStatusReport {
     route_result: &'static str,
     app_version: String,
     route_band: String,
+    selection_projection_source: &'static str,
     selected_pool: &'static str,
     selected_pool_reason: &'static str,
     preferred_next_account_hash: Option<String>,
@@ -2523,9 +2571,10 @@ struct JsonQuotaStatusReport {
 impl JsonQuotaStatusReport {
     fn from_report(report: &QuotaStatusReport) -> Self {
         Self {
-            route_result: "ok",
+            route_result: report.selection_projection_source.route_result(),
             app_version: report.app_version.clone(),
             route_band: report.route_band.clone(),
+            selection_projection_source: report.selection_projection_source.as_json(),
             selected_pool: selected_pool_json(report.selected_pool),
             selected_pool_reason: selected_pool_reason_json(report.selected_pool),
             preferred_next_account_hash: report
@@ -3264,6 +3313,15 @@ mod tests {
     const NOW: u64 = 1_700_000_000;
 
     #[test]
+    fn quota_refresh_selector_window_stale_after_uses_plan_freshness_ceiling() {
+        assert_eq!(
+            stale_after_unix_seconds(1_000),
+            1_300,
+            "selector-window last-known-good freshness must use the plan's 300s ceiling"
+        );
+    }
+
+    #[test]
     fn quota_status_selection_uses_projected_run_rate_like_runtime_selector() {
         let fast_burning_account = account("acct_fast", "fast");
         let slow_burning_account = account("acct_slow", "slow");
@@ -3639,6 +3697,7 @@ mod tests {
             route_band: "responses".to_owned(),
             selected_pool: SelectedPool::Usable,
             preferred_next_account_id: Some(account_id("acct_ssdev")),
+            selection_projection_source: SelectionProjectionSource::SqlxProjection,
             now_unix_seconds: NOW,
             rows: vec![
                 quota_capture_row(
@@ -3691,6 +3750,7 @@ mod tests {
             route_band: "responses".to_owned(),
             selected_pool: SelectedPool::None,
             preferred_next_account_id: None,
+            selection_projection_source: SelectionProjectionSource::SqlxProjection,
             now_unix_seconds: NOW,
             rows: vec![
                 quota_capture_row(
