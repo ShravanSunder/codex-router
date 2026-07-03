@@ -1141,10 +1141,17 @@ fn is_reset_without_closing_handshake(error: &tungstenite::Error) -> bool {
     )
 }
 
-fn is_normal_websocket_cleanup_close(error: &tungstenite::Error) -> bool {
+pub(crate) fn is_normal_websocket_cleanup_close(error: &tungstenite::Error) -> bool {
     matches!(
         error,
         tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed
+    ) || matches!(
+        error,
+        tungstenite::Error::Io(source)
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            )
     ) || is_reset_without_closing_handshake(error)
 }
 

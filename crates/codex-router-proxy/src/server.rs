@@ -821,6 +821,9 @@ fn handle_connection_join_result(
 ) -> Result<(), LoopbackRouterRuntimeError> {
     match joined {
         Ok(Ok(())) => Ok(()),
+        Ok(Err(LoopbackRouterRuntimeError::WebSocket(
+            crate::websocket::WebSocketTunnelError::Transport(ref error),
+        ))) if crate::websocket::is_normal_websocket_cleanup_close(error) => Ok(()),
         Ok(Err(error)) => Err(error),
         Err(source) => Err(LoopbackRouterRuntimeError::ConnectionJoin(source)),
     }
