@@ -61,7 +61,7 @@ const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses_compact",
     "code_review",
 ];
-const SELECTOR_INVALIDATED_ROUTE_BANDS: &[&str] = &[
+const SELECTOR_INVALIDATED_ROUTE_BANDS: [&str; 4] = [
     "responses",
     "models",
     "memories_trace_summarize",
@@ -3611,6 +3611,12 @@ impl SqliteStateStore {
     }
 
     fn apply_v3(&self) -> Result<(), StateStoreError> {
+        let [
+            responses_route_band,
+            models_route_band,
+            memories_trace_summarize_route_band,
+            responses_compact_route_band,
+        ] = SELECTOR_INVALIDATED_ROUTE_BANDS;
         let transaction = self
             .connection
             .unchecked_transaction()
@@ -3665,10 +3671,10 @@ impl SqliteStateStore {
                     SelectorQuotaWindowStatus::Ineligible.as_str(),
                     SelectorQuotaWindowStatus::Stale.as_str(),
                     SelectorQuotaWindowStatus::Eligible.as_str(),
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[0],
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[1],
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[2],
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[3],
+                    responses_route_band,
+                    models_route_band,
+                    memories_trace_summarize_route_band,
+                    responses_compact_route_band,
                 ],
             )
             .map_err(sqlite_error)?;
@@ -3681,6 +3687,12 @@ impl SqliteStateStore {
     }
 
     fn apply_v4(&self) -> Result<(), StateStoreError> {
+        let [
+            responses_route_band,
+            models_route_band,
+            memories_trace_summarize_route_band,
+            responses_compact_route_band,
+        ] = SELECTOR_INVALIDATED_ROUTE_BANDS;
         let transaction = self
             .connection
             .unchecked_transaction()
@@ -3690,10 +3702,10 @@ impl SqliteStateStore {
                 "DELETE FROM selector_quota_windows
                   WHERE route_band NOT IN (?1, ?2, ?3, ?4)",
                 params![
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[0],
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[1],
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[2],
-                    SELECTOR_INVALIDATED_ROUTE_BANDS[3],
+                    responses_route_band,
+                    models_route_band,
+                    memories_trace_summarize_route_band,
+                    responses_compact_route_band,
                 ],
             )
             .map_err(sqlite_error)?;

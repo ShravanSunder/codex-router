@@ -1472,7 +1472,12 @@ impl LoopbackProtocolConnectionHandler {
             fixed_now_unix_seconds.unwrap_or_else(|| match current_unix_seconds() {
                 Ok(now_unix_seconds) => now_unix_seconds,
                 Err(error) => {
-                    panic!("system clock must remain after Unix epoch for routing: {error}")
+                    tracing::error!(
+                        error.class = "system_clock_before_unix_epoch",
+                        error.message = %error,
+                        "codex_router.runtime_clock_failed"
+                    );
+                    0
                 }
             })
         })
@@ -1602,7 +1607,9 @@ async fn bounded_request_metadata_body(
                 let remaining_bytes =
                     HTTP_REQUEST_METADATA_PREFIX_MAX_BYTES - routing_metadata_prefix.len();
                 let bytes_to_scan = data.len().min(remaining_bytes);
-                routing_metadata_prefix.extend_from_slice(&data[..bytes_to_scan]);
+                if let Some(scanned_data) = data.get(..bytes_to_scan) {
+                    routing_metadata_prefix.extend_from_slice(scanned_data);
+                }
             }
             if let Some(replay_body) = full_replay_body.as_mut() {
                 if replay_body.len().saturating_add(data.len()) <= HTTP_REQUEST_REPLAY_MAX_BYTES {
@@ -1722,7 +1729,9 @@ async fn split_precommit_http_quota_response(
         if let Some(data) = frame.data_ref() {
             let remaining_bytes = HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES - scanned_bytes;
             let bytes_to_scan = data.len().min(remaining_bytes);
-            buffered.extend_from_slice(&data[..bytes_to_scan]);
+            if let Some(scanned_data) = data.get(..bytes_to_scan) {
+                buffered.extend_from_slice(scanned_data);
+            }
             scanned_bytes += bytes_to_scan;
             if let Some(provider_error_body) = provider_error_body_from_http_buffer(&buffered)
                 && classify_provider_error_envelope(&provider_error_body)
@@ -1921,7 +1930,9 @@ fn record_affinity_owner_from_async_body(
             scanned_events += 1;
             let remaining_bytes = HTTP_RESPONSE_AFFINITY_SCAN_MAX_BYTES - scanned_bytes;
             let bytes_to_scan = data.len().min(remaining_bytes);
-            buffered.extend_from_slice(&data[..bytes_to_scan]);
+            if let Some(scanned_data) = data.get(..bytes_to_scan) {
+                buffered.extend_from_slice(scanned_data);
+            }
             scanned_bytes += bytes_to_scan;
             if should_scan_affinity
                 && let Some(secret) = affinity_secret.as_ref()
@@ -1991,7 +2002,10 @@ fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
         .iter()
         .rposition(|byte| !byte.is_ascii_whitespace())
         .map_or(start, |index| index + 1);
-    &bytes[start..end]
+    match bytes.get(start..end) {
+        Some(trimmed) => trimmed,
+        None => &[],
+    }
 }
 
 fn hold_active_reservation_until_body_drop(

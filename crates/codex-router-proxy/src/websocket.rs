@@ -5561,15 +5561,19 @@ fn percent_decode_ascii(value: &str) -> String {
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0_usize;
     while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        let Some(byte) = bytes.get(index).copied() else {
+            break;
+        };
+        if byte == b'%'
+            && let (Some(high), Some(low)) = (
+                bytes.get(index + 1).copied().and_then(hex_value),
+                bytes.get(index + 2).copied().and_then(hex_value),
+            )
         {
             decoded.push((high << 4) | low);
             index += 3;
         } else {
-            decoded.push(bytes[index]);
+            decoded.push(byte);
             index += 1;
         }
     }
@@ -5591,11 +5595,11 @@ fn json_string_slice(body: &[u8], start: usize) -> Option<(&[u8], usize)> {
     }
     let mut cursor = start + 1;
     while cursor < body.len() {
-        match body[cursor] {
+        match body.get(cursor).copied()? {
             b'\\' => cursor = cursor.saturating_add(2),
             b'"' => {
                 let end = cursor + 1;
-                return Some((&body[start..end], end));
+                return body.get(start..end).map(|slice| (slice, end));
             }
             _ => cursor += 1,
         }

@@ -461,34 +461,50 @@ impl DbWriteActor {
     /// Returns the last scrubbed degraded queue event observed by this actor.
     #[must_use]
     pub fn last_degraded_event(&self) -> Option<QueueDegradedEvent> {
-        self.last_degraded_event
-            .lock()
-            .unwrap_or_else(|error| {
-                panic!("db write actor degraded event lock should be available: {error}")
-            })
-            .clone()
+        match self.last_degraded_event.lock() {
+            Ok(last_degraded_event) => last_degraded_event.clone(),
+            Err(error) => {
+                tracing::warn!(
+                    error.class = "db_write_actor_degraded_event_lock_poisoned",
+                    error.message = %error,
+                    "codex_router.db_write_actor_degraded_event_unavailable"
+                );
+                None
+            }
+        }
     }
 
     /// Returns the last scrubbed queue-lag event observed by this actor.
     #[must_use]
     pub fn last_queue_lag_event(&self) -> Option<QueueLagEvent> {
-        self.last_queue_lag_event
-            .lock()
-            .unwrap_or_else(|error| {
-                panic!("db write actor queue lag event lock should be available: {error}")
-            })
-            .clone()
+        match self.last_queue_lag_event.lock() {
+            Ok(last_queue_lag_event) => last_queue_lag_event.clone(),
+            Err(error) => {
+                tracing::warn!(
+                    error.class = "db_write_actor_queue_lag_event_lock_poisoned",
+                    error.message = %error,
+                    "codex_router.db_write_actor_queue_lag_event_unavailable"
+                );
+                None
+            }
+        }
     }
 
     /// Cancels the actor and waits for the task to finish.
     pub async fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         self.shutdown.cancel();
-        let task = self
-            .task
-            .lock()
-            .unwrap_or_else(|error| panic!("db write actor task lock should be available: {error}"))
-            .take();
+        let task = match self.task.lock() {
+            Ok(mut task) => task.take(),
+            Err(error) => {
+                tracing::warn!(
+                    error.class = "db_write_actor_task_lock_poisoned",
+                    error.message = %error,
+                    "codex_router.db_write_actor_shutdown_task_unavailable"
+                );
+                None
+            }
+        };
         if let Some(mut task) = task {
             let drain_grace = tokio::time::sleep(std::time::Duration::from_millis(
                 DB_WRITE_SHUTDOWN_DRAIN_GRACE_MS,
@@ -531,10 +547,18 @@ impl DbWriteActor {
             reason,
             self.sender_for_command(command).max_capacity(),
         );
-        let mut last_degraded_event = self.last_degraded_event.lock().unwrap_or_else(|error| {
-            panic!("db write actor degraded event lock should be available: {error}")
-        });
-        *last_degraded_event = Some(event);
+        match self.last_degraded_event.lock() {
+            Ok(mut last_degraded_event) => {
+                *last_degraded_event = Some(event);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error.class = "db_write_actor_degraded_event_lock_poisoned",
+                    error.message = %error,
+                    "codex_router.db_write_actor_degraded_event_dropped"
+                );
+            }
+        }
     }
 
     fn sender_for_command(&self, command: &DbWriteCommand) -> &mpsc::Sender<QueuedDbWriteCommand> {
@@ -627,10 +651,18 @@ async fn handle_db_write_actor_command(
         queue_lag_millis_since(enqueued_at),
     );
     {
-        let mut last_queue_lag_event = last_queue_lag_event.lock().unwrap_or_else(|error| {
-            panic!("db write actor queue lag event lock should be available: {error}")
-        });
-        *last_queue_lag_event = Some(queue_lag_event);
+        match last_queue_lag_event.lock() {
+            Ok(mut last_queue_lag_event) => {
+                *last_queue_lag_event = Some(queue_lag_event);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error.class = "db_write_actor_queue_lag_event_lock_poisoned",
+                    error.message = %error,
+                    "codex_router.db_write_actor_queue_lag_event_dropped"
+                );
+            }
+        }
     }
     let command_result = handle_db_write_command(repository, command).await;
     apply_db_write_command_result(

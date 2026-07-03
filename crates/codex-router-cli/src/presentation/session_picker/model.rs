@@ -178,8 +178,12 @@ impl SessionsPickerModel {
             .map(|(index, _record)| index)
             .collect::<Vec<_>>();
         indices.sort_by(|left_index, right_index| {
-            let left = &self.request.records[*left_index];
-            let right = &self.request.records[*right_index];
+            let Some(left) = self.request.records.get(*left_index) else {
+                return left_index.cmp(right_index);
+            };
+            let Some(right) = self.request.records.get(*right_index) else {
+                return left_index.cmp(right_index);
+            };
             match self.sort {
                 SessionsSort::Updated => right
                     .recency_at_ms

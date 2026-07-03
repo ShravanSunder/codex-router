@@ -443,13 +443,22 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, String> {
         if byte_count == 0 {
             break;
         }
-        bytes.extend_from_slice(&buffer[..byte_count]);
+        let read_bytes = buffer.get(..byte_count).ok_or_else(|| {
+            "route-native upstream read byte count exceeded buffer length".to_owned()
+        })?;
+        bytes.extend_from_slice(read_bytes);
         if let Some(header_end) = find_header_end(&bytes) {
-            let header_text = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+            let header_bytes = bytes.get(..header_end).ok_or_else(|| {
+                "route-native upstream header boundary exceeded buffer length".to_owned()
+            })?;
+            let header_text = String::from_utf8_lossy(header_bytes).to_string();
             let content_length = parse_content_length(&header_text);
             let body_start = header_end + 4;
             if bytes.len() >= body_start + content_length {
-                return String::from_utf8(bytes[..body_start + content_length].to_vec())
+                let request_bytes = bytes.get(..body_start + content_length).ok_or_else(|| {
+                    "route-native upstream request boundary exceeded buffer length".to_owned()
+                })?;
+                return String::from_utf8(request_bytes.to_vec())
                     .map_err(|error| format!("route-native HTTP request was not UTF-8: {error}"));
             }
         }
@@ -529,6 +538,9 @@ fn looks_like_websocket_upgrade(stream: &TcpStream) -> Result<bool, String> {
     let byte_count = stream
         .peek(&mut buffer)
         .map_err(|error| format!("route-native upstream failed to peek request: {error}"))?;
-    let request = String::from_utf8_lossy(&buffer[..byte_count]);
+    let request_bytes = buffer
+        .get(..byte_count)
+        .ok_or_else(|| "route-native upstream peek byte count exceeded buffer length".to_owned())?;
+    let request = String::from_utf8_lossy(request_bytes);
     Ok(request.to_ascii_lowercase().contains("upgrade: websocket"))
 }

@@ -1,4 +1,5 @@
 //! OpenAI account authentication boundaries for codex-router.
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 pub mod live_quota;
 pub mod oauth;

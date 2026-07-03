@@ -259,9 +259,24 @@ impl MaintenanceActor {
         }
         let coalescing_key = hint.coalescing_key();
         {
-            let mut pending = self.pending.lock().unwrap_or_else(|error| {
-                panic!("maintenance pending set lock should be available: {error}")
-            });
+            let mut pending = match self.pending.lock() {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::warn!(
+                        component = "maintenance_actor",
+                        lock = "pending_set",
+                        error.message = %error,
+                        "codex_router.maintenance_pending_set_lock_poisoned"
+                    );
+                    emit_maintenance_lag_observed(
+                        hint.maintenance_class(),
+                        hint.route_band_label(),
+                        "degraded",
+                        0,
+                    );
+                    return MaintenanceEnqueueResult::ClosedDegraded;
+                }
+            };
             if let Some(existing_enqueued_at) = pending.get(&coalescing_key) {
                 emit_maintenance_lag_observed(
                     hint.maintenance_class(),
@@ -307,21 +322,37 @@ impl MaintenanceActor {
     pub async fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         self.shutdown.cancel();
-        let task = self
-            .task
-            .lock()
-            .unwrap_or_else(|error| panic!("maintenance task lock should be available: {error}"))
-            .take();
+        let task = match self.task.lock() {
+            Ok(mut task) => task.take(),
+            Err(error) => {
+                tracing::warn!(
+                    component = "maintenance_actor",
+                    lock = "task",
+                    error.message = %error,
+                    "codex_router.maintenance_task_lock_poisoned"
+                );
+                None
+            }
+        };
         if let Some(task) = task {
             let _join_result = task.await;
         }
     }
 
     fn remove_pending_key(&self, coalescing_key: &MaintenanceCoalescingKey) {
-        let mut pending = self.pending.lock().unwrap_or_else(|error| {
-            panic!("maintenance pending set lock should be available: {error}")
-        });
-        pending.remove(coalescing_key);
+        match self.pending.lock() {
+            Ok(mut pending) => {
+                pending.remove(coalescing_key);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    component = "maintenance_actor",
+                    lock = "pending_set",
+                    error.message = %error,
+                    "codex_router.maintenance_pending_remove_lock_poisoned"
+                );
+            }
+        }
     }
 }
 
@@ -397,19 +428,37 @@ async fn run_maintenance_actor(
                 );
                 tokio::select! {
                     () = shutdown.cancelled() => {
-                        let mut pending = pending.lock().unwrap_or_else(|error| {
-                            panic!("maintenance pending set lock should be available: {error}")
-                        });
-                        pending.remove(&coalescing_key);
+                        match pending.lock() {
+                            Ok(mut pending) => {
+                                pending.remove(&coalescing_key);
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    component = "maintenance_actor",
+                                    lock = "pending_set",
+                                    error.message = %error,
+                                    "codex_router.maintenance_pending_shutdown_lock_poisoned"
+                                );
+                            }
+                        }
                         receiver.close();
                         break;
                     }
                     _result = repository.run_maintenance_hint(hint.clone()) => {}
                 }
-                let mut pending = pending.lock().unwrap_or_else(|error| {
-                    panic!("maintenance pending set lock should be available: {error}")
-                });
-                pending.remove(&hint_for_cleanup.coalescing_key());
+                match pending.lock() {
+                    Ok(mut pending) => {
+                        pending.remove(&hint_for_cleanup.coalescing_key());
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            component = "maintenance_actor",
+                            lock = "pending_set",
+                            error.message = %error,
+                            "codex_router.maintenance_pending_cleanup_lock_poisoned"
+                        );
+                    }
+                }
             }
         }
     }
@@ -677,7 +726,9 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!("MaintenanceRepository boundary must follow MaintenanceHint")
             });
-        let hint_enum_source = &actor_source[hint_enum_start..hint_enum_end];
+        let hint_enum_source = actor_source
+            .get(hint_enum_start..hint_enum_end)
+            .unwrap_or_else(|| panic!("MaintenanceHint source slice should be valid"));
 
         for expected_hint_variant in [
             "CleanupStaleActiveClients",

@@ -1,4 +1,5 @@
 //! Test support helpers for codex-router.
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 pub mod installed_codex;
 pub mod mock_upstream;

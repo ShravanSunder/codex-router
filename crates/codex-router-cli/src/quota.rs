@@ -3017,8 +3017,9 @@ fn telemetry_hash(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     let digest = hasher.finalize();
-    digest[..8]
+    digest
         .iter()
+        .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
 }

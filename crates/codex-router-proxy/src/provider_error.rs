@@ -287,7 +287,7 @@ fn prefix_top_level_object_field_prefix<'a>(prefix: &'a str, field_name: &str) -
     let mut depth = 0_u32;
     let mut expect_field = false;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'{' => {
                 depth = depth.saturating_add(1);
                 expect_field = depth == 1;
@@ -337,7 +337,7 @@ fn prefix_json_object_slice(input: &str, object_start: usize) -> Option<&str> {
     let mut index = object_start;
     let mut depth = 0_u32;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'{' => {
                 depth = depth.saturating_add(1);
                 index += 1;
@@ -390,7 +390,7 @@ fn prefix_top_level_field_value<'a>(
     let mut depth = 0_u32;
     let mut expect_field = false;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'{' => {
                 depth = depth.saturating_add(1);
                 expect_field = depth == 1;
@@ -448,30 +448,35 @@ fn json_object_braces_are_balanced(input: &str) -> bool {
 
     let mut depth = 0_u32;
     while index < bytes.len() {
-        match bytes[index] {
-            b'{' => {
-                depth = depth.saturating_add(1);
-                index += 1;
-            }
-            b'}' => {
-                let Some(next_depth) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next_depth;
-                index += 1;
-                if depth == 0 {
-                    return bytes[index..].iter().all(|byte| byte.is_ascii_whitespace());
+        match bytes.get(index).copied() {
+            Some(byte) => match byte {
+                b'{' => {
+                    depth = depth.saturating_add(1);
+                    index += 1;
                 }
-            }
-            b'"' => {
-                let Some((_, after_string)) = parse_json_string_token(input, index) else {
-                    return false;
-                };
-                index = after_string;
-            }
-            _ => {
-                index += 1;
-            }
+                b'}' => {
+                    let Some(next_depth) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = next_depth;
+                    index += 1;
+                    if depth == 0 {
+                        return bytes.get(index..).is_some_and(|tail| {
+                            tail.iter().all(|byte| byte.is_ascii_whitespace())
+                        });
+                    }
+                }
+                b'"' => {
+                    let Some((_, after_string)) = parse_json_string_token(input, index) else {
+                        return false;
+                    };
+                    index = after_string;
+                }
+                _ => {
+                    index += 1;
+                }
+            },
+            None => return false,
         }
     }
 
@@ -490,30 +495,35 @@ fn json_object_prefix_is_open_or_cleanly_closed(input: &str) -> bool {
 
     let mut depth = 0_u32;
     while index < bytes.len() {
-        match bytes[index] {
-            b'{' => {
-                depth = depth.saturating_add(1);
-                index += 1;
-            }
-            b'}' => {
-                let Some(next_depth) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next_depth;
-                index += 1;
-                if depth == 0 {
-                    return bytes[index..].iter().all(|byte| byte.is_ascii_whitespace());
+        match bytes.get(index).copied() {
+            Some(byte) => match byte {
+                b'{' => {
+                    depth = depth.saturating_add(1);
+                    index += 1;
                 }
-            }
-            b'"' => {
-                let Some((_, after_string)) = parse_json_string_token(input, index) else {
-                    return true;
-                };
-                index = after_string;
-            }
-            _ => {
-                index += 1;
-            }
+                b'}' => {
+                    let Some(next_depth) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = next_depth;
+                    index += 1;
+                    if depth == 0 {
+                        return bytes.get(index..).is_some_and(|tail| {
+                            tail.iter().all(|byte| byte.is_ascii_whitespace())
+                        });
+                    }
+                }
+                b'"' => {
+                    let Some((_, after_string)) = parse_json_string_token(input, index) else {
+                        return true;
+                    };
+                    index = after_string;
+                }
+                _ => {
+                    index += 1;
+                }
+            },
+            None => return false,
         }
     }
 
@@ -543,7 +553,7 @@ fn parse_json_string_token(input: &str, quote_index: usize) -> Option<(&str, usi
     }
     let mut index = quote_index + 1;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'\\' => {
                 index = index.saturating_add(2);
             }

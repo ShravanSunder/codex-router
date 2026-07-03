@@ -451,7 +451,13 @@ async fn estimate_window_burn_rate(
         });
     }
 
-    let first_observation = &observations[0];
+    let Some(first_observation) = observations.first() else {
+        return Ok(ProjectedBurnRateEstimate {
+            confidence: QuotaRunRateConfidence::Unknown,
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
+        });
+    };
     let elapsed_seconds = latest_observation
         .observed_unix_seconds()
         .saturating_sub(first_observation.observed_unix_seconds());

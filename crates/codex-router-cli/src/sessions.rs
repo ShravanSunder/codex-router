@@ -765,7 +765,13 @@ fn parse_model_provider(content: &str) -> Option<String> {
         if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
             continue;
         }
-        return Some(value[1..value.len() - 1].to_owned());
+        let Some(value) = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+        else {
+            continue;
+        };
+        return Some(value.to_owned());
     }
     None
 }

@@ -1,4 +1,5 @@
 //! Command-line entry points for codex-router.
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 use std::ffi::OsString;
 use std::fs;
@@ -1031,7 +1032,10 @@ impl ArgumentParser {
     }
 
     pub(crate) fn remaining_arguments(&mut self) -> Vec<OsString> {
-        let remaining = self.arguments[self.index..].to_vec();
+        let remaining = self
+            .arguments
+            .get(self.index..)
+            .map_or_else(Vec::new, <[OsString]>::to_vec);
         self.index = self.arguments.len();
         remaining
     }
@@ -7654,7 +7658,9 @@ exit 42
         let Some(header_end) = text.find("\r\n\r\n") else {
             return false;
         };
-        let headers = &text[..header_end];
+        let Some(headers) = text.get(..header_end) else {
+            return false;
+        };
         let Some(content_length) = headers.lines().find_map(|line| {
             let (name, value) = line.split_once(':')?;
             if name.eq_ignore_ascii_case("content-length") {

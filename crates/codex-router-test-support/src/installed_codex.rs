@@ -3338,12 +3338,16 @@ fn replace_port_after_prefix(value: &str, prefix: &str) -> String {
         output.push_str(before);
         output.push_str(prefix);
         output.push_str("<port>");
-        let after_prefix = &after_before[prefix.len()..];
+        let Some(after_prefix) = after_before.strip_prefix(prefix) else {
+            output.push_str(after_before);
+            remaining = "";
+            break;
+        };
         let first_non_digit = after_prefix
             .char_indices()
             .find_map(|(offset, character)| (!character.is_ascii_digit()).then_some(offset))
             .unwrap_or(after_prefix.len());
-        remaining = &after_prefix[first_non_digit..];
+        remaining = after_prefix.get(first_non_digit..).unwrap_or_default();
     }
     output.push_str(remaining);
     output
@@ -3484,7 +3488,9 @@ fn contains_loopback_endpoint_with_numeric_port(payload: &str) -> bool {
 fn contains_prefix_followed_by_digit(payload: &str, prefix: &str) -> bool {
     let mut remaining = payload;
     while let Some(index) = remaining.find(prefix) {
-        let after_prefix = &remaining[index + prefix.len()..];
+        let Some(after_prefix) = remaining.get(index + prefix.len()..) else {
+            return false;
+        };
         if after_prefix
             .chars()
             .next()
@@ -5144,7 +5150,8 @@ fn register_concurrent_non_prewarm_session(
 fn extract_harness_client_index(frame: &str) -> Option<usize> {
     let marker = "codex-router-client-";
     let marker_start = frame.find(marker)? + marker.len();
-    let digits = frame[marker_start..]
+    let digits = frame
+        .get(marker_start..)?
         .chars()
         .take_while(|character| character.is_ascii_digit())
         .collect::<String>();
@@ -5382,7 +5389,10 @@ fn send_concurrent_response_events(
     let response_events = smoke_response_events(request_index);
     let mut event_count = 0_usize;
     let mut in_overlap_event_count = 0_usize;
-    send_concurrent_response_event(websocket, &response_events[0])?;
+    let Some(first_response_event) = response_events.first() else {
+        return Err("mock upstream response events must not be empty".to_owned());
+    };
+    send_concurrent_response_event(websocket, first_response_event)?;
     event_count = event_count.saturating_add(1);
     in_overlap_event_count =
         in_overlap_event_count.saturating_add(usize::from(is_concurrent_overlap_active(state)?));
@@ -5690,7 +5700,10 @@ fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, St
     let byte_count = stream
         .peek(&mut buffer)
         .map_err(|error| format!("mock upstream failed to peek request: {error}"))?;
-    let request = String::from_utf8_lossy(&buffer[..byte_count]);
+    let request_bytes = buffer
+        .get(..byte_count)
+        .ok_or_else(|| "mock upstream peek byte count exceeded buffer length".to_owned())?;
+    let request = String::from_utf8_lossy(request_bytes);
     Ok(request.to_ascii_lowercase().contains("upgrade: websocket"))
 }
 
@@ -5738,12 +5751,21 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Result<MockHttpSseTran
         if byte_count == 0 {
             break;
         }
-        bytes.extend_from_slice(&buffer[..byte_count]);
+        let read_bytes = buffer
+            .get(..byte_count)
+            .ok_or_else(|| "mock upstream read byte count exceeded buffer length".to_owned())?;
+        bytes.extend_from_slice(read_bytes);
         if let Some(header_end) = find_header_end(&bytes) {
-            let header_text = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+            let header_bytes = bytes
+                .get(..header_end)
+                .ok_or_else(|| "mock upstream header boundary exceeded buffer length".to_owned())?;
+            let header_text = String::from_utf8_lossy(header_bytes).to_string();
             let body_start = header_end + 4;
             if header_uses_chunked_transfer(&header_text) {
-                if let Some(body) = decode_complete_chunked_body(&bytes[body_start..])? {
+                let body_bytes = bytes.get(body_start..).ok_or_else(|| {
+                    "mock upstream body boundary exceeded buffer length".to_owned()
+                })?;
+                if let Some(body) = decode_complete_chunked_body(body_bytes)? {
                     let (request_line, headers) = parse_http_head(&header_text)?;
                     return Ok(MockHttpSseTranscript {
                         request_line,
@@ -5754,9 +5776,12 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Result<MockHttpSseTran
             } else {
                 let content_length = parse_content_length(&header_text);
                 if bytes.len() >= body_start + content_length {
-                    let body =
-                        String::from_utf8_lossy(&bytes[body_start..body_start + content_length])
-                            .to_string();
+                    let body_bytes = bytes
+                        .get(body_start..body_start + content_length)
+                        .ok_or_else(|| {
+                            "mock upstream body length exceeded buffer length".to_owned()
+                        })?;
+                    let body = String::from_utf8_lossy(body_bytes).to_string();
                     let (request_line, headers) = parse_http_head(&header_text)?;
                     return Ok(MockHttpSseTranscript {
                         request_line,
@@ -5786,10 +5811,16 @@ fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> 
     let mut position = 0_usize;
     let mut body = Vec::new();
     loop {
-        let Some(size_line_end) = find_crlf(&bytes[position..]) else {
+        let Some(remaining) = bytes.get(position..) else {
             return Ok(None);
         };
-        let size_line = std::str::from_utf8(&bytes[position..position + size_line_end])
+        let Some(size_line_end) = find_crlf(remaining) else {
+            return Ok(None);
+        };
+        let size_line_bytes = bytes
+            .get(position..position + size_line_end)
+            .ok_or_else(|| "chunk size line exceeded buffer length".to_owned())?;
+        let size_line = std::str::from_utf8(size_line_bytes)
             .map_err(|error| format!("chunk size line was not UTF-8: {error}"))?;
         let size_text = size_line
             .split_once(';')
@@ -5803,7 +5834,10 @@ fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> 
                     .map(Some)
                     .map_err(|error| format!("chunked body was not UTF-8: {error}"));
             }
-            let Some(trailer_end) = find_header_end(&bytes[position..]) else {
+            let Some(remaining) = bytes.get(position..) else {
+                return Ok(None);
+            };
+            let Some(trailer_end) = find_header_end(remaining) else {
                 return Ok(None);
             };
             let _consumed = position.saturating_add(trailer_end + 4);
@@ -5814,7 +5848,10 @@ fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> 
         if bytes.len() < position.saturating_add(chunk_size).saturating_add(2) {
             return Ok(None);
         }
-        body.extend_from_slice(&bytes[position..position + chunk_size]);
+        let chunk = bytes
+            .get(position..position + chunk_size)
+            .ok_or_else(|| "chunk data exceeded buffer length".to_owned())?;
+        body.extend_from_slice(chunk);
         position = position.saturating_add(chunk_size);
         if bytes.get(position..position + 2) != Some(b"\r\n") {
             return Err("chunk data was not followed by CRLF".to_owned());
@@ -6169,7 +6206,10 @@ fn parse_posix_token_assignment(assignment: &str) -> Result<String, String> {
     if !assignment.starts_with(prefix) || !assignment.ends_with(suffix) {
         return Err("token export assignment did not use expected POSIX shape".to_owned());
     }
-    let token = &assignment[prefix.len()..assignment.len() - suffix.len()];
+    let token = assignment
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(suffix))
+        .ok_or_else(|| "token export assignment did not use expected POSIX shape".to_owned())?;
     if token.contains("'\\''") {
         return Err("smoke token unexpectedly required shell unescaping".to_owned());
     }
@@ -6700,7 +6740,7 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let error = match run_with_timeout(command, std::time::Duration::from_millis(10)) {
+        let error = match run_with_timeout(command, std::time::Duration::from_millis(250)) {
             Ok(_) => panic!("sleeping command must time out"),
             Err(error) => error,
         };

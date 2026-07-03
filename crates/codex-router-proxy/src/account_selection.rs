@@ -1917,13 +1917,13 @@ fn json_string_slice(body: &[u8], start: usize) -> Option<(&[u8], usize)> {
     }
     let mut cursor = start + 1;
     while cursor < body.len() {
-        match body[cursor] {
+        match body.get(cursor).copied()? {
             b'\\' => {
                 cursor = cursor.saturating_add(2);
             }
             b'"' => {
                 let end = cursor + 1;
-                return Some((&body[start..end], end));
+                return body.get(start..end).map(|slice| (slice, end));
             }
             _ => {
                 cursor += 1;
@@ -1991,8 +1991,9 @@ fn telemetry_hash(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     let digest = hasher.finalize();
-    digest[..8]
+    digest
         .iter()
+        .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
 }
