@@ -593,15 +593,7 @@ fn quota_account_list_height(
 }
 
 fn selected_detail_height(has_selected_details: bool) -> usize {
-    if has_selected_details {
-        selected_detail_inner_height(true) + 2
-    } else {
-        3
-    }
-}
-
-fn selected_detail_inner_height(has_activity_gap: bool) -> usize {
-    if has_activity_gap { 21 } else { 20 }
+    if has_selected_details { 21 } else { 3 }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -815,11 +807,8 @@ fn render_selected_panel(
     width: usize,
     height: usize,
 ) -> AnyElement<'static> {
-    let has_activity_gap = height.saturating_sub(2) >= selected_detail_inner_height(true);
     let details = selected
-        .map(|selected| {
-            render_selected_details(selected, width.saturating_sub(4), has_activity_gap)
-        })
+        .map(|selected| render_selected_details(selected, width.saturating_sub(4)))
         .unwrap_or_else(|| {
             element! {
                 Text(content: "No selectable account", color: Color::Grey)
@@ -849,13 +838,7 @@ fn render_selected_panel(
 fn render_selected_details(
     selected: &QuotaSelectedAccountViewModel,
     detail_width: usize,
-    has_activity_gap: bool,
 ) -> AnyElement<'static> {
-    let activity_gap = if has_activity_gap {
-        quota_gap()
-    } else {
-        element! { View(width: 0) {} }.into_any()
-    };
     element! {
         View(
             width: detail_width as u32,
@@ -871,14 +854,12 @@ fn render_selected_details(
             #(detail_line("weekly", &selected.weekly_window, detail_width, Color::White))
             #(quota_gap())
             Text(content: "Reset pace", color: Color::Cyan, weight: Weight::Bold)
-            #(reset_pace_detail_line("current", &selected.reset_pace, detail_width))
+            #(reset_pace_detail_line("weekly", &selected.reset_pace, detail_width))
             #(detail_line("sample", &sample_metadata_summary(&selected.sample_metadata), detail_width, Color::White))
             #(detail_line("rate", &selected.total_rate, detail_width, Color::White))
             #(detail_line("conn", &selected.connection_rate, detail_width, Color::White))
+            #(reset_pace_detail_line("5h", &selected.short_reset_pace, detail_width))
             #(quota_gap())
-            Text(content: "5h pace", color: Color::Cyan, weight: Weight::Bold)
-            #(reset_pace_detail_line("current", &selected.short_reset_pace, detail_width))
-            #(activity_gap)
             Text(content: "Activity", color: Color::Cyan, weight: Weight::Bold)
             #(detail_line("clients", &selected.active_clients, detail_width, Color::White))
             #(detail_line("guards", &selected.guards, detail_width, Color::White))
@@ -1453,46 +1434,51 @@ mod tests {
     }
 
     #[test]
-    fn quota_status_selected_panel_renders_5h_pace_between_reset_pace_and_activity() {
+    fn quota_status_selected_panel_renders_5h_after_conn_before_activity() {
         let text = render_quota_static_capture(quota_view_model(), 160, false);
         let reset_pace_index = text
             .find("Reset pace")
             .unwrap_or_else(|| panic!("selected panel should render reset pace:\n{text}"));
         let short_pace_index = text
-            .find("5h pace")
-            .unwrap_or_else(|| panic!("selected panel should render separate 5h pace:\n{text}"));
+            .find("5h        ▱▱▱▱▱▱▱│▰▰▰▰▰▰▰  runs out 2d 16h")
+            .unwrap_or_else(|| panic!("selected panel should render 5h after conn:\n{text}"));
         let activity_index = text
             .find("Activity")
             .unwrap_or_else(|| panic!("selected panel should render activity:\n{text}"));
 
         assert!(
             reset_pace_index < short_pace_index && short_pace_index < activity_index,
-            "5h pace should sit below reset pace and above activity:\n{text}"
+            "5h reset pace should sit inside Reset pace before Activity:\n{text}"
         );
         assert!(
-            text.contains("current   ▱▱▱▱▱▱▱│▰▰▰▰▰▰▰  runs out 2d 16h"),
-            "5h pace should render only the current runout line:\n{text}"
+            !text.contains("5h pace"),
+            "5h reset pace should not render a separate section header:\n{text}"
         );
     }
 
     #[test]
-    fn quota_status_selected_panel_spaces_5h_pace_from_activity_when_height_allows() {
+    fn quota_status_selected_panel_spaces_activity_header_after_5h_pace() {
         let text = render_quota_static_capture(quota_view_model(), 160, false);
         let lines = text.lines().collect::<Vec<_>>();
-        let short_pace_line_index = lines
+        let conn_line_index = lines
             .iter()
-            .position(|line| line.contains("runs out 2d 16h"))
-            .unwrap_or_else(|| panic!("5h pace line should render:\n{text}"));
+            .position(|line| line.contains("conn"))
+            .unwrap_or_else(|| panic!("conn line should render:\n{text}"));
+        let short_pace_line = lines
+            .get(conn_line_index + 1)
+            .unwrap_or_else(|| panic!("5h pace should follow conn:\n{text}"));
         let spacer_line = lines
-            .get(short_pace_line_index + 1)
-            .unwrap_or_else(|| panic!("5h pace should have a following line:\n{text}"));
+            .get(conn_line_index + 2)
+            .unwrap_or_else(|| panic!("5h pace should have a following spacer:\n{text}"));
         let activity_line = lines
-            .get(short_pace_line_index + 2)
+            .get(conn_line_index + 3)
             .unwrap_or_else(|| panic!("activity should follow 5h pace spacer:\n{text}"));
 
+        assert!(short_pace_line.contains("5h"), "{text}");
+        assert!(short_pace_line.contains("runs out 2d 16h"), "{text}");
         assert!(
             spacer_line.contains("│                                                            │"),
-            "5h pace should have a blank spacer before Activity when height allows:\n{text}"
+            "Activity should remain separated as a header:\n{text}"
         );
         assert!(activity_line.contains("Activity"), "{text}");
     }

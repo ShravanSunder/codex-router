@@ -4151,7 +4151,7 @@ mod tests {
             "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
         );
         assert!(
-            text.contains("current") && text.contains("reset pace"),
+            text.contains("weekly") && text.contains("5h") && text.contains("reset pace"),
             "quota table should show the selected reset pace as an explicit block meter:\n{text}"
         );
         assert!(
