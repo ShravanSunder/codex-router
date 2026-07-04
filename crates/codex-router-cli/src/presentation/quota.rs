@@ -84,6 +84,7 @@ pub(crate) struct ResetPaceMeterSegments {
 pub(crate) struct ResetPaceViewModel {
     pub(crate) state: ResetPaceState,
     pub(crate) multiple_label: String,
+    pub(crate) impact_label: Option<String>,
     pub(crate) semantic_label: &'static str,
     pub(crate) meter_left_segments: ResetPaceMeterSegments,
     pub(crate) meter_right_segments: ResetPaceMeterSegments,
@@ -96,6 +97,7 @@ impl Default for ResetPaceViewModel {
         Self {
             state: ResetPaceState::Unavailable,
             multiple_label: "burn unavailable".to_owned(),
+            impact_label: None,
             semantic_label: "burn unavailable",
             meter_left_segments: ResetPaceMeterSegments {
                 filled: 0,
@@ -878,6 +880,9 @@ fn reset_pace_summary_for_width(reset_pace: &ResetPaceViewModel, width: usize) -
     if reset_pace.state == ResetPaceState::Unavailable {
         return fit_line(&summary, width);
     }
+    if let Some(impact_label) = &reset_pace.impact_label {
+        return fit_line(impact_label, width);
+    }
     fit_line(
         &format!(
             "{} {}",
@@ -894,6 +899,9 @@ fn reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {
             reset_pace_meter(reset_pace),
             reset_pace.semantic_label
         );
+    }
+    if let Some(impact_label) = &reset_pace.impact_label {
+        return format!("{}  {}", reset_pace_meter(reset_pace), impact_label);
     }
     format!(
         "{}  {} {}",
@@ -1374,6 +1382,7 @@ mod tests {
         let reset_pace = ResetPaceViewModel {
             state: ResetPaceState::OverBurning,
             multiple_label: "1.21x reset pace".to_owned(),
+            impact_label: None,
             semantic_label: "over",
             meter_left_segments: ResetPaceMeterSegments {
                 filled: 0,
@@ -1437,6 +1446,35 @@ mod tests {
                 && !text.contains("legacy-meter-sentinel")
                 && !text.contains("conflicting unavailable sentinel"),
             "renderer must use typed reset-pace/sample fields instead of parsing legacy strings:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quota_status_row_renders_runout_impact_label() {
+        let mut view_model = quota_view_model();
+        view_model.rows[0].reset_pace = ResetPaceViewModel {
+            state: ResetPaceState::OverBurning,
+            multiple_label: "3.00x reset pace".to_owned(),
+            impact_label: Some("runs out 3h".to_owned()),
+            semantic_label: "over",
+            meter_left_segments: ResetPaceMeterSegments {
+                filled: 0,
+                empty: 7,
+            },
+            meter_right_segments: ResetPaceMeterSegments {
+                filled: 7,
+                empty: 0,
+            },
+            center_marker: '│',
+            unavailable_reason: None,
+        };
+
+        let text = render_quota_static_capture(view_model, 120, false);
+
+        assert!(text.contains("runs out 3h"), "{text}");
+        assert!(
+            !text.contains("3.00x reset pace over"),
+            "runout impact should replace the capped over-pace copy in account rows:\n{text}"
         );
     }
 
@@ -1587,6 +1625,7 @@ mod tests {
                 reset_pace: ResetPaceViewModel {
                     state: ResetPaceState::Healthy,
                     multiple_label: "1.00x reset pace".to_owned(),
+                    impact_label: None,
                     semantic_label: "healthy",
                     meter_left_segments: ResetPaceMeterSegments {
                         filled: 0,
@@ -1716,6 +1755,7 @@ mod tests {
             reset_pace: ResetPaceViewModel {
                 state: ResetPaceState::Healthy,
                 multiple_label: "1.00x reset pace".to_owned(),
+                impact_label: None,
                 semantic_label: "healthy",
                 meter_left_segments: ResetPaceMeterSegments {
                     filled: 0,
@@ -1811,6 +1851,7 @@ mod tests {
         let reset_pace = ResetPaceViewModel {
             state,
             multiple_label: multiple_label.to_owned(),
+            impact_label: None,
             semantic_label,
             meter_left_segments: meter_segments.0,
             meter_right_segments: meter_segments.1,

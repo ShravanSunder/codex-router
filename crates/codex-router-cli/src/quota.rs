@@ -87,6 +87,7 @@ const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
 const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 300;
 const QUOTA_STATUS_SAMPLE_FRESH_SECONDS: u64 = 900;
+const RESET_PACE_RUNOUT_LABEL_THRESHOLD_HUNDREDTHS: u32 = 200;
 const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
 const QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 
@@ -2561,9 +2562,36 @@ fn reset_pace_view_model_from_snapshot(
     snapshot: Option<QuotaPaceSnapshot>,
     now_unix_seconds: u64,
 ) -> ResetPaceViewModel {
-    reset_pace_view_model_from_multiple_basis_points(
-        snapshot.and_then(|snapshot| quota_pace_load(snapshot, now_unix_seconds)),
-    )
+    let Some(snapshot) = snapshot else {
+        return reset_pace_view_model_from_multiple_basis_points(None);
+    };
+    let multiple_hundredths = quota_pace_load(snapshot, now_unix_seconds);
+    let impact_label = reset_pace_impact_label(snapshot, multiple_hundredths, now_unix_seconds);
+    let mut view_model = reset_pace_view_model_from_multiple_basis_points(multiple_hundredths);
+    view_model.impact_label = impact_label;
+    view_model
+}
+
+fn reset_pace_impact_label(
+    snapshot: QuotaPaceSnapshot,
+    multiple_hundredths: Option<u32>,
+    now_unix_seconds: u64,
+) -> Option<String> {
+    if multiple_hundredths? <= RESET_PACE_RUNOUT_LABEL_THRESHOLD_HUNDREDTHS {
+        return None;
+    }
+    let projected_exhaustion_unix_seconds = snapshot.projected_exhaustion_unix_seconds?;
+    if projected_exhaustion_unix_seconds >= snapshot.reset_unix_seconds? {
+        return None;
+    }
+    if projected_exhaustion_unix_seconds <= now_unix_seconds {
+        return Some("runs out now".to_owned());
+    }
+
+    Some(format!(
+        "runs out {}",
+        format_duration(projected_exhaustion_unix_seconds.saturating_sub(now_unix_seconds))
+    ))
 }
 
 fn reset_pace_view_model_from_multiple_basis_points(
@@ -2587,6 +2615,7 @@ fn reset_pace_view_model_from_multiple_basis_points(
     ResetPaceViewModel {
         state,
         multiple_label: format_reset_pace_multiple_label(multiple_hundredths),
+        impact_label: None,
         semantic_label,
         meter_left_segments: ResetPaceMeterSegments {
             filled: left_filled,
@@ -3751,6 +3780,42 @@ mod tests {
                 "{multiple_basis_points} basis points should classify correctly"
             );
         }
+    }
+
+    #[test]
+    fn quota_status_reset_pace_over_two_x_shows_runout_impact() {
+        let snapshot = QuotaPaceSnapshot {
+            remaining_headroom: 10,
+            reset_unix_seconds: Some(NOW + 10 * 60 * 60),
+            projected_exhaustion_unix_seconds: Some(NOW + 3 * 60 * 60),
+            projected_candidate_burn_basis_points_per_hour: Some(300),
+            aggregate_burn_basis_points_per_hour: Some(300),
+            per_connection_burn_basis_points_per_hour: None,
+            confidence: QuotaRunRateConfidence::Low,
+        };
+
+        let view_model = reset_pace_view_model_from_snapshot(Some(snapshot), NOW);
+
+        assert_eq!(view_model.multiple_label, "3.00x reset pace");
+        assert_eq!(view_model.impact_label, Some("runs out 3h".to_owned()));
+    }
+
+    #[test]
+    fn quota_status_reset_pace_at_two_x_keeps_multiplier_label() {
+        let snapshot = QuotaPaceSnapshot {
+            remaining_headroom: 10,
+            reset_unix_seconds: Some(NOW + 10 * 60 * 60),
+            projected_exhaustion_unix_seconds: Some(NOW + 5 * 60 * 60),
+            projected_candidate_burn_basis_points_per_hour: Some(200),
+            aggregate_burn_basis_points_per_hour: Some(200),
+            per_connection_burn_basis_points_per_hour: None,
+            confidence: QuotaRunRateConfidence::Low,
+        };
+
+        let view_model = reset_pace_view_model_from_snapshot(Some(snapshot), NOW);
+
+        assert_eq!(view_model.multiple_label, "2.00x reset pace");
+        assert_eq!(view_model.impact_label, None);
     }
 
     #[test]
