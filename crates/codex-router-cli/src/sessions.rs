@@ -37,12 +37,6 @@ const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
 const SESSION_RECORD_PAGE_SIZE: usize = 250;
-#[cfg(all(debug_assertions, not(test)))]
-const DEBUG_CODEX_HOME_ENV: &str = "CODEX_ROUTER_DEBUG_CODEX_HOME";
-#[cfg(all(debug_assertions, not(test)))]
-const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
-#[cfg(all(debug_assertions, not(test)))]
-const DEFAULT_DEBUG_CODEX_HOME: &str = "tmp/dev-state/codex-home";
 
 /// Session search root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -695,29 +689,23 @@ impl RootFilter {
 }
 
 fn codex_home(context: &CliContext) -> Result<PathBuf, SessionsCommandError> {
-    if let Some(codex_home) = context.env_var("CODEX_HOME") {
-        return Ok(PathBuf::from(codex_home));
-    }
-    #[cfg(all(debug_assertions, not(test)))]
-    {
-        if context.env_var(USE_HOME_DEFAULT_ENV).is_none() {
-            if let Some(debug_home) = context.env_var(DEBUG_CODEX_HOME_ENV)
-                && !debug_home.is_empty()
-            {
-                return Ok(PathBuf::from(debug_home));
-            }
+    codex_home_from_environment(
+        context.env_var("CODEX_HOME").map(PathBuf::from),
+        context.env_var("HOME").map(PathBuf::from),
+    )
+}
 
-            let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-            return Ok(workspace_root.join(DEFAULT_DEBUG_CODEX_HOME));
-        }
+fn codex_home_from_environment(
+    codex_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, SessionsCommandError> {
+    if let Some(codex_home) = codex_home {
+        return Ok(codex_home);
     }
-    let Some(home) = context.env_var("HOME") else {
+    let Some(home) = home else {
         return Err(SessionsCommandError::CodexHomeUnavailable);
     };
-    Ok(PathBuf::from(home).join(".codex"))
+    Ok(home.join(".codex"))
 }
 
 fn resolve_current_provider(codex_home: &Path) -> Result<String, SessionsCommandError> {
@@ -1339,12 +1327,14 @@ fn format_duration_ms(duration_ms: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::SessionConversationPreview;
+    use super::codex_home_from_environment;
     use super::deferred_rollout_source;
     use super::extract_recent_conversation_snippets;
     use super::format_duration_ms;
     use super::validated_rollout_path;
     use serde_json::json;
     use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn duration_format_uses_now_without_suffix_for_subminute_values() {
@@ -1506,6 +1496,23 @@ mod tests {
         assert_eq!(
             extract_recent_conversation_snippets(&jsonl),
             vec!["actual resumed thread message".to_owned()]
+        );
+    }
+
+    #[test]
+    fn codex_home_resolution_uses_real_home_without_debug_redirect() {
+        let home = PathBuf::from("/tmp/codex-router-home-policy");
+        let explicit_codex_home = PathBuf::from("/tmp/explicit-codex-home");
+
+        assert_eq!(
+            codex_home_from_environment(None, Some(home.clone()))
+                .expect("HOME should resolve Codex home"),
+            home.join(".codex")
+        );
+        assert_eq!(
+            codex_home_from_environment(Some(explicit_codex_home.clone()), Some(home))
+                .expect("CODEX_HOME should win"),
+            explicit_codex_home
         );
     }
 
