@@ -234,6 +234,7 @@ dependencies = [
  "codex-router-selection",
  "codex-router-state",
  "comfy-table",
+ "crossterm",
  "futures-util",
  "indicatif",
  "iocraft",

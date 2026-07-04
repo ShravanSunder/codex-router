@@ -9,6 +9,8 @@ use crate::presentation::session_picker::model::SessionsPickerModel;
 use crate::presentation::session_picker::model::VISIBLE_SESSION_ROWS;
 use crate::presentation::session_picker::model::visible_window_start;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
+use crate::presentation::session_picker::request::SessionsPickerDataQuery;
+use crate::presentation::session_picker::request::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionConversationPreview;
 use crate::sessions::SessionConversationSource;
@@ -17,10 +19,11 @@ use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
-const SIDECAR_PICKER_WIDTH: usize = 96;
+const SIDECAR_PICKER_WIDTH: usize = 160;
 const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
 const MAX_VISIBLE_RECORDS: usize = VISIBLE_SESSION_ROWS;
+const START_NEW_DETAILS_HEIGHT: usize = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConversationPreviewLoadRequest {
@@ -43,8 +46,15 @@ struct SelectedConversationPreview {
 #[derive(Default, Props)]
 pub(crate) struct SessionsPickerComponentProps<'a> {
     request: SessionsPickerRequest,
+    record_loader: Option<SessionsPickerRecordLoader>,
     width: usize,
     selected_outcome_out: Option<&'a mut Option<SessionsPickerOutcome>>,
+}
+
+#[derive(Clone)]
+struct SessionRecordsReloadRequest {
+    query: SessionsPickerDataQuery,
+    loader: SessionsPickerRecordLoader,
 }
 
 #[component]
@@ -54,14 +64,41 @@ pub(crate) fn SessionsPickerComponent<'a>(
 ) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
     let (terminal_width, _) = hooks.use_terminal_size();
-    let width = if props.width == 0 {
-        usize::from(terminal_width)
-    } else {
-        props.width
-    };
+    let live_terminal_width = props.width == 0;
+    let observed_width = hooks.use_state(|| {
+        if live_terminal_width {
+            let width = usize::from(terminal_width);
+            if width == 0 { MIN_PICKER_WIDTH } else { width }
+        } else {
+            props.width
+        }
+    });
+    let width = observed_width.get();
     let mut model = hooks.use_state(|| SessionsPickerModel::new(props.request.clone(), width));
+    if model.read().width != width {
+        model.write().set_width(width);
+    }
     let mut conversation_cache =
         hooks.use_state(BTreeMap::<String, ConversationPreviewLoadState>::new);
+    let reload_records = hooks.use_async_handler({
+        let mut model = model;
+        move |request: SessionRecordsReloadRequest| async move {
+            let query = request.query;
+            let loader = request.loader;
+            let loaded_records = tokio::task::spawn_blocking({
+                let query = query.clone();
+                move || loader(query)
+            })
+            .await;
+            let Ok(Ok(records)) = loaded_records else {
+                return;
+            };
+            let mut model_value = model.write();
+            if model_value.data_query() == query {
+                model_value.replace_records(records);
+            }
+        }
+    });
     let load_conversation = hooks.use_async_handler({
         let mut conversation_cache = conversation_cache;
         move |request: ConversationPreviewLoadRequest| async move {
@@ -82,9 +119,18 @@ pub(crate) fn SessionsPickerComponent<'a>(
     });
     let mut selected_outcome = hooks.use_state(|| Option::<SessionsPickerOutcome>::None);
     let mut should_cancel = hooks.use_state(|| false);
+    let record_loader = props.record_loader.clone();
 
     hooks.use_terminal_events({
+        let mut observed_width = observed_width;
+        let record_loader = record_loader.clone();
         move |event| {
+            if let TerminalEvent::Resize(width, _) = event {
+                if live_terminal_width {
+                    observed_width.set(usize::from(width));
+                }
+                return;
+            }
             let TerminalEvent::Key(KeyEvent {
                 code,
                 kind,
@@ -102,6 +148,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
             }
 
             let mut model_value = model.write();
+            let previous_query = model_value.data_query();
             match code {
                 KeyCode::Down => model_value.handle_key(SessionsPickerKey::MoveDown),
                 KeyCode::Up => model_value.handle_key(SessionsPickerKey::MoveUp),
@@ -144,6 +191,17 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     }
                 }
                 _ => {}
+            }
+            let next_query = model_value.data_query();
+            drop(model_value);
+
+            if next_query != previous_query
+                && let Some(loader) = record_loader.clone()
+            {
+                reload_records(SessionRecordsReloadRequest {
+                    query: next_query,
+                    loader,
+                });
             }
         }
     });
@@ -241,39 +299,35 @@ fn render_picker_view(
     children.extend(render_filter_controls(model, content_width));
 
     let visible_len = model.visible_len();
-    if visible_len == 0 {
-        children.push(render_empty_state(model));
-    } else {
-        let selected_record = model.selected_record();
-        if model.width >= SIDECAR_PICKER_WIDTH {
-            let list_width = (content_width.saturating_sub(2) / 2).max(42);
-            let detail_width = content_width.saturating_sub(list_width + 2).max(28);
-            let list_height = session_list_height(visible_len, model.selected_index);
-            let details_panel_height = selected_record
-                .map(|record| {
-                    detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
-                })
-                .unwrap_or(2);
-            let main_height = list_height.max(details_panel_height);
-            children.push(
-                element! {
-                    View(width: 100pct, height: main_height as u32) {
-                        #(render_session_list(model, list_width))
-                        View(width: 2) { Text(content: "") }
-                        #(selected_record
-                            .map(|record| render_details(record, detail_width, selected_conversation))
-                            .unwrap_or_else(|| render_empty_state(model)))
-                    }
+    let selected_record = model.selected_record();
+    if model.width >= SIDECAR_PICKER_WIDTH {
+        let list_width = (content_width.saturating_sub(2) / 2).max(42);
+        let detail_width = content_width.saturating_sub(list_width + 2).max(28);
+        let list_height = session_list_height(visible_len, model.selected_index);
+        let details_panel_height = selected_record
+            .map(|record| {
+                detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
+            })
+            .unwrap_or(START_NEW_DETAILS_HEIGHT);
+        let main_height = list_height.max(details_panel_height);
+        children.push(
+            element! {
+                View(width: 100pct, height: main_height as u32) {
+                    #(render_session_list(model, list_width))
+                    View(width: 2) { Text(content: "") }
+                    #(selected_record
+                        .map(|record| render_details(record, detail_width, selected_conversation))
+                        .unwrap_or_else(|| render_start_new_details(model, detail_width)))
                 }
-                .into_any(),
-            );
-        } else {
-            children.push(render_session_list(model, content_width));
-            if model.width >= NARROW_PICKER_WIDTH
-                && let Some(record) = selected_record
-            {
-                children.push(render_details(record, content_width, selected_conversation));
             }
+            .into_any(),
+        );
+    } else {
+        children.push(render_session_list(model, content_width));
+        if model.width >= NARROW_PICKER_WIDTH
+            && let Some(record) = selected_record
+        {
+            children.push(render_details(record, content_width, selected_conversation));
         }
     }
 
@@ -306,15 +360,17 @@ fn picker_content_height(
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let heading_height = 1 + filter_control_height(content_width);
     let visible_len = model.visible_len();
-    let body_height = if visible_len == 0 {
-        2
-    } else if model.width >= SIDECAR_PICKER_WIDTH {
-        let conversation = selected_conversation
-            .or_else(|| model.selected_record().map(|record| &record.conversation));
-        session_list_height(visible_len, model.selected_index).max(detail_height(conversation))
+    let body_height = if model.width >= SIDECAR_PICKER_WIDTH {
+        let details_height = if let Some(record) = model.selected_record() {
+            let conversation = selected_conversation.unwrap_or(&record.conversation);
+            detail_height(Some(conversation))
+        } else {
+            START_NEW_DETAILS_HEIGHT
+        };
+        session_list_height(visible_len, model.selected_index).max(details_height)
     } else {
         let list_height = session_list_height(visible_len, model.selected_index);
-        if model.width >= NARROW_PICKER_WIDTH {
+        if model.width >= NARROW_PICKER_WIDTH && model.selected_record().is_some() {
             let conversation = selected_conversation
                 .or_else(|| model.selected_record().map(|record| &record.conversation));
             list_height + detail_height(conversation)
@@ -421,29 +477,26 @@ fn control_line(parts: Vec<String>) -> AnyElement<'static> {
     .into_any()
 }
 
-fn render_empty_state(model: &SessionsPickerModel) -> AnyElement<'static> {
+fn render_start_new_details(model: &SessionsPickerModel, width: usize) -> AnyElement<'static> {
+    let detail_width = width.saturating_sub(4);
     element! {
         View(
-            width: 100pct,
+            width: width as u32,
+            height: START_NEW_DETAILS_HEIGHT as u32,
             flex_direction: FlexDirection::Column,
-            background_color: Color::DarkGrey,
+            border_style: BorderStyle::Single,
+            border_color: Color::DarkGrey,
             padding_left: 1,
             padding_right: 1,
+            overflow: Overflow::Hidden,
         ) {
-            Text(
-                content: "Start new session",
-                color: Color::White,
-                weight: Weight::Bold,
-            )
-            Text(
-                content: if model.search.is_empty() {
-                    "No existing sessions match these filters"
-                } else {
-                    "No matching sessions"
-                },
-                color: Color::Grey,
-                weight: Weight::Normal,
-            )
+            Text(content: "Start new session", color: Color::Cyan, weight: Weight::Bold)
+            Text(content: fit_line(&start_new_args_label(model), detail_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            #(if model.visible_record_len() == 0 {
+                Some(detail_text(no_matching_sessions_label(model), detail_width, Color::Grey))
+            } else {
+                None
+            })
         }
     }
     .into_any()
@@ -473,7 +526,13 @@ fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<
         if visible_index > window_start {
             rows.push(list_gap());
         }
-        if let Some(record) = model.visible_record_at(visible_index) {
+        if visible_index == 0 {
+            rows.push(render_start_new_row(
+                model,
+                visible_index == selected_index,
+                row_width,
+            ));
+        } else if let Some(record) = model.visible_choice_record_at(visible_index) {
             rows.push(render_record_row(
                 record,
                 visible_index == selected_index,
@@ -513,6 +572,65 @@ fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<
         }
     }
     .into_any()
+}
+
+fn render_start_new_row(
+    model: &SessionsPickerModel,
+    selected: bool,
+    width: usize,
+) -> AnyElement<'static> {
+    let foreground = if selected { Color::White } else { Color::Grey };
+    let title_prefix = if selected { "❯ " } else { "  " };
+    let title_width = width.saturating_sub(18).max(14);
+    let first_line = fit_line(
+        &format!(
+            "{title_prefix}{:<title_width$} {:>6} {:>6}",
+            "Start new session", "-", "-"
+        ),
+        width.saturating_sub(2),
+    );
+    let metadata_line = if model.visible_record_len() == 0 {
+        format!(
+            "    {}  {}",
+            no_matching_sessions_label(model),
+            start_new_args_label(model)
+        )
+    } else {
+        format!("    {}", start_new_args_label(model))
+    };
+    let second_line = fit_line(&metadata_line, width.saturating_sub(2));
+
+    element! {
+        View(
+            width: width as u32,
+            flex_direction: FlexDirection::Column,
+            background_color: Color::DarkGrey,
+            padding_left: 1,
+            padding_right: 1,
+            padding_top: 0,
+            padding_bottom: 0,
+        ) {
+            Text(content: first_line, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            Text(content: second_line, color: Color::Grey, weight: Weight::Light, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
+fn no_matching_sessions_label(model: &SessionsPickerModel) -> &'static str {
+    if model.search.is_empty() {
+        "No existing sessions match these filters"
+    } else {
+        "No matching sessions"
+    }
+}
+
+fn start_new_args_label(model: &SessionsPickerModel) -> String {
+    if model.request.new_session_args_display.is_empty() {
+        "no extra args".to_owned()
+    } else {
+        format!("args: {}", model.request.new_session_args_display)
+    }
 }
 
 fn render_session_header(width: usize) -> AnyElement<'static> {
@@ -795,6 +913,7 @@ fn truncate_middle(value: &str, max_chars: usize) -> String {
 
 pub(crate) fn run_sessions_picker(
     request: SessionsPickerRequest,
+    record_loader: Option<SessionsPickerRecordLoader>,
 ) -> io::Result<Option<SessionsPickerOutcome>> {
     let mut selected_outcome = None;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -804,6 +923,7 @@ pub(crate) fn run_sessions_picker(
         element! {
             SessionsPickerComponent(
                 request: request,
+                record_loader: record_loader,
                 width: 0usize,
                 selected_outcome_out: &mut selected_outcome,
             )
@@ -819,8 +939,10 @@ mod tests {
     use futures_util::StreamExt;
     use iocraft::prelude::*;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::presentation::session_picker::test_support::picker_record;
     use crate::presentation::session_picker::test_support::picker_request;
     use crate::sessions::SessionConversationPreview;
     use crate::sessions::SessionPickerRecord;
@@ -829,7 +951,7 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_picker_iocraft_mock_terminal_handles_keys() {
-        let mut selected_outcome = None;
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
         let actual = element! {
             SessionsPickerComponent(
                 request: picker_request(),
@@ -885,6 +1007,62 @@ mod tests {
             actual.iter().any(|snapshot| snapshot
                 .contains("Scope: [worktree]    Threads: [all]    Sort: [created]")),
             "ctrl shortcuts should cycle scope, threads, and sort: {actual:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_filter_shortcuts_reload_records_from_query_source() {
+        let observed_queries = Arc::new(Mutex::new(Vec::<SessionsPickerDataQuery>::new()));
+        let loader_queries = Arc::clone(&observed_queries);
+        let record_loader: SessionsPickerRecordLoader = Arc::new(move |query| {
+            loader_queries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(query);
+            Ok(vec![picker_record(
+                "thread-reloaded",
+                "Reloaded SQL result",
+                "/repo/project-a",
+                "codex-router",
+                "subagent",
+            )])
+        });
+        let mut request = picker_request();
+        request.records = vec![picker_record(
+            "thread-initial",
+            "Initial SQL result",
+            "/repo/project-a",
+            "codex-router",
+            "cli",
+        )];
+
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let _actual = element! {
+            SessionsPickerComponent(
+                request,
+                record_loader: Some(record_loader),
+                width: 100usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                ctrl_key('t'),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .collect::<Vec<_>>()
+        .await;
+
+        let queries = observed_queries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            queries
+                .iter()
+                .any(|query| query.source == SessionsSource::All),
+            "ctrl-t should reload records for the next thread-source query: {queries:?}"
         );
     }
 
@@ -1149,6 +1327,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessions_picker_uses_sidecar_only_at_160_columns() {
+        let stacked_text = render_picker_capture(
+            capture_picker_request(),
+            159,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        assert!(
+            !has_sidecar_details(&stacked_text),
+            "session picker should stack details below 160 columns:\n{stacked_text}"
+        );
+
+        let sidecar_text = render_picker_capture(
+            capture_picker_request(),
+            160,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        assert!(
+            has_sidecar_details(&sidecar_text),
+            "session picker should place details on the right at 160 columns:\n{sidecar_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_reflows_when_terminal_width_changes() {
+        let frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 0usize,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                TerminalEvent::Resize(159, 40),
+                TerminalEvent::Resize(160, 40),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            frames.iter().any(|frame| !has_sidecar_details(frame)),
+            "session picker should render a stacked frame after shrinking below 160 columns: {frames:?}"
+        );
+        assert!(
+            frames.iter().any(|frame| has_sidecar_details(frame)),
+            "session picker should render a sidecar frame after growing to 160 columns: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "writes visual session picker capture artifacts for design review"]
     async fn sessions_picker_capture_artifacts_for_design_review() {
         let capture_dir = capture_dir();
@@ -1202,6 +1440,11 @@ mod tests {
             .last()
             .cloned()
             .unwrap_or_else(|| panic!("picker should render at least one frame"))
+    }
+
+    fn has_sidecar_details(text: &str) -> bool {
+        text.lines()
+            .any(|line| line.matches('┌').count() >= 2 && line.matches('┐').count() >= 2)
     }
 
     fn ctrl_key(character: char) -> TerminalEvent {

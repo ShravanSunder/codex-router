@@ -33,14 +33,11 @@ router_root="${smoke_root}/router"
 mkdir -p "${router_root}"
 
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
-  quota status \
-  --no-refresh \
+  account list \
   --router-root "${router_root}" \
-  --format plain \
-  --now-unix-seconds 10000 \
   >/dev/null
 
-sqlite3 "${router_root}/state.sqlite" <<'SQL'
+seed_sql_statement="
 INSERT INTO accounts (account_id, label, status, active_credential_generation)
 VALUES
   ('acct_askluna', 'askluna', 'enabled', 1),
@@ -64,7 +61,9 @@ VALUES
   ('acct_matches', 'responses', 604800, 'eligible', 54, 525000, 0, 10000),
   ('acct_ssdev', 'responses', 18000, 'eligible', 100, 15000, 1, 10000),
   ('acct_ssdev', 'responses', 604800, 'eligible', 16, 120000, 0, 10000);
-SQL
+"
+
+sqlite3 -batch -cmd ".timeout 5000" "${router_root}/state.sqlite" "${seed_sql_statement}"
 
 table_output="${smoke_root}/quota-status-table.txt"
 plain_output="${smoke_root}/quota-status-plain.txt"
@@ -101,12 +100,16 @@ grep -q "pace" "${table_output}"
 grep -q "burn" "${table_output}"
 grep -q "routing" "${table_output}"
 grep -q "next use" "${table_output}"
-grep -q "█" "${table_output}"
+grep -q "##" "${table_output}"
 grep -q "askluna" "${table_output}"
 grep -q "matches" "${table_output}"
 grep -q "ssdev" "${table_output}"
 grep -Eq "preferred|available|blocked|needs probe" "${table_output}"
-grep -q "quota guard" "${plain_output}"
+grep -q "burn unavailable" "${plain_output}"
+if grep -q "quota guard" "${plain_output}" "${table_output}"; then
+  echo "quota status exposed legacy quota guard copy" >&2
+  exit 1
+fi
 if grep -q "score" "${plain_output}" "${table_output}"; then
   echo "quota status exposed legacy score output" >&2
   exit 1
@@ -131,7 +134,7 @@ for forbidden in "acct_askluna" "acct_matches" "acct_ssdev" "access-token" "refr
   fi
 done
 
-python3 - "${json_output}" <<'PY'
+python3 -c '
 import json
 import sys
 
@@ -189,6 +192,6 @@ for account in payload["accounts"]:
         "blocked_window_exhausted",
         "blocked_window_ineligible",
     }
-PY
+' "${json_output}"
 
 echo "quota status smoke ok: ${smoke_root}"

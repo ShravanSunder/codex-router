@@ -8,6 +8,7 @@ use crate::presentation::session_picker::filters::root_matches;
 use crate::presentation::session_picker::filters::source_matches;
 #[cfg(test)]
 use crate::presentation::session_picker::render::render_model_snapshot;
+use crate::presentation::session_picker::request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsProvider;
@@ -47,6 +48,7 @@ impl SessionsPickerModel {
             visible_rows_generation: 0,
         };
         model.rebuild_visible_rows();
+        model.select_first_record_when_available();
         model
     }
 
@@ -118,6 +120,26 @@ impl SessionsPickerModel {
         }
     }
 
+    pub(crate) fn set_width(&mut self, width: usize) {
+        self.width = width;
+    }
+
+    pub(crate) fn data_query(&self) -> SessionsPickerDataQuery {
+        SessionsPickerDataQuery {
+            root: self.root,
+            provider: self.provider.clone(),
+            source: self.source,
+            sort: self.sort,
+            search: self.search.clone(),
+        }
+    }
+
+    pub(crate) fn replace_records(&mut self, records: Vec<SessionPickerRecord>) {
+        self.request.records = records;
+        self.rebuild_visible_rows();
+        self.clamp_selection();
+    }
+
     pub(crate) fn selected_session_id(&self) -> Option<&str> {
         self.selected_record()
             .map(|record| record.session_id.as_str())
@@ -141,11 +163,22 @@ impl SessionsPickerModel {
     }
 
     pub(super) fn visible_len(&self) -> usize {
+        self.visible_indices.len() + 1
+    }
+
+    pub(super) fn visible_record_len(&self) -> usize {
         self.visible_indices.len()
     }
 
     pub(super) fn selected_record(&self) -> Option<&SessionPickerRecord> {
-        self.visible_record_at(self.selected_index)
+        self.visible_choice_record_at(self.selected_index)
+    }
+
+    pub(super) fn visible_choice_record_at(&self, index: usize) -> Option<&SessionPickerRecord> {
+        if index == 0 {
+            return None;
+        }
+        self.visible_record_at(index - 1)
     }
 
     pub(super) fn visible_record_at(&self, index: usize) -> Option<&SessionPickerRecord> {
@@ -197,6 +230,12 @@ impl SessionsPickerModel {
         });
         self.visible_indices = indices;
         self.visible_rows_generation = self.visible_rows_generation.saturating_add(1);
+    }
+
+    fn select_first_record_when_available(&mut self) {
+        if !self.visible_indices.is_empty() {
+            self.selected_index = 1;
+        }
     }
 
     fn clamp_selection(&mut self) {

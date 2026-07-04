@@ -22,6 +22,7 @@ codex-router-secret-store = { path = "../codex-router-secret-store", version = "
 codex-router-state = { path = "../codex-router-state", version = "0.1.2" }
 clap.workspace = true
 comfy-table.workspace = true
+crossterm.workspace = true
 indicatif.workspace = true
 iocraft.workspace = true
 opentelemetry.workspace = true

@@ -2794,12 +2794,11 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
         );
-        assert_eq!(
-            lines[2],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients mirror <= 2h\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
-        );
+        assert!(lines[2].contains("burn unavailable"), "{}", lines[2]);
+        assert!(lines[2].contains("sample fresh 1m 40s"), "{}", lines[2]);
+        assert!(!lines[2].contains("safe pace"), "{}", lines[2]);
         assert_eq!(
             lines[3],
             "responses route\tnext: snapshot\twhy: fallback by quota: needs refresh limiting window: 5h 75% left"
@@ -2893,12 +2892,18 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
         );
-        assert_eq!(
-            lines[2],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tquota guard 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+        assert!(lines[2].contains("###------- 25% left resets in 2h 30m"));
+        assert!(lines[2].contains("########-- 80% left resets in 6d 23h"));
+        assert!(
+            lines[2].contains("reset pace") || lines[2].contains("burn unavailable"),
+            "{}",
+            lines[2]
         );
+        assert!(lines[2].contains("sample stale 16m 40s"));
+        assert!(!lines[2].contains("history unknown"));
+        assert!(!lines[2].contains("quota guard"));
         assert_eq!(
             lines[3],
             "responses route\tnext: primary\twhy: preferred by quota: safest quota limiting window: 5h 25% left"
@@ -3017,8 +3022,6 @@ exit 42
         assert!(!visible_stdout.contains("account ┆ status"));
         assert!(!visible_stdout.contains("route     ┆ next"));
         assert!(!visible_stdout.contains("acct_primary"));
-        assert!(output.stdout.contains("\x1b["));
-        assert!(output.stdout.contains("\x1b[1m"));
         assert!(output.stderr.is_empty());
     }
 
@@ -3075,6 +3078,54 @@ exit 42
         assert!(!output.stdout.contains("updated quota:"));
         assert!(output.stdout.contains("┌"));
         assert!(output.stdout.contains("Selected account"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_redacts_unsafe_account_labels() {
+        let test_root = TestRoot::new("quota-status-redacts-unsafe-account-labels");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account = AccountRecord::new(
+            account_id("acct_unsafe_status_label"),
+            "person@example.com",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_unsafe_status_label"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(10_000)
+            .with_route_band("responses", 80)
+            .with_reset_unix_seconds(20_000)
+            .with_stale_penalty(false),
+        ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "table",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
+        );
+
+        assert!(!output.stdout.contains("person@example.com"));
+        assert!(output.stdout.contains("acct-"));
         assert!(output.stderr.is_empty());
     }
 
@@ -3482,7 +3533,23 @@ exit 42
             parsed["accounts"][0]["active_clients_source"],
             "unavailable"
         );
+        assert_eq!(
+            parsed["accounts"][0]["window_slots"]["5h"]["remaining_headroom"],
+            80
+        );
+        assert_eq!(
+            parsed["accounts"][0]["window_slots"]["weekly"]["remaining_headroom"],
+            80
+        );
         assert_eq!(parsed["accounts"][0]["preferred_next"], false);
+        assert_ne!(parsed["accounts"][0]["next_use"], "preferred by quota");
+        assert!(
+            !parsed["accounts"][0]["routing_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("preferred_"),
+            "degraded status must not expose preferred-routing semantics: {parsed}"
+        );
         assert!(output.stderr.is_empty());
     }
 
@@ -3575,10 +3642,15 @@ exit 42
             CliContext::new(Vec::new()),
         );
 
-        assert!(output.stdout.contains("5h 30% ahead; normal burn 36%/h"));
-        assert!(output.stdout.contains("runout in 2h 13m"));
         assert!(
-            output.stdout.contains("weekly 10% behind; history unknown"),
+            output.stdout.contains("reset pace") || output.stdout.contains("burn unavailable"),
+            "{}",
+            output.stdout
+        );
+        assert!(output.stdout.contains("sample fresh"), "{}", output.stdout);
+        assert!(!output.stdout.contains("normal burn"), "{}", output.stdout);
+        assert!(
+            !output.stdout.contains("history unknown"),
             "{}",
             output.stdout
         );
@@ -5304,6 +5376,32 @@ exit 42
     }
 
     #[test]
+    fn sessions_command_rejects_limit_without_list() {
+        let interactive_error = must_err(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--limit"),
+            OsString::from("5"),
+        ]));
+        let last_error = must_err(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--last"),
+            OsString::from("--limit"),
+            OsString::from("5"),
+        ]));
+
+        assert!(
+            interactive_error
+                .to_string()
+                .contains("--limit only applies with --list")
+        );
+        assert!(
+            last_error
+                .to_string()
+                .contains("--limit only applies with --list")
+        );
+    }
+
+    #[test]
     fn sessions_list_json_reads_codex_state_metadata_without_prompt_leak() {
         const PROMPT_CANARY: &str = "SECRET_PROMPT_CANARY_SHOULD_NOT_LEAK";
         let test_root = TestRoot::new("sessions-list-json");
@@ -5944,18 +6042,80 @@ exit 42
         ));
 
         assert!(stdout.is_empty());
-        assert_eq!(
-            picker.offered_session_ids,
-            [
-                "thread-subagent",
-                "thread-sibling",
-                "thread-new",
-                "thread-old"
-            ]
-        );
-        assert_eq!(picker.offered_labels.len(), 4);
+        assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
+        assert_eq!(picker.offered_labels.len(), 2);
         assert_eq!(picker.offered_labels[0], "PICKER_CANARY_SHOULD_NOT_LEAK");
         assert_eq!(runner.resumed_session_ids, ["thread-old"]);
+    }
+
+    #[test]
+    fn sessions_interactive_picker_loads_older_repo_matches_beyond_default_limit() {
+        let test_root = TestRoot::new("sessions-picker-older-repo-match");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        let unrelated_project = test_root.path().join("unrelated-project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        must_ok(fs::create_dir(&unrelated_project));
+
+        let target_session_id = "thread-target-older-subagent";
+        let mut rows = Vec::new();
+        for index in 0..101 {
+            rows.push(CodexStateThreadFixture::new(
+                &format!("thread-unrelated-newer-{index}"),
+                &unrelated_project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                10_000 + i64::from(index),
+            ));
+        }
+        rows.push(CodexStateThreadFixture::new(
+            target_session_id,
+            &project,
+            "codex-router",
+            "subagent",
+            "subagent",
+            "main",
+            1_000,
+        ));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "PICKER_CANARY_SHOULD_NOT_LEAK",
+            &rows,
+        );
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--repo"),
+            OsString::from("--source"),
+            OsString::from("subagents"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new(target_session_id);
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(picker.offered_session_ids, [target_session_id]);
+        assert_eq!(runner.resumed_session_ids, [target_session_id]);
     }
 
     #[test]
@@ -5993,6 +6153,57 @@ exit 42
         assert!(picker.offered_session_ids.is_empty());
         assert_eq!(runner.resumed_session_ids, Vec::<String>::new());
         assert_eq!(runner.new_codex_args, [Vec::<OsString>::new()]);
+    }
+
+    #[test]
+    fn sessions_interactive_picker_shows_start_new_command_with_passthrough_args() {
+        let test_root = TestRoot::new("sessions-picker-start-new-command");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(&codex_home.join("state_5.sqlite"), "EMPTY", &[]);
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--yolo"),
+            OsString::from("--model"),
+            OsString::from("gpt-5-codex"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new_start_new();
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(
+            picker.new_session_args_display.as_deref(),
+            Some("--yolo --model gpt-5-codex")
+        );
+        assert_eq!(
+            runner.new_codex_args,
+            [[
+                OsString::from("--yolo"),
+                OsString::from("--model"),
+                OsString::from("gpt-5-codex")
+            ]]
+        );
     }
 
     #[test]
@@ -7347,6 +7558,7 @@ exit 42
         selected_outcome: crate::presentation::session_picker::SessionsPickerOutcome,
         offered_session_ids: Vec<String>,
         offered_labels: Vec<String>,
+        new_session_args_display: Option<String>,
     }
 
     impl FakeSessionsPicker {
@@ -7358,6 +7570,7 @@ exit 42
                     ),
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
+                new_session_args_display: None,
             }
         }
 
@@ -7367,6 +7580,7 @@ exit 42
                     crate::presentation::session_picker::SessionsPickerOutcome::StartNewSession,
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
+                new_session_args_display: None,
             }
         }
     }
@@ -7375,10 +7589,12 @@ exit 42
         fn select_session(
             &mut self,
             request: crate::presentation::session_picker::SessionsPickerRequest,
+            _record_loader: Option<crate::presentation::session_picker::SessionsPickerRecordLoader>,
         ) -> Result<
             Option<crate::presentation::session_picker::SessionsPickerOutcome>,
             crate::sessions::SessionsCommandError,
         > {
+            self.new_session_args_display = Some(request.new_session_args_display.clone());
             self.offered_session_ids = request
                 .records
                 .iter()

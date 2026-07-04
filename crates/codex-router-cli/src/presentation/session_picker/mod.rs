@@ -11,4 +11,6 @@ mod test_support;
 
 pub(crate) use action::SessionsPickerOutcome;
 pub(crate) use component::run_sessions_picker;
+pub(crate) use request::SessionsPickerDataQuery;
+pub(crate) use request::SessionsPickerRecordLoader;
 pub(crate) use request::SessionsPickerRequest;

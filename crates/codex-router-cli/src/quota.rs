@@ -1,6 +1,7 @@
 //! Quota command glue for persisted router-owned quota state.
 
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -73,12 +74,19 @@ use crate::credential_runtime::CliCredentialResolverOpenError;
 use crate::presentation::quota::QuotaSelectedAccountViewModel;
 use crate::presentation::quota::QuotaStatusAccountViewModel;
 use crate::presentation::quota::QuotaStatusViewModel;
+use crate::presentation::quota::ResetPaceMeterSegments;
+use crate::presentation::quota::ResetPaceState;
+use crate::presentation::quota::ResetPaceViewModel;
+use crate::presentation::quota::SampleConfidence;
+use crate::presentation::quota::SampleMetadata;
+use crate::presentation::quota::run_quota_status_view;
 use crate::presentation::quota::write_quota_status_view;
 use crate::router_root_or_default;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
 const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 300;
+const QUOTA_STATUS_SAMPLE_FRESH_SECONDS: u64 = 900;
 const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
 const QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 
@@ -1238,6 +1246,12 @@ fn render_quota_status_once(
     let unicode_bars = effective_format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
     match effective_format {
+        QuotaStatusFormat::Table if std::io::stdout().is_terminal() => {
+            let rows = report.rows();
+            let width = stdout_terminal_width.unwrap_or(100).max(40);
+            let view_model = quota_status_view_model(&report, rows, width);
+            run_quota_status_view(view_model).map_err(QuotaCommandError::Stdout)
+        }
         QuotaStatusFormat::Table => write_quota_table_with_style(
             stdout,
             &report,
@@ -1432,9 +1446,21 @@ fn quota_status_report(
         .as_ref()
         .map(|account_id| telemetry_hash(account_id.as_str()))
         .unwrap_or_else(|| "none".to_owned());
+    let preferred_selection_reason = preferred_next_account_id
+        .as_ref()
+        .and_then(|preferred_account_id| {
+            assessment
+                .accounts()
+                .iter()
+                .find(|account| account.account_id() == preferred_account_id)
+        })
+        .map_or("none", |account| {
+            routing_reason_json(account.routing_reason())
+        });
     tracing::info!(
         route_band = USER_QUOTA_ROUTE_BAND,
         selected_pool = selected_pool_json(selected_pool),
+        selection.reason = preferred_selection_reason,
         preferred.account_hash = preferred_next_hash.as_str(),
         active_client.source = active_client_mirror_source,
         "codex_router.quota_status_selection"
@@ -1458,7 +1484,7 @@ fn quota_status_report(
         .collect::<Vec<_>>();
     if !authoritative_projection {
         for row in &mut rows {
-            row.preferred_next = false;
+            row.normalize_degraded_projection_authority();
         }
     }
     emit_quota_status_metrics(USER_QUOTA_ROUTE_BAND, &rows);
@@ -1543,39 +1569,60 @@ fn quota_status_view_model(
                     report.now_unix_seconds,
                 ),
                 burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
+                sample_metadata: sample_metadata_from_display_window(
+                    &row.windows,
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    report.now_unix_seconds,
+                ),
+                reset_pace: reset_pace_view_model_from_snapshot(
+                    row.weekly_pace,
+                    report.now_unix_seconds,
+                ),
                 weekly_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds),
+                details: quota_selected_account_view_model(report, row),
             })
             .collect(),
-        selected: selected_row.map(|row| QuotaSelectedAccountViewModel {
-            account: row.account_label.clone(),
-            status: quota_state_text(row).to_owned(),
-            reason: first_line(&row.routing).to_owned(),
-            short_window: quota_window_visual_summary(
-                &row.windows,
-                V1_SHORT_WINDOW_SECONDS,
-                "",
-                report.now_unix_seconds,
-            )
-            .trim()
-            .to_owned(),
-            weekly_window: quota_window_visual_summary(
-                &row.windows,
-                V1_WEEKLY_WINDOW_SECONDS,
-                "",
-                report.now_unix_seconds,
-            )
-            .trim()
-            .to_owned(),
-            burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
-            burn_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds)
-                .replace("  ", " "),
-            total_rate: quota_total_rate_summary(row.weekly_pace),
-            connection_rate: quota_connection_rate_summary(row.weekly_pace),
-            active_clients: active_clients_label(row),
-            guards: format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure),
-            reset: row.reset_credits_available.clone(),
-            note: first_line(&row.routing).to_owned(),
-        }),
+        selected: selected_row.map(|row| quota_selected_account_view_model(report, row)),
+    }
+}
+
+fn quota_selected_account_view_model(
+    report: &QuotaStatusReport,
+    row: &QuotaStatusRow,
+) -> QuotaSelectedAccountViewModel {
+    QuotaSelectedAccountViewModel {
+        account: row.account_label.clone(),
+        status: quota_state_text(row).to_owned(),
+        reason: first_line(&row.routing).to_owned(),
+        short_window: quota_window_visual_summary(
+            &row.windows,
+            V1_SHORT_WINDOW_SECONDS,
+            "",
+            report.now_unix_seconds,
+        )
+        .trim()
+        .to_owned(),
+        weekly_window: quota_window_visual_summary(
+            &row.windows,
+            V1_WEEKLY_WINDOW_SECONDS,
+            "",
+            report.now_unix_seconds,
+        )
+        .trim()
+        .to_owned(),
+        burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
+        burn_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds).replace("  ", " "),
+        sample_metadata: sample_metadata_from_display_windows(
+            &row.windows,
+            report.now_unix_seconds,
+        ),
+        reset_pace: reset_pace_view_model_from_snapshot(row.weekly_pace, report.now_unix_seconds),
+        total_rate: quota_total_rate_summary(row.weekly_pace),
+        connection_rate: quota_connection_rate_summary(row.weekly_pace),
+        active_clients: active_clients_label(row),
+        guards: format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure),
+        reset: row.reset_credits_available.clone(),
+        note: first_line(&row.routing).to_owned(),
     }
 }
 
@@ -1587,10 +1634,14 @@ fn write_quota_plain(
     writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     writeln!(
         stdout,
-        "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
+        "account\tstatus\t5h\tweekly\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
+        let reset_pace =
+            reset_pace_view_model_from_snapshot(row.weekly_pace, report.now_unix_seconds);
+        let sample_metadata =
+            sample_metadata_from_display_windows(&row.windows, report.now_unix_seconds);
         writeln!(
             stdout,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -1598,8 +1649,8 @@ fn write_quota_plain(
             row.account_status,
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
-            row.pace.replace('\n', " "),
-            row.burn.replace('\n', " "),
+            plain_reset_pace_summary(&reset_pace),
+            plain_sample_metadata_summary(&sample_metadata),
             row.updated.replace('\n', " "),
             row.active_clients.replace('\n', " "),
             row.reset_credits_available,
@@ -1623,6 +1674,26 @@ fn write_selector_summary_plain(
         selector_summary(rows)
     )
     .map_err(QuotaCommandError::Stdout)
+}
+
+fn plain_reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {
+    if reset_pace.state == ResetPaceState::Unavailable {
+        return reset_pace.semantic_label.to_owned();
+    }
+    format!(
+        "{} {}",
+        reset_pace.multiple_label, reset_pace.semantic_label
+    )
+}
+
+fn plain_sample_metadata_summary(sample_metadata: &SampleMetadata) -> String {
+    if sample_metadata.confidence == SampleConfidence::Unknown {
+        return sample_metadata.semantic_label.to_owned();
+    }
+    format!(
+        "{} {}",
+        sample_metadata.semantic_label, sample_metadata.age_label
+    )
 }
 
 fn selected_account_label(rows: &[QuotaStatusRow]) -> &str {
@@ -1928,6 +1999,15 @@ impl QuotaStatusRow {
             weekly_burn_rate_confidence: assessment.weekly_burn_rate_confidence(),
         }
     }
+
+    fn normalize_degraded_projection_authority(&mut self) {
+        self.preferred_next = false;
+        if routing_reason_is_preferred(self.routing_reason) {
+            self.routing_reason = RoutingReason::UnknownFallbackAvailable;
+            self.routing = format_routing_reason(self.routing_reason).to_owned();
+            self.next_use = format_next_use_from_routing_reason(self.routing_reason).to_owned();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1998,7 +2078,7 @@ fn attach_history_estimates_to_display_windows(
     now_unix_seconds: u64,
     windows: &mut [DisplayQuotaWindow],
 ) -> Result<(), QuotaCommandError> {
-    let estimator = QuotaRunRateEstimator::new(DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS);
+    let estimator = display_quota_run_rate_estimator();
     let observed_from_unix_seconds =
         now_unix_seconds.saturating_sub(QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS);
     for window in windows {
@@ -2023,6 +2103,10 @@ fn attach_history_estimates_to_display_windows(
     }
 
     Ok(())
+}
+
+fn display_quota_run_rate_estimator() -> QuotaRunRateEstimator {
+    QuotaRunRateEstimator::new(QUOTA_STATUS_SAMPLE_FRESH_SECONDS)
 }
 
 fn quota_run_rate_observation_from_history(
@@ -2281,23 +2365,32 @@ fn quota_pace_snapshot(
     let weekly_window = windows
         .iter()
         .find(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS)?;
-    let aggregate_rate = projected_weekly_window
-        .and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour)
-        .or_else(|| {
-            weekly_window
-                .run_rate_estimate
-                .burn_rate_basis_points_per_hour()
-        });
-    let candidate_rate = projected_weekly_window
-        .and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour)
-        .or(aggregate_rate);
-    let projected_exhaustion = projected_weekly_window
-        .and_then(QuotaWindowFact::projected_exhaustion_unix_seconds)
-        .or_else(|| {
-            weekly_window
-                .run_rate_estimate
-                .projected_exhaustion_unix_seconds(now_unix_seconds)
-        });
+    let projected_aggregate_rate =
+        projected_weekly_window.and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour);
+    let display_aggregate_rate = weekly_window
+        .run_rate_estimate
+        .burn_rate_basis_points_per_hour();
+    let aggregate_rate = projected_aggregate_rate.or(display_aggregate_rate);
+    let projected_candidate_rate = projected_weekly_window
+        .and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour);
+    let candidate_rate = projected_candidate_rate.or(aggregate_rate);
+    let projected_exhaustion_from_projection =
+        projected_weekly_window.and_then(QuotaWindowFact::projected_exhaustion_unix_seconds);
+    let display_exhaustion = weekly_window
+        .run_rate_estimate
+        .projected_exhaustion_unix_seconds(now_unix_seconds);
+    let projected_exhaustion = projected_exhaustion_from_projection.or(display_exhaustion);
+    let projection_has_burn_estimate = projected_aggregate_rate.is_some()
+        || projected_candidate_rate.is_some()
+        || projected_exhaustion_from_projection.is_some();
+    let confidence = if projection_has_burn_estimate {
+        projected_weekly_window.map_or(
+            weekly_window.run_rate_estimate.confidence(),
+            QuotaWindowFact::burn_rate_confidence,
+        )
+    } else {
+        weekly_window.run_rate_estimate.confidence()
+    };
     Some(QuotaPaceSnapshot {
         remaining_headroom: weekly_window.remaining_headroom,
         reset_unix_seconds: weekly_window.reset_unix_seconds,
@@ -2306,23 +2399,23 @@ fn quota_pace_snapshot(
         aggregate_burn_basis_points_per_hour: aggregate_rate,
         per_connection_burn_basis_points_per_hour: projected_weekly_window
             .and_then(QuotaWindowFact::per_connection_burn_basis_points_per_hour),
-        confidence: projected_weekly_window.map_or(
-            weekly_window.run_rate_estimate.confidence(),
-            QuotaWindowFact::burn_rate_confidence,
-        ),
+        confidence,
     })
 }
 
 fn quota_pace_summary(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64) -> String {
     let Some(snapshot) = snapshot else {
-        return "pace unknown".to_owned();
+        return "burn unavailable".to_owned();
     };
     let direction = quota_pace_direction(snapshot, now_unix_seconds);
-    let pace_load = quota_pace_load(snapshot, now_unix_seconds).map_or_else(
-        || "safe pace unknown".to_owned(),
-        |load| format!("{load}% safe pace"),
-    );
-    format!("{direction}  {pace_load}")
+    let reset_pace = reset_pace_view_model_from_snapshot(Some(snapshot), now_unix_seconds);
+    if reset_pace.state == ResetPaceState::Unavailable {
+        return format!("{direction}  burn unavailable");
+    }
+    format!(
+        "{direction}  {} {}",
+        reset_pace.multiple_label, reset_pace.semantic_label
+    )
 }
 
 fn quota_total_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
@@ -2408,6 +2501,124 @@ fn quota_pace_load(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> Option
         return None;
     }
     Some(((candidate_rate.saturating_mul(100)) / safe_rate).min(999) as u32)
+}
+
+fn sample_metadata_from_display_windows(
+    windows: &[DisplayQuotaWindow],
+    now_unix_seconds: u64,
+) -> SampleMetadata {
+    let observed_unix_seconds = windows
+        .iter()
+        .filter(|window| !matches!(window.status, QuotaWindowStatus::Unknown))
+        .map(|window| window.observed_unix_seconds)
+        .collect::<Vec<_>>();
+    sample_metadata_from_observed_windows(&observed_unix_seconds, now_unix_seconds)
+}
+
+fn sample_metadata_from_display_window(
+    windows: &[DisplayQuotaWindow],
+    window_seconds: u64,
+    now_unix_seconds: u64,
+) -> SampleMetadata {
+    let observed_unix_seconds = windows
+        .iter()
+        .filter(|window| {
+            window.window_seconds == window_seconds
+                && !matches!(window.status, QuotaWindowStatus::Unknown)
+        })
+        .map(|window| window.observed_unix_seconds)
+        .collect::<Vec<_>>();
+    sample_metadata_from_observed_windows(&observed_unix_seconds, now_unix_seconds)
+}
+
+fn sample_metadata_from_observed_windows(
+    observed_unix_seconds: &[u64],
+    now_unix_seconds: u64,
+) -> SampleMetadata {
+    let Some(oldest_observed_unix_seconds) = observed_unix_seconds.iter().min().copied() else {
+        return SampleMetadata::default();
+    };
+    let age_seconds = now_unix_seconds.saturating_sub(oldest_observed_unix_seconds);
+    let confidence = if age_seconds <= QUOTA_STATUS_SAMPLE_FRESH_SECONDS {
+        SampleConfidence::Fresh
+    } else {
+        SampleConfidence::Stale
+    };
+    let semantic_label = match confidence {
+        SampleConfidence::Fresh => "sample fresh",
+        SampleConfidence::Stale => "sample stale",
+        SampleConfidence::Unknown => "sample unknown",
+    };
+    SampleMetadata {
+        confidence,
+        age_label: format_duration(age_seconds),
+        age_seconds: Some(age_seconds),
+        semantic_label,
+    }
+}
+
+fn reset_pace_view_model_from_snapshot(
+    snapshot: Option<QuotaPaceSnapshot>,
+    now_unix_seconds: u64,
+) -> ResetPaceViewModel {
+    reset_pace_view_model_from_multiple_basis_points(
+        snapshot.and_then(|snapshot| quota_pace_load(snapshot, now_unix_seconds)),
+    )
+}
+
+fn reset_pace_view_model_from_multiple_basis_points(
+    multiple_hundredths: Option<u32>,
+) -> ResetPaceViewModel {
+    let Some(multiple_hundredths) = multiple_hundredths else {
+        return ResetPaceViewModel::default();
+    };
+    let state = match multiple_hundredths {
+        0..=79 => ResetPaceState::UnderBurning,
+        80..=120 => ResetPaceState::Healthy,
+        _ => ResetPaceState::OverBurning,
+    };
+    let semantic_label = match state {
+        ResetPaceState::UnderBurning => "under",
+        ResetPaceState::Healthy => "healthy",
+        ResetPaceState::OverBurning => "over",
+        ResetPaceState::Unavailable => "burn unavailable",
+    };
+    let (left_filled, right_filled) = reset_pace_meter_fill(multiple_hundredths);
+    ResetPaceViewModel {
+        state,
+        multiple_label: format_reset_pace_multiple_label(multiple_hundredths),
+        semantic_label,
+        meter_left_segments: ResetPaceMeterSegments {
+            filled: left_filled,
+            empty: 7_usize.saturating_sub(left_filled),
+        },
+        meter_right_segments: ResetPaceMeterSegments {
+            filled: right_filled,
+            empty: 7_usize.saturating_sub(right_filled),
+        },
+        center_marker: '│',
+        unavailable_reason: None,
+    }
+}
+
+fn reset_pace_meter_fill(multiple_hundredths: u32) -> (usize, usize) {
+    if multiple_hundredths < 100 {
+        let under_distance = 100_u32.saturating_sub(multiple_hundredths).min(100);
+        (under_distance.saturating_mul(7).div_ceil(100) as usize, 0)
+    } else if multiple_hundredths > 100 {
+        let over_distance = multiple_hundredths.saturating_sub(100).min(100);
+        (0, over_distance.saturating_mul(7).div_ceil(100) as usize)
+    } else {
+        (0, 0)
+    }
+}
+
+fn format_reset_pace_multiple_label(multiple_hundredths: u32) -> String {
+    format!(
+        "{}.{:02}x reset pace",
+        multiple_hundredths / 100,
+        multiple_hundredths % 100
+    )
 }
 
 fn format_window_pace(
@@ -2503,6 +2714,19 @@ fn format_routing_cell(assessment: &BurnDownAccountAssessment) -> String {
     }
 }
 
+const fn routing_reason_is_preferred(reason: RoutingReason) -> bool {
+    matches!(
+        reason,
+        RoutingReason::PreferredNearResetDrainable
+            | RoutingReason::PreferredNearResetControlledDrain
+            | RoutingReason::PreferredWeeklyHealthier
+            | RoutingReason::PreferredWeeklyResetSoon
+            | RoutingReason::PreferredShortResetSoon
+            | RoutingReason::PreferredProjectedBurn
+            | RoutingReason::PreferredSafestQuota
+    )
+}
+
 fn format_routing_reason(reason: RoutingReason) -> &'static str {
     match reason {
         RoutingReason::PreferredNearResetDrainable => "preferred by quota: near-reset drainable",
@@ -2529,7 +2753,11 @@ fn format_routing_reason(reason: RoutingReason) -> &'static str {
 }
 
 fn format_next_use(assessment: &BurnDownAccountAssessment) -> &'static str {
-    match assessment.routing_reason() {
+    format_next_use_from_routing_reason(assessment.routing_reason())
+}
+
+fn format_next_use_from_routing_reason(reason: RoutingReason) -> &'static str {
+    match reason {
         RoutingReason::PreferredWeeklyHealthier
         | RoutingReason::PreferredNearResetDrainable
         | RoutingReason::PreferredNearResetControlledDrain
@@ -2930,7 +3158,7 @@ fn window_display_note(window: &DisplayQuotaWindow, now_unix_seconds: u64) -> St
     );
     match window.status {
         QuotaWindowStatus::Eligible => reset,
-        QuotaWindowStatus::Stale => format!("{reset}; needs refresh"),
+        QuotaWindowStatus::Stale => reset,
         QuotaWindowStatus::Unknown => "unknown; needs refresh".to_owned(),
         QuotaWindowStatus::Ineligible if window.remaining_headroom == 0 => "empty".to_owned(),
         QuotaWindowStatus::Ineligible => "quota ineligible".to_owned(),
@@ -3417,6 +3645,206 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_sample_confidence_uses_15_minute_display_boundary() {
+        assert_eq!(
+            sample_metadata_from_observed_windows(&[NOW - 899], NOW).confidence,
+            SampleConfidence::Fresh
+        );
+        assert_eq!(
+            sample_metadata_from_observed_windows(&[NOW - 900], NOW).confidence,
+            SampleConfidence::Fresh
+        );
+        assert_eq!(
+            sample_metadata_from_observed_windows(&[NOW - 901], NOW).confidence,
+            SampleConfidence::Stale
+        );
+    }
+
+    #[test]
+    fn quota_status_sample_confidence_uses_displayed_value_window_age() {
+        let windows = vec![
+            DisplayQuotaWindow {
+                observed_unix_seconds: NOW - 30,
+                ..display_window(
+                    V1_SHORT_WINDOW_SECONDS,
+                    20,
+                    NOW + V1_SHORT_WINDOW_SECONDS,
+                    QuotaRunRateEstimate::unknown(),
+                )
+            },
+            DisplayQuotaWindow {
+                observed_unix_seconds: NOW - 901,
+                ..display_window(
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    70,
+                    NOW + V1_WEEKLY_WINDOW_SECONDS,
+                    QuotaRunRateEstimate::unknown(),
+                )
+            },
+            DisplayQuotaWindow {
+                status: QuotaWindowStatus::Unknown,
+                observed_unix_seconds: NOW - 3_600,
+                ..display_window(
+                    V1_WEEKLY_WINDOW_SECONDS * 2,
+                    0,
+                    NOW + V1_WEEKLY_WINDOW_SECONDS,
+                    QuotaRunRateEstimate::unknown(),
+                )
+            },
+        ];
+
+        let sample = sample_metadata_from_display_windows(&windows, NOW);
+
+        assert_eq!(sample.confidence, SampleConfidence::Stale);
+        assert_eq!(sample.age_seconds, Some(901));
+        assert_eq!(sample.semantic_label, "sample stale");
+    }
+
+    #[test]
+    fn quota_status_row_sample_uses_only_weekly_window_age() {
+        let mut report = quota_capture_report();
+        let row = report
+            .rows
+            .get_mut(0)
+            .unwrap_or_else(|| panic!("capture report should include a selected row"));
+        for window in &mut row.windows {
+            if window.window_seconds == V1_SHORT_WINDOW_SECONDS {
+                window.observed_unix_seconds = NOW - 901;
+            } else if window.window_seconds == V1_WEEKLY_WINDOW_SECONDS {
+                window.observed_unix_seconds = NOW - 30;
+            }
+        }
+
+        let view_model = quota_status_view_model(&report, report.rows(), 120);
+        let rendered_row = view_model
+            .rows
+            .first()
+            .unwrap_or_else(|| panic!("quota view model should include a row"));
+        let selected = view_model
+            .selected
+            .as_ref()
+            .unwrap_or_else(|| panic!("quota view model should include selected details"));
+
+        assert_eq!(
+            rendered_row.sample_metadata.confidence,
+            SampleConfidence::Fresh
+        );
+        assert_eq!(rendered_row.sample_metadata.age_seconds, Some(30));
+        assert_eq!(selected.sample_metadata.confidence, SampleConfidence::Stale);
+        assert_eq!(selected.sample_metadata.age_seconds, Some(901));
+    }
+
+    #[test]
+    fn quota_status_reset_pace_classifies_thresholds() {
+        for (multiple_basis_points, expected_state) in [
+            (79, ResetPaceState::UnderBurning),
+            (80, ResetPaceState::Healthy),
+            (100, ResetPaceState::Healthy),
+            (120, ResetPaceState::Healthy),
+            (121, ResetPaceState::OverBurning),
+        ] {
+            let view_model =
+                reset_pace_view_model_from_multiple_basis_points(Some(multiple_basis_points));
+
+            assert_eq!(
+                view_model.state, expected_state,
+                "{multiple_basis_points} basis points should classify correctly"
+            );
+        }
+    }
+
+    #[test]
+    fn quota_status_reset_pace_unavailable_has_marker_meter() {
+        let view_model = reset_pace_view_model_from_multiple_basis_points(None);
+
+        assert_eq!(view_model.state, ResetPaceState::Unavailable);
+        assert_eq!(view_model.semantic_label, "burn unavailable");
+        assert_eq!(view_model.meter_left_segments.filled, 0);
+        assert_eq!(view_model.meter_right_segments.filled, 0);
+        assert_eq!(view_model.meter_left_segments.empty, 7);
+        assert_eq!(view_model.meter_right_segments.empty, 7);
+        assert_eq!(view_model.center_marker, '│');
+        assert!(view_model.unavailable_reason.is_some());
+    }
+
+    #[test]
+    fn quota_status_display_reset_pace_accepts_15_minute_history_without_routing_authority() {
+        let reset_unix_seconds = NOW + V1_WEEKLY_WINDOW_SECONDS;
+        let observations = [
+            QuotaRunRateObservation::new(NOW - 899, reset_unix_seconds, 50),
+            QuotaRunRateObservation::new(NOW - 600, reset_unix_seconds, 48),
+        ];
+
+        let display_estimate =
+            display_quota_run_rate_estimator().estimate(NOW, reset_unix_seconds, &observations);
+        let routing_authority_estimate = QuotaRunRateEstimator::new(
+            DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS,
+        )
+        .estimate(NOW, reset_unix_seconds, &observations);
+
+        assert_eq!(display_estimate.confidence(), QuotaRunRateConfidence::Low);
+        assert!(display_estimate.burn_rate_basis_points_per_hour().is_some());
+        assert_eq!(
+            routing_authority_estimate.confidence(),
+            QuotaRunRateConfidence::Stale,
+            "runtime authority must still go stale at the persisted 300s boundary"
+        );
+    }
+
+    #[test]
+    fn quota_status_display_reset_pace_uses_display_estimate_when_projection_is_stale() {
+        let windows = vec![display_window(
+            V1_WEEKLY_WINDOW_SECONDS,
+            50,
+            NOW + V1_WEEKLY_WINDOW_SECONDS,
+            QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+                QuotaRunRateConfidence::Low,
+                2_000,
+                50,
+            ),
+        )];
+        let stale_projected_weekly_window =
+            QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Stale)
+                .with_remaining_headroom(50)
+                .with_reset_unix_seconds(NOW + V1_WEEKLY_WINDOW_SECONDS)
+                .with_observed_unix_seconds(NOW - 301)
+                .with_burn_rate_confidence(QuotaRunRateConfidence::Stale);
+
+        let snapshot = quota_pace_snapshot(&windows, Some(&stale_projected_weekly_window), NOW)
+            .unwrap_or_else(|| panic!("weekly display window should produce pace snapshot"));
+
+        assert_eq!(snapshot.aggregate_burn_basis_points_per_hour, Some(2_000));
+        assert_eq!(
+            snapshot.projected_candidate_burn_basis_points_per_hour,
+            Some(2_000)
+        );
+        assert_eq!(snapshot.confidence, QuotaRunRateConfidence::Low);
+    }
+
+    #[test]
+    fn quota_status_shared_dto_carries_sample_and_reset_pace_without_string_parsing() {
+        let report = quota_capture_report();
+
+        let view_model = quota_status_view_model(&report, report.rows(), 120);
+        let row = view_model
+            .rows
+            .first()
+            .unwrap_or_else(|| panic!("quota view model should include an account row"));
+
+        assert_eq!(row.sample_metadata.confidence, SampleConfidence::Fresh);
+        assert_eq!(row.sample_metadata.semantic_label, "sample fresh");
+        assert_ne!(row.reset_pace.state, ResetPaceState::Unavailable);
+        assert!(
+            row.reset_pace.multiple_label.contains("reset pace"),
+            "reset pace should be carried as typed row metadata, not rebuilt from safe-pace strings"
+        );
+        assert!(
+            !row.weekly_pace.contains("safe pace"),
+            "legacy safe-pace copy must not survive in the shared DTO"
+        );
+    }
+
+    #[test]
     fn quota_status_width_contract_preserves_layout() {
         let report = quota_capture_report();
 
@@ -3458,8 +3886,8 @@ mod tests {
             "account header should reserve selector-marker space:\n{text}"
         );
         assert!(
-            text.contains("Quota windows") && text.contains("Burn pace"),
-            "selected account details should separate quota windows from burn pace:\n{text}"
+            text.contains("Quota windows") && text.contains("Reset pace"),
+            "selected account details should separate quota windows from reset pace:\n{text}"
         );
         assert!(
             text.contains("0 clients") || text.contains("1 client"),
@@ -3470,24 +3898,51 @@ mod tests {
             "quota table should expose total and per-connection rate units:\n{text}"
         );
         assert!(
-            text.contains("ahead") || text.contains("behind"),
-            "quota table should say whether the account is ahead or behind reset:\n{text}"
-        );
-        assert!(
             text.contains("weekly █"),
             "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
         );
         assert!(
-            text.contains("current") && text.contains("▰"),
-            "quota table should show the selected burn pace as an explicit block meter:\n{text}"
+            text.contains("current") && text.contains("reset pace"),
+            "quota table should show the selected reset pace as an explicit block meter:\n{text}"
         );
         assert!(
-            text.contains("burn ▰") || text.contains("burn ▱"),
-            "main account rows should show a burn/pace meter in Weekly pace:\n{text}"
+            text.contains("reset pace") && text.contains("sample fresh"),
+            "main account rows should show reset pace and sample metadata in Weekly pace:\n{text}"
         );
         assert!(
-            !text.contains("current [") && !text.contains('■'),
-            "quota table should not use the old bracketed burn meter:\n{text}"
+            !text.contains("current [")
+                && !text.contains('■')
+                && !text.contains("safe pace")
+                && !text.contains("ahead to reset")
+                && !text.contains("safe pace unknown"),
+            "quota table should not use legacy burn/safe-pace copy:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quota_status_table_shows_stale_values_with_sample_marker_without_refresh_filler() {
+        let mut report = quota_capture_report();
+        let row = report
+            .rows
+            .get_mut(0)
+            .unwrap_or_else(|| panic!("capture report should include a selected row"));
+        for window in &mut row.windows {
+            window.status = QuotaWindowStatus::Stale;
+            window.observed_unix_seconds = NOW - 901;
+        }
+        row.short_window = format_window_cell(&row.windows, V1_SHORT_WINDOW_SECONDS, NOW, true);
+        row.weekly_window = format_window_cell(&row.windows, V1_WEEKLY_WINDOW_SECONDS, NOW, true);
+        row.freshness = QuotaEvidenceFreshness::Stale;
+
+        let mut output = Vec::new();
+        must_ok(write_quota_table(&mut output, &report, Some(120)));
+        let text = must_ok(String::from_utf8(output));
+
+        assert!(text.contains("weekly █"), "{text}");
+        assert!(text.contains("sample stale 15m 1s"), "{text}");
+        assert!(
+            !text.contains("needs refresh"),
+            "stale value-bearing status output should show values and mark sample stale once:\n{text}"
         );
     }
 
@@ -3506,11 +3961,11 @@ mod tests {
 
         assert!(
             text.contains("\x1b["),
-            "quota table should emit ANSI styling through iocraft:\n{text:?}"
+            "quota table should emit ANSI styling:\n{text:?}"
         );
         assert!(
-            text.contains("\x1b[1m"),
-            "quota title and selected text should use emphasized iocraft styling:\n{text:?}"
+            text.contains("\x1b[38;5;11m") && text.contains("reset pace under"),
+            "quota reset pace should emit state color:\n{text:?}"
         );
         assert!(
             !text.contains("\x1b[32m"),
@@ -3526,46 +3981,43 @@ mod tests {
     #[ignore = "writes visual quota capture artifacts for design review"]
     fn quota_status_capture_artifacts_for_design_review() {
         let capture_dir = capture_dir();
-        let report = quota_capture_report();
 
-        for width in [48, 72, 90, 120] {
-            let mut output = Vec::new();
-            must_ok(write_quota_table(&mut output, &report, Some(width)));
-            let text = must_ok(String::from_utf8(output));
-            let mut ansi_output = Vec::new();
-            must_ok(write_quota_table_with_style(
-                &mut ansi_output,
-                &report,
-                Some(width),
-                QuotaTableStyle::TerminalColor,
-            ));
-            let ansi_text = must_ok(String::from_utf8(ansi_output));
-            write_capture_pair_with_svg_text(
-                &capture_dir,
-                &format!("quota-{width}"),
-                &text,
-                &ansi_text,
-            );
+        for case in QuotaCaptureDesignCase::ALL {
+            let report = quota_capture_case_report(case);
+            for width in [48, 160] {
+                let mut output = Vec::new();
+                must_ok(write_quota_table(&mut output, &report, Some(width)));
+                let text = must_ok(String::from_utf8(output));
+                let mut ansi_output = Vec::new();
+                must_ok(write_quota_table_with_style(
+                    &mut ansi_output,
+                    &report,
+                    Some(width),
+                    QuotaTableStyle::TerminalColor,
+                ));
+                let ansi_text = must_ok(String::from_utf8(ansi_output));
+                write_capture_pair_with_svg_text(
+                    &capture_dir,
+                    &format!("{}-{width}", case.file_stem()),
+                    &text,
+                    &ansi_text,
+                );
+            }
         }
-
-        let blocked_report = blocked_quota_capture_report();
-        let mut output = Vec::new();
-        must_ok(write_quota_table(&mut output, &blocked_report, Some(80)));
-        let text = must_ok(String::from_utf8(output));
-        let mut ansi_output = Vec::new();
-        must_ok(write_quota_table_with_style(
-            &mut ansi_output,
-            &blocked_report,
-            Some(80),
-            QuotaTableStyle::TerminalColor,
-        ));
-        let ansi_text = must_ok(String::from_utf8(ansi_output));
-        write_capture_pair_with_svg_text(&capture_dir, "quota-all-blocked-80", &text, &ansi_text);
     }
 
     #[test]
     fn quota_status_telemetry_contract_uses_scrubbed_low_cardinality_labels() {
         let source = include_str!("quota.rs");
+        let Some(before_trace_event_name) = source
+            .split("\"codex_router.quota_status_selection\"")
+            .next()
+        else {
+            panic!("quota status tracing event should have a stable event name");
+        };
+        let Some(trace_event) = before_trace_event_name.rsplit("tracing::info!(").next() else {
+            panic!("quota status tracing event should exist");
+        };
         let Some(after_function_name) = source.split("fn emit_quota_status_metrics").nth(1) else {
             panic!("emit_quota_status_metrics helper should exist");
         };
@@ -3590,16 +4042,35 @@ mod tests {
                 "quota status telemetry must include {required_label}"
             );
         }
+        for required_trace_label in [
+            "route_band",
+            "selected_pool",
+            "selection.reason",
+            "preferred.account_hash",
+            "active_client.source",
+        ] {
+            assert!(
+                trace_event.contains(required_trace_label),
+                "quota status tracing attributes must include low-cardinality {required_trace_label}"
+            );
+        }
         for forbidden_label in [
             "account.id",
             "account.label",
             "reservation.id",
             "payload",
             "token",
+            "sample.age_seconds",
+            "sample.age_text",
+            "provider.error",
         ] {
             assert!(
                 !metrics_helper.contains(forbidden_label),
                 "quota status telemetry must not include {forbidden_label}"
+            );
+            assert!(
+                !trace_event.contains(forbidden_label),
+                "quota status tracing attributes must not include {forbidden_label}"
             );
         }
     }
@@ -3613,6 +4084,32 @@ mod tests {
         freshness: QuotaEvidenceFreshness,
         availability: AccountAvailability,
         routing_reason: RoutingReason,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum QuotaCaptureDesignCase {
+        FreshHealthy,
+        StaleUnder,
+        DegradedOver,
+        UnavailableBurn,
+    }
+
+    impl QuotaCaptureDesignCase {
+        const ALL: [Self; 4] = [
+            Self::FreshHealthy,
+            Self::StaleUnder,
+            Self::DegradedOver,
+            Self::UnavailableBurn,
+        ];
+
+        const fn file_stem(self) -> &'static str {
+            match self {
+                Self::FreshHealthy => "fresh-healthy",
+                Self::StaleUnder => "stale-under",
+                Self::DegradedOver => "degraded-over",
+                Self::UnavailableBurn => "unavailable-burn",
+            }
+        }
     }
 
     fn quota_capture_row(fixture: QuotaCaptureRowFixture) -> QuotaStatusRow {
@@ -3749,6 +4246,65 @@ mod tests {
         }
     }
 
+    fn quota_capture_case_report(case: QuotaCaptureDesignCase) -> QuotaStatusReport {
+        let mut report = quota_capture_report();
+        match case {
+            QuotaCaptureDesignCase::FreshHealthy => {
+                let selected_row = report
+                    .rows
+                    .get_mut(0)
+                    .unwrap_or_else(|| panic!("capture report should include selected row"));
+                selected_row.weekly_pace = selected_row.weekly_pace.map(|mut pace| {
+                    pace.projected_candidate_burn_basis_points_per_hour = Some(49);
+                    pace.aggregate_burn_basis_points_per_hour = Some(49);
+                    pace
+                });
+            }
+            QuotaCaptureDesignCase::StaleUnder => {
+                let selected_row = report
+                    .rows
+                    .get_mut(0)
+                    .unwrap_or_else(|| panic!("capture report should include selected row"));
+                selected_row.freshness = QuotaEvidenceFreshness::Stale;
+                for window in &mut selected_row.windows {
+                    window.status = QuotaWindowStatus::Stale;
+                    window.observed_unix_seconds = NOW - 901;
+                }
+                selected_row.updated = "failed 15m 1s ago: network".to_owned();
+                selected_row.weekly_pace = selected_row.weekly_pace.map(|mut pace| {
+                    pace.projected_candidate_burn_basis_points_per_hour = Some(10);
+                    pace.aggregate_burn_basis_points_per_hour = Some(10);
+                    pace
+                });
+            }
+            QuotaCaptureDesignCase::DegradedOver => {
+                report.selection_projection_source =
+                    SelectionProjectionSource::DisplayWindowsFallback;
+                report.preferred_next_account_id = None;
+                for row in &mut report.rows {
+                    row.preferred_next = false;
+                }
+                let selected_row = report
+                    .rows
+                    .get_mut(0)
+                    .unwrap_or_else(|| panic!("capture report should include selected row"));
+                selected_row.weekly_pace = selected_row.weekly_pace.map(|mut pace| {
+                    pace.projected_candidate_burn_basis_points_per_hour = Some(70);
+                    pace.aggregate_burn_basis_points_per_hour = Some(70);
+                    pace
+                });
+            }
+            QuotaCaptureDesignCase::UnavailableBurn => {
+                let selected_row = report
+                    .rows
+                    .get_mut(0)
+                    .unwrap_or_else(|| panic!("capture report should include selected row"));
+                selected_row.weekly_pace = None;
+            }
+        }
+        report
+    }
+
     fn blocked_quota_capture_report() -> QuotaStatusReport {
         QuotaStatusReport {
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -3860,6 +4416,7 @@ mod tests {
 
     fn write_capture_pair_with_svg_text(dir: &Path, name: &str, text: &str, svg_text: &str) {
         must_ok(std::fs::write(dir.join(format!("{name}.txt")), text));
+        must_ok(std::fs::write(dir.join(format!("{name}.ansi")), svg_text));
         must_ok(std::fs::write(
             dir.join(format!("{name}.svg")),
             terminal_svg(name, svg_text),

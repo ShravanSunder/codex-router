@@ -20,13 +20,17 @@ use clap::Parser;
 use clap::ValueEnum;
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::QueryBuilder;
 use sqlx::Row;
+use sqlx::Sqlite;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use thiserror::Error;
 
 use crate::CliContext;
+use crate::presentation::session_picker::SessionsPickerDataQuery;
 use crate::presentation::session_picker::SessionsPickerOutcome;
+use crate::presentation::session_picker::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::SessionsPickerRequest;
 use crate::presentation::session_picker::run_sessions_picker;
 
@@ -37,12 +41,6 @@ const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
 const SESSION_RECORD_PAGE_SIZE: usize = 250;
-#[cfg(all(debug_assertions, not(test)))]
-const DEBUG_CODEX_HOME_ENV: &str = "CODEX_ROUTER_DEBUG_CODEX_HOME";
-#[cfg(all(debug_assertions, not(test)))]
-const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
-#[cfg(all(debug_assertions, not(test)))]
-const DEFAULT_DEBUG_CODEX_HOME: &str = "tmp/dev-state/codex-home";
 
 /// Session search root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +141,43 @@ pub struct SessionsCommand {
     pub codex_args: Vec<OsString>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionRecordQuery {
+    root: SessionsRoot,
+    provider: SessionsProvider,
+    source: SessionsSource,
+    sort: SessionsSort,
+    last: bool,
+    limit: usize,
+    search: String,
+}
+
+impl SessionRecordQuery {
+    fn from_command(command: &SessionsCommand) -> Self {
+        Self {
+            root: command.root,
+            provider: command.provider.clone(),
+            source: command.source,
+            sort: command.sort,
+            last: command.last,
+            limit: command.limit,
+            search: String::new(),
+        }
+    }
+
+    fn from_picker_query(query: SessionsPickerDataQuery) -> Self {
+        Self {
+            root: query.root,
+            provider: query.provider,
+            source: query.source,
+            sort: query.sort,
+            last: false,
+            limit: DEFAULT_SESSION_RECORD_LIMIT,
+            search: query.search,
+        }
+    }
+}
+
 impl SessionsCommand {
     pub(crate) fn parse(arguments: Vec<OsString>) -> Result<Self, String> {
         let mut argv = Vec::with_capacity(arguments.len() + 1);
@@ -151,6 +186,7 @@ impl SessionsCommand {
         let parsed =
             ClapSessionsCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
         reject_legacy_router_options(&parsed.codex_args)?;
+        reject_interactive_limit(&parsed)?;
         Ok(Self {
             root: parsed.root()?,
             provider: parsed.provider,
@@ -160,7 +196,7 @@ impl SessionsCommand {
             format: parsed.format,
             last: parsed.last,
             new: parsed.new,
-            limit: parsed.limit,
+            limit: parsed.limit.unwrap_or(DEFAULT_SESSION_RECORD_LIMIT),
             dry_run: parsed.dry_run,
             codex_args: parsed.codex_args,
         })
@@ -173,6 +209,13 @@ fn reject_legacy_router_options(codex_args: &[OsString]) -> Result<(), String> {
         .any(|argument| argument == OsStr::new("--scope"))
     {
         return Err("--scope was removed; use --checkout, --repo, or --any".to_owned());
+    }
+    Ok(())
+}
+
+fn reject_interactive_limit(command: &ClapSessionsCommand) -> Result<(), String> {
+    if command.limit.is_some() && !command.list {
+        return Err("--limit only applies with --list".to_owned());
     }
     Ok(())
 }
@@ -200,8 +243,8 @@ struct ClapSessionsCommand {
     last: bool,
     #[arg(long, conflicts_with_all = ["list", "last"])]
     new: bool,
-    #[arg(long, default_value_t = DEFAULT_SESSION_RECORD_LIMIT)]
-    limit: usize,
+    #[arg(long)]
+    limit: Option<usize>,
     #[arg(long)]
     dry_run: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -292,9 +335,16 @@ async fn load_session_records(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<Vec<SessionRecord>, SessionsCommandError> {
-    let root_filter = RootFilter::from_command(command.root, context);
+    load_session_records_for_query(SessionRecordQuery::from_command(&command), context).await
+}
+
+async fn load_session_records_for_query(
+    query: SessionRecordQuery,
+    context: &CliContext,
+) -> Result<Vec<SessionRecord>, SessionsCommandError> {
+    let root_filter = RootFilter::from_command(query.root, context);
     let codex_home_path = codex_home(context)?;
-    let provider_filter = ProviderFilter::from_command(&command.provider, &codex_home_path)?;
+    let provider_filter = ProviderFilter::from_command(&query.provider, &codex_home_path)?;
 
     let state_database_path = codex_home_path.join("state_5.sqlite");
     let options = SqliteConnectOptions::new()
@@ -310,7 +360,7 @@ async fn load_session_records(
         .map_err(SessionsCommandError::Sqlx)?;
 
     let mut records = Vec::new();
-    let target_limit = if command.last { 1 } else { command.limit };
+    let target_limit = if query.last { 1 } else { query.limit };
     let mut offset = 0_i64;
     while target_limit == 0 || records.len() < target_limit {
         let page_size = target_limit
@@ -319,35 +369,38 @@ async fn load_session_records(
             .map_or(SESSION_RECORD_PAGE_SIZE, |remaining| {
                 remaining.min(SESSION_RECORD_PAGE_SIZE)
             });
-        let query = match command.sort {
-            SessionsSort::Created => {
-                r#"
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
                 SELECT
                     id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
                     title, preview, first_user_message,
                     created_at_ms, updated_at_ms, recency_at_ms
                 FROM threads
                 WHERE archived = 0
-                ORDER BY created_at_ms DESC, id DESC
-                LIMIT ? OFFSET ?
-                "#
+                "#,
+        );
+        append_session_record_filters(
+            &mut builder,
+            &root_filter,
+            &provider_filter,
+            query.source,
+            &query.search,
+        );
+        match query.sort {
+            SessionsSort::Created => {
+                builder.push(" ORDER BY created_at_ms DESC, id DESC");
             }
             SessionsSort::Updated => {
-                r#"
-                SELECT
-                    id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
-                    title, preview, first_user_message,
-                    created_at_ms, updated_at_ms, recency_at_ms
-                FROM threads
-                WHERE archived = 0
-                ORDER BY recency_at_ms DESC, id DESC
-                LIMIT ? OFFSET ?
-                "#
+                builder.push(" ORDER BY recency_at_ms DESC, id DESC");
             }
-        };
-        let rows = sqlx::query(query)
-            .bind(i64::try_from(page_size).unwrap_or(i64::MAX))
-            .bind(offset)
+        }
+        builder
+            .push(" LIMIT ")
+            .push_bind(i64::try_from(page_size).unwrap_or(i64::MAX))
+            .push(" OFFSET ")
+            .push_bind(offset);
+        let rows = builder
+            .build()
             .fetch_all(&pool)
             .await
             .map_err(SessionsCommandError::Sqlx)?;
@@ -361,15 +414,6 @@ async fn load_session_records(
             let source = row.get::<Option<String>, _>("source");
             let thread_source = row.get::<Option<String>, _>("thread_source");
             let cwd = row.get::<Option<String>, _>("cwd");
-            if !source_matches(command.source, source.as_deref(), thread_source.as_deref()) {
-                continue;
-            }
-            if !provider_filter.matches(row.get::<Option<String>, _>("model_provider").as_deref()) {
-                continue;
-            }
-            if !root_filter.matches(cwd.as_deref()) {
-                continue;
-            }
             records.push(SessionRecord {
                 session_id: row.get("id"),
                 rollout_path: deferred_rollout_source(
@@ -403,6 +447,155 @@ async fn load_session_records(
     Ok(records)
 }
 
+fn append_session_record_filters(
+    builder: &mut QueryBuilder<Sqlite>,
+    root_filter: &RootFilter,
+    provider_filter: &ProviderFilter,
+    source: SessionsSource,
+    search: &str,
+) {
+    append_root_filter(builder, root_filter);
+    append_provider_filter(builder, provider_filter);
+    append_source_filter(builder, source);
+    append_search_filter(builder, search);
+}
+
+fn append_root_filter(builder: &mut QueryBuilder<Sqlite>, root_filter: &RootFilter) {
+    match root_filter {
+        RootFilter::Any => {}
+        RootFilter::Cwd(current_dir) => {
+            builder.push(" AND (");
+            append_path_exact_filter(builder, current_dir);
+            builder.push(")");
+        }
+        RootFilter::Checkout(checkout_root) => {
+            builder.push(" AND (");
+            append_path_scope_filter(builder, checkout_root);
+            builder.push(")");
+        }
+        RootFilter::Repo(repo_roots) => {
+            if repo_roots.is_empty() {
+                builder.push(" AND 0 = 1");
+                return;
+            }
+            builder.push(" AND (");
+            for (index, repo_root) in repo_roots.iter().enumerate() {
+                if index > 0 {
+                    builder.push(" OR ");
+                }
+                append_path_scope_filter(builder, repo_root);
+            }
+            builder.push(")");
+        }
+    }
+}
+
+fn append_path_exact_filter(builder: &mut QueryBuilder<Sqlite>, path: &Path) {
+    for (index, path_value) in path_sql_values(path).into_iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder.push("cwd = ").push_bind(path_value);
+    }
+}
+
+fn append_path_scope_filter(builder: &mut QueryBuilder<Sqlite>, root: &Path) {
+    for (index, path_value) in path_sql_values(root).into_iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder
+            .push("cwd = ")
+            .push_bind(path_value.clone())
+            .push(" OR cwd LIKE ")
+            .push_bind(path_child_like_pattern(&path_value))
+            .push(" ESCAPE '\\'");
+    }
+}
+
+fn append_provider_filter(builder: &mut QueryBuilder<Sqlite>, provider_filter: &ProviderFilter) {
+    match provider_filter {
+        ProviderFilter::Any => {}
+        ProviderFilter::Id(provider_id) => {
+            builder
+                .push(" AND model_provider = ")
+                .push_bind(provider_id.clone());
+        }
+    }
+}
+
+fn append_source_filter(builder: &mut QueryBuilder<Sqlite>, source: SessionsSource) {
+    match source {
+        SessionsSource::All => {}
+        SessionsSource::Interactive => {
+            builder.push(
+                " AND source IN ('cli', 'vscode') \
+                 AND (thread_source IS NULL OR thread_source NOT IN ('exec', 'app_server', 'subagent'))",
+            );
+        }
+        SessionsSource::Subagents => {
+            builder.push(
+                " AND (thread_source = 'subagent' \
+                 OR source = 'subagent' \
+                 OR source LIKE ",
+            );
+            builder.push_bind("%subagent%").push(" ESCAPE '\\')");
+        }
+    }
+}
+
+fn append_search_filter(builder: &mut QueryBuilder<Sqlite>, search: &str) {
+    let search = search.trim().to_lowercase();
+    if search.is_empty() {
+        return;
+    }
+    let pattern = format!("%{}%", escape_like(&search));
+    builder.push(" AND (lower(id) LIKE ");
+    append_like_bind(builder, &pattern);
+    builder.push(" OR lower(coalesce(title, '')) LIKE ");
+    append_like_bind(builder, &pattern);
+    builder.push(" OR lower(coalesce(preview, '')) LIKE ");
+    append_like_bind(builder, &pattern);
+    builder.push(" OR lower(coalesce(first_user_message, '')) LIKE ");
+    append_like_bind(builder, &pattern);
+    builder.push(" OR lower(coalesce(model_provider, '')) LIKE ");
+    append_like_bind(builder, &pattern);
+    builder.push(")");
+}
+
+fn append_like_bind(builder: &mut QueryBuilder<Sqlite>, pattern: &str) {
+    builder.push_bind(pattern.to_owned()).push(" ESCAPE '\\'");
+}
+
+fn path_sql_values(path: &Path) -> Vec<String> {
+    let path = path.to_string_lossy().into_owned();
+    let mut values = vec![path.clone()];
+    if let Some(stripped_path) = path.strip_prefix("/private/") {
+        values.push(format!("/{stripped_path}"));
+    } else if path.starts_with("/var/") {
+        values.push(format!("/private{path}"));
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn path_child_like_pattern(path: &str) -> String {
+    let path = path.trim_end_matches('/');
+    format!("{}/%", escape_like(path))
+}
+
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 fn run_interactive_session(
     command: SessionsCommand,
     context: &CliContext,
@@ -418,10 +611,7 @@ fn run_interactive_session(
         .enable_all()
         .build()
         .map_err(SessionsCommandError::Runtime)?;
-    let records = runtime.block_on(load_session_records(
-        interactive_candidate_command(&command),
-        context,
-    ))?;
+    let records = runtime.block_on(load_session_records(command.clone(), context))?;
     let request = SessionsPickerRequest {
         root: picker_root,
         provider: picker_provider,
@@ -431,12 +621,14 @@ fn run_interactive_session(
         checkout_root: checkout_root(context.current_dir()),
         repo_roots: repo_roots(context.current_dir()),
         current_provider: current_provider_for_picker(context),
+        new_session_args_display: codex_args_display(&command.codex_args),
         records: records
             .iter()
             .map(SessionPickerRecord::from_record)
             .collect(),
     };
-    let Some(outcome) = picker.select_session(request)? else {
+    let record_loader = session_picker_record_loader(context.clone());
+    let Some(outcome) = picker.select_session(request, Some(record_loader))? else {
         return Err(SessionsCommandError::PickerCanceled);
     };
     match outcome {
@@ -449,12 +641,23 @@ fn run_interactive_session(
     }
 }
 
-fn interactive_candidate_command(command: &SessionsCommand) -> SessionsCommand {
-    let mut candidate_command = command.clone();
-    candidate_command.root = SessionsRoot::Any;
-    candidate_command.provider = SessionsProvider::Any;
-    candidate_command.source = SessionsSource::All;
-    candidate_command
+fn session_picker_record_loader(context: CliContext) -> SessionsPickerRecordLoader {
+    std::sync::Arc::new(move |query| {
+        let record_query = SessionRecordQuery::from_picker_query(query);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime
+            .block_on(load_session_records_for_query(record_query, &context))
+            .map(|records| {
+                records
+                    .iter()
+                    .map(SessionPickerRecord::from_record)
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    })
 }
 
 fn run_last_session<W: Write>(
@@ -525,6 +728,17 @@ fn write_codex_args<W: Write>(
     Ok(())
 }
 
+fn codex_args_display(codex_args: &[OsString]) -> String {
+    if codex_args.is_empty() {
+        return String::new();
+    }
+    codex_args
+        .iter()
+        .map(|argument| argument.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Interactive session picker.
 pub(crate) trait SessionsPicker {
     /// Verifies the picker can run before expensive session loading.
@@ -536,6 +750,7 @@ pub(crate) trait SessionsPicker {
     fn select_session(
         &mut self,
         request: SessionsPickerRequest,
+        record_loader: Option<SessionsPickerRecordLoader>,
     ) -> Result<Option<SessionsPickerOutcome>, SessionsCommandError>;
 }
 
@@ -565,8 +780,9 @@ impl SessionsPicker for TerminalSessionsPicker {
     fn select_session(
         &mut self,
         request: SessionsPickerRequest,
+        record_loader: Option<SessionsPickerRecordLoader>,
     ) -> Result<Option<SessionsPickerOutcome>, SessionsCommandError> {
-        run_sessions_picker(request).map_err(SessionsCommandError::Picker)
+        run_sessions_picker(request, record_loader).map_err(SessionsCommandError::Picker)
     }
 }
 
@@ -643,13 +859,6 @@ impl ProviderFilter {
             SessionsProvider::Current => Ok(Self::Id(resolve_current_provider(codex_home)?)),
         }
     }
-
-    fn matches(&self, provider: Option<&str>) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Id(expected_provider) => provider == Some(expected_provider.as_str()),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -669,55 +878,26 @@ impl RootFilter {
             SessionsRoot::Repo => Self::Repo(repo_roots(context.current_dir())),
         }
     }
-
-    fn matches(&self, cwd: Option<&str>) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Cwd(current_dir) => cwd
-                .map(|session_cwd| normalize_path(Path::new(session_cwd)) == *current_dir)
-                .unwrap_or(false),
-            Self::Checkout(checkout_root) => cwd
-                .map(|session_cwd| {
-                    let session_cwd = normalize_path(Path::new(session_cwd));
-                    path_is_equal_or_child(&session_cwd, checkout_root)
-                })
-                .unwrap_or(false),
-            Self::Repo(repo_roots) => cwd
-                .map(|session_cwd| {
-                    let session_cwd = normalize_path(Path::new(session_cwd));
-                    repo_roots
-                        .iter()
-                        .any(|repo_root| path_is_equal_or_child(&session_cwd, repo_root))
-                })
-                .unwrap_or(false),
-        }
-    }
 }
 
 fn codex_home(context: &CliContext) -> Result<PathBuf, SessionsCommandError> {
-    if let Some(codex_home) = context.env_var("CODEX_HOME") {
-        return Ok(PathBuf::from(codex_home));
-    }
-    #[cfg(all(debug_assertions, not(test)))]
-    {
-        if context.env_var(USE_HOME_DEFAULT_ENV).is_none() {
-            if let Some(debug_home) = context.env_var(DEBUG_CODEX_HOME_ENV)
-                && !debug_home.is_empty()
-            {
-                return Ok(PathBuf::from(debug_home));
-            }
+    codex_home_from_environment(
+        context.env_var("CODEX_HOME").map(PathBuf::from),
+        context.env_var("HOME").map(PathBuf::from),
+    )
+}
 
-            let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-            return Ok(workspace_root.join(DEFAULT_DEBUG_CODEX_HOME));
-        }
+fn codex_home_from_environment(
+    codex_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, SessionsCommandError> {
+    if let Some(codex_home) = codex_home {
+        return Ok(codex_home);
     }
-    let Some(home) = context.env_var("HOME") else {
+    let Some(home) = home else {
         return Err(SessionsCommandError::CodexHomeUnavailable);
     };
-    Ok(PathBuf::from(home).join(".codex"))
+    Ok(home.join(".codex"))
 }
 
 fn resolve_current_provider(codex_home: &Path) -> Result<String, SessionsCommandError> {
@@ -776,23 +956,6 @@ fn parse_model_provider(content: &str) -> Option<String> {
     None
 }
 
-fn source_matches(
-    source_filter: SessionsSource,
-    source: Option<&str>,
-    thread_source: Option<&str>,
-) -> bool {
-    match source_filter {
-        SessionsSource::All => true,
-        SessionsSource::Interactive => {
-            matches!(source, Some("cli" | "vscode"))
-                && !matches!(thread_source, Some("exec" | "app_server" | "subagent"))
-        }
-        SessionsSource::Subagents => {
-            source_indicates_subagent(source) || matches!(thread_source, Some("subagent"))
-        }
-    }
-}
-
 fn validate_resume_session_id(session_id: &str) -> Result<(), SessionsCommandError> {
     let trimmed = session_id.trim();
     if trimmed.is_empty()
@@ -805,36 +968,6 @@ fn validate_resume_session_id(session_id: &str) -> Result<(), SessionsCommandErr
         return Err(SessionsCommandError::UnsafeSessionId);
     }
     Ok(())
-}
-
-fn source_indicates_subagent(source: Option<&str>) -> bool {
-    let Some(source) = source else {
-        return false;
-    };
-    if source == "subagent" {
-        return true;
-    }
-    let trimmed = source.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return false;
-    }
-    serde_json::from_str::<Value>(trimmed)
-        .ok()
-        .is_some_and(json_mentions_subagent_source)
-}
-
-fn json_mentions_subagent_source(value: Value) -> bool {
-    match value {
-        Value::String(value) => value == "subagent",
-        Value::Array(values) => values.into_iter().any(json_mentions_subagent_source),
-        Value::Object(object) => object.into_iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "subagent" | "parent_agent_id" | "parent_session_id" | "parent_thread_id"
-            ) || json_mentions_subagent_source(value)
-        }),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
-    }
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -881,10 +1014,6 @@ fn parse_git_worktree_roots(output: &str) -> Vec<PathBuf> {
         .map(PathBuf::from)
         .map(|path| normalize_path(&path))
         .collect()
-}
-
-fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
-    candidate == parent || candidate.starts_with(parent)
 }
 
 fn deferred_rollout_source(
@@ -1339,12 +1468,14 @@ fn format_duration_ms(duration_ms: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::SessionConversationPreview;
+    use super::codex_home_from_environment;
     use super::deferred_rollout_source;
     use super::extract_recent_conversation_snippets;
     use super::format_duration_ms;
     use super::validated_rollout_path;
     use serde_json::json;
     use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn duration_format_uses_now_without_suffix_for_subminute_values() {
@@ -1506,6 +1637,23 @@ mod tests {
         assert_eq!(
             extract_recent_conversation_snippets(&jsonl),
             vec!["actual resumed thread message".to_owned()]
+        );
+    }
+
+    #[test]
+    fn codex_home_resolution_uses_real_home_without_debug_redirect() {
+        let home = PathBuf::from("/tmp/codex-router-home-policy");
+        let explicit_codex_home = PathBuf::from("/tmp/explicit-codex-home");
+
+        assert_eq!(
+            codex_home_from_environment(None, Some(home.clone()))
+                .expect("HOME should resolve Codex home"),
+            home.join(".codex")
+        );
+        assert_eq!(
+            codex_home_from_environment(Some(explicit_codex_home.clone()), Some(home))
+                .expect("CODEX_HOME should win"),
+            explicit_codex_home
         );
     }
 
