@@ -6016,16 +6016,8 @@ exit 42
         ));
 
         assert!(stdout.is_empty());
-        assert_eq!(
-            picker.offered_session_ids,
-            [
-                "thread-subagent",
-                "thread-sibling",
-                "thread-new",
-                "thread-old"
-            ]
-        );
-        assert_eq!(picker.offered_labels.len(), 4);
+        assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
+        assert_eq!(picker.offered_labels.len(), 2);
         assert_eq!(picker.offered_labels[0], "PICKER_CANARY_SHOULD_NOT_LEAK");
         assert_eq!(runner.resumed_session_ids, ["thread-old"]);
     }
@@ -6096,12 +6088,7 @@ exit 42
         ));
 
         assert!(stdout.is_empty());
-        assert!(
-            picker
-                .offered_session_ids
-                .iter()
-                .any(|session_id| session_id == target_session_id)
-        );
+        assert_eq!(picker.offered_session_ids, [target_session_id]);
         assert_eq!(runner.resumed_session_ids, [target_session_id]);
     }
 
@@ -7522,6 +7509,7 @@ exit 42
         fn select_session(
             &mut self,
             request: crate::presentation::session_picker::SessionsPickerRequest,
+            _record_loader: Option<crate::presentation::session_picker::SessionsPickerRecordLoader>,
         ) -> Result<
             Option<crate::presentation::session_picker::SessionsPickerOutcome>,
             crate::sessions::SessionsCommandError,

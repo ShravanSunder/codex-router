@@ -8,6 +8,7 @@ use crate::presentation::session_picker::filters::root_matches;
 use crate::presentation::session_picker::filters::source_matches;
 #[cfg(test)]
 use crate::presentation::session_picker::render::render_model_snapshot;
+use crate::presentation::session_picker::request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsProvider;
@@ -120,6 +121,22 @@ impl SessionsPickerModel {
 
     pub(crate) fn set_width(&mut self, width: usize) {
         self.width = width;
+    }
+
+    pub(crate) fn data_query(&self) -> SessionsPickerDataQuery {
+        SessionsPickerDataQuery {
+            root: self.root,
+            provider: self.provider.clone(),
+            source: self.source,
+            sort: self.sort,
+            search: self.search.clone(),
+        }
+    }
+
+    pub(crate) fn replace_records(&mut self, records: Vec<SessionPickerRecord>) {
+        self.request.records = records;
+        self.rebuild_visible_rows();
+        self.clamp_selection();
     }
 
     pub(crate) fn selected_session_id(&self) -> Option<&str> {

@@ -9,6 +9,8 @@ use crate::presentation::session_picker::model::SessionsPickerModel;
 use crate::presentation::session_picker::model::VISIBLE_SESSION_ROWS;
 use crate::presentation::session_picker::model::visible_window_start;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
+use crate::presentation::session_picker::request::SessionsPickerDataQuery;
+use crate::presentation::session_picker::request::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
 use crate::sessions::SessionConversationPreview;
 use crate::sessions::SessionConversationSource;
@@ -43,8 +45,15 @@ struct SelectedConversationPreview {
 #[derive(Default, Props)]
 pub(crate) struct SessionsPickerComponentProps<'a> {
     request: SessionsPickerRequest,
+    record_loader: Option<SessionsPickerRecordLoader>,
     width: usize,
     selected_outcome_out: Option<&'a mut Option<SessionsPickerOutcome>>,
+}
+
+#[derive(Clone)]
+struct SessionRecordsReloadRequest {
+    query: SessionsPickerDataQuery,
+    loader: SessionsPickerRecordLoader,
 }
 
 #[component]
@@ -70,6 +79,25 @@ pub(crate) fn SessionsPickerComponent<'a>(
     }
     let mut conversation_cache =
         hooks.use_state(BTreeMap::<String, ConversationPreviewLoadState>::new);
+    let reload_records = hooks.use_async_handler({
+        let mut model = model;
+        move |request: SessionRecordsReloadRequest| async move {
+            let query = request.query;
+            let loader = request.loader;
+            let loaded_records = tokio::task::spawn_blocking({
+                let query = query.clone();
+                move || loader(query)
+            })
+            .await;
+            let Ok(Ok(records)) = loaded_records else {
+                return;
+            };
+            let mut model_value = model.write();
+            if model_value.data_query() == query {
+                model_value.replace_records(records);
+            }
+        }
+    });
     let load_conversation = hooks.use_async_handler({
         let mut conversation_cache = conversation_cache;
         move |request: ConversationPreviewLoadRequest| async move {
@@ -90,9 +118,11 @@ pub(crate) fn SessionsPickerComponent<'a>(
     });
     let mut selected_outcome = hooks.use_state(|| Option::<SessionsPickerOutcome>::None);
     let mut should_cancel = hooks.use_state(|| false);
+    let record_loader = props.record_loader.clone();
 
     hooks.use_terminal_events({
         let mut observed_width = observed_width;
+        let record_loader = record_loader.clone();
         move |event| {
             if let TerminalEvent::Resize(width, _) = event {
                 if live_terminal_width {
@@ -117,6 +147,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
             }
 
             let mut model_value = model.write();
+            let previous_query = model_value.data_query();
             match code {
                 KeyCode::Down => model_value.handle_key(SessionsPickerKey::MoveDown),
                 KeyCode::Up => model_value.handle_key(SessionsPickerKey::MoveUp),
@@ -159,6 +190,17 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     }
                 }
                 _ => {}
+            }
+            let next_query = model_value.data_query();
+            drop(model_value);
+
+            if next_query != previous_query
+                && let Some(loader) = record_loader.clone()
+            {
+                reload_records(SessionRecordsReloadRequest {
+                    query: next_query,
+                    loader,
+                });
             }
         }
     });
@@ -810,6 +852,7 @@ fn truncate_middle(value: &str, max_chars: usize) -> String {
 
 pub(crate) fn run_sessions_picker(
     request: SessionsPickerRequest,
+    record_loader: Option<SessionsPickerRecordLoader>,
 ) -> io::Result<Option<SessionsPickerOutcome>> {
     let mut selected_outcome = None;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -819,6 +862,7 @@ pub(crate) fn run_sessions_picker(
         element! {
             SessionsPickerComponent(
                 request: request,
+                record_loader: record_loader,
                 width: 0usize,
                 selected_outcome_out: &mut selected_outcome,
             )
@@ -834,8 +878,10 @@ mod tests {
     use futures_util::StreamExt;
     use iocraft::prelude::*;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::presentation::session_picker::test_support::picker_record;
     use crate::presentation::session_picker::test_support::picker_request;
     use crate::sessions::SessionConversationPreview;
     use crate::sessions::SessionPickerRecord;
@@ -844,7 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_picker_iocraft_mock_terminal_handles_keys() {
-        let mut selected_outcome = None;
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
         let actual = element! {
             SessionsPickerComponent(
                 request: picker_request(),
@@ -900,6 +946,62 @@ mod tests {
             actual.iter().any(|snapshot| snapshot
                 .contains("Scope: [worktree]    Threads: [all]    Sort: [created]")),
             "ctrl shortcuts should cycle scope, threads, and sort: {actual:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_filter_shortcuts_reload_records_from_query_source() {
+        let observed_queries = Arc::new(Mutex::new(Vec::<SessionsPickerDataQuery>::new()));
+        let loader_queries = Arc::clone(&observed_queries);
+        let record_loader: SessionsPickerRecordLoader = Arc::new(move |query| {
+            loader_queries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(query);
+            Ok(vec![picker_record(
+                "thread-reloaded",
+                "Reloaded SQL result",
+                "/repo/project-a",
+                "codex-router",
+                "subagent",
+            )])
+        });
+        let mut request = picker_request();
+        request.records = vec![picker_record(
+            "thread-initial",
+            "Initial SQL result",
+            "/repo/project-a",
+            "codex-router",
+            "cli",
+        )];
+
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let _actual = element! {
+            SessionsPickerComponent(
+                request,
+                record_loader: Some(record_loader),
+                width: 100usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                ctrl_key('t'),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .collect::<Vec<_>>()
+        .await;
+
+        let queries = observed_queries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            queries
+                .iter()
+                .any(|query| query.source == SessionsSource::All),
+            "ctrl-t should reload records for the next thread-source query: {queries:?}"
         );
     }
 
