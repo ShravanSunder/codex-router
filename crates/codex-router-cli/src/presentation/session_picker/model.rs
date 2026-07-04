@@ -48,6 +48,7 @@ impl SessionsPickerModel {
             visible_rows_generation: 0,
         };
         model.rebuild_visible_rows();
+        model.select_first_record_when_available();
         model
     }
 
@@ -162,11 +163,22 @@ impl SessionsPickerModel {
     }
 
     pub(super) fn visible_len(&self) -> usize {
+        self.visible_indices.len() + 1
+    }
+
+    pub(super) fn visible_record_len(&self) -> usize {
         self.visible_indices.len()
     }
 
     pub(super) fn selected_record(&self) -> Option<&SessionPickerRecord> {
-        self.visible_record_at(self.selected_index)
+        self.visible_choice_record_at(self.selected_index)
+    }
+
+    pub(super) fn visible_choice_record_at(&self, index: usize) -> Option<&SessionPickerRecord> {
+        if index == 0 {
+            return None;
+        }
+        self.visible_record_at(index - 1)
     }
 
     pub(super) fn visible_record_at(&self, index: usize) -> Option<&SessionPickerRecord> {
@@ -218,6 +230,12 @@ impl SessionsPickerModel {
         });
         self.visible_indices = indices;
         self.visible_rows_generation = self.visible_rows_generation.saturating_add(1);
+    }
+
+    fn select_first_record_when_available(&mut self) {
+        if !self.visible_indices.is_empty() {
+            self.selected_index = 1;
+        }
     }
 
     fn clamp_selection(&mut self) {

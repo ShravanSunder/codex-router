@@ -5376,6 +5376,32 @@ exit 42
     }
 
     #[test]
+    fn sessions_command_rejects_limit_without_list() {
+        let interactive_error = must_err(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--limit"),
+            OsString::from("5"),
+        ]));
+        let last_error = must_err(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--last"),
+            OsString::from("--limit"),
+            OsString::from("5"),
+        ]));
+
+        assert!(
+            interactive_error
+                .to_string()
+                .contains("--limit only applies with --list")
+        );
+        assert!(
+            last_error
+                .to_string()
+                .contains("--limit only applies with --list")
+        );
+    }
+
+    #[test]
     fn sessions_list_json_reads_codex_state_metadata_without_prompt_leak() {
         const PROMPT_CANARY: &str = "SECRET_PROMPT_CANARY_SHOULD_NOT_LEAK";
         let test_root = TestRoot::new("sessions-list-json");
@@ -6127,6 +6153,57 @@ exit 42
         assert!(picker.offered_session_ids.is_empty());
         assert_eq!(runner.resumed_session_ids, Vec::<String>::new());
         assert_eq!(runner.new_codex_args, [Vec::<OsString>::new()]);
+    }
+
+    #[test]
+    fn sessions_interactive_picker_shows_start_new_command_with_passthrough_args() {
+        let test_root = TestRoot::new("sessions-picker-start-new-command");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(&codex_home.join("state_5.sqlite"), "EMPTY", &[]);
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--yolo"),
+            OsString::from("--model"),
+            OsString::from("gpt-5-codex"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new_start_new();
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(
+            picker.new_session_args_display.as_deref(),
+            Some("--yolo --model gpt-5-codex")
+        );
+        assert_eq!(
+            runner.new_codex_args,
+            [[
+                OsString::from("--yolo"),
+                OsString::from("--model"),
+                OsString::from("gpt-5-codex")
+            ]]
+        );
     }
 
     #[test]
@@ -7481,6 +7558,7 @@ exit 42
         selected_outcome: crate::presentation::session_picker::SessionsPickerOutcome,
         offered_session_ids: Vec<String>,
         offered_labels: Vec<String>,
+        new_session_args_display: Option<String>,
     }
 
     impl FakeSessionsPicker {
@@ -7492,6 +7570,7 @@ exit 42
                     ),
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
+                new_session_args_display: None,
             }
         }
 
@@ -7501,6 +7580,7 @@ exit 42
                     crate::presentation::session_picker::SessionsPickerOutcome::StartNewSession,
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
+                new_session_args_display: None,
             }
         }
     }
@@ -7514,6 +7594,7 @@ exit 42
             Option<crate::presentation::session_picker::SessionsPickerOutcome>,
             crate::sessions::SessionsCommandError,
         > {
+            self.new_session_args_display = Some(request.new_session_args_display.clone());
             self.offered_session_ids = request
                 .records
                 .iter()

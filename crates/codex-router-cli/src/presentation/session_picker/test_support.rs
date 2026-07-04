@@ -16,6 +16,7 @@ pub(crate) fn picker_request() -> SessionsPickerRequest {
         checkout_root: "/repo/project-a".into(),
         repo_roots: vec!["/repo/project-a".into(), "/repo/project-b".into()],
         current_provider: Some("codex-router".to_owned()),
+        new_session_args_display: String::new(),
         records: vec![
             picker_record(
                 "thread-a",

@@ -38,17 +38,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         render_filters_line(model),
     ];
 
-    if visible_len == 0 {
-        lines.push(fit_line("Start new session", model.width));
-        lines.push(fit_line(
-            if model.search.is_empty() {
-                "No existing sessions match these filters"
-            } else {
-                "No matching sessions"
-            },
-            model.width,
-        ));
-    } else {
+    if visible_len > 0 {
         let window_start =
             visible_window_start(model.selected_index, visible_len, VISIBLE_SESSION_ROWS);
         if window_start > 0 {
@@ -59,13 +49,34 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         }
         let window_end = (window_start + VISIBLE_SESSION_ROWS).min(visible_len);
         for visible_index in window_start..window_end {
-            let Some(record) = model.visible_record_at(visible_index) else {
-                continue;
-            };
             let marker = if visible_index == model.selected_index {
                 "❯"
             } else {
                 " "
+            };
+            if visible_index == 0 {
+                lines.push(fit_line(
+                    &format!("{marker} Start new session"),
+                    model.width,
+                ));
+                lines.push(fit_line(
+                    &format!("  {}", start_new_args_label(model)),
+                    model.width,
+                ));
+                if model.visible_record_len() == 0 {
+                    lines.push(fit_line(
+                        if model.search.is_empty() {
+                            "No existing sessions match these filters"
+                        } else {
+                            "No matching sessions"
+                        },
+                        model.width,
+                    ));
+                }
+                continue;
+            }
+            let Some(record) = model.visible_choice_record_at(visible_index) else {
+                continue;
             };
             let title_width = model.width.saturating_sub(18).max(14);
             lines.push(fit_line(
@@ -134,6 +145,15 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         model.width,
     ));
     format!("{}\n", lines.join("\n"))
+}
+
+#[cfg(test)]
+fn start_new_args_label(model: &SessionsPickerModel) -> String {
+    if model.request.new_session_args_display.is_empty() {
+        "no extra args".to_owned()
+    } else {
+        format!("args: {}", model.request.new_session_args_display)
+    }
 }
 
 #[cfg(test)]

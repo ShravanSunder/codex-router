@@ -165,14 +165,14 @@ impl SessionRecordQuery {
         }
     }
 
-    fn from_picker_query(query: SessionsPickerDataQuery, base_command: &SessionsCommand) -> Self {
+    fn from_picker_query(query: SessionsPickerDataQuery) -> Self {
         Self {
             root: query.root,
             provider: query.provider,
             source: query.source,
             sort: query.sort,
             last: false,
-            limit: base_command.limit,
+            limit: DEFAULT_SESSION_RECORD_LIMIT,
             search: query.search,
         }
     }
@@ -186,6 +186,7 @@ impl SessionsCommand {
         let parsed =
             ClapSessionsCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
         reject_legacy_router_options(&parsed.codex_args)?;
+        reject_interactive_limit(&parsed)?;
         Ok(Self {
             root: parsed.root()?,
             provider: parsed.provider,
@@ -195,7 +196,7 @@ impl SessionsCommand {
             format: parsed.format,
             last: parsed.last,
             new: parsed.new,
-            limit: parsed.limit,
+            limit: parsed.limit.unwrap_or(DEFAULT_SESSION_RECORD_LIMIT),
             dry_run: parsed.dry_run,
             codex_args: parsed.codex_args,
         })
@@ -208,6 +209,13 @@ fn reject_legacy_router_options(codex_args: &[OsString]) -> Result<(), String> {
         .any(|argument| argument == OsStr::new("--scope"))
     {
         return Err("--scope was removed; use --checkout, --repo, or --any".to_owned());
+    }
+    Ok(())
+}
+
+fn reject_interactive_limit(command: &ClapSessionsCommand) -> Result<(), String> {
+    if command.limit.is_some() && !command.list {
+        return Err("--limit only applies with --list".to_owned());
     }
     Ok(())
 }
@@ -235,8 +243,8 @@ struct ClapSessionsCommand {
     last: bool,
     #[arg(long, conflicts_with_all = ["list", "last"])]
     new: bool,
-    #[arg(long, default_value_t = DEFAULT_SESSION_RECORD_LIMIT)]
-    limit: usize,
+    #[arg(long)]
+    limit: Option<usize>,
     #[arg(long)]
     dry_run: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -613,12 +621,13 @@ fn run_interactive_session(
         checkout_root: checkout_root(context.current_dir()),
         repo_roots: repo_roots(context.current_dir()),
         current_provider: current_provider_for_picker(context),
+        new_session_args_display: codex_args_display(&command.codex_args),
         records: records
             .iter()
             .map(SessionPickerRecord::from_record)
             .collect(),
     };
-    let record_loader = session_picker_record_loader(command.clone(), context.clone());
+    let record_loader = session_picker_record_loader(context.clone());
     let Some(outcome) = picker.select_session(request, Some(record_loader))? else {
         return Err(SessionsCommandError::PickerCanceled);
     };
@@ -632,12 +641,9 @@ fn run_interactive_session(
     }
 }
 
-fn session_picker_record_loader(
-    base_command: SessionsCommand,
-    context: CliContext,
-) -> SessionsPickerRecordLoader {
+fn session_picker_record_loader(context: CliContext) -> SessionsPickerRecordLoader {
     std::sync::Arc::new(move |query| {
-        let record_query = SessionRecordQuery::from_picker_query(query, &base_command);
+        let record_query = SessionRecordQuery::from_picker_query(query);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -720,6 +726,17 @@ fn write_codex_args<W: Write>(
         write!(stdout, " {}", argument.to_string_lossy()).map_err(SessionsCommandError::Stdout)?;
     }
     Ok(())
+}
+
+fn codex_args_display(codex_args: &[OsString]) -> String {
+    if codex_args.is_empty() {
+        return String::new();
+    }
+    codex_args
+        .iter()
+        .map(|argument| argument.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Interactive session picker.

@@ -23,6 +23,7 @@ const SIDECAR_PICKER_WIDTH: usize = 160;
 const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
 const MAX_VISIBLE_RECORDS: usize = VISIBLE_SESSION_ROWS;
+const START_NEW_DETAILS_HEIGHT: usize = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConversationPreviewLoadRequest {
@@ -298,39 +299,35 @@ fn render_picker_view(
     children.extend(render_filter_controls(model, content_width));
 
     let visible_len = model.visible_len();
-    if visible_len == 0 {
-        children.push(render_empty_state(model));
-    } else {
-        let selected_record = model.selected_record();
-        if model.width >= SIDECAR_PICKER_WIDTH {
-            let list_width = (content_width.saturating_sub(2) / 2).max(42);
-            let detail_width = content_width.saturating_sub(list_width + 2).max(28);
-            let list_height = session_list_height(visible_len, model.selected_index);
-            let details_panel_height = selected_record
-                .map(|record| {
-                    detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
-                })
-                .unwrap_or(2);
-            let main_height = list_height.max(details_panel_height);
-            children.push(
-                element! {
-                    View(width: 100pct, height: main_height as u32) {
-                        #(render_session_list(model, list_width))
-                        View(width: 2) { Text(content: "") }
-                        #(selected_record
-                            .map(|record| render_details(record, detail_width, selected_conversation))
-                            .unwrap_or_else(|| render_empty_state(model)))
-                    }
+    let selected_record = model.selected_record();
+    if model.width >= SIDECAR_PICKER_WIDTH {
+        let list_width = (content_width.saturating_sub(2) / 2).max(42);
+        let detail_width = content_width.saturating_sub(list_width + 2).max(28);
+        let list_height = session_list_height(visible_len, model.selected_index);
+        let details_panel_height = selected_record
+            .map(|record| {
+                detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
+            })
+            .unwrap_or(START_NEW_DETAILS_HEIGHT);
+        let main_height = list_height.max(details_panel_height);
+        children.push(
+            element! {
+                View(width: 100pct, height: main_height as u32) {
+                    #(render_session_list(model, list_width))
+                    View(width: 2) { Text(content: "") }
+                    #(selected_record
+                        .map(|record| render_details(record, detail_width, selected_conversation))
+                        .unwrap_or_else(|| render_start_new_details(model, detail_width)))
                 }
-                .into_any(),
-            );
-        } else {
-            children.push(render_session_list(model, content_width));
-            if model.width >= NARROW_PICKER_WIDTH
-                && let Some(record) = selected_record
-            {
-                children.push(render_details(record, content_width, selected_conversation));
             }
+            .into_any(),
+        );
+    } else {
+        children.push(render_session_list(model, content_width));
+        if model.width >= NARROW_PICKER_WIDTH
+            && let Some(record) = selected_record
+        {
+            children.push(render_details(record, content_width, selected_conversation));
         }
     }
 
@@ -363,15 +360,17 @@ fn picker_content_height(
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let heading_height = 1 + filter_control_height(content_width);
     let visible_len = model.visible_len();
-    let body_height = if visible_len == 0 {
-        2
-    } else if model.width >= SIDECAR_PICKER_WIDTH {
-        let conversation = selected_conversation
-            .or_else(|| model.selected_record().map(|record| &record.conversation));
-        session_list_height(visible_len, model.selected_index).max(detail_height(conversation))
+    let body_height = if model.width >= SIDECAR_PICKER_WIDTH {
+        let details_height = if let Some(record) = model.selected_record() {
+            let conversation = selected_conversation.unwrap_or(&record.conversation);
+            detail_height(Some(conversation))
+        } else {
+            START_NEW_DETAILS_HEIGHT
+        };
+        session_list_height(visible_len, model.selected_index).max(details_height)
     } else {
         let list_height = session_list_height(visible_len, model.selected_index);
-        if model.width >= NARROW_PICKER_WIDTH {
+        if model.width >= NARROW_PICKER_WIDTH && model.selected_record().is_some() {
             let conversation = selected_conversation
                 .or_else(|| model.selected_record().map(|record| &record.conversation));
             list_height + detail_height(conversation)
@@ -478,29 +477,26 @@ fn control_line(parts: Vec<String>) -> AnyElement<'static> {
     .into_any()
 }
 
-fn render_empty_state(model: &SessionsPickerModel) -> AnyElement<'static> {
+fn render_start_new_details(model: &SessionsPickerModel, width: usize) -> AnyElement<'static> {
+    let detail_width = width.saturating_sub(4);
     element! {
         View(
-            width: 100pct,
+            width: width as u32,
+            height: START_NEW_DETAILS_HEIGHT as u32,
             flex_direction: FlexDirection::Column,
-            background_color: Color::DarkGrey,
+            border_style: BorderStyle::Single,
+            border_color: Color::DarkGrey,
             padding_left: 1,
             padding_right: 1,
+            overflow: Overflow::Hidden,
         ) {
-            Text(
-                content: "Start new session",
-                color: Color::White,
-                weight: Weight::Bold,
-            )
-            Text(
-                content: if model.search.is_empty() {
-                    "No existing sessions match these filters"
-                } else {
-                    "No matching sessions"
-                },
-                color: Color::Grey,
-                weight: Weight::Normal,
-            )
+            Text(content: "Start new session", color: Color::Cyan, weight: Weight::Bold)
+            Text(content: fit_line(&start_new_args_label(model), detail_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            #(if model.visible_record_len() == 0 {
+                Some(detail_text(no_matching_sessions_label(model), detail_width, Color::Grey))
+            } else {
+                None
+            })
         }
     }
     .into_any()
@@ -530,7 +526,13 @@ fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<
         if visible_index > window_start {
             rows.push(list_gap());
         }
-        if let Some(record) = model.visible_record_at(visible_index) {
+        if visible_index == 0 {
+            rows.push(render_start_new_row(
+                model,
+                visible_index == selected_index,
+                row_width,
+            ));
+        } else if let Some(record) = model.visible_choice_record_at(visible_index) {
             rows.push(render_record_row(
                 record,
                 visible_index == selected_index,
@@ -570,6 +572,65 @@ fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<
         }
     }
     .into_any()
+}
+
+fn render_start_new_row(
+    model: &SessionsPickerModel,
+    selected: bool,
+    width: usize,
+) -> AnyElement<'static> {
+    let foreground = if selected { Color::White } else { Color::Grey };
+    let title_prefix = if selected { "❯ " } else { "  " };
+    let title_width = width.saturating_sub(18).max(14);
+    let first_line = fit_line(
+        &format!(
+            "{title_prefix}{:<title_width$} {:>6} {:>6}",
+            "Start new session", "-", "-"
+        ),
+        width.saturating_sub(2),
+    );
+    let metadata_line = if model.visible_record_len() == 0 {
+        format!(
+            "    {}  {}",
+            no_matching_sessions_label(model),
+            start_new_args_label(model)
+        )
+    } else {
+        format!("    {}", start_new_args_label(model))
+    };
+    let second_line = fit_line(&metadata_line, width.saturating_sub(2));
+
+    element! {
+        View(
+            width: width as u32,
+            flex_direction: FlexDirection::Column,
+            background_color: Color::DarkGrey,
+            padding_left: 1,
+            padding_right: 1,
+            padding_top: 0,
+            padding_bottom: 0,
+        ) {
+            Text(content: first_line, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            Text(content: second_line, color: Color::Grey, weight: Weight::Light, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
+fn no_matching_sessions_label(model: &SessionsPickerModel) -> &'static str {
+    if model.search.is_empty() {
+        "No existing sessions match these filters"
+    } else {
+        "No matching sessions"
+    }
+}
+
+fn start_new_args_label(model: &SessionsPickerModel) -> String {
+    if model.request.new_session_args_display.is_empty() {
+        "no extra args".to_owned()
+    } else {
+        format!("args: {}", model.request.new_session_args_display)
+    }
 }
 
 fn render_session_header(width: usize) -> AnyElement<'static> {

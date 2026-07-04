@@ -13,6 +13,7 @@ fn sessions_picker_model_shows_and_switches_three_filters() {
     assert!(initial.contains("Threads: [interactive]"));
     assert!(initial.contains("Sort: [updated]"));
     assert!(initial.contains("ctrl-n new thread"));
+    assert!(initial.contains("Start new session"));
     assert!(initial.contains("Feature design session"));
     assert!(!initial.contains("Subagent planning"));
 
@@ -127,7 +128,10 @@ fn sessions_picker_model_supports_page_and_edge_navigation() {
     model.handle_key(SessionsPickerKey::PageUp);
     assert_eq!(model.selected_session_id(), Some("thread-extra-3"));
     model.handle_key(SessionsPickerKey::MoveFirst);
-    assert_eq!(model.selected_session_id(), Some("thread-a"));
+    assert_eq!(
+        model.selected_outcome(),
+        Some(SessionsPickerOutcome::StartNewSession)
+    );
 }
 
 #[test]
@@ -228,6 +232,24 @@ fn sessions_picker_root_filters_match_checkout_and_repo_roots() {
     assert!(repo_snapshot.contains("Current source session"));
     assert!(repo_snapshot.contains("Sibling test session"));
     assert!(repo_snapshot.contains("Sibling worktree session"));
+}
+
+#[test]
+fn sessions_picker_model_keeps_start_new_choice_with_existing_sessions() {
+    let mut request = picker_request();
+    request.new_session_args_display = "--yolo --model gpt-5-codex".to_owned();
+    let mut model = SessionsPickerModel::new(request, 120);
+
+    let initial = model.render_snapshot();
+    assert!(initial.contains("Start new session"));
+    assert!(initial.contains("args: --yolo --model gpt-5-codex"));
+    assert_eq!(model.selected_session_id(), Some("thread-a"));
+
+    model.handle_key(SessionsPickerKey::MoveUp);
+    assert_eq!(
+        model.selected_outcome(),
+        Some(SessionsPickerOutcome::StartNewSession)
+    );
 }
 
 #[test]
