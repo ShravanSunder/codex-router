@@ -140,11 +140,11 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn hex_digit(nibble: u8) -> char {
+fn hex_digit(value: u8) -> char {
+    let nibble = value & 0x0f;
     match nibble {
         0..=9 => char::from(b'0' + nibble),
-        10..=15 => char::from(b'a' + (nibble - 10)),
-        _ => unreachable!("nibble is masked to four bits"),
+        _ => char::from(b'a' + (nibble - 10)),
     }
 }
 

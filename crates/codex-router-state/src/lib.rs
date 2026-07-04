@@ -61,6 +61,13 @@ mod tests {
     use crate::sqlite::SqliteStateStore;
     use crate::sqlite::StateStoreError;
 
+    fn expect_error<T, E>(result: Result<T, E>, context: &'static str) -> E {
+        match result {
+            Ok(_) => panic!("{context}"),
+            Err(error) => error,
+        }
+    }
+
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
@@ -309,6 +316,172 @@ mod tests {
         };
 
         assert_eq!(async_inputs, sync_inputs);
+    }
+
+    #[tokio::test]
+    async fn async_read_only_store_reads_without_allowing_writes() {
+        let temp_dir = TestTempDir::new("async_read_only_store");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let writable_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("writable async state store should open and migrate: {error}"),
+        };
+        let account = AccountRecord::new(
+            account_id("acct_async_read_only"),
+            "read-only",
+            AccountStatus::Enabled,
+        );
+        if let Err(error) = writable_store.upsert_account(&account).await {
+            panic!("writable async store should persist account: {error}");
+        }
+        if let Err(error) = writable_store.close().await {
+            panic!("writable async store should close cleanly: {error}");
+        }
+        drop(writable_store);
+
+        let read_only_store = match AsyncSqliteStateStore::open_read_only(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("read-only async state store should open: {error}"),
+        };
+        let accounts = match read_only_store.list_accounts().await {
+            Ok(accounts) => accounts,
+            Err(error) => panic!("read-only async store should list accounts: {error}"),
+        };
+        assert_eq!(accounts, vec![account]);
+
+        let write_error = read_only_store
+            .upsert_account(&AccountRecord::new(
+                account_id("acct_async_read_only_blocked"),
+                "blocked",
+                AccountStatus::Enabled,
+            ))
+            .await;
+        assert!(
+            write_error.is_err(),
+            "read-only async store must reject writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_read_only_store_reports_missing_current_schema_without_writes() {
+        let temp_dir = TestTempDir::new("async_read_only_missing_schema");
+        let database_path = temp_dir.path().join("state.sqlite");
+        create_v10_database_missing_async_projection_tables(&database_path);
+
+        let error = expect_error(
+            AsyncSqliteStateStore::open_read_only(&database_path).await,
+            "read-only open should fail before status queries hit missing tables",
+        );
+
+        assert_eq!(
+            error,
+            StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "table",
+                object_name: "quota_history_observations",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_seeded_state_store_is_accepted_by_quota_status_read_only_schema() {
+        let temp_dir = TestTempDir::new("sync_seeded_read_only_quota_status");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_sync_seeded_quota_status");
+        let account = AccountRecord::new(account_id.clone(), "sync-seeded", AccountStatus::Enabled)
+            .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("sync seed should persist account: {error}");
+        }
+        let short_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(91)
+        .with_reset_unix_seconds(18_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(1_000);
+        let weekly_window = PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(54)
+        .with_reset_unix_seconds(604_800)
+        .with_observed_unix_seconds(1_000);
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&sync_store, &short_window)
+        {
+            panic!("sync seed should persist short selector window: {error}");
+        }
+        if let Err(error) =
+            SelectorQuotaRepository::upsert_selector_window(&sync_store, &weekly_window)
+        {
+            panic!("sync seed should persist weekly selector window: {error}");
+        }
+        drop(sync_store);
+
+        let read_only_store = match AsyncSqliteStateStore::open_read_only(&database_path).await {
+            Ok(store) => store,
+            Err(error) => {
+                panic!(
+                    "sync-seeded state database should satisfy read-only quota status schema: {error}"
+                )
+            }
+        };
+        let observations = match AsyncQuotaHistoryRepository::quota_history_observations_for_window(
+            &read_only_store,
+            &account_id,
+            "responses",
+            604_800,
+            0,
+            2_000,
+        )
+        .await
+        {
+            Ok(observations) => observations,
+            Err(error) => {
+                panic!(
+                    "quota status read-only quota history query should find current schema: {error}"
+                )
+            }
+        };
+
+        assert!(
+            observations.is_empty(),
+            "sync-seeded state should start with no quota history observations"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_writable_store_enables_wal_journal_mode() {
+        let temp_dir = TestTempDir::new("async_wal_journal_mode");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        if let Err(error) = store.close().await {
+            panic!("async state store should close cleanly: {error}");
+        }
+        drop(store);
+
+        let connection = match Connection::open(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("sqlite database should open for journal inspection: {error}"),
+        };
+        let journal_mode: String =
+            match connection.query_row("PRAGMA journal_mode", [], |row| row.get(0)) {
+                Ok(journal_mode) => journal_mode,
+                Err(error) => panic!("journal mode should be readable: {error}"),
+            };
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
     }
 
     #[tokio::test]
@@ -909,6 +1082,69 @@ mod tests {
                 crate::sqlite::ActiveSessionRollup::new(account, "responses", 900, 1_200, 100, 1)
                     .with_terminal_counts(0, 1),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn writable_selection_projection_terminalizes_stale_active_leases() {
+        let temp_dir = TestTempDir::new("selection_projection_stale_lease_cleanup");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_projection_stale_cleanup");
+        let reservation_id = ReservationId::new("reservation_projection_stale_cleanup");
+        let account_record =
+            AccountRecord::new(account.clone(), "projection-stale", AccountStatus::Enabled)
+                .with_active_credential_generation(1);
+        store
+            .upsert_account(&account_record)
+            .await
+            .unwrap_or_else(|error| panic!("account should persist: {error}"));
+        store
+            .upsert_selector_quota_window(
+                &PersistedSelectorQuotaWindow::new(
+                    account.clone(),
+                    "responses",
+                    V1_WEEKLY_WINDOW_SECONDS,
+                    SelectorQuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(90)
+                .with_reset_unix_seconds(100_000)
+                .with_effective(true)
+                .with_observed_unix_seconds(100),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("selector window should persist: {error}"));
+        store
+            .record_active_client_acquired(
+                "responses",
+                "process-projection-stale",
+                &reservation_id,
+                &account,
+                100,
+                8,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("stale lease should acquire: {error}"));
+
+        let projection = project_route_band_selection_inputs(&store, "responses", 1_000, 300)
+            .await
+            .unwrap_or_else(|error| panic!("writable projection should load: {error}"));
+
+        assert_eq!(projection.accounts().len(), 1);
+        assert_eq!(projection.accounts()[0].current_active_sessions(), 0);
+        let events = store
+            .active_session_events_for_route_band("responses")
+            .await
+            .unwrap_or_else(|error| panic!("active session events should load: {error}"));
+        assert!(
+            events.iter().any(|event| {
+                event.event_kind() == crate::sqlite::ActiveSessionEventKind::StalePurged
+                    && event.reservation_id() == &reservation_id
+            }),
+            "writable projection should terminalize stale persisted leases"
         );
     }
 
@@ -3122,6 +3358,61 @@ mod tests {
             ",
         ) {
             panic!("raw v8 database should initialize: {error}");
+        }
+    }
+
+    fn create_v10_database_missing_async_projection_tables(database_path: &Path) {
+        let connection = match Connection::open(database_path) {
+            Ok(connection) => connection,
+            Err(error) => panic!("raw v10 database should open: {error}"),
+        };
+        if let Err(error) = connection.execute_batch(
+            "
+            CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                active_credential_generation INTEGER
+            );
+
+            CREATE TABLE quota_snapshots (
+                account_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                route_band TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                reset_credits_available INTEGER,
+                stale_penalty INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            CREATE TABLE selector_quota_windows (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                limit_window_seconds INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                remaining_headroom INTEGER NOT NULL,
+                reset_unix_seconds INTEGER,
+                effective INTEGER NOT NULL,
+                observed_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (account_id, route_band, limit_window_seconds)
+            );
+
+            CREATE TABLE quota_refresh_status (
+                account_id TEXT NOT NULL,
+                route_band TEXT NOT NULL,
+                last_success_unix_seconds INTEGER,
+                last_attempt_unix_seconds INTEGER,
+                last_error_class TEXT,
+                stale_after_unix_seconds INTEGER,
+                PRIMARY KEY (account_id, route_band)
+            );
+
+            PRAGMA user_version = 10;
+            ",
+        ) {
+            panic!("raw v10 database should initialize without async projection tables: {error}");
         }
     }
 

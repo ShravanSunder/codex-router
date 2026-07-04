@@ -1427,7 +1427,13 @@ impl Read for AffinityOwnerRecordingBody {
             self.record_if_ready()?;
             return Ok(0);
         }
-        self.buffered.extend_from_slice(&buffer[..read]);
+        let Some(read_buffer) = buffer.get(..read) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "read length exceeded buffer length",
+            ));
+        };
+        self.buffered.extend_from_slice(read_buffer);
         self.record_if_ready()?;
         Ok(read)
     }
@@ -1593,7 +1599,10 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
         .iter()
         .rposition(|byte| !byte.is_ascii_whitespace())
         .map_or(start, |index| index + 1);
-    &bytes[start..end]
+    match bytes.get(start..end) {
+        Some(trimmed) => trimmed,
+        None => &[],
+    }
 }
 
 fn current_unix_seconds() -> u64 {

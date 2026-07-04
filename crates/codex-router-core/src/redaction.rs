@@ -150,11 +150,11 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn hex_digit(nibble: u8) -> char {
+fn hex_digit(value: u8) -> char {
+    let nibble = value & 0x0f;
     match nibble {
         0..=9 => char::from(b'0' + nibble),
-        10..=15 => char::from(b'a' + (nibble - 10)),
-        _ => unreachable!("nibble is masked to four bits"),
+        _ => char::from(b'a' + (nibble - 10)),
     }
 }
 
@@ -194,8 +194,12 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.as_str().starts_with("acct-"));
         assert_eq!(first.as_str().len(), "acct-".len() + 12);
+        let suffix = match first.as_str().strip_prefix("acct-") {
+            Some(suffix) => suffix,
+            None => panic!("safe account label should use acct- prefix"),
+        };
         assert!(
-            first.as_str()["acct-".len()..]
+            suffix
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );

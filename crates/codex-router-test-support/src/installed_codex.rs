@@ -54,6 +54,8 @@ use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::repositories::QuotaSnapshotRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::sqlite::SqliteStateStore;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use tungstenite::Message;
 use tungstenite::WebSocket;
@@ -62,6 +64,7 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::connect;
 use tungstenite::handshake::server::Request;
 use tungstenite::handshake::server::Response;
+use tungstenite::stream::MaybeTlsStream;
 
 const SMOKE_EXPECTED_TEXT: &str = "codex-router smoke ok";
 const SMOKE_PROMPT: &str = "Reply with exactly: codex-router smoke ok";
@@ -75,6 +78,17 @@ const SOAK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SOAK_PROOF_MARGIN: Duration = Duration::from_secs(1);
 const QUICK_CONCURRENT_HOLD_DURATION: Duration = Duration::from_secs(2);
 const ROUTER_REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+const RETAIN_SMOKE_ROOT_ENV: &str = "CODEX_ROUTER_RETAIN_SMOKE_ROOT";
+type PressureHandles = Arc<Mutex<Vec<thread::JoinHandle<Result<(), String>>>>>;
+const INSTALLED_SMOKE_RUNTIME_ROOT_MODE_ENV: &str =
+    "CODEX_ROUTER_INSTALLED_SMOKE_RUNTIME_ROOT_MODE";
+const INSTALLED_SMOKE_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_INSTALLED_SMOKE_ROUTER_ROOT";
+const INSTALLED_SMOKE_CODEX_HOME_ENV: &str = "CODEX_ROUTER_INSTALLED_SMOKE_CODEX_HOME";
+const INSTALLED_SMOKE_PROCESS_HOME_ENV: &str = "CODEX_ROUTER_INSTALLED_SMOKE_PROCESS_HOME";
+const S8_RUN_ID_ENV: &str = "CODEX_ROUTER_S8_RUN_ID";
+const QUOTA_RECONNECT_SQLITE_PRESSURE_HOLD: Duration = Duration::from_secs(15);
+const QUOTA_RECONNECT_SQLITE_PRESSURE_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const QUOTA_RECONNECT_ROUTER_MAX_CONNECTIONS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstalledCodexSmokeMode {
@@ -90,6 +104,7 @@ struct ConcurrentWebSocketHarnessConfig {
     codex_command_timeout: Duration,
     router_max_connections: usize,
     capture_registry_report: bool,
+    quota_reconnect: bool,
 }
 
 impl ConcurrentWebSocketHarnessConfig {
@@ -97,9 +112,10 @@ impl ConcurrentWebSocketHarnessConfig {
         Self {
             artifact_mode: "three-websocket",
             upstream: ConcurrentUpstreamConfig::quick(3),
-            codex_command_timeout: CODEX_COMMAND_TIMEOUT,
+            codex_command_timeout: Duration::from_secs(60),
             router_max_connections: 3,
-            capture_registry_report: false,
+            capture_registry_report: true,
+            quota_reconnect: false,
         }
     }
 
@@ -111,6 +127,19 @@ impl ConcurrentWebSocketHarnessConfig {
             codex_command_timeout: hold_duration.saturating_add(SOAK_COMMAND_TIMEOUT_SLACK),
             router_max_connections: 3,
             capture_registry_report: true,
+            quota_reconnect: false,
+        }
+    }
+
+    fn s8_overlap_quota() -> Self {
+        let hold_duration = soak_duration_from_env();
+        Self {
+            artifact_mode: "s8-overlap-quota",
+            upstream: ConcurrentUpstreamConfig::s8_overlap_quota(3, hold_duration),
+            codex_command_timeout: hold_duration.saturating_add(SOAK_COMMAND_TIMEOUT_SLACK),
+            router_max_connections: 5,
+            capture_registry_report: true,
+            quota_reconnect: true,
         }
     }
 }
@@ -118,6 +147,7 @@ impl ConcurrentWebSocketHarnessConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ConcurrentUpstreamConfig {
     expected_sessions: usize,
+    expected_upstream_sessions: usize,
     hold_duration: Duration,
     heartbeat_interval: Duration,
 }
@@ -126,6 +156,7 @@ impl ConcurrentUpstreamConfig {
     const fn quick(expected_sessions: usize) -> Self {
         Self {
             expected_sessions,
+            expected_upstream_sessions: expected_sessions,
             hold_duration: QUICK_CONCURRENT_HOLD_DURATION,
             heartbeat_interval: Duration::from_millis(250),
         }
@@ -140,6 +171,22 @@ impl ConcurrentUpstreamConfig {
             });
         Self {
             expected_sessions,
+            expected_upstream_sessions: expected_sessions,
+            hold_duration,
+            heartbeat_interval,
+        }
+    }
+
+    fn s8_overlap_quota(expected_sessions: usize, hold_duration: Duration) -> Self {
+        let heartbeat_interval = hold_duration
+            .checked_div(4)
+            .filter(|duration| !duration.is_zero())
+            .map_or(SOAK_HEARTBEAT_INTERVAL, |duration| {
+                duration.min(SOAK_HEARTBEAT_INTERVAL)
+            });
+        Self {
+            expected_sessions,
+            expected_upstream_sessions: expected_sessions.saturating_add(2),
             hold_duration,
             heartbeat_interval,
         }
@@ -200,29 +247,20 @@ struct CodexExecRequest<'a> {
     child_environment: CodexChildEnvironment,
     timeout: Duration,
     prompt: &'a str,
-    pid_observer: Option<(usize, mpsc::Sender<ClientPidObservation>)>,
+    client_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ClientPidObservation {
-    client_index: usize,
-    pid: u32,
+struct InstalledCodexRuntimeRoots {
+    mode: String,
+    router_root: PathBuf,
+    state_path: PathBuf,
+    secret_root: PathBuf,
+    codex_home: Option<PathBuf>,
+    process_home: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ClientSocketObservation {
-    client_index: usize,
-    client_pid: u32,
-    local_port: u16,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RouterSessionPeerObservation {
-    session_id: u64,
-    local_port: u16,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct UpstreamClientSessionObservation {
     client_index: usize,
     upstream_session_id: u64,
@@ -254,20 +292,32 @@ pub fn run_installed_codex_three_websocket_mock_soak() -> Result<InstalledCodexS
     run_installed_codex_three_websocket_mock_e2e_inner(ConcurrentWebSocketHarnessConfig::soak())
 }
 
+/// Runs three installed Codex WebSocket clients while one reconnects after quota exhaustion.
+pub fn run_installed_codex_s8_overlap_quota_websocket_mock_smoke()
+-> Result<InstalledCodexSmokeReport, String> {
+    run_installed_codex_three_websocket_mock_e2e_inner(
+        ConcurrentWebSocketHarnessConfig::s8_overlap_quota(),
+    )
+}
+
 /// Runs one installed Codex WebSocket client through provider quota exhaustion,
 /// then proves Codex reconnects and completes on the next router account.
 pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
 -> Result<InstalledCodexSmokeReport, String> {
     let smoke_root = SmokeTempRoot::new("installed-codex-quota-reconnect")?;
-    let codex_home = smoke_root.path().join("codex-home");
+    let runtime_roots = installed_codex_runtime_roots(&smoke_root)?;
+    let codex_home = runtime_roots
+        .codex_home
+        .clone()
+        .unwrap_or_else(|| smoke_root.path().join("codex-home"));
     let workdir = smoke_root.path().join("workdir");
-    let process_home = smoke_root.path().join("home");
+    let process_home = runtime_roots
+        .process_home
+        .clone()
+        .unwrap_or_else(|| smoke_root.path().join("home"));
     let xdg_config_home = smoke_root.path().join("xdg-config");
     let xdg_state_home = smoke_root.path().join("xdg-state");
     let xdg_cache_home = smoke_root.path().join("xdg-cache");
-    let router_root = smoke_root.path().join("router");
-    let state_path = router_root.join("state.sqlite");
-    let secret_root = router_root.join("secrets");
     for path in [
         &codex_home,
         &workdir,
@@ -275,30 +325,48 @@ pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
         &xdg_config_home,
         &xdg_state_home,
         &xdg_cache_home,
-        &router_root,
+        &runtime_roots.router_root,
     ] {
         fs::create_dir_all(path)
             .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
     }
 
     let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
-    seed_quota_reconnect_router_state(&state_path, &secret_root)?;
-    let upstream = MockQuotaReconnectWebSocketUpstream::start()?;
+    seed_quota_reconnect_router_state(&runtime_roots.state_path, &runtime_roots.secret_root)?;
+    let sqlite_pressure = (runtime_roots.mode == "copied-dev-state")
+        .then(|| QuotaReconnectSqlitePressureConfig::new(runtime_roots.state_path.clone()));
+    let upstream = MockQuotaReconnectWebSocketUpstream::start(sqlite_pressure)?;
     let router_port = reserve_loopback_port()?;
-    let audit_path = router_root.join("audit").join("events.jsonl");
+    let audit_path = smoke_root
+        .path()
+        .join("quota-reconnect-audit")
+        .join("events.jsonl");
+    let registry_report_path = runtime_roots
+        .router_root
+        .join("quota-reconnect-websocket-registry-report.json");
+    if let Some(audit_dir) = audit_path.parent() {
+        fs::create_dir_all(audit_dir).map_err(|error| {
+            format!(
+                "failed to create quota reconnect audit dir {}: {error}",
+                audit_dir.display()
+            )
+        })?;
+    }
     let profile_writer = CodexRouterProfileWriter::new(&codex_home);
     let profile = CodexRouterProfile::new(router_port);
     let profile_path = profile_writer
         .write(&profile, true)
         .map_err(|error| format!("failed to write quota reconnect Codex profile: {error}"))?;
-    let router_process = start_router_process(
+    let router_process = start_router_process_with_options(RouterProcessStartOptions {
         router_port,
-        state_path,
-        secret_root,
-        None,
-        format!("http://{}/v1", upstream.address()),
-        audit_path.clone(),
-    )?;
+        state_path: runtime_roots.state_path.clone(),
+        secret_root: runtime_roots.secret_root.clone(),
+        local_token: None,
+        upstream_base_url: format!("http://{}/v1", upstream.address()),
+        audit_path: audit_path.clone(),
+        max_connections: QUOTA_RECONNECT_ROUTER_MAX_CONNECTIONS,
+        websocket_registry_report_file: Some(registry_report_path.clone()),
+    })?;
 
     let last_message_path = smoke_root.path().join("websocket-last-message.txt");
     let codex_output = run_codex_exec_with_timeout(
@@ -320,7 +388,9 @@ pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
         &last_message_path,
     )?;
     assert_codex_quota_reconnect_output_is_safe(&codex_output, &last_message_path)?;
-    let router_process = router_process.stop("quota reconnect router process")?;
+    let router_process =
+        router_process.wait("quota reconnect router process", Duration::from_secs(10))?;
+    let registry_report = RouterWebSocketRegistryReport::from_file(&registry_report_path)?;
     let router_audit = RouterAuditObservation::from_file(&audit_path)?;
     router_audit.require_mode(InstalledCodexSmokeMode::WebSocket)?;
     let upstream_result = upstream.join()?;
@@ -336,6 +406,8 @@ pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
             upstream: &upstream_result,
             router_process: &router_process,
             router_audit: &router_audit,
+            registry_report: &registry_report,
+            runtime_roots: &runtime_roots,
         })?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
@@ -528,28 +600,45 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
     config: ConcurrentWebSocketHarnessConfig,
 ) -> Result<InstalledCodexSmokeReport, String> {
     let smoke_root = SmokeTempRoot::new("installed-codex-three-websocket")?;
-    let router_root = smoke_root.path().join("router");
-    let state_path = router_root.join("state.sqlite");
-    let secret_root = router_root.join("secrets");
-    fs::create_dir_all(&router_root).map_err(|error| {
+    let runtime_roots = installed_codex_runtime_roots_for_three_websocket(&smoke_root)?;
+    fs::create_dir_all(&runtime_roots.router_root).map_err(|error| {
         format!(
             "failed to create temp router root {}: {error}",
-            router_root.display()
+            runtime_roots.router_root.display()
         )
     })?;
 
     let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
-    let upstream = MockConcurrentWebSocketUpstream::start(config.upstream)?;
-    let seed = seed_router_state(&state_path, &secret_root)?;
+    let sqlite_pressure = (config.quota_reconnect && runtime_roots.mode == "copied-dev-state")
+        .then(|| QuotaReconnectSqlitePressureConfig::new(runtime_roots.state_path.clone()));
+    let upstream = MockConcurrentWebSocketUpstream::start(config.upstream, sqlite_pressure)?;
+    let seed = if config.quota_reconnect {
+        seed_s8_overlap_quota_router_state(&runtime_roots.state_path, &runtime_roots.secret_root)?
+    } else {
+        seed_router_state(&runtime_roots.state_path, &runtime_roots.secret_root)?
+    };
     let router_port = reserve_loopback_port()?;
-    let audit_path = router_root.join("audit").join("events.jsonl");
-    let registry_report_path = config
-        .capture_registry_report
-        .then(|| router_root.join("websocket-registry-report.json"));
+    let audit_path = smoke_root
+        .path()
+        .join("three-websocket-audit")
+        .join("events.jsonl");
+    if let Some(audit_dir) = audit_path.parent() {
+        fs::create_dir_all(audit_dir).map_err(|error| {
+            format!(
+                "failed to create three-websocket audit dir {}: {error}",
+                audit_dir.display()
+            )
+        })?;
+    }
+    let registry_report_path = config.capture_registry_report.then(|| {
+        runtime_roots
+            .router_root
+            .join("websocket-registry-report.json")
+    });
     let router_process = start_router_process_with_options(RouterProcessStartOptions {
         router_port,
-        state_path,
-        secret_root,
+        state_path: runtime_roots.state_path.clone(),
+        secret_root: runtime_roots.secret_root.clone(),
         local_token: None,
         upstream_base_url: format!("http://{}/v1", upstream.address()),
         audit_path,
@@ -558,13 +647,18 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
     })?;
 
     let start_barrier = Arc::new(Barrier::new(3));
-    let (pid_sender, pid_receiver) = mpsc::channel();
     let mut handles = Vec::new();
     for client_index in 0..3 {
         let client_root = smoke_root.path().join(format!("client-{client_index}"));
-        let codex_home = client_root.join("codex-home");
+        let codex_home = runtime_roots
+            .codex_home
+            .clone()
+            .unwrap_or_else(|| client_root.join("codex-home"));
         let workdir = client_root.join("workdir");
-        let process_home = client_root.join("home");
+        let process_home = runtime_roots
+            .process_home
+            .clone()
+            .unwrap_or_else(|| client_root.join("home"));
         let xdg_config_home = client_root.join("xdg-config");
         let xdg_state_home = client_root.join("xdg-state");
         let xdg_cache_home = client_root.join("xdg-cache");
@@ -592,7 +686,6 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
             &xdg_cache_home,
         );
         let barrier = Arc::clone(&start_barrier);
-        let pid_sender = pid_sender.clone();
         handles.push(
             thread::Builder::new()
                 .name(format!("codex-router-three-client-{client_index}"))
@@ -609,7 +702,7 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
                         child_environment,
                         timeout: config.codex_command_timeout,
                         prompt: &prompt,
-                        pid_observer: Some((client_index, pid_sender)),
+                        client_index: Some(client_index),
                     })?;
                     assert_codex_visible_output(
                         &format!("WebSocket client {client_index}"),
@@ -623,19 +716,43 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
                 })?,
         );
     }
-    drop(pid_sender);
-    let client_pid_observations =
-        collect_client_pid_observations(&pid_receiver, 3, Duration::from_secs(10))?;
-    let client_socket_observations = observe_client_router_sockets(
-        &client_pid_observations,
-        router_port,
-        Duration::from_secs(20),
-    )?;
+
+    let quota_probe_handle = if config.quota_reconnect {
+        let overlap_state = Arc::clone(&upstream.state);
+        let local_token = seed.local_token.clone();
+        Some(
+            thread::Builder::new()
+                .name("codex-router-s8-overlap-quota-probe".to_owned())
+                .spawn(move || {
+                    wait_for_concurrent_session_barrier(&overlap_state)?;
+                    run_s8_overlap_quota_local_probe(router_port, &local_token)
+                })
+                .map_err(|error| {
+                    format!("failed to spawn S8 overlap quota local probe: {error}")
+                })?,
+        )
+    } else {
+        None
+    };
 
     let mut outputs = Vec::new();
+    let mut output_errors = Vec::new();
     for (client_index, handle) in handles.into_iter().enumerate() {
-        let output = join_result(handle, &format!("installed Codex client {client_index}"))?;
-        outputs.push(output);
+        match join_result(handle, &format!("installed Codex client {client_index}")) {
+            Ok(output) => outputs.push(output),
+            Err(error) => output_errors.push(format!("client{client_index}:{error}")),
+        }
+    }
+    if let Some(handle) = quota_probe_handle
+        && let Err(error) = join_result(handle, "S8 overlap quota local probe")
+    {
+        output_errors.push(format!("quota_probe:{error}"));
+    }
+    if !output_errors.is_empty() {
+        return Err(format!(
+            "installed Codex client failures: {}",
+            output_errors.join(" | ")
+        ));
     }
     let upstream_result = upstream.join()?;
     let socket_cleanup = observe_router_socket_cleanup(router_process.observation.pid)?;
@@ -656,103 +773,164 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
             upstream: &upstream_result,
             socket_cleanup: &socket_cleanup,
             outputs: &outputs,
-            client_socket_observations: &client_socket_observations,
             seed: &seed,
+            runtime_roots: &runtime_roots,
         })?;
 
     Ok(InstalledCodexSmokeReport { transcript_path })
 }
 
-fn collect_client_pid_observations(
-    receiver: &mpsc::Receiver<ClientPidObservation>,
-    expected_clients: usize,
-    timeout: Duration,
-) -> Result<Vec<ClientPidObservation>, String> {
-    let deadline = Instant::now() + timeout;
-    let mut observations = Vec::new();
-    while observations.len() < expected_clients {
-        let now = Instant::now();
-        if now >= deadline {
+fn installed_codex_runtime_roots_for_three_websocket(
+    smoke_root: &SmokeTempRoot,
+) -> Result<InstalledCodexRuntimeRoots, String> {
+    installed_codex_runtime_roots(smoke_root)
+}
+
+fn installed_codex_runtime_roots(
+    smoke_root: &SmokeTempRoot,
+) -> Result<InstalledCodexRuntimeRoots, String> {
+    let mode = std::env::var(INSTALLED_SMOKE_RUNTIME_ROOT_MODE_ENV)
+        .unwrap_or_else(|_| "isolated-temp".to_owned());
+    match mode.as_str() {
+        "isolated-temp" => {
+            let router_root = smoke_root.path().join("router");
+            Ok(InstalledCodexRuntimeRoots {
+                mode,
+                state_path: router_root.join("state.sqlite"),
+                secret_root: router_root.join("secrets"),
+                router_root,
+                codex_home: None,
+                process_home: None,
+            })
+        }
+        "copied-dev-state" => {
+            let router_root = required_env_path(INSTALLED_SMOKE_ROUTER_ROOT_ENV)?;
+            let codex_home = required_env_path(INSTALLED_SMOKE_CODEX_HOME_ENV)?;
+            let process_home = required_env_path(INSTALLED_SMOKE_PROCESS_HOME_ENV)?;
+            validate_copied_dev_state_roots(&router_root, &codex_home, &process_home)?;
+            Ok(InstalledCodexRuntimeRoots {
+                mode,
+                state_path: router_root.join("state.sqlite"),
+                secret_root: router_root.join("secrets"),
+                router_root,
+                codex_home: Some(codex_home),
+                process_home: Some(process_home),
+            })
+        }
+        other => Err(format!(
+            "{INSTALLED_SMOKE_RUNTIME_ROOT_MODE_ENV} must be isolated-temp or copied-dev-state, got {other}"
+        )),
+    }
+}
+
+fn required_env_path(name: &str) -> Result<PathBuf, String> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| format!("{name} is required for copied-dev-state installed Codex smoke"))
+}
+
+fn validate_copied_dev_state_roots(
+    router_root: &Path,
+    codex_home: &Path,
+    process_home: &Path,
+) -> Result<(), String> {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| "test-support crate should live under workspace crates".to_owned())?;
+    let dev_state_root = resolve_copied_dev_state_policy_path(
+        "repo tmp/dev-state",
+        &workspace_root.join("tmp/dev-state"),
+    )?;
+    for (label, path) in [
+        ("router root", router_root),
+        ("Codex home", codex_home),
+        ("process HOME", process_home),
+        ("router state.sqlite", &router_root.join("state.sqlite")),
+        ("Codex state_5.sqlite", &codex_home.join("state_5.sqlite")),
+        ("router secrets", &router_root.join("secrets")),
+    ] {
+        let resolved = resolve_copied_dev_state_policy_path(label, path)?;
+        if !resolved.starts_with(&dev_state_root) {
             return Err(format!(
-                "timed out waiting for {expected_clients} Codex child pids; observed {}",
-                observations.len()
+                "copied-dev-state {label} must be under repo-local tmp/dev-state; got {}",
+                resolved.display()
             ));
         }
-        match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
-            Ok(observation) => observations.push(observation),
-            Err(error) => {
-                return Err(format!(
-                    "failed waiting for Codex child pid observation: {error}"
-                ));
+    }
+    Ok(())
+}
+
+fn resolve_copied_dev_state_policy_path(label: &str, path: &Path) -> Result<PathBuf, String> {
+    if path_is_symlink(path)? {
+        return Err(format!(
+            "copied-dev-state {label} must not be a symlink; got {}",
+            path.display()
+        ));
+    }
+    if path.exists() {
+        return fs::canonicalize(path).map_err(|error| {
+            format!(
+                "failed to resolve copied-dev-state {label} {}: {error}",
+                path.display()
+            )
+        });
+    }
+    resolve_future_path_without_following_new_leaf(path)
+}
+
+fn path_is_symlink(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "failed to inspect copied-dev-state path {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn resolve_future_path_without_following_new_leaf(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("failed to resolve current directory: {error}"))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
             }
+            _ => normalized.push(component.as_os_str()),
         }
     }
-    observations.sort_by_key(|observation| observation.client_index);
-    Ok(observations)
-}
-
-fn observe_client_router_sockets(
-    pid_observations: &[ClientPidObservation],
-    router_port: u16,
-    timeout: Duration,
-) -> Result<Vec<ClientSocketObservation>, String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let mut observations = Vec::new();
-        for pid_observation in pid_observations {
-            if let Some(observation) = observe_client_router_socket(pid_observation, router_port)? {
-                observations.push(observation);
-            }
-        }
-        if observations.len() == pid_observations.len() {
-            return Ok(observations);
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "timed out observing {} client sockets to router port {router_port}; observed {}",
-                pid_observations.len(),
-                observations.len()
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
+    let mut missing_components = Vec::new();
+    let mut existing_ancestor = normalized.as_path();
+    while !existing_ancestor.exists() {
+        let Some(file_name) = existing_ancestor.file_name() else {
+            break;
+        };
+        missing_components.push(file_name.to_os_string());
+        let Some(parent) = existing_ancestor.parent() else {
+            break;
+        };
+        existing_ancestor = parent;
     }
-}
-
-fn observe_client_router_socket(
-    pid_observation: &ClientPidObservation,
-    router_port: u16,
-) -> Result<Option<ClientSocketObservation>, String> {
-    let output = Command::new("lsof")
-        .args(["-nP", "-a", "-p", &pid_observation.pid.to_string(), "-iTCP"])
-        .output()
-        .map_err(|error| format!("failed to run lsof for Codex child socket: {error}"))?;
-    if !output.status.success() {
-        return Ok(None);
+    let mut resolved = fs::canonicalize(existing_ancestor).map_err(|error| {
+        format!(
+            "failed to resolve copied-dev-state ancestor {}: {error}",
+            existing_ancestor.display()
+        )
+    })?;
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if !line.contains(&format!("->127.0.0.1:{router_port}"))
-            && !line.contains(&format!("->[::1]:{router_port}"))
-        {
-            continue;
-        }
-        if let Some(local_port) = parse_lsof_local_tcp_port(line, router_port) {
-            return Ok(Some(ClientSocketObservation {
-                client_index: pid_observation.client_index,
-                client_pid: pid_observation.pid,
-                local_port,
-            }));
-        }
-    }
-    Ok(None)
-}
-
-fn parse_lsof_local_tcp_port(line: &str, router_port: u16) -> Option<u16> {
-    let arrow_index = line.find("->")?;
-    let local_side = &line[..arrow_index];
-    let port_text = local_side.rsplit(':').next()?.split_whitespace().next()?;
-    let local_port = port_text.parse::<u16>().ok()?;
-    (line.contains(&format!(":{router_port}"))).then_some(local_port)
+    Ok(resolved)
 }
 
 fn assert_concurrent_websocket_contract(
@@ -766,10 +944,10 @@ fn assert_concurrent_websocket_contract(
             upstream.expected_sessions, config.upstream.expected_sessions
         ));
     }
-    if upstream.completed_sessions != config.upstream.expected_sessions {
+    if upstream.completed_sessions != config.upstream.expected_upstream_sessions {
         return Err(format!(
             "concurrent upstream completed {} sessions, expected {}",
-            upstream.completed_sessions, config.upstream.expected_sessions
+            upstream.completed_sessions, config.upstream.expected_upstream_sessions
         ));
     }
     if upstream.final_active_sessions != 0 {
@@ -784,10 +962,10 @@ fn assert_concurrent_websocket_contract(
             upstream.active_high_water, config.upstream.expected_sessions
         ));
     }
-    if upstream.target_model_session_count != config.upstream.expected_sessions {
+    if upstream.target_model_session_count != config.upstream.expected_upstream_sessions {
         return Err(format!(
             "concurrent upstream observed {} target-model sessions, expected {} with {SMOKE_TARGET_MODEL}",
-            upstream.target_model_session_count, config.upstream.expected_sessions
+            upstream.target_model_session_count, config.upstream.expected_upstream_sessions
         ));
     }
     if !upstream.unexpected_response_create_models.is_empty() {
@@ -804,10 +982,11 @@ fn assert_concurrent_websocket_contract(
                 config.upstream.hold_duration.as_millis()
             ));
         }
-        if upstream
-            .in_overlap_session_event_counts
-            .iter()
-            .any(|event_count| *event_count < 3)
+        if !config.quota_reconnect
+            && upstream
+                .in_overlap_session_event_counts
+                .iter()
+                .any(|event_count| *event_count < 3)
         {
             return Err(format!(
                 "soak in-overlap session event counts were {:?}, expected at least 3 each",
@@ -826,7 +1005,7 @@ fn assert_concurrent_websocket_contract(
                 upstream.upstream_session_ids, config.upstream.expected_sessions
             ));
         }
-        if upstream.normal_close_sessions < config.upstream.expected_sessions
+        if upstream.normal_close_sessions < config.upstream.expected_upstream_sessions
             || upstream.abnormal_close_sessions != 0
         {
             return Err(format!(
@@ -834,29 +1013,61 @@ fn assert_concurrent_websocket_contract(
                 upstream.session_close_outcomes,
                 upstream.normal_close_sessions,
                 upstream.abnormal_close_sessions,
-                config.upstream.expected_sessions
+                config.upstream.expected_upstream_sessions
             ));
         }
-        if !upstream.multi_step_interleave_completed {
+        if !config.quota_reconnect && !upstream.multi_step_interleave_completed {
             return Err("soak did not complete a multi-step WebSocket interleave".to_owned());
         }
-        if upstream.multi_step_followup_frame_count == 0 {
+        if !config.quota_reconnect && upstream.multi_step_followup_frame_count == 0 {
             return Err(
                 "soak did not observe a follow-up local frame before completion".to_owned(),
             );
         }
-        if upstream.multi_step_followup_active_session_count < config.upstream.expected_sessions {
+        if !config.quota_reconnect
+            && upstream.multi_step_followup_active_session_count < config.upstream.expected_sessions
+        {
             return Err(format!(
                 "multi-step follow-up saw {} active sessions, expected at least {}",
                 upstream.multi_step_followup_active_session_count,
                 config.upstream.expected_sessions
             ));
         }
-        if !upstream.multi_step_completed_before_overlap_end {
+        if !config.quota_reconnect && !upstream.multi_step_completed_before_overlap_end {
             return Err(
                 "multi-step WebSocket interleave did not complete before true 3-way overlap ended"
                     .to_owned(),
             );
+        }
+    }
+    if config.quota_reconnect {
+        if !upstream.quota_error_sent || !upstream.completion_sent {
+            return Err(format!(
+                "S8 overlap quota did not send both quota error and completion: {upstream:?}"
+            ));
+        }
+        if upstream.quota_error_connection_label.as_deref() != Some(QUOTA_RECONNECT_PRIMARY.label) {
+            return Err(format!(
+                "S8 overlap quota first real request used {:?}, expected {}",
+                upstream.quota_error_connection_label, QUOTA_RECONNECT_PRIMARY.label
+            ));
+        }
+        if upstream.completion_connection_label.as_deref() != Some(QUOTA_RECONNECT_FALLBACK.label) {
+            return Err(format!(
+                "S8 overlap quota completion used {:?}, expected {}",
+                upstream.completion_connection_label, QUOTA_RECONNECT_FALLBACK.label
+            ));
+        }
+        let sqlite_pressure = upstream
+            .sqlite_pressure
+            .as_ref()
+            .ok_or_else(|| "S8 overlap quota did not record copied SQLite pressure".to_owned())?;
+        if !sqlite_pressure.acquired_before_quota_error
+            || !sqlite_pressure.released_after_completion
+        {
+            return Err(format!(
+                "S8 overlap quota SQLite pressure did not cover quota reconnect: {sqlite_pressure:?}"
+            ));
         }
     }
     if config.capture_registry_report {
@@ -1060,6 +1271,8 @@ const QUOTA_RECONNECT_FALLBACK: SmokeAccountFixture = SmokeAccountFixture {
     weekly_status: SelectorQuotaWindowStatus::Eligible,
 };
 
+const SMOKE_SELECTOR_STALE_AFTER_SECONDS: u64 = 300;
+
 fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed, String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open smoke SQLite state: {error}"))?;
@@ -1076,6 +1289,8 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
     );
     let exported_token = parse_posix_token_assignment(&local_token_assignment)?;
 
+    disable_accounts_outside_fixtures(&state, SMOKE_ACCOUNT_FIXTURES, "three-websocket")?;
+    reset_fixture_route_band_state(state_path, SMOKE_ACCOUNT_FIXTURES, "three-websocket")?;
     for fixture in SMOKE_ACCOUNT_FIXTURES {
         seed_smoke_account(&state, &secrets, *fixture)?;
     }
@@ -1112,8 +1327,130 @@ fn seed_quota_reconnect_router_state(state_path: &Path, secret_root: &Path) -> R
         .map_err(|error| format!("failed to open quota reconnect SQLite state: {error}"))?;
     let secrets = FileSecretStore::open(secret_root)
         .map_err(|error| format!("failed to open quota reconnect secret store: {error}"))?;
+    disable_accounts_outside_fixtures(
+        &state,
+        &[QUOTA_RECONNECT_PRIMARY, QUOTA_RECONNECT_FALLBACK],
+        "quota reconnect",
+    )?;
+    reset_fixture_route_band_state(
+        state_path,
+        &[QUOTA_RECONNECT_PRIMARY, QUOTA_RECONNECT_FALLBACK],
+        "quota reconnect",
+    )?;
     seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_PRIMARY)?;
     seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_FALLBACK)?;
+    Ok(())
+}
+
+fn seed_s8_overlap_quota_router_state(
+    state_path: &Path,
+    secret_root: &Path,
+) -> Result<SmokeSeed, String> {
+    seed_quota_reconnect_router_state(state_path, secret_root)?;
+    let secrets = FileSecretStore::open(secret_root)
+        .map_err(|error| format!("failed to open S8 overlap quota secret store: {error}"))?;
+    let token_service = LocalRouterTokenService::new(secrets);
+    let local_token = token_service
+        .rotate()
+        .map_err(|error| format!("failed to rotate S8 overlap quota local token: {error}"))?;
+    let local_token_assignment = export_token_assignment(
+        "CODEX_ROUTER_TOKEN",
+        local_token.token().expose_secret(),
+        Shell::Posix,
+    );
+    let exported_token = parse_posix_token_assignment(&local_token_assignment)?;
+    let quota_status = capture_quota_status(state_path)?;
+    let selected_account = selected_account_from_status_json(&quota_status.json)?;
+
+    Ok(SmokeSeed {
+        local_token_assignment,
+        local_token: exported_token,
+        expected_account_label: selected_account.safe_label,
+        expected_account_tag: selected_account.account_hash,
+        expected_upstream_token: QUOTA_RECONNECT_PRIMARY.upstream_token.to_owned(),
+        routable_upstream_tokens: vec![
+            QUOTA_RECONNECT_PRIMARY.upstream_token.to_owned(),
+            QUOTA_RECONNECT_FALLBACK.upstream_token.to_owned(),
+        ],
+        quota_status,
+    })
+}
+
+fn reset_fixture_route_band_state(
+    state_path: &Path,
+    fixtures: &[SmokeAccountFixture],
+    scenario_label: &str,
+) -> Result<(), String> {
+    let mut command = Command::new("python3");
+    command
+        .arg("-c")
+        .arg(
+            r#"
+import sqlite3
+import sys
+
+database_path = sys.argv[1]
+account_ids = sys.argv[2:]
+connection = sqlite3.connect(database_path, timeout=0)
+try:
+    for account_id in account_ids:
+        connection.execute(
+            "DELETE FROM route_band_account_states WHERE account_id = ? AND route_band = 'responses'",
+            (account_id,),
+        )
+    connection.commit()
+finally:
+    connection.close()
+"#,
+        )
+        .arg(state_path);
+    for account_fixture in fixtures {
+        command.arg(account_fixture.account_id);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run {scenario_label} state reset helper: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to reset {scenario_label} route-band state in {}: status={} stderr={}",
+            state_path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn disable_accounts_outside_fixtures(
+    state: &SqliteStateStore,
+    allowed_fixtures: &[SmokeAccountFixture],
+    scenario_label: &str,
+) -> Result<(), String> {
+    for account in AccountStateRepository::list_accounts(state)
+        .map_err(|error| format!("failed to list accounts for {scenario_label} fixture: {error}"))?
+    {
+        if allowed_fixtures
+            .iter()
+            .any(|fixture| fixture.account_id == account.account_id().as_str())
+        {
+            continue;
+        }
+        let mut disabled_account = AccountRecord::new(
+            account.account_id().clone(),
+            account.label().to_owned(),
+            AccountStatus::Disabled,
+        );
+        if let Some(active_generation) = account.active_credential_generation() {
+            disabled_account =
+                disabled_account.with_active_credential_generation(active_generation);
+        }
+        AccountStateRepository::upsert_account(state, &disabled_account).map_err(|error| {
+            format!(
+                "failed to disable non-{scenario_label} account {}: {error}",
+                account.label()
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -1123,15 +1460,20 @@ fn seed_smoke_account(
     fixture: SmokeAccountFixture,
 ) -> Result<(), String> {
     let account_id = account_id(fixture.account_id)?;
+    let observed_unix_seconds = timestamp_seconds();
+    let short_reset_unix_seconds = observed_unix_seconds.saturating_add(fixture.short_reset);
+    let weekly_reset_unix_seconds = observed_unix_seconds.saturating_add(fixture.weekly_reset);
+    let stale_after_unix_seconds =
+        observed_unix_seconds.saturating_add(SMOKE_SELECTOR_STALE_AFTER_SECONDS);
     let account = AccountRecord::new(account_id.clone(), fixture.label, AccountStatus::Enabled)
         .with_active_credential_generation(1);
     AccountStateRepository::upsert_account(state, &account)
         .map_err(|error| format!("failed to seed smoke account {}: {error}", fixture.label))?;
     let snapshot =
         PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
-            .with_observed_unix_seconds(1_000)
+            .with_observed_unix_seconds(observed_unix_seconds)
             .with_route_band("responses", fixture.short_remaining)
-            .with_reset_unix_seconds(fixture.short_reset);
+            .with_reset_unix_seconds(short_reset_unix_seconds);
     QuotaSnapshotRepository::upsert_snapshot(state, &snapshot).map_err(|error| {
         format!(
             "failed to seed smoke quota snapshot for {}: {error}",
@@ -1145,15 +1487,9 @@ fn seed_smoke_account(
         SelectorQuotaWindowStatus::Eligible,
     )
     .with_remaining_headroom(fixture.short_remaining)
-    .with_reset_unix_seconds(fixture.short_reset)
+    .with_reset_unix_seconds(short_reset_unix_seconds)
     .with_effective(true)
-    .with_observed_unix_seconds(1_000);
-    SelectorQuotaRepository::upsert_selector_window(state, &short_window).map_err(|error| {
-        format!(
-            "failed to seed smoke short selector window for {}: {error}",
-            fixture.label
-        )
-    })?;
+    .with_observed_unix_seconds(observed_unix_seconds);
     let weekly_window = PersistedSelectorQuotaWindow::new(
         account_id.clone(),
         "responses",
@@ -1161,11 +1497,19 @@ fn seed_smoke_account(
         fixture.weekly_status,
     )
     .with_remaining_headroom(fixture.weekly_remaining)
-    .with_reset_unix_seconds(fixture.weekly_reset)
-    .with_observed_unix_seconds(1_000);
-    SelectorQuotaRepository::upsert_selector_window(state, &weekly_window).map_err(|error| {
+    .with_reset_unix_seconds(weekly_reset_unix_seconds)
+    .with_observed_unix_seconds(observed_unix_seconds);
+    SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+        state,
+        &account_id,
+        "responses",
+        &[short_window, weekly_window],
+        observed_unix_seconds,
+        stale_after_unix_seconds,
+    )
+    .map_err(|error| {
         format!(
-            "failed to seed smoke weekly selector window for {}: {error}",
+            "failed to seed fresh smoke selector windows for {}: {error}",
             fixture.label
         )
     })?;
@@ -1554,7 +1898,7 @@ fn run_codex_exec_with_timeout(
         child_environment,
         timeout,
         prompt: SMOKE_PROMPT,
-        pid_observer: None,
+        client_index: None,
     })
     .map(|run| run.output)
 }
@@ -1570,7 +1914,7 @@ fn run_codex_exec_with_timeout_observed(
         child_environment,
         timeout,
         prompt,
-        pid_observer,
+        client_index,
     } = request;
     let CodexChildEnvironment {
         home,
@@ -1616,52 +1960,113 @@ fn run_codex_exec_with_timeout_observed(
         command.env("PATH", path);
     }
 
-    run_with_timeout_observed(command, timeout, pid_observer)
+    run_with_timeout_observed(command, timeout).map_err(|error| {
+        format!(
+            "{error}; {}",
+            codex_child_timeout_diagnostics(client_index, last_message_path)
+        )
+    })
 }
 
 #[cfg(test)]
 fn run_with_timeout(command: Command, timeout: Duration) -> Result<Output, String> {
-    run_with_timeout_observed(command, timeout, None).map(|run| run.output)
+    run_with_timeout_observed(command, timeout).map(|run| run.output)
 }
 
 fn run_with_timeout_observed(
     mut command: Command,
     timeout: Duration,
-    pid_observer: Option<(usize, mpsc::Sender<ClientPidObservation>)>,
 ) -> Result<CodexChildRun, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to spawn installed codex: {error}"))?;
     let pid = child.id();
-    if let Some((client_index, sender)) = pid_observer {
-        let _send_result = sender.send(ClientPidObservation { client_index, pid });
-    }
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_child_output_reader("stdout", stdout))
+        .transpose()?;
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_child_output_reader("stderr", stderr))
+        .transpose()?;
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => {
-                let output = child.wait_with_output().map_err(|error| {
-                    format!("failed to collect installed codex output: {error}")
-                })?;
+            Ok(Some(status)) => {
+                let output = collect_child_output(status, stdout_reader, stderr_reader)?;
                 return Ok(CodexChildRun { pid, output });
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
-                    let output = child.wait_with_output().map_err(|error| {
-                        format!("failed to collect timed-out installed codex output: {error}")
+                    let status = child.wait().map_err(|error| {
+                        format!("failed to wait for timed-out installed codex: {error}")
                     })?;
+                    let output = collect_child_output(status, stdout_reader, stderr_reader)?;
                     let stdout_byte_count = output.stdout.len();
                     let stderr_byte_count = output.stderr.len();
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!(
-                        "installed codex timed out after {}s; captured stdout/stderr suppressed to avoid leaking secrets (stdout_bytes={stdout_byte_count}, stderr_bytes={stderr_byte_count})",
+                        "installed codex timed out after {}s; captured stdout/stderr suppressed to avoid leaking secrets (stdout_bytes={stdout_byte_count}, stderr_bytes={stderr_byte_count}); stdout_preview={}; stderr_preview={}; stdout_markers={}; stderr_markers={}",
                         timeout.as_secs(),
+                        redacted_process_output_preview(&stdout),
+                        redacted_process_output_preview(&stderr),
+                        process_output_markers(&stdout),
+                        process_output_markers(&stderr),
                     ));
                 }
                 thread::sleep(Duration::from_millis(20));
             }
             Err(error) => return Err(format!("failed to poll installed codex: {error}")),
         }
+    }
+}
+
+fn spawn_child_output_reader<R>(
+    stream_name: &'static str,
+    mut stream: R,
+) -> Result<thread::JoinHandle<Result<Vec<u8>, String>>, String>
+where
+    R: Read + Send + 'static,
+{
+    thread::Builder::new()
+        .name(format!("codex-router-installed-codex-{stream_name}-reader"))
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).map_err(|error| {
+                format!("failed to read installed codex {stream_name}: {error}")
+            })?;
+            Ok(bytes)
+        })
+        .map_err(|error| format!("failed to spawn installed codex {stream_name} reader: {error}"))
+}
+
+fn collect_child_output(
+    status: ExitStatus,
+    stdout_reader: Option<thread::JoinHandle<Result<Vec<u8>, String>>>,
+    stderr_reader: Option<thread::JoinHandle<Result<Vec<u8>, String>>>,
+) -> Result<Output, String> {
+    let stdout = join_child_output_reader(stdout_reader, "stdout")?;
+    let stderr = join_child_output_reader(stderr_reader, "stderr")?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn join_child_output_reader(
+    reader: Option<thread::JoinHandle<Result<Vec<u8>, String>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>, String> {
+    match reader {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| format!("installed codex {stream_name} reader panicked"))?,
+        None => Ok(Vec::new()),
     }
 }
 
@@ -1674,10 +2079,12 @@ fn assert_codex_visible_output(
     if !stdout.contains(SMOKE_EXPECTED_TEXT) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "{label} smoke stdout did not contain expected response text; status={}; stdout_preview={}; stderr_preview={}",
+            "{label} smoke stdout did not contain expected response text; status={}; stdout_preview={}; stderr_preview={}; stdout_markers={}; stderr_markers={}",
             output.status,
             redacted_process_output_preview(&stdout),
             redacted_process_output_preview(&stderr),
+            process_output_markers(&stdout),
+            process_output_markers(&stderr),
         ));
     }
     let last_message = fs::read_to_string(last_message_path).map_err(|error| {
@@ -1695,32 +2102,44 @@ fn assert_codex_visible_output(
 }
 
 fn redacted_process_output_preview(output: &str) -> String {
-    const MAX_CHARS: usize = 1200;
-    let mut redacted = String::new();
-    let mut words = output.split_whitespace().peekable();
-    while let Some(word) = words.next() {
-        if !redacted.is_empty() {
-            redacted.push(' ');
-        }
-        if word == "Bearer" {
-            redacted.push_str("Bearer <redacted>");
-            let _ = words.next();
-        } else if let Some(token) = word.strip_prefix("Bearer ") {
-            let _ = token;
-            redacted.push_str("Bearer <redacted>");
-        } else {
-            redacted.push_str(word);
-        }
-        if redacted.chars().count() >= MAX_CHARS {
-            redacted.truncate(MAX_CHARS);
-            redacted.push_str("<truncated>");
-            break;
-        }
-    }
-    if redacted.is_empty() {
+    if output.trim().is_empty() {
         "<empty>".to_owned()
     } else {
-        redacted
+        "<suppressed>".to_owned()
+    }
+}
+
+fn process_output_markers(output: &str) -> String {
+    let markers = stderr_transport_error_markers(output);
+    if markers.is_empty() {
+        "<none>".to_owned()
+    } else {
+        markers.join(",")
+    }
+}
+
+fn codex_child_timeout_diagnostics(
+    client_index: Option<usize>,
+    last_message_path: &Path,
+) -> String {
+    let client_index = client_index
+        .map(|index| index.to_string())
+        .unwrap_or_else(|| "n/a".to_owned());
+    match fs::read(last_message_path) {
+        Ok(bytes) => {
+            let contains_expected = String::from_utf8_lossy(&bytes).contains(SMOKE_EXPECTED_TEXT);
+            format!(
+                "child_diagnostics=client_index:{client_index},last_message_exists:true,last_message_bytes:{},last_message_contains_expected:{contains_expected}",
+                bytes.len()
+            )
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => format!(
+            "child_diagnostics=client_index:{client_index},last_message_exists:false,last_message_bytes:0,last_message_contains_expected:false"
+        ),
+        Err(error) => format!(
+            "child_diagnostics=client_index:{client_index},last_message_exists:unknown,last_message_read_error:{},last_message_contains_expected:false",
+            error.kind()
+        ),
     }
 }
 
@@ -2102,7 +2521,7 @@ struct RouterProcessObservation {
     cleanup_result: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 struct RouterWebSocketRegistryReport {
     handled_connections: Option<usize>,
     active_sessions: usize,
@@ -2111,12 +2530,23 @@ struct RouterWebSocketRegistryReport {
     closed_sessions: usize,
     completed_response_sessions: usize,
     forwarded_upstream_messages: usize,
-    registered_session_ids: Vec<u64>,
-    completed_session_ids: Vec<u64>,
-    closed_session_ids: Vec<u64>,
-    session_peer_addrs: Vec<RouterSessionPeerObservation>,
+    registered_session_id_count: usize,
+    completed_session_id_count: usize,
+    closed_session_id_count: usize,
+    session_peer_addr_count: usize,
+    session_peer_join_observable: bool,
     completed_session_forwarded_upstream_message_counts: Vec<usize>,
     final_session_forwarded_upstream_message_counts: Vec<usize>,
+    #[serde(default)]
+    quota_reconnect_signal_count: usize,
+    quota_reconnect_signal_unix_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+struct RouterWebSocketRegistryReportFile {
+    schema_version: usize,
+    handled_connections: Option<usize>,
+    websocket_registry: RouterWebSocketRegistryReport,
 }
 
 impl RouterWebSocketRegistryReport {
@@ -2127,143 +2557,24 @@ impl RouterWebSocketRegistryReport {
                 path.display()
             )
         })?;
-        let value = serde_json::from_str::<Value>(&contents).map_err(|error| {
-            format!(
-                "router websocket registry report {} was invalid JSON: {error}",
-                path.display()
-            )
-        })?;
-        let registry = value
-            .get("websocket_registry")
-            .ok_or_else(|| "router websocket registry report was missing registry".to_owned())?;
-        let schema_version = required_usize_field(&value, "schema_version")?;
-        if schema_version != 1 {
+        let report = serde_json::from_str::<RouterWebSocketRegistryReportFile>(&contents).map_err(
+            |error| {
+                format!(
+                    "router websocket registry report {} was invalid JSON: {error}",
+                    path.display()
+                )
+            },
+        )?;
+        if report.schema_version != 2 {
             return Err(format!(
-                "router websocket registry report schema_version={schema_version}, expected 1"
+                "router websocket registry report schema_version={}, expected 2",
+                report.schema_version
             ));
         }
-        Ok(Self {
-            handled_connections: optional_usize_field(&value, "handled_connections")?,
-            active_sessions: required_usize_field(registry, "active_sessions")?,
-            high_water_sessions: required_usize_field(registry, "high_water_sessions")?,
-            registered_sessions: required_usize_field(registry, "registered_sessions")?,
-            closed_sessions: required_usize_field(registry, "closed_sessions")?,
-            completed_response_sessions: required_usize_field(
-                registry,
-                "completed_response_sessions",
-            )?,
-            forwarded_upstream_messages: required_usize_field(
-                registry,
-                "forwarded_upstream_messages",
-            )?,
-            registered_session_ids: required_u64_array_field(registry, "registered_session_ids")?,
-            completed_session_ids: required_u64_array_field(registry, "completed_session_ids")?,
-            closed_session_ids: required_u64_array_field(registry, "closed_session_ids")?,
-            session_peer_addrs: required_session_peer_addrs(registry, "session_peer_addrs")?,
-            completed_session_forwarded_upstream_message_counts: required_usize_array_field(
-                registry,
-                "completed_session_forwarded_upstream_message_counts",
-            )?,
-            final_session_forwarded_upstream_message_counts: required_usize_array_field(
-                registry,
-                "final_session_forwarded_upstream_message_counts",
-            )?,
-        })
+        let mut registry = report.websocket_registry;
+        registry.handled_connections = report.handled_connections;
+        Ok(registry)
     }
-}
-
-fn required_usize_field(value: &Value, field: &'static str) -> Result<usize, String> {
-    let raw = value
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| format!("router websocket registry report missing numeric {field}"))?;
-    usize::try_from(raw)
-        .map_err(|_| format!("router websocket registry report field {field} overflowed usize"))
-}
-
-fn optional_usize_field(value: &Value, field: &'static str) -> Result<Option<usize>, String> {
-    let Some(raw) = value.get(field) else {
-        return Ok(None);
-    };
-    if raw.is_null() {
-        return Ok(None);
-    }
-    let raw = raw
-        .as_u64()
-        .ok_or_else(|| format!("router websocket registry report field {field} was not numeric"))?;
-    usize::try_from(raw)
-        .map(Some)
-        .map_err(|_| format!("router websocket registry report field {field} overflowed usize"))
-}
-
-fn required_usize_array_field(value: &Value, field: &'static str) -> Result<Vec<usize>, String> {
-    let raw = value
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("router websocket registry report missing numeric array {field}"))?;
-    raw.iter()
-        .map(|item| {
-            let raw = item.as_u64().ok_or_else(|| {
-                format!("router websocket registry report field {field} contained non-number")
-            })?;
-            usize::try_from(raw).map_err(|_| {
-                format!("router websocket registry report field {field} overflowed usize")
-            })
-        })
-        .collect()
-}
-
-fn required_u64_array_field(value: &Value, field: &'static str) -> Result<Vec<u64>, String> {
-    let raw = value
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("router websocket registry report missing numeric array {field}"))?;
-    raw.iter()
-        .map(|item| {
-            item.as_u64().ok_or_else(|| {
-                format!("router websocket registry report field {field} contained non-number")
-            })
-        })
-        .collect()
-}
-
-fn required_session_peer_addrs(
-    value: &Value,
-    field: &'static str,
-) -> Result<Vec<RouterSessionPeerObservation>, String> {
-    let raw = value
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("router websocket registry report missing peer array {field}"))?;
-    raw.iter()
-        .map(|item| {
-            let session_id = item
-                .get("session_id")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    format!("router websocket registry report field {field} missing session_id")
-                })?;
-            let peer_addr = item
-                .get("peer_addr")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    format!("router websocket registry report field {field} missing peer_addr")
-                })?;
-            let local_port = peer_addr
-                .rsplit(':')
-                .next()
-                .and_then(|port| port.parse::<u16>().ok())
-                .ok_or_else(|| {
-                    format!(
-                        "router websocket registry peer_addr had no parseable port: {peer_addr}"
-                    )
-                })?;
-            Ok(RouterSessionPeerObservation {
-                session_id,
-                local_port,
-            })
-        })
-        .collect()
 }
 
 impl RouterAuditObservation {
@@ -2342,6 +2653,8 @@ struct QuotaReconnectTranscriptInput<'a> {
     upstream: &'a QuotaReconnectWebSocketTranscript,
     router_process: &'a RouterProcessObservation,
     router_audit: &'a RouterAuditObservation,
+    registry_report: &'a RouterWebSocketRegistryReport,
+    runtime_roots: &'a InstalledCodexRuntimeRoots,
 }
 
 fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathBuf, String> {
@@ -2379,9 +2692,9 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
             "binary_path": router_binary_path,
             "pid": input.router_process.pid,
             "argv": router_argv,
-            "listener": input.router_process.listener,
-            "readiness_line": input.router_process.readiness_line,
-            "cleanup_result": input.router_process.cleanup_result,
+            "listener": sanitized_loopback_endpoint_text(&input.router_process.listener),
+            "readiness_line": sanitized_loopback_endpoint_text(&input.router_process.readiness_line),
+            "cleanup_result": sanitized_loopback_endpoint_text(&input.router_process.cleanup_result),
             "spawned_real_serve_child": true,
         },
         "http_sse_codex_status": input.http_sse_codex_status.map(ToString::to_string),
@@ -2463,19 +2776,87 @@ fn write_redacted_quota_reconnect_transcript(
         std::process::id(),
         timestamp_millis()
     ));
+    let router_root = sanitized_artifact_path(&input.runtime_roots.router_root)?;
+    let router_db = sanitized_artifact_path(&input.runtime_roots.state_path)?;
+    let codex_home = input
+        .runtime_roots
+        .codex_home
+        .as_deref()
+        .map(sanitized_artifact_path)
+        .transpose()?;
+    let codex_db = input
+        .runtime_roots
+        .codex_home
+        .as_deref()
+        .map(|path| sanitized_artifact_path(&path.join("state_5.sqlite")))
+        .transpose()?;
+    let process_home = input
+        .runtime_roots
+        .process_home
+        .as_deref()
+        .map(sanitized_artifact_path)
+        .transpose()?;
+    let runtime_roots = serde_json::json!({
+        "mode": input.runtime_roots.mode.as_str(),
+        "router_root": router_root,
+        "router_db": router_db,
+        "codex_home": codex_home,
+        "codex_db": codex_db,
+        "process_home": process_home,
+    });
+    let sqlite_pressure = input.upstream.sqlite_pressure.as_ref();
+    let sqlite_lock_or_maintenance_pressure = sqlite_pressure.is_some_and(|pressure| {
+        pressure.acquired_before_quota_error && pressure.released_after_completion
+    });
+    let reconnected_to_different_account =
+        input.upstream.quota_error_connection_label != input.upstream.completion_connection_label;
+    let pressure = serde_json::json!({
+        "pressure_mechanism": sqlite_pressure.map_or("none", |pressure| pressure.mechanism),
+        "copied_db_pressure_proven": input.runtime_roots.mode == "copied-dev-state"
+            && sqlite_lock_or_maintenance_pressure,
+        "sqlite_lock_or_maintenance_pressure": sqlite_lock_or_maintenance_pressure,
+        "provider_error_observer_delay": false,
+        "sqlite_pressure": sqlite_pressure.map(|pressure| serde_json::json!({
+            "mechanism": pressure.mechanism,
+            "hold_duration_ms": pressure.hold_duration_ms,
+            "acquired_before_quota_error": pressure.acquired_before_quota_error,
+            "released_after_completion": pressure.released_after_completion,
+            "acquired_unix_ms": pressure.acquired_unix_ms,
+            "released_unix_ms": pressure.released_unix_ms,
+        })),
+    });
+    let signal_ordering = serde_json::json!({
+        "signal_before_persistence": sqlite_lock_or_maintenance_pressure
+            && input.upstream.completion_sent,
+        "basis": "fallback completion was sent before copied SQLite write-lock pressure released",
+    });
+    let account_selection = serde_json::json!({
+        "non_reselection": reconnected_to_different_account,
+        "basis": "quota error account role differs from fallback completion account role",
+    });
+    let router_signal_latency_ms = input
+        .upstream
+        .quota_error_sent_unix_ms
+        .zip(input.registry_report.quota_reconnect_signal_unix_ms)
+        .map(|(quota_error, router_signal)| router_signal.saturating_sub(quota_error));
     let payload = serde_json::json!({
         "git_head": current_git_head()?,
         "mode": "quota-reconnect-websocket",
+        "s8_provenance": s8_smoke_provenance("quota-reconnect"),
         "codex_version": input.codex_version,
+        "runtime_roots": runtime_roots,
+        "pressure": pressure,
+        "signal_ordering": signal_ordering,
+        "account_selection": account_selection,
         "profile_written": input.profile_path.exists(),
         "profile_uses_codex_router_token": false,
         "router_process": {
             "binary_path": sanitized_artifact_path(&input.router_process.binary_path)?,
             "pid": input.router_process.pid,
             "argv": sanitized_router_argv(&input.router_process.argv),
-            "listener": input.router_process.listener,
-            "readiness_line": input.router_process.readiness_line,
-            "cleanup_result": input.router_process.cleanup_result,
+            "listener": sanitized_loopback_endpoint_text(&input.router_process.listener),
+            "readiness_line": sanitized_loopback_endpoint_text(&input.router_process.readiness_line),
+            "cleanup_result": sanitized_loopback_endpoint_text(&input.router_process.cleanup_result),
             "spawned_real_serve_child": true,
         },
         "codex": {
@@ -2500,7 +2881,12 @@ fn write_redacted_quota_reconnect_transcript(
             "completion_account_role": quota_reconnect_role_from_label(
                 input.upstream.completion_connection_label.as_deref(),
             ),
-            "reconnected_to_different_account": input.upstream.quota_error_connection_label != input.upstream.completion_connection_label,
+            "reconnected_to_different_account": reconnected_to_different_account,
+        },
+        "quota_reconnect_progress": {
+            "signal_latency_ms": router_signal_latency_ms,
+            "basis": "router quota_reconnect signal timestamp minus upstream quota exhaustion timestamp",
+            "router_signal_count": input.registry_report.quota_reconnect_signal_count,
         },
         "upstream": {
             "http_probe_count": input.upstream.http_probe_count,
@@ -2528,8 +2914,8 @@ struct ThreeWebSocketTranscriptInput<'a> {
     upstream: &'a ConcurrentWebSocketTranscript,
     socket_cleanup: &'a RouterSocketCleanupObservation,
     outputs: &'a [CodexChildRun],
-    client_socket_observations: &'a [ClientSocketObservation],
     seed: &'a SmokeSeed,
+    runtime_roots: &'a InstalledCodexRuntimeRoots,
 }
 
 fn write_redacted_three_websocket_transcript(
@@ -2562,92 +2948,215 @@ fn write_redacted_three_websocket_transcript(
         .collect::<Vec<_>>();
     let router_binary_path = sanitized_artifact_path(&input.router_process.binary_path)?;
     let router_argv = sanitized_router_argv(&input.router_process.argv);
+    let router_root = sanitized_artifact_path(&input.runtime_roots.router_root)?;
+    let router_db = sanitized_artifact_path(&input.runtime_roots.state_path)?;
+    let codex_home = input
+        .runtime_roots
+        .codex_home
+        .as_deref()
+        .map(sanitized_artifact_path)
+        .transpose()?;
+    let codex_db = input
+        .runtime_roots
+        .codex_home
+        .as_deref()
+        .map(|path| sanitized_artifact_path(&path.join("state_5.sqlite")))
+        .transpose()?;
+    let process_home = input
+        .runtime_roots
+        .process_home
+        .as_deref()
+        .map(sanitized_artifact_path)
+        .transpose()?;
+    let runtime_roots = serde_json::json!({
+        "mode": input.runtime_roots.mode.as_str(),
+        "router_root": router_root,
+        "router_db": router_db,
+        "codex_home": codex_home,
+        "codex_db": codex_db,
+        "process_home": process_home,
+    });
+    let sqlite_pressure = input.upstream.sqlite_pressure.as_ref();
+    let sqlite_lock_or_maintenance_pressure = sqlite_pressure.is_some_and(|pressure| {
+        pressure.acquired_before_quota_error && pressure.released_after_completion
+    });
+    let reconnected_to_different_account = input.upstream.quota_error_connection_label
+        != input.upstream.completion_connection_label
+        && input.upstream.quota_error_connection_label.is_some()
+        && input.upstream.completion_connection_label.is_some();
+    let pressure = if input.upstream.quota_error_sent {
+        serde_json::json!({
+            "pressure_mechanism": sqlite_pressure.map_or("none", |pressure| pressure.mechanism),
+            "copied_db_pressure_proven": input.runtime_roots.mode == "copied-dev-state"
+                && sqlite_lock_or_maintenance_pressure,
+            "sqlite_lock_or_maintenance_pressure": sqlite_lock_or_maintenance_pressure,
+            "provider_error_observer_delay": false,
+            "sqlite_pressure": sqlite_pressure.map(|pressure| serde_json::json!({
+                "mechanism": pressure.mechanism,
+                "hold_duration_ms": pressure.hold_duration_ms,
+                "acquired_before_quota_error": pressure.acquired_before_quota_error,
+                "released_after_completion": pressure.released_after_completion,
+                "acquired_unix_ms": pressure.acquired_unix_ms,
+                "released_unix_ms": pressure.released_unix_ms,
+            })),
+        })
+    } else {
+        serde_json::json!({
+            "pressure_mechanism": "blocked-missing-sqlite-pressure",
+            "copied_db_pressure_proven": false,
+            "sqlite_lock_or_maintenance_pressure": false,
+            "provider_error_observer_delay": false,
+            "blocked_reason": "copied roots were exercised, but this harness has no approved SQLite lock/maintenance pressure or forced provider-error observer delay",
+        })
+    };
+    let signal_ordering = serde_json::json!({
+        "signal_before_persistence": if input.upstream.quota_error_sent {
+            sqlite_lock_or_maintenance_pressure && input.upstream.completion_sent
+        } else {
+            input.upstream.multi_step_completed_before_overlap_end
+        },
+        "basis": if input.upstream.quota_error_sent {
+            "fallback completion was sent before copied SQLite write-lock pressure released"
+        } else {
+            "multi-step follow-up completed before overlap end; durable provider-error persistence pressure is not present in this harness"
+        },
+    });
+    let account_selection = serde_json::json!({
+        "non_reselection": if input.upstream.quota_error_sent {
+            reconnected_to_different_account
+        } else {
+            input.upstream.upstream_client_sessions.len() >= input.outputs.len()
+        },
+        "basis": if input.upstream.quota_error_sent {
+            "quota error account role differs from fallback completion account role"
+        } else {
+            "all expected upstream client sessions completed; exhausted-account scenario is not present in this harness"
+        },
+    });
     let runtime_correlations = runtime_correlations_for_three_websocket(input);
     let session_continuity = session_continuity_for_three_websocket(input);
+    let router_process = serde_json::json!({
+        "binary_path": router_binary_path,
+        "pid": input.router_process.pid,
+        "argv": router_argv,
+        "listener": sanitized_loopback_endpoint_text(&input.router_process.listener),
+        "readiness_line": sanitized_loopback_endpoint_text(&input.router_process.readiness_line),
+        "cleanup_result": sanitized_loopback_endpoint_text(&input.router_process.cleanup_result),
+        "spawned_real_serve_child": true,
+    });
+    let router_websocket_registry = input.registry_report.map(|report| serde_json::json!({
+        "handled_connections": report.handled_connections,
+        "active_sessions": report.active_sessions,
+        "high_water_sessions": report.high_water_sessions,
+        "registered_sessions": report.registered_sessions,
+        "closed_sessions": report.closed_sessions,
+        "completed_response_sessions": report.completed_response_sessions,
+        "forwarded_upstream_messages": report.forwarded_upstream_messages,
+        "registered_session_id_count": report.registered_session_id_count,
+        "completed_session_id_count": report.completed_session_id_count,
+        "closed_session_id_count": report.closed_session_id_count,
+        "session_peer_addr_count": report.session_peer_addr_count,
+        "session_peer_join_observable": report.session_peer_join_observable,
+        "completed_session_forwarded_upstream_message_counts": report.completed_session_forwarded_upstream_message_counts,
+        "final_session_forwarded_upstream_message_counts": report.final_session_forwarded_upstream_message_counts,
+        "quota_reconnect_signal_count": report.quota_reconnect_signal_count,
+        "quota_reconnect_signal_unix_ms": report.quota_reconnect_signal_unix_ms,
+    }));
+    let clients = serde_json::json!({
+        "count": input.outputs.len(),
+        "target_model": SMOKE_TARGET_MODEL,
+        "all_success": input.outputs.iter().all(|run| run.output.status.success()),
+        "statuses": statuses,
+    });
+    let selected_account = serde_json::json!({
+        "safe_tag": input.seed.expected_account_tag,
+        "expected_upstream_account_selected": input.upstream.upstream_client_sessions.len() >= input.outputs.len(),
+    });
+    let upstream = serde_json::json!({
+        "expected_sessions": input.upstream.expected_sessions,
+        "expected_upstream_sessions": input.upstream.expected_upstream_sessions,
+        "completed_sessions": input.upstream.completed_sessions,
+        "final_active_sessions": input.upstream.final_active_sessions,
+        "active_high_water": input.upstream.active_high_water,
+        "overlap_proven": input.upstream.active_high_water >= input.upstream.expected_sessions,
+        "overlap_started_unix_ms": input.upstream.overlap_started_unix_ms,
+        "overlap_completed_unix_ms": input.upstream.overlap_completed_unix_ms,
+        "real_overlap_completed_unix_ms": input.upstream.real_overlap_completed_unix_ms,
+        "overlap_duration_ms": input.upstream.overlap_duration_ms,
+        "real_overlap_duration_ms": input.upstream.real_overlap_duration_ms,
+        "hold_duration_ms": input.upstream.hold_duration.as_millis(),
+        "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
+        "target_model": SMOKE_TARGET_MODEL,
+        "target_model_session_count": input.upstream.target_model_session_count,
+        "unexpected_response_create_models": input.upstream.unexpected_response_create_models,
+        "upstream_session_id_count": input.upstream.upstream_session_ids.len(),
+        "upstream_client_session_count": input.upstream.upstream_client_sessions.len(),
+        "upstream_client_indexes": input.upstream.upstream_client_sessions.iter().map(|session| session.client_index).collect::<Vec<_>>(),
+        "session_frame_counts": input.upstream.session_frame_counts,
+        "session_event_counts": input.upstream.session_event_counts,
+        "in_overlap_session_event_counts": input.upstream.in_overlap_session_event_counts,
+        "http_probe_count": input.upstream.http_probe_count,
+        "normal_close_sessions": input.upstream.normal_close_sessions,
+        "abnormal_close_sessions": input.upstream.abnormal_close_sessions,
+        "session_close_outcomes": input.upstream.session_close_outcomes,
+        "multi_step_interleave_completed": input.upstream.multi_step_interleave_completed,
+        "multi_step_followup_frame_count": input.upstream.multi_step_followup_frame_count,
+        "multi_step_followup_active_session_count": input.upstream.multi_step_followup_active_session_count,
+        "multi_step_followup_unix_ms": input.upstream.multi_step_followup_unix_ms,
+        "multi_step_completed_before_overlap_end": input.upstream.multi_step_completed_before_overlap_end,
+    });
+    let quota_reconnect_progress = serde_json::json!({
+        "signal_latency_ms": input.upstream.quota_error_sent_unix_ms.zip(input.registry_report.and_then(|report| report.quota_reconnect_signal_unix_ms)).map(|(quota_error, router_signal)| router_signal.saturating_sub(quota_error)),
+        "basis": "router quota_reconnect signal timestamp minus upstream quota exhaustion timestamp",
+        "router_signal_count": input.registry_report.map_or(0, |report| report.quota_reconnect_signal_count),
+    });
+    let source_artifact = serde_json::json!({
+        "artifact": transcript_path.file_name().and_then(|name| name.to_str()),
+        "s8_run_id": s8_smoke_run_id(),
+        "git_head": current_git_head()?,
+        "runtime_roots": runtime_roots,
+        "mode": input.mode,
+    });
+    let socket_cleanup = serde_json::json!({
+        "lsof_exit_status": input.socket_cleanup.lsof_exit_status,
+        "tcp_line_count": input.socket_cleanup.tcp_line_count,
+        "established_count": input.socket_cleanup.established_count,
+        "close_wait_count": input.socket_cleanup.close_wait_count,
+        "raw_state_counts": input.socket_cleanup.raw_state_counts,
+    });
     let payload = serde_json::json!({
         "git_head": current_git_head()?,
         "mode": input.mode,
+        "s8_provenance": s8_smoke_provenance(input.mode),
         "codex_version": input.codex_version.trim(),
-        "router_process": {
-            "binary_path": router_binary_path,
-            "pid": input.router_process.pid,
-            "argv": router_argv,
-            "listener": input.router_process.listener,
-            "readiness_line": input.router_process.readiness_line,
-            "cleanup_result": input.router_process.cleanup_result,
-            "spawned_real_serve_child": true,
+        "runtime_roots": runtime_roots,
+        "pressure": pressure,
+        "signal_ordering": signal_ordering,
+        "account_selection": account_selection,
+        "quota_reconnect": {
+            "primary_account_role": "primary",
+            "fallback_account_role": "fallback",
+            "first_real_request_account_role": quota_reconnect_role_from_label(
+                input.upstream.quota_error_connection_label.as_deref(),
+            ),
+            "completion_account_role": quota_reconnect_role_from_label(
+                input.upstream.completion_connection_label.as_deref(),
+            ),
+            "reconnected_to_different_account": reconnected_to_different_account,
         },
-        "router_websocket_registry": input.registry_report.map(|report| serde_json::json!({
-            "handled_connections": report.handled_connections,
-            "active_sessions": report.active_sessions,
-            "high_water_sessions": report.high_water_sessions,
-            "registered_sessions": report.registered_sessions,
-            "closed_sessions": report.closed_sessions,
-            "completed_response_sessions": report.completed_response_sessions,
-            "forwarded_upstream_messages": report.forwarded_upstream_messages,
-            "registered_session_ids": report.registered_session_ids,
-            "completed_session_ids": report.completed_session_ids,
-            "closed_session_ids": report.closed_session_ids,
-            "session_peer_addrs": report.session_peer_addrs.iter().map(|peer| serde_json::json!({
-                "session_id": peer.session_id,
-                "local_port": peer.local_port,
-            })).collect::<Vec<_>>(),
-            "completed_session_forwarded_upstream_message_counts": report.completed_session_forwarded_upstream_message_counts,
-            "final_session_forwarded_upstream_message_counts": report.final_session_forwarded_upstream_message_counts,
-        })),
-        "clients": {
-            "count": input.outputs.len(),
-            "target_model": SMOKE_TARGET_MODEL,
-            "all_success": input.outputs.iter().all(|run| run.output.status.success()),
-            "statuses": statuses,
+        "quota_reconnect_progress": quota_reconnect_progress,
+        "source_artifacts": {
+            "three_websocket_soak": source_artifact,
+            "quota_reconnect": source_artifact,
         },
-        "selected_account": {
-            "safe_tag": input.seed.expected_account_tag,
-            "expected_upstream_account_selected": input.upstream.upstream_client_sessions.len() >= input.outputs.len(),
-        },
+        "router_process": router_process,
+        "router_websocket_registry": router_websocket_registry,
+        "clients": clients,
+        "selected_account": selected_account,
         "runtime_correlations": runtime_correlations,
         "session_continuity": session_continuity,
-        "upstream": {
-            "expected_sessions": input.upstream.expected_sessions,
-            "completed_sessions": input.upstream.completed_sessions,
-            "final_active_sessions": input.upstream.final_active_sessions,
-            "active_high_water": input.upstream.active_high_water,
-            "overlap_proven": input.upstream.active_high_water >= input.upstream.expected_sessions,
-            "overlap_started_unix_ms": input.upstream.overlap_started_unix_ms,
-            "overlap_completed_unix_ms": input.upstream.overlap_completed_unix_ms,
-            "real_overlap_completed_unix_ms": input.upstream.real_overlap_completed_unix_ms,
-            "overlap_duration_ms": input.upstream.overlap_duration_ms,
-            "real_overlap_duration_ms": input.upstream.real_overlap_duration_ms,
-            "hold_duration_ms": input.upstream.hold_duration.as_millis(),
-            "non_prewarm_session_count": input.upstream.non_prewarm_session_count,
-            "target_model": SMOKE_TARGET_MODEL,
-            "target_model_session_count": input.upstream.target_model_session_count,
-            "unexpected_response_create_models": input.upstream.unexpected_response_create_models,
-            "upstream_session_ids": input.upstream.upstream_session_ids,
-            "upstream_client_sessions": input.upstream.upstream_client_sessions.iter().map(|session| serde_json::json!({
-                "client_index": session.client_index,
-                "upstream_session_id": session.upstream_session_id,
-            })).collect::<Vec<_>>(),
-            "session_frame_counts": input.upstream.session_frame_counts,
-            "session_event_counts": input.upstream.session_event_counts,
-            "in_overlap_session_event_counts": input.upstream.in_overlap_session_event_counts,
-            "http_probe_count": input.upstream.http_probe_count,
-            "normal_close_sessions": input.upstream.normal_close_sessions,
-            "abnormal_close_sessions": input.upstream.abnormal_close_sessions,
-            "session_close_outcomes": input.upstream.session_close_outcomes,
-            "multi_step_interleave_completed": input.upstream.multi_step_interleave_completed,
-            "multi_step_followup_frame_count": input.upstream.multi_step_followup_frame_count,
-            "multi_step_followup_active_session_count": input.upstream.multi_step_followup_active_session_count,
-            "multi_step_followup_unix_ms": input.upstream.multi_step_followup_unix_ms,
-            "multi_step_completed_before_overlap_end": input.upstream.multi_step_completed_before_overlap_end,
-        },
-        "socket_cleanup": {
-            "lsof_exit_status": input.socket_cleanup.lsof_exit_status,
-            "tcp_line_count": input.socket_cleanup.tcp_line_count,
-            "established_count": input.socket_cleanup.established_count,
-            "close_wait_count": input.socket_cleanup.close_wait_count,
-            "raw_state_counts": input.socket_cleanup.raw_state_counts,
-        },
+        "upstream": upstream,
+        "socket_cleanup": socket_cleanup,
         "shared_router_pid": input.router_process.pid,
     });
     let rendered = serde_json::to_string_pretty(&payload)
@@ -2658,10 +3167,23 @@ fn write_redacted_three_websocket_transcript(
     Ok(transcript_path)
 }
 
+fn s8_smoke_provenance(scenario: &str) -> serde_json::Value {
+    serde_json::json!({
+        "run_id": s8_smoke_run_id(),
+        "scenario": scenario,
+    })
+}
+
+fn s8_smoke_run_id() -> Option<String> {
+    std::env::var(S8_RUN_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 fn runtime_correlations_for_three_websocket(
     input: &ThreeWebSocketTranscriptInput<'_>,
 ) -> Vec<Value> {
-    let router_session_by_client = router_session_by_client_index(input);
     let upstream_session_by_client = upstream_session_by_client_index(input.upstream);
     input
         .outputs
@@ -2674,8 +3196,11 @@ fn runtime_correlations_for_three_websocket(
                 "client_index": index,
                 "client_pid": run.pid,
                 "router_pid": input.router_process.pid,
-                "router_session_id": router_session_by_client.get(&index).copied(),
-                "upstream_session_id": upstream_session_by_client.get(&index).copied(),
+                "router_session_observed": input.registry_report.is_some_and(|report| {
+                    report.high_water_sessions >= input.outputs.len()
+                        && report.registered_sessions >= input.outputs.len()
+                }),
+                "upstream_session_observed": upstream_session_by_client.contains_key(&index),
                 "transport": if markers.is_empty() { "websocket" } else { "websocket_error" },
                 "stderr_transport_error_markers": markers,
                 "stdout_contains_smoke_text": String::from_utf8_lossy(&run.output.stdout).contains(SMOKE_EXPECTED_TEXT),
@@ -2685,18 +3210,13 @@ fn runtime_correlations_for_three_websocket(
 }
 
 fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<'_>) -> Value {
-    let registry_registered_ids = input
-        .registry_report
-        .map(|report| report.registered_session_ids.as_slice())
-        .unwrap_or_default();
-    let registry_closed_ids = input
-        .registry_report
-        .map(|report| report.closed_session_ids.as_slice())
-        .unwrap_or_default();
-    let upstream_session_ids = input.upstream.upstream_session_ids.as_slice();
-    let router_session_by_client = router_session_by_client_index(input);
     let upstream_session_by_client = upstream_session_by_client_index(input.upstream);
-    let per_client_join_keys = input
+    let router_registry_observed = input.registry_report.is_some_and(|report| {
+        report.high_water_sessions >= input.outputs.len()
+            && report.registered_sessions >= input.outputs.len()
+            && report.closed_sessions >= input.outputs.len()
+    });
+    let per_client_join_observations = input
         .outputs
         .iter()
         .enumerate()
@@ -2704,53 +3224,29 @@ fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<
             serde_json::json!({
                 "client_index": client_index,
                 "client_pid": run.pid,
-                "router_session_id": router_session_by_client.get(&client_index).copied(),
-                "upstream_session_id": upstream_session_by_client.get(&client_index).copied(),
+                "router_session_observed": router_registry_observed,
+                "upstream_session_observed": upstream_session_by_client.contains_key(&client_index),
             })
         })
         .collect::<Vec<_>>();
     serde_json::json!({
-        "per_client_session_join_key_observed": per_client_join_keys.len() == input.outputs.len()
-            && per_client_join_keys.iter().all(|key| {
-                key.get("router_session_id").is_some_and(|value| !value.is_null())
-                    && key.get("upstream_session_id").is_some_and(|value| !value.is_null())
-            }),
-        "correlation_level": "per_client_socket_and_marker_join",
-        "per_client_join_keys": per_client_join_keys,
-        "router_registered_unique_session_count": unique_u64_count(registry_registered_ids),
-        "router_closed_unique_session_count": unique_u64_count(registry_closed_ids),
-        "upstream_unique_session_count": unique_u64_count(upstream_session_ids),
-        "router_registered_session_ids": registry_registered_ids,
-        "router_closed_session_ids": registry_closed_ids,
-        "upstream_session_ids": upstream_session_ids,
+        "per_client_session_join_key_observed": false,
+        "correlation_level": if router_registry_observed {
+            "router_registry_counts_and_upstream_marker_join"
+        } else {
+            "upstream_marker_join"
+        },
+        "per_client_join_observations": per_client_join_observations,
+        "router_registered_unique_session_count": input
+            .registry_report
+            .map_or(0, |report| report.registered_session_id_count),
+        "router_closed_unique_session_count": input
+            .registry_report
+            .map_or(0, |report| report.closed_session_id_count),
+        "upstream_unique_session_count": unique_u64_count(&input.upstream.upstream_session_ids),
         "router_pid": input.router_process.pid,
         "shared_router_pid": input.router_process.pid,
     })
-}
-
-fn router_session_by_client_index(
-    input: &ThreeWebSocketTranscriptInput<'_>,
-) -> BTreeMap<usize, u64> {
-    let router_session_by_port = input
-        .registry_report
-        .map(|report| {
-            report
-                .session_peer_addrs
-                .iter()
-                .map(|peer| (peer.local_port, peer.session_id))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
-    input
-        .client_socket_observations
-        .iter()
-        .filter_map(|client_socket| {
-            router_session_by_port
-                .get(&client_socket.local_port)
-                .copied()
-                .map(|session_id| (client_socket.client_index, session_id))
-        })
-        .collect()
 }
 
 fn upstream_session_by_client_index(
@@ -2778,6 +3274,12 @@ fn stderr_transport_error_markers(stderr: &str) -> Vec<&'static str> {
             "stream disconnected before completion",
             "stream_disconnected_before_completion",
         ),
+        ("closed connection", "closed_connection"),
+        ("connection closed", "closed_connection"),
+        ("waiting on loopback", "waiting_on_loopback"),
+        ("function_call_output", "function_call_output"),
+        ("shell_command", "shell_command"),
+        ("tool-call", "tool_call"),
         ("request timed out", "request_timed_out"),
     ]
     .into_iter()
@@ -2798,8 +3300,10 @@ fn sanitized_artifact_path(path: &Path) -> Result<String, String> {
 
 fn sanitized_router_argv(argv: &[String]) -> Vec<String> {
     let path_value_flags = [
+        "--port",
         "--state-db",
         "--secret-root",
+        "--upstream-base-url",
         "--audit-file",
         "--websocket-registry-report-file",
     ];
@@ -2816,6 +3320,37 @@ fn sanitized_router_argv(argv: &[String]) -> Vec<String> {
         }
     }
     sanitized
+}
+
+fn sanitized_loopback_endpoint_text(value: &str) -> String {
+    let mut sanitized = value.to_owned();
+    for prefix in ["127.0.0.1:", "localhost:"] {
+        sanitized = replace_port_after_prefix(&sanitized, prefix);
+    }
+    sanitized
+}
+
+fn replace_port_after_prefix(value: &str, prefix: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(index) = remaining.find(prefix) {
+        let (before, after_before) = remaining.split_at(index);
+        output.push_str(before);
+        output.push_str(prefix);
+        output.push_str("<port>");
+        let Some(after_prefix) = after_before.strip_prefix(prefix) else {
+            output.push_str(after_before);
+            remaining = "";
+            break;
+        };
+        let first_non_digit = after_prefix
+            .char_indices()
+            .find_map(|(offset, character)| (!character.is_ascii_digit()).then_some(offset))
+            .unwrap_or(after_prefix.len());
+        remaining = after_prefix.get(first_non_digit..).unwrap_or_default();
+    }
+    output.push_str(remaining);
+    output
 }
 
 fn current_git_head() -> Result<String, String> {
@@ -2901,6 +3436,34 @@ fn assert_redacted_three_websocket_payload(
             ));
         }
     }
+    if contains_loopback_endpoint_with_numeric_port(payload) {
+        return Err(
+            "three-client transcript leaked loopback endpoint with numeric port".to_owned(),
+        );
+    }
+    let forbidden_structural_keys = [
+        "registered_session_ids",
+        "completed_session_ids",
+        "closed_session_ids",
+        "session_peer_addrs",
+        "session_id",
+        "local_port",
+        "router_session_id",
+        "upstream_session_id",
+        "per_client_join_keys",
+        "router_registered_session_ids",
+        "router_closed_session_ids",
+        "upstream_session_ids",
+        "upstream_client_sessions",
+    ];
+    for forbidden_key in forbidden_structural_keys {
+        let quoted_key = format!("\"{forbidden_key}\"");
+        if payload.contains(&quoted_key) {
+            return Err(format!(
+                "three-client transcript leaked forbidden structural key: {forbidden_key}"
+            ));
+        }
+    }
     for run in outputs {
         let stdout = String::from_utf8_lossy(&run.output.stdout);
         let stderr = String::from_utf8_lossy(&run.output.stderr);
@@ -2914,6 +3477,30 @@ fn assert_redacted_three_websocket_payload(
         }
     }
     Ok(())
+}
+
+fn contains_loopback_endpoint_with_numeric_port(payload: &str) -> bool {
+    ["127.0.0.1:", "localhost:"]
+        .into_iter()
+        .any(|prefix| contains_prefix_followed_by_digit(payload, prefix))
+}
+
+fn contains_prefix_followed_by_digit(payload: &str, prefix: &str) -> bool {
+    let mut remaining = payload;
+    while let Some(index) = remaining.find(prefix) {
+        let Some(after_prefix) = remaining.get(index + prefix.len()..) else {
+            return false;
+        };
+        if after_prefix
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            return true;
+        }
+        remaining = after_prefix;
+    }
+    false
 }
 
 fn assert_redacted_quota_reconnect_payload(
@@ -3060,6 +3647,7 @@ struct MockConcurrentWebSocketUpstream {
     address: String,
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
+    pressure_handles: PressureHandles,
     handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
@@ -3067,7 +3655,17 @@ struct MockQuotaReconnectWebSocketUpstream {
     address: String,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
     shutdown: Arc<AtomicBool>,
+    pressure_handles: PressureHandles,
     handle: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+struct S8OverlapQuotaErrorContext {
+    shared: Arc<ConcurrentUpstreamSharedState>,
+    overlap_started_at: Instant,
+    config: ConcurrentUpstreamConfig,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    pressure_handles: PressureHandles,
+    frame_count: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3081,6 +3679,9 @@ struct QuotaReconnectWebSocketTranscript {
     completion_sent: bool,
     quota_error_connection_label: Option<String>,
     completion_connection_label: Option<String>,
+    quota_error_sent_unix_ms: Option<u128>,
+    signal_latency_ms: Option<u128>,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureTranscript>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3094,11 +3695,42 @@ struct QuotaReconnectUpstreamState {
     completion_sent: bool,
     quota_error_connection_token: Option<String>,
     completion_connection_token: Option<String>,
+    quota_error_sent_unix_ms: Option<u128>,
+    completion_sent_unix_ms: Option<u128>,
+    sqlite_pressure_requested: bool,
+    sqlite_pressure_acquired_unix_ms: Option<u128>,
+    sqlite_pressure_released_unix_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuotaReconnectSqlitePressureConfig {
+    state_path: PathBuf,
+    hold_duration: Duration,
+}
+
+impl QuotaReconnectSqlitePressureConfig {
+    fn new(state_path: PathBuf) -> Self {
+        Self {
+            state_path,
+            hold_duration: QUOTA_RECONNECT_SQLITE_PRESSURE_HOLD,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuotaReconnectSqlitePressureTranscript {
+    mechanism: &'static str,
+    hold_duration_ms: u128,
+    acquired_before_quota_error: bool,
+    released_after_completion: bool,
+    acquired_unix_ms: Option<u128>,
+    released_unix_ms: Option<u128>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConcurrentWebSocketTranscript {
     expected_sessions: usize,
+    expected_upstream_sessions: usize,
     completed_sessions: usize,
     final_active_sessions: usize,
     active_high_water: usize,
@@ -3125,6 +3757,13 @@ struct ConcurrentWebSocketTranscript {
     multi_step_followup_active_session_count: usize,
     multi_step_followup_unix_ms: Option<u128>,
     multi_step_completed_before_overlap_end: bool,
+    quota_error_sent: bool,
+    completion_sent: bool,
+    quota_error_connection_label: Option<String>,
+    completion_connection_label: Option<String>,
+    quota_error_sent_unix_ms: Option<u128>,
+    signal_latency_ms: Option<u128>,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureTranscript>,
 }
 
 #[derive(Debug)]
@@ -3136,6 +3775,7 @@ struct ConcurrentUpstreamSharedState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConcurrentUpstreamState {
     expected_sessions: usize,
+    expected_upstream_sessions: usize,
     hold_duration: Duration,
     active_non_prewarm_sessions: usize,
     active_high_water: usize,
@@ -3159,10 +3799,21 @@ struct ConcurrentUpstreamState {
     unexpected_response_create_models: Vec<String>,
     multi_step_interleave_claimed: bool,
     multi_step_interleave_completed: bool,
+    sessions_with_overlap_proof_events: usize,
     multi_step_followup_frame_count: usize,
     multi_step_followup_active_session_count: usize,
     multi_step_followup_unix_ms: Option<u128>,
     multi_step_completed_unix_ms: Option<u128>,
+    quota_reconnect_claimed: bool,
+    quota_error_sent: bool,
+    completion_sent: bool,
+    quota_error_connection_token: Option<String>,
+    completion_connection_token: Option<String>,
+    quota_error_sent_unix_ms: Option<u128>,
+    completion_sent_unix_ms: Option<u128>,
+    sqlite_pressure_requested: bool,
+    sqlite_pressure_acquired_unix_ms: Option<u128>,
+    sqlite_pressure_released_unix_ms: Option<u128>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3412,7 +4063,7 @@ impl Drop for MockWebSocketUpstream {
 }
 
 impl MockQuotaReconnectWebSocketUpstream {
-    fn start() -> Result<Self, String> {
+    fn start(sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind quota reconnect upstream: {error}"))?;
         listener.set_nonblocking(true).map_err(|error| {
@@ -3424,12 +4075,20 @@ impl MockQuotaReconnectWebSocketUpstream {
             .to_string();
         let state = Arc::new(Mutex::new(QuotaReconnectUpstreamState::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let pressure_handles = Arc::new(Mutex::new(Vec::new()));
         let thread_state = Arc::clone(&state);
         let thread_shutdown = Arc::clone(&shutdown);
+        let thread_pressure_handles = Arc::clone(&pressure_handles);
         let handle = thread::Builder::new()
             .name("codex-router-quota-reconnect-upstream".to_owned())
             .spawn(move || {
-                run_quota_reconnect_mock_upstream(listener, thread_state, thread_shutdown)
+                run_quota_reconnect_mock_upstream(
+                    listener,
+                    thread_state,
+                    thread_shutdown,
+                    sqlite_pressure,
+                    thread_pressure_handles,
+                )
             })
             .map_err(|error| format!("failed to spawn quota reconnect upstream thread: {error}"))?;
 
@@ -3437,6 +4096,7 @@ impl MockQuotaReconnectWebSocketUpstream {
             address,
             state,
             shutdown,
+            pressure_handles,
             handle: Some(handle),
         })
     }
@@ -3453,11 +4113,37 @@ impl MockQuotaReconnectWebSocketUpstream {
             .take()
             .ok_or_else(|| "quota reconnect upstream was already joined".to_owned())?;
         join_result(handle, "quota reconnect upstream")?;
+        let pressure_handles = self
+            .pressure_handles
+            .lock()
+            .map_err(|_| "quota reconnect pressure handle mutex poisoned".to_owned())?
+            .drain(..)
+            .collect::<Vec<_>>();
+        for pressure_handle in pressure_handles {
+            join_result(pressure_handle, "quota reconnect sqlite pressure")?;
+        }
         let state = self
             .state
             .lock()
             .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?
             .clone();
+        let sqlite_pressure =
+            state
+                .sqlite_pressure_requested
+                .then(|| QuotaReconnectSqlitePressureTranscript {
+                    mechanism: "copied-db-sqlite-write-lock",
+                    hold_duration_ms: QUOTA_RECONNECT_SQLITE_PRESSURE_HOLD.as_millis(),
+                    acquired_before_quota_error: state
+                        .sqlite_pressure_acquired_unix_ms
+                        .zip(state.quota_error_sent_unix_ms)
+                        .is_some_and(|(acquired, quota_error)| acquired <= quota_error),
+                    released_after_completion: state
+                        .sqlite_pressure_released_unix_ms
+                        .zip(state.completion_sent_unix_ms)
+                        .is_some_and(|(released, completion)| released >= completion),
+                    acquired_unix_ms: state.sqlite_pressure_acquired_unix_ms,
+                    released_unix_ms: state.sqlite_pressure_released_unix_ms,
+                });
         Ok(QuotaReconnectWebSocketTranscript {
             http_probe_count: state.http_probe_count,
             websocket_handshake_count: state.websocket_handshake_count,
@@ -3476,6 +4162,12 @@ impl MockQuotaReconnectWebSocketUpstream {
                 .as_deref()
                 .and_then(quota_reconnect_label_from_upstream_token)
                 .map(str::to_owned),
+            quota_error_sent_unix_ms: state.quota_error_sent_unix_ms,
+            signal_latency_ms: state
+                .quota_error_sent_unix_ms
+                .zip(state.completion_sent_unix_ms)
+                .map(|(quota_error, completion)| completion.saturating_sub(quota_error)),
+            sqlite_pressure,
         })
     }
 }
@@ -3491,7 +4183,10 @@ impl Drop for MockQuotaReconnectWebSocketUpstream {
 }
 
 impl MockConcurrentWebSocketUpstream {
-    fn start(config: ConcurrentUpstreamConfig) -> Result<Self, String> {
+    fn start(
+        config: ConcurrentUpstreamConfig,
+        sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind concurrent mock upstream: {error}"))?;
         listener.set_nonblocking(true).map_err(|error| {
@@ -3504,6 +4199,7 @@ impl MockConcurrentWebSocketUpstream {
         let state = Arc::new(ConcurrentUpstreamSharedState {
             state: Mutex::new(ConcurrentUpstreamState {
                 expected_sessions: config.expected_sessions,
+                expected_upstream_sessions: config.expected_upstream_sessions,
                 hold_duration: config.hold_duration,
                 active_non_prewarm_sessions: 0,
                 active_high_water: 0,
@@ -3527,20 +4223,40 @@ impl MockConcurrentWebSocketUpstream {
                 unexpected_response_create_models: Vec::new(),
                 multi_step_interleave_claimed: false,
                 multi_step_interleave_completed: false,
+                sessions_with_overlap_proof_events: 0,
                 multi_step_followup_frame_count: 0,
                 multi_step_followup_active_session_count: 0,
                 multi_step_followup_unix_ms: None,
                 multi_step_completed_unix_ms: None,
+                quota_reconnect_claimed: false,
+                quota_error_sent: false,
+                completion_sent: false,
+                quota_error_connection_token: None,
+                completion_connection_token: None,
+                quota_error_sent_unix_ms: None,
+                completion_sent_unix_ms: None,
+                sqlite_pressure_requested: false,
+                sqlite_pressure_acquired_unix_ms: None,
+                sqlite_pressure_released_unix_ms: None,
             }),
             condition: Condvar::new(),
         });
         let shutdown = Arc::new(AtomicBool::new(false));
+        let pressure_handles = Arc::new(Mutex::new(Vec::new()));
         let thread_state = Arc::clone(&state);
         let thread_shutdown = Arc::clone(&shutdown);
+        let thread_pressure_handles = Arc::clone(&pressure_handles);
         let handle = thread::Builder::new()
             .name("codex-router-three-client-upstream".to_owned())
             .spawn(move || {
-                run_concurrent_mock_upstream(listener, thread_state, thread_shutdown, config)
+                run_concurrent_mock_upstream(
+                    listener,
+                    thread_state,
+                    thread_shutdown,
+                    config,
+                    sqlite_pressure,
+                    thread_pressure_handles,
+                )
             })
             .map_err(|error| format!("failed to spawn concurrent mock upstream: {error}"))?;
 
@@ -3548,6 +4264,7 @@ impl MockConcurrentWebSocketUpstream {
             address,
             state,
             shutdown,
+            pressure_handles,
             handle: Some(handle),
         })
     }
@@ -3557,14 +4274,20 @@ impl MockConcurrentWebSocketUpstream {
     }
 
     fn join(mut self) -> Result<ConcurrentWebSocketTranscript, String> {
-        self.shutdown.store(true, Ordering::SeqCst);
-        wake_mock_upstream_accept(&self.address);
-        self.state.condition.notify_all();
         let handle = self
             .handle
             .take()
             .ok_or_else(|| "concurrent mock upstream was already joined".to_owned())?;
         join_result(handle, "concurrent mock upstream")?;
+        let pressure_handles = self
+            .pressure_handles
+            .lock()
+            .map_err(|_| "concurrent pressure handle mutex poisoned".to_owned())?
+            .drain(..)
+            .collect::<Vec<_>>();
+        for pressure_handle in pressure_handles {
+            join_result(pressure_handle, "S8 overlap quota sqlite pressure")?;
+        }
         let state = self
             .state
             .state
@@ -3579,12 +4302,30 @@ impl MockConcurrentWebSocketUpstream {
         }
         if state.completed_sessions < state.expected_sessions {
             return Err(format!(
-                "concurrent upstream completed {} sessions, expected {}",
+                "concurrent upstream completed {} sessions, expected at least {}",
                 state.completed_sessions, state.expected_sessions
             ));
         }
+        let sqlite_pressure =
+            state
+                .sqlite_pressure_requested
+                .then(|| QuotaReconnectSqlitePressureTranscript {
+                    mechanism: "copied-db-sqlite-write-lock",
+                    hold_duration_ms: QUOTA_RECONNECT_SQLITE_PRESSURE_HOLD.as_millis(),
+                    acquired_before_quota_error: state
+                        .sqlite_pressure_acquired_unix_ms
+                        .zip(state.quota_error_sent_unix_ms)
+                        .is_some_and(|(acquired, quota_error)| acquired <= quota_error),
+                    released_after_completion: state
+                        .sqlite_pressure_released_unix_ms
+                        .zip(state.completion_sent_unix_ms)
+                        .is_some_and(|(released, completion)| released >= completion),
+                    acquired_unix_ms: state.sqlite_pressure_acquired_unix_ms,
+                    released_unix_ms: state.sqlite_pressure_released_unix_ms,
+                });
         Ok(ConcurrentWebSocketTranscript {
             expected_sessions: state.expected_sessions,
+            expected_upstream_sessions: state.expected_upstream_sessions,
             completed_sessions: state.completed_sessions,
             final_active_sessions: state.final_active_sessions,
             active_high_water: state.active_high_water,
@@ -3617,6 +4358,24 @@ impl MockConcurrentWebSocketUpstream {
                 .is_some_and(|(multi_step_completed, overlap_completed)| {
                     multi_step_completed <= overlap_completed
                 }),
+            quota_error_sent: state.quota_error_sent,
+            completion_sent: state.completion_sent,
+            quota_error_connection_label: state
+                .quota_error_connection_token
+                .as_deref()
+                .and_then(quota_reconnect_label_from_upstream_token)
+                .map(str::to_owned),
+            completion_connection_label: state
+                .completion_connection_token
+                .as_deref()
+                .and_then(quota_reconnect_label_from_upstream_token)
+                .map(str::to_owned),
+            quota_error_sent_unix_ms: state.quota_error_sent_unix_ms,
+            signal_latency_ms: state
+                .quota_error_sent_unix_ms
+                .zip(state.completion_sent_unix_ms)
+                .map(|(quota_error, completion)| completion.saturating_sub(quota_error)),
+            sqlite_pressure,
         })
     }
 }
@@ -3701,6 +4460,8 @@ fn run_quota_reconnect_mock_upstream(
     listener: TcpListener,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
     shutdown: Arc<AtomicBool>,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     let deadline = Instant::now() + UPSTREAM_ACCEPT_TIMEOUT;
     loop {
@@ -3726,7 +4487,12 @@ fn run_quota_reconnect_mock_upstream(
                     state.http_probe_count = state.http_probe_count.saturating_add(1);
                     continue;
                 }
-                run_quota_reconnect_mock_websocket_session(stream, Arc::clone(&state))?;
+                run_quota_reconnect_mock_websocket_session(
+                    stream,
+                    Arc::clone(&state),
+                    sqlite_pressure.clone(),
+                    Arc::clone(&pressure_handles),
+                )?;
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -3740,6 +4506,8 @@ fn run_quota_reconnect_mock_upstream(
 fn run_quota_reconnect_mock_websocket_session(
     stream: std::net::TcpStream,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -3837,11 +4605,25 @@ fn run_quota_reconnect_mock_websocket_session(
             }
         };
         if send_quota_error {
+            if let Some(sqlite_pressure) = sqlite_pressure {
+                let pressure_handle =
+                    start_quota_reconnect_sqlite_pressure(sqlite_pressure, Arc::clone(&state))?;
+                pressure_handles
+                    .lock()
+                    .map_err(|_| "quota reconnect pressure handle mutex poisoned".to_owned())?
+                    .push(pressure_handle);
+            }
             websocket
                 .send(Message::Text(quota_reconnect_usage_limit_frame().into()))
                 .map_err(|error| {
                     format!("quota reconnect upstream failed to send usage limit: {error}")
                 })?;
+            {
+                let mut state = state
+                    .lock()
+                    .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?;
+                state.quota_error_sent_unix_ms = Some(timestamp_millis());
+            }
             let _close_result = websocket.close(None);
             return Ok(());
         }
@@ -3852,10 +4634,229 @@ fn run_quota_reconnect_mock_websocket_session(
                     format!("quota reconnect upstream failed to send completion event: {error}")
                 })?;
         }
+        {
+            let mut state = state
+                .lock()
+                .map_err(|_| "quota reconnect upstream state mutex poisoned".to_owned())?;
+            state.completion_sent_unix_ms = Some(timestamp_millis());
+        }
         let _close_result = websocket.close(None);
         return Ok(());
     }
     Ok(())
+}
+
+fn start_quota_reconnect_sqlite_pressure(
+    config: QuotaReconnectSqlitePressureConfig,
+    state: Arc<Mutex<QuotaReconnectUpstreamState>>,
+) -> Result<thread::JoinHandle<Result<(), String>>, String> {
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name("codex-router-quota-reconnect-sqlite-pressure".to_owned())
+        .spawn(move || {
+            let mut child = Command::new("python3");
+            child
+                .arg("-c")
+                .arg(
+                    r#"
+import sqlite3
+import sys
+import time
+
+database_path = sys.argv[1]
+hold_seconds = float(sys.argv[2])
+connection = sqlite3.connect(database_path, timeout=0)
+try:
+    connection.execute("BEGIN IMMEDIATE")
+    print("acquired", flush=True)
+    time.sleep(hold_seconds)
+    connection.commit()
+finally:
+    connection.close()
+"#,
+                )
+                .arg(&config.state_path)
+                .arg(format!("{}", config.hold_duration.as_secs_f64()))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = match child.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let error =
+                        format!("failed to spawn quota reconnect pressure helper: {error}");
+                    let _send_result = ready_sender.send(Err(error.clone()));
+                    return Err(error);
+                }
+            };
+            let Some(stdout) = child.stdout.take() else {
+                let error = "quota reconnect pressure helper stdout was unavailable".to_owned();
+                let _send_result = ready_sender.send(Err(error.clone()));
+                return Err(error);
+            };
+            let mut stdout = BufReader::new(stdout);
+            let mut ready_line = String::new();
+            stdout.read_line(&mut ready_line).map_err(|error| {
+                format!("failed to read quota reconnect pressure readiness: {error}")
+            })?;
+            if ready_line.trim() != "acquired" {
+                let output = child.wait_with_output().map_err(|error| {
+                    format!("failed to wait for quota reconnect pressure helper: {error}")
+                })?;
+                let error = format!(
+                    "failed to acquire quota reconnect pressure write lock on {}: status={} stderr={}",
+                    config.state_path.display(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let _send_result = ready_sender.send(Err(error.clone()));
+                return Err(error);
+            };
+            {
+                let mut state = state.lock().map_err(|_| {
+                    "quota reconnect upstream state mutex poisoned during pressure acquire"
+                        .to_owned()
+                })?;
+                state.sqlite_pressure_requested = true;
+                state.sqlite_pressure_acquired_unix_ms = Some(timestamp_millis());
+            }
+            let _ready_result = ready_sender.send(Ok(()));
+            let output = child.wait_with_output().map_err(|error| {
+                format!(
+                    "failed to wait for quota reconnect pressure helper on {}: {error}",
+                    config.state_path.display(),
+                )
+            })?;
+            if !output.status.success() {
+                return Err(format!(
+                    "quota reconnect pressure helper failed on {}: status={} stderr={}",
+                    config.state_path.display(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            {
+                let mut state = state.lock().map_err(|_| {
+                    "quota reconnect upstream state mutex poisoned during pressure release"
+                        .to_owned()
+                })?;
+                state.sqlite_pressure_released_unix_ms = Some(timestamp_millis());
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("failed to spawn quota reconnect sqlite pressure: {error}"))?;
+    match ready_receiver.recv_timeout(QUOTA_RECONNECT_SQLITE_PRESSURE_READY_TIMEOUT) {
+        Ok(Ok(())) => Ok(handle),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(format!(
+            "quota reconnect sqlite pressure did not acquire before timeout: {error}"
+        )),
+    }
+}
+
+fn start_s8_overlap_quota_sqlite_pressure(
+    config: QuotaReconnectSqlitePressureConfig,
+    shared: Arc<ConcurrentUpstreamSharedState>,
+) -> Result<thread::JoinHandle<Result<(), String>>, String> {
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name("codex-router-s8-overlap-quota-sqlite-pressure".to_owned())
+        .spawn(move || {
+            let mut child = Command::new("python3");
+            child
+                .arg("-c")
+                .arg(
+                    r#"
+import sqlite3
+import sys
+import time
+
+database_path = sys.argv[1]
+hold_seconds = float(sys.argv[2])
+connection = sqlite3.connect(database_path, timeout=0)
+try:
+    connection.execute("BEGIN IMMEDIATE")
+    print("acquired", flush=True)
+    time.sleep(hold_seconds)
+    connection.commit()
+finally:
+    connection.close()
+"#,
+                )
+                .arg(&config.state_path)
+                .arg(format!("{}", config.hold_duration.as_secs_f64()))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = match child.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let error = format!("failed to spawn S8 overlap quota pressure helper: {error}");
+                    let _send_result = ready_sender.send(Err(error.clone()));
+                    return Err(error);
+                }
+            };
+            let Some(stdout) = child.stdout.take() else {
+                let error = "S8 overlap quota pressure helper stdout was unavailable".to_owned();
+                let _send_result = ready_sender.send(Err(error.clone()));
+                return Err(error);
+            };
+            let mut stdout = BufReader::new(stdout);
+            let mut ready_line = String::new();
+            stdout.read_line(&mut ready_line).map_err(|error| {
+                format!("failed to read S8 overlap quota pressure readiness: {error}")
+            })?;
+            if ready_line.trim() != "acquired" {
+                let output = child.wait_with_output().map_err(|error| {
+                    format!("failed to wait for S8 overlap quota pressure helper: {error}")
+                })?;
+                let error = format!(
+                    "failed to acquire S8 overlap quota pressure write lock on {}: status={} stderr={}",
+                    config.state_path.display(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let _send_result = ready_sender.send(Err(error.clone()));
+                return Err(error);
+            };
+            {
+                let mut state = shared.state.lock().map_err(|_| {
+                    "concurrent upstream state mutex poisoned during pressure acquire".to_owned()
+                })?;
+                state.sqlite_pressure_requested = true;
+                state.sqlite_pressure_acquired_unix_ms = Some(timestamp_millis());
+            }
+            shared.condition.notify_all();
+            let _ready_result = ready_sender.send(Ok(()));
+            let output = child.wait_with_output().map_err(|error| {
+                format!(
+                    "failed to wait for S8 overlap quota pressure helper on {}: {error}",
+                    config.state_path.display(),
+                )
+            })?;
+            if !output.status.success() {
+                return Err(format!(
+                    "S8 overlap quota pressure helper failed on {}: status={} stderr={}",
+                    config.state_path.display(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            {
+                let mut state = shared.state.lock().map_err(|_| {
+                    "concurrent upstream state mutex poisoned during pressure release".to_owned()
+                })?;
+                state.sqlite_pressure_released_unix_ms = Some(timestamp_millis());
+            }
+            shared.condition.notify_all();
+            Ok(())
+        })
+        .map_err(|error| format!("failed to spawn S8 overlap quota sqlite pressure: {error}"))?;
+    match ready_receiver.recv_timeout(QUOTA_RECONNECT_SQLITE_PRESSURE_READY_TIMEOUT) {
+        Ok(Ok(())) => Ok(handle),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(format!(
+            "S8 overlap quota sqlite pressure did not acquire before timeout: {error}"
+        )),
+    }
 }
 
 fn quota_reconnect_completion_sent(
@@ -3872,6 +4873,8 @@ fn run_concurrent_mock_upstream(
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
     config: ConcurrentUpstreamConfig,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     let deadline = Instant::now()
         + Duration::from_secs(45)
@@ -3884,7 +4887,7 @@ fn run_concurrent_mock_upstream(
                 .state
                 .lock()
                 .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
-            if state_guard.completed_sessions >= config.expected_sessions {
+            if state_guard.completed_sessions >= config.expected_upstream_sessions {
                 break;
             }
         }
@@ -3912,6 +4915,8 @@ fn run_concurrent_mock_upstream(
                 }
                 let session_state = Arc::clone(&state);
                 let session_shutdown = Arc::clone(&shutdown);
+                let session_sqlite_pressure = sqlite_pressure.clone();
+                let session_pressure_handles = Arc::clone(&pressure_handles);
                 handles.push(
                     thread::Builder::new()
                         .name("codex-router-three-client-upstream-session".to_owned())
@@ -3921,6 +4926,8 @@ fn run_concurrent_mock_upstream(
                                 session_state,
                                 session_shutdown,
                                 config,
+                                session_sqlite_pressure,
+                                session_pressure_handles,
                             )
                         })
                         .map_err(|error| {
@@ -3950,6 +4957,8 @@ fn run_concurrent_mock_websocket_session(
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
     config: ConcurrentUpstreamConfig,
+    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    pressure_handles: PressureHandles,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(
@@ -3960,10 +4969,33 @@ fn run_concurrent_mock_websocket_session(
         .map_err(|error| {
             format!("concurrent mock upstream failed to set websocket read timeout: {error}")
         })?;
-    let mut websocket = accept_hdr(stream, |_request: &Request, response: Response| {
+    let captured_headers = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let callback_headers = Arc::clone(&captured_headers);
+    let mut websocket = accept_hdr(stream, move |request: &Request, response: Response| {
+        let headers = request
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        if let Ok(mut captured) = callback_headers.lock() {
+            *captured = headers;
+        }
         Ok(response)
     })
     .map_err(|error| format!("concurrent mock upstream websocket handshake failed: {error}"))?;
+    let token = {
+        let headers = captured_headers
+            .lock()
+            .map_err(|_| "concurrent upstream header mutex poisoned".to_owned())?;
+        bearer_token_from_headers(&headers)
+            .ok_or_else(|| "concurrent upstream missing bearer token".to_owned())?
+            .to_owned()
+    };
     let mut frame_count = 0_usize;
     for request_index in 0..4 {
         if shutdown.load(Ordering::SeqCst) {
@@ -3999,7 +5031,23 @@ fn run_concurrent_mock_websocket_session(
             observed_model.as_deref(),
         )?;
         let overlap_started_at = wait_for_concurrent_session_barrier(&state)?;
-        let run_multi_step_interleave = claim_multi_step_interleave(&state)?;
+        if claim_quota_reconnect_interleave(&state, &token, &frame)? {
+            return send_s8_overlap_quota_error(
+                &mut websocket,
+                &token,
+                S8OverlapQuotaErrorContext {
+                    shared: Arc::clone(&state),
+                    overlap_started_at,
+                    config,
+                    sqlite_pressure,
+                    pressure_handles,
+                    frame_count,
+                },
+            );
+        }
+        let quota_completion_session = record_quota_reconnect_completion_if_needed(&state, &token)?;
+        let run_multi_step_interleave =
+            !quota_completion_session && claim_multi_step_interleave(&state)?;
         let (event_count, in_overlap_event_count) = if run_multi_step_interleave {
             send_concurrent_multi_step_response_events(
                 &mut websocket,
@@ -4018,6 +5066,7 @@ fn run_concurrent_mock_websocket_session(
                 &state,
             )?
         };
+        wait_for_all_concurrent_overlap_proof_events(&state, config)?;
         let close_outcome = match websocket.close(None) {
             Ok(()) => "normal".to_owned(),
             Err(error) => format!("abnormal:{error}"),
@@ -4032,18 +5081,6 @@ fn run_concurrent_mock_websocket_session(
         return Ok(());
     }
     Err("concurrent mock upstream did not receive non-prewarm request frame".to_owned())
-}
-
-fn claim_multi_step_interleave(shared: &ConcurrentUpstreamSharedState) -> Result<bool, String> {
-    let mut state = shared
-        .state
-        .lock()
-        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
-    if state.multi_step_interleave_claimed {
-        return Ok(false);
-    }
-    state.multi_step_interleave_claimed = true;
-    Ok(true)
 }
 
 fn complete_multi_step_interleave(
@@ -4113,7 +5150,8 @@ fn register_concurrent_non_prewarm_session(
 fn extract_harness_client_index(frame: &str) -> Option<usize> {
     let marker = "codex-router-client-";
     let marker_start = frame.find(marker)? + marker.len();
-    let digits = frame[marker_start..]
+    let digits = frame
+        .get(marker_start..)?
         .chars()
         .take_while(|character| character.is_ascii_digit())
         .collect::<String>();
@@ -4201,6 +5239,146 @@ fn finish_concurrent_non_prewarm_session(
     Ok(())
 }
 
+fn wait_for_all_concurrent_overlap_proof_events(
+    shared: &ConcurrentUpstreamSharedState,
+    config: ConcurrentUpstreamConfig,
+) -> Result<(), String> {
+    let deadline = Instant::now()
+        + Duration::from_secs(20)
+            .saturating_add(config.hold_duration)
+            .saturating_add(config.heartbeat_interval);
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    state.sessions_with_overlap_proof_events =
+        state.sessions_with_overlap_proof_events.saturating_add(1);
+    shared.condition.notify_all();
+    loop {
+        if state.sessions_with_overlap_proof_events >= state.expected_sessions {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "concurrent upstream timed out waiting for overlap proof events sessions_with_overlap_proof_events={} expected={}",
+                state.sessions_with_overlap_proof_events, state.expected_sessions
+            ));
+        }
+        let wait = deadline.saturating_duration_since(now);
+        let (next_state, _timeout) = shared
+            .condition
+            .wait_timeout(state, wait.min(Duration::from_millis(100)))
+            .map_err(|_| "concurrent upstream condition wait poisoned".to_owned())?;
+        state = next_state;
+    }
+}
+
+fn claim_multi_step_interleave(shared: &ConcurrentUpstreamSharedState) -> Result<bool, String> {
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    if state.multi_step_interleave_claimed {
+        return Ok(false);
+    }
+    state.multi_step_interleave_claimed = true;
+    Ok(true)
+}
+
+fn claim_quota_reconnect_interleave(
+    shared: &ConcurrentUpstreamSharedState,
+    token: &str,
+    frame: &str,
+) -> Result<bool, String> {
+    if token != QUOTA_RECONNECT_PRIMARY.upstream_token {
+        return Ok(false);
+    }
+    if !frame.contains("codex-router-s8-quota-client") {
+        return Ok(false);
+    }
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    if state.expected_upstream_sessions == state.expected_sessions {
+        return Ok(false);
+    }
+    if state.quota_reconnect_claimed {
+        return Ok(false);
+    }
+    state.quota_reconnect_claimed = true;
+    Ok(true)
+}
+
+fn record_quota_reconnect_completion_if_needed(
+    shared: &ConcurrentUpstreamSharedState,
+    token: &str,
+) -> Result<bool, String> {
+    if token != QUOTA_RECONNECT_FALLBACK.upstream_token {
+        return Ok(false);
+    }
+    let mut state = shared
+        .state
+        .lock()
+        .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+    if state.expected_upstream_sessions == state.expected_sessions {
+        return Ok(false);
+    }
+    state.completion_sent = true;
+    state.completion_connection_token = Some(token.to_owned());
+    state.completion_sent_unix_ms = Some(timestamp_millis());
+    shared.condition.notify_all();
+    Ok(true)
+}
+
+fn send_s8_overlap_quota_error(
+    websocket: &mut WebSocket<std::net::TcpStream>,
+    token: &str,
+    context: S8OverlapQuotaErrorContext,
+) -> Result<(), String> {
+    if !context.config.hold_duration.is_zero() {
+        let quota_deadline = context.overlap_started_at + context.config.hold_duration;
+        let remaining = quota_deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            thread::sleep(remaining);
+        }
+    }
+    if let Some(sqlite_pressure) = context.sqlite_pressure {
+        let pressure_handle =
+            start_s8_overlap_quota_sqlite_pressure(sqlite_pressure, Arc::clone(&context.shared))?;
+        context
+            .pressure_handles
+            .lock()
+            .map_err(|_| "S8 overlap quota pressure handle mutex poisoned".to_owned())?
+            .push(pressure_handle);
+    }
+    websocket
+        .send(Message::Text(quota_reconnect_usage_limit_frame().into()))
+        .map_err(|error| {
+            format!("S8 overlap quota upstream failed to send usage limit: {error}")
+        })?;
+    {
+        let mut state = context
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "concurrent upstream state mutex poisoned".to_owned())?;
+        state.quota_error_sent = true;
+        state.quota_error_connection_token = Some(token.to_owned());
+        state.quota_error_sent_unix_ms = Some(timestamp_millis());
+    }
+    let _close_result = websocket.close(None);
+    finish_concurrent_non_prewarm_session(
+        &context.shared,
+        context.frame_count,
+        1,
+        usize::from(is_concurrent_overlap_active(&context.shared)?),
+        "normal".to_owned(),
+    )?;
+    Ok(())
+}
+
 fn send_concurrent_response_events(
     websocket: &mut WebSocket<std::net::TcpStream>,
     request_index: usize,
@@ -4211,31 +5389,19 @@ fn send_concurrent_response_events(
     let response_events = smoke_response_events(request_index);
     let mut event_count = 0_usize;
     let mut in_overlap_event_count = 0_usize;
-    send_concurrent_response_event(websocket, &response_events[0])?;
+    let Some(first_response_event) = response_events.first() else {
+        return Err("mock upstream response events must not be empty".to_owned());
+    };
+    send_concurrent_response_event(websocket, first_response_event)?;
     event_count = event_count.saturating_add(1);
     in_overlap_event_count =
         in_overlap_event_count.saturating_add(usize::from(is_concurrent_overlap_active(state)?));
 
     if !config.hold_duration.is_zero() {
         let hold_deadline = overlap_started_at + config.hold_duration + SOAK_PROOF_MARGIN;
-        let mut heartbeat_index = 0_usize;
-        while Instant::now() < hold_deadline {
-            let remaining = hold_deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(config.heartbeat_interval));
-            if Instant::now() >= hold_deadline {
-                break;
-            }
-            let heartbeat = serde_json::json!({
-                "type": "response.output_text.delta",
-                "delta": "",
-                "sequence_number": heartbeat_index,
-            })
-            .to_string();
-            send_concurrent_response_event(websocket, &heartbeat)?;
-            heartbeat_index = heartbeat_index.saturating_add(1);
-            event_count = event_count.saturating_add(1);
-            in_overlap_event_count = in_overlap_event_count
-                .saturating_add(usize::from(is_concurrent_overlap_active(state)?));
+        let remaining = hold_deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            thread::sleep(remaining);
         }
     }
 
@@ -4324,24 +5490,9 @@ fn send_concurrent_multi_step_response_events(
 
     if !config.hold_duration.is_zero() {
         let hold_deadline = overlap_started_at + config.hold_duration + SOAK_PROOF_MARGIN;
-        let mut heartbeat_index = 0_usize;
-        while Instant::now() < hold_deadline {
-            let remaining = hold_deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(config.heartbeat_interval));
-            if Instant::now() >= hold_deadline {
-                break;
-            }
-            let heartbeat = serde_json::json!({
-                "type": "response.output_text.delta",
-                "delta": "",
-                "sequence_number": heartbeat_index,
-            })
-            .to_string();
-            send_concurrent_response_event(websocket, &heartbeat)?;
-            heartbeat_index = heartbeat_index.saturating_add(1);
-            event_count = event_count.saturating_add(1);
-            in_overlap_event_count = in_overlap_event_count
-                .saturating_add(usize::from(is_concurrent_overlap_active(state)?));
+        let remaining = hold_deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            thread::sleep(remaining);
         }
     }
 
@@ -4549,7 +5700,10 @@ fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, St
     let byte_count = stream
         .peek(&mut buffer)
         .map_err(|error| format!("mock upstream failed to peek request: {error}"))?;
-    let request = String::from_utf8_lossy(&buffer[..byte_count]);
+    let request_bytes = buffer
+        .get(..byte_count)
+        .ok_or_else(|| "mock upstream peek byte count exceeded buffer length".to_owned())?;
+    let request = String::from_utf8_lossy(request_bytes);
     Ok(request.to_ascii_lowercase().contains("upgrade: websocket"))
 }
 
@@ -4597,12 +5751,21 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Result<MockHttpSseTran
         if byte_count == 0 {
             break;
         }
-        bytes.extend_from_slice(&buffer[..byte_count]);
+        let read_bytes = buffer
+            .get(..byte_count)
+            .ok_or_else(|| "mock upstream read byte count exceeded buffer length".to_owned())?;
+        bytes.extend_from_slice(read_bytes);
         if let Some(header_end) = find_header_end(&bytes) {
-            let header_text = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+            let header_bytes = bytes
+                .get(..header_end)
+                .ok_or_else(|| "mock upstream header boundary exceeded buffer length".to_owned())?;
+            let header_text = String::from_utf8_lossy(header_bytes).to_string();
             let body_start = header_end + 4;
             if header_uses_chunked_transfer(&header_text) {
-                if let Some(body) = decode_complete_chunked_body(&bytes[body_start..])? {
+                let body_bytes = bytes.get(body_start..).ok_or_else(|| {
+                    "mock upstream body boundary exceeded buffer length".to_owned()
+                })?;
+                if let Some(body) = decode_complete_chunked_body(body_bytes)? {
                     let (request_line, headers) = parse_http_head(&header_text)?;
                     return Ok(MockHttpSseTranscript {
                         request_line,
@@ -4613,9 +5776,12 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Result<MockHttpSseTran
             } else {
                 let content_length = parse_content_length(&header_text);
                 if bytes.len() >= body_start + content_length {
-                    let body =
-                        String::from_utf8_lossy(&bytes[body_start..body_start + content_length])
-                            .to_string();
+                    let body_bytes = bytes
+                        .get(body_start..body_start + content_length)
+                        .ok_or_else(|| {
+                            "mock upstream body length exceeded buffer length".to_owned()
+                        })?;
+                    let body = String::from_utf8_lossy(body_bytes).to_string();
                     let (request_line, headers) = parse_http_head(&header_text)?;
                     return Ok(MockHttpSseTranscript {
                         request_line,
@@ -4645,10 +5811,16 @@ fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> 
     let mut position = 0_usize;
     let mut body = Vec::new();
     loop {
-        let Some(size_line_end) = find_crlf(&bytes[position..]) else {
+        let Some(remaining) = bytes.get(position..) else {
             return Ok(None);
         };
-        let size_line = std::str::from_utf8(&bytes[position..position + size_line_end])
+        let Some(size_line_end) = find_crlf(remaining) else {
+            return Ok(None);
+        };
+        let size_line_bytes = bytes
+            .get(position..position + size_line_end)
+            .ok_or_else(|| "chunk size line exceeded buffer length".to_owned())?;
+        let size_line = std::str::from_utf8(size_line_bytes)
             .map_err(|error| format!("chunk size line was not UTF-8: {error}"))?;
         let size_text = size_line
             .split_once(';')
@@ -4662,7 +5834,10 @@ fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> 
                     .map(Some)
                     .map_err(|error| format!("chunked body was not UTF-8: {error}"));
             }
-            let Some(trailer_end) = find_header_end(&bytes[position..]) else {
+            let Some(remaining) = bytes.get(position..) else {
+                return Ok(None);
+            };
+            let Some(trailer_end) = find_header_end(remaining) else {
                 return Ok(None);
             };
             let _consumed = position.saturating_add(trailer_end + 4);
@@ -4673,7 +5848,10 @@ fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> 
         if bytes.len() < position.saturating_add(chunk_size).saturating_add(2) {
             return Ok(None);
         }
-        body.extend_from_slice(&bytes[position..position + chunk_size]);
+        let chunk = bytes
+            .get(position..position + chunk_size)
+            .ok_or_else(|| "chunk data exceeded buffer length".to_owned())?;
+        body.extend_from_slice(chunk);
         position = position.saturating_add(chunk_size);
         if bytes.get(position..position + 2) != Some(b"\r\n") {
             return Err("chunk data was not followed by CRLF".to_owned());
@@ -5028,7 +6206,10 @@ fn parse_posix_token_assignment(assignment: &str) -> Result<String, String> {
     if !assignment.starts_with(prefix) || !assignment.ends_with(suffix) {
         return Err("token export assignment did not use expected POSIX shape".to_owned());
     }
-    let token = &assignment[prefix.len()..assignment.len() - suffix.len()];
+    let token = assignment
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(suffix))
+        .ok_or_else(|| "token export assignment did not use expected POSIX shape".to_owned())?;
     if token.contains("'\\''") {
         return Err("smoke token unexpectedly required shell unescaping".to_owned());
     }
@@ -5069,6 +6250,101 @@ fn send_hostile_no_token_websocket(router_port: u16) -> Result<(), String> {
     }
 }
 
+fn run_s8_overlap_quota_local_probe(router_port: u16, local_token: &str) -> Result<(), String> {
+    let request_payload = serde_json::json!({
+        "model": SMOKE_TARGET_MODEL,
+        "input": [{
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!("{SMOKE_PROMPT}\n\nHarness marker: codex-router-s8-quota-client"),
+            }],
+        }],
+        "stream": true,
+    })
+    .to_string();
+
+    let mut last_error = None;
+    for attempt in 0..2 {
+        match run_s8_overlap_quota_local_probe_attempt(router_port, local_token, &request_payload) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 0 => {
+                last_error = Some(error);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "S8 overlap quota local probe failed after reconnect; first_error={} second_error={error}",
+                    last_error.unwrap_or_else(|| "<none>".to_owned())
+                ));
+            }
+        }
+    }
+    Err("S8 overlap quota local probe exited without an attempt".to_owned())
+}
+
+fn run_s8_overlap_quota_local_probe_attempt(
+    router_port: u16,
+    local_token: &str,
+    request_payload: &str,
+) -> Result<(), String> {
+    let mut request = format!("ws://127.0.0.1:{router_port}/v1/responses")
+        .into_client_request()
+        .map_err(|error| format!("failed to build S8 overlap quota request: {error}"))?;
+    let authorization = format!("Bearer {local_token}")
+        .parse()
+        .map_err(|error| format!("failed to build S8 overlap quota authorization: {error}"))?;
+    request.headers_mut().insert("authorization", authorization);
+    let (mut websocket, _response) = connect(request)
+        .map_err(|error| format!("S8 overlap quota local probe connect failed: {error}"))?;
+    let MaybeTlsStream::Plain(stream) = websocket.get_mut() else {
+        return Err("S8 overlap quota local probe expected a plain loopback stream".to_owned());
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|error| format!("S8 overlap quota local probe read timeout failed: {error}"))?;
+    websocket
+        .send(Message::text(request_payload.to_owned()))
+        .map_err(|error| format!("S8 overlap quota local probe send failed: {error}"))?;
+
+    let mut saw_expected_text = false;
+    let mut saw_completed = false;
+    loop {
+        match websocket.read() {
+            Ok(Message::Text(text)) => {
+                let text = text.to_string();
+                saw_expected_text |= text.contains(SMOKE_EXPECTED_TEXT);
+                saw_completed |= text.contains("response.completed");
+                if saw_expected_text && saw_completed {
+                    let _close_result = websocket.close(None);
+                    return Ok(());
+                }
+            }
+            Ok(Message::Binary(bytes)) => {
+                let text = String::from_utf8(bytes.to_vec()).map_err(|error| {
+                    format!("S8 overlap quota local probe binary frame was not UTF-8: {error}")
+                })?;
+                saw_expected_text |= text.contains(SMOKE_EXPECTED_TEXT);
+                saw_completed |= text.contains("response.completed");
+                if saw_expected_text && saw_completed {
+                    let _close_result = websocket.close(None);
+                    return Ok(());
+                }
+            }
+            Ok(Message::Close(_)) => {
+                return Err(format!(
+                    "closed before completion; saw_expected_text={saw_expected_text} saw_completed={saw_completed}"
+                ));
+            }
+            Ok(_other) => {}
+            Err(error) => {
+                return Err(format!(
+                    "read failed before completion; saw_expected_text={saw_expected_text} saw_completed={saw_completed}: {error}"
+                ));
+            }
+        }
+    }
+}
+
 fn account_id(value: &str) -> Result<AccountId, String> {
     AccountId::new(value.to_owned()).map_err(|_| format!("invalid smoke account id: {value}"))
 }
@@ -5081,6 +6357,13 @@ fn upstream_account_token() -> &'static str {
 fn timestamp_millis() -> u128 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_millis(),
+        Err(_) => 0,
+    }
+}
+
+fn timestamp_seconds() -> u64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
         Err(_) => 0,
     }
 }
@@ -5117,6 +6400,10 @@ impl SmokeTempRoot {
 
 impl Drop for SmokeTempRoot {
     fn drop(&mut self) {
+        if std::env::var_os(RETAIN_SMOKE_ROOT_ENV).is_some() {
+            eprintln!("retaining smoke temp root: {}", self.path.display());
+            return;
+        }
         if self.path.exists() {
             let _ = fs::remove_dir_all(&self.path);
         }
@@ -5127,6 +6414,7 @@ impl Drop for SmokeTempRoot {
 mod tests {
     use std::borrow::Cow;
     use std::fs;
+    use std::os::unix::fs as unix_fs;
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
     use std::process::Output;
@@ -5134,26 +6422,39 @@ mod tests {
     use super::InstalledCodexSmokeMode;
     use super::MockHttpSseTranscript;
     use super::MockWebSocketTranscript;
+    use super::RETAIN_SMOKE_ROOT_ENV;
     use super::RedactedTranscriptInput;
     use super::RouterAuditObservation;
     use super::RouterProcessObservation;
     use super::SMOKE_EXPECTED_TEXT;
     use super::SmokeContractAssertion;
     use super::SmokeQuotaStatus;
+    use super::SmokeSeed;
     use super::SmokeTempRoot;
+
     use super::assert_codex_visible_output;
+    use super::assert_redacted_three_websocket_payload;
     use super::assert_smoke_contract;
     use super::first_frame_shape_summary;
     use super::run_hostile_no_token_smoke;
     use super::run_installed_codex_http_sse_mock_smoke;
     use super::run_installed_codex_mock_smoke;
     use super::run_installed_codex_quota_reconnect_websocket_mock_smoke;
+    use super::run_installed_codex_s8_overlap_quota_websocket_mock_smoke;
     use super::run_installed_codex_three_websocket_mock_e2e;
     use super::run_installed_codex_three_websocket_mock_soak;
     use super::run_installed_codex_websocket_mock_smoke;
     use super::run_with_timeout;
     use super::upstream_account_token;
+    use super::validate_copied_dev_state_roots;
     use super::write_redacted_transcript;
+
+    fn expect_string_error(result: Result<(), String>, context: &'static str) -> String {
+        match result {
+            Ok(()) => panic!("{context}"),
+            Err(error) => error,
+        }
+    }
 
     fn success_status() -> ExitStatus {
         ExitStatus::from_raw(0)
@@ -5227,15 +6528,93 @@ mod tests {
         assert!(
             script.contains(r#"run_three_websocket_soak_filter "three_codex_websocket_soak_""#)
         );
-        assert!(script.contains(r#"run_test_filter "installed_codex_websocket_quota_reconnect_""#));
+        assert!(script.contains(
+            r#"run_s8_overlap_quota_filter "installed_codex_websocket_s8_overlap_quota_""#
+        ));
+        assert!(script.contains(
+            r#"run_quota_reconnect_filter "installed_codex_websocket_quota_reconnect_""#
+        ));
         assert!(script.contains(r#"smoke_target_model="gpt-5.4-mini""#));
         assert!(script.contains(r#"smoke_client_summary="3 concurrent clients""#));
         assert!(script.contains(r#"smoke_client_summary="1 client with quota reconnect""#));
+        assert!(
+            script.contains(r#"smoke_client_summary="3 concurrent clients with quota reconnect""#)
+        );
         assert!(script.contains(r#"clients=%s"#));
         assert!(script.contains("bounded explicit exact-reply prompt"));
         assert!(
             script.contains("uses the existing codex CLI from PATH; it does not install Codex")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_db_runtime_isolation_uses_copied_roots_and_blocks_false_receipts() -> Result<(), String>
+    {
+        let workspace_root = super::workspace_root()?;
+        let proxy_script = fs::read_to_string(
+            workspace_root
+                .join("tests")
+                .join("smoke")
+                .join("proxy_db_runtime_isolation.sh"),
+        )
+        .map_err(|error| format!("failed to read proxy DB smoke script: {error}"))?;
+        let validator_script = fs::read_to_string(
+            workspace_root
+                .join("scripts")
+                .join("validate-proxy-db-runtime-isolation-artifact.py"),
+        )
+        .map_err(|error| format!("failed to read proxy DB artifact validator: {error}"))?;
+        let installed_script = fs::read_to_string(
+            workspace_root
+                .join("tests")
+                .join("smoke")
+                .join("installed_codex_mock.sh"),
+        )
+        .map_err(|error| format!("failed to read installed Codex smoke script: {error}"))?;
+
+        assert!(proxy_script.contains(r#"--runtime-root-mode copied-dev-state"#));
+        assert!(proxy_script.contains(r#"--router-root "${router_root_resolved}""#));
+        assert!(proxy_script.contains(r#"--codex-home "${codex_home_resolved}""#));
+        assert!(proxy_script.contains(r#"--process-home "${home_resolved}""#));
+        assert!(proxy_script.contains("validate-proxy-db-runtime-isolation-artifact.py"));
+        assert!(proxy_script.contains(r#"--scenario s8-overlap-quota"#));
+        assert!(!proxy_script.contains(r#"--scenario quota-reconnect"#));
+        assert!(proxy_script.contains("installed-codex-s8-overlap-quota-artifact.txt"));
+        assert!(!proxy_script.contains("${quota_artifact_path}"));
+        assert!(validator_script.contains(r#"runtime_roots.get("mode") == "copied-dev-state""#));
+        assert!(validator_script.contains(r#"pressure.get("copied_db_pressure_proven") is True"#));
+        assert!(
+            validator_script
+                .contains(r#"pressure.get("sqlite_lock_or_maintenance_pressure") is True"#)
+        );
+        assert!(
+            validator_script
+                .contains(r#"signal_ordering.get("signal_before_persistence") is True"#)
+        );
+        assert!(validator_script.contains(r#"account_selection.get("non_reselection") is True"#));
+        assert!(validator_script.contains(r#"router_signal_count"#));
+        assert!(validator_script.contains(r#"source_artifacts_same_s8_run_id"#));
+        assert!(proxy_script.contains(r#"status=BLOCKED"#));
+        assert!(proxy_script.contains(r#"scrubbed_signal_log_path"#));
+        assert!(proxy_script.contains(r#"CODEX_ROUTER_S8_RUN_ID"#));
+        assert!(proxy_script.contains(r#"receipt_path_value()"#));
+        assert!(!proxy_script.contains(r#"printf 'router_root=%s\n' "${router_root_resolved}""#));
+        assert!(!proxy_script.contains(r#"printf 'router_db=%s\n' "${router_db}""#));
+        assert!(!proxy_script.contains(r#"printf 'codex_home=%s\n' "${codex_home_resolved}""#));
+        assert!(!proxy_script.contains(r#"printf 'codex_db=%s\n' "${codex_db}""#));
+        assert!(!proxy_script.contains(r#"printf 'sentinel_home=%s\n' "${home_resolved}""#));
+        assert!(validator_script.contains(r#"pass_count="#));
+        assert!(validator_script.contains(r#"fail_count="#));
+        assert!(installed_script.contains(r#"--runtime-root-mode"#));
+        assert!(installed_script.contains(r#"CODEX_ROUTER_INSTALLED_SMOKE_RUNTIME_ROOT_MODE"#));
+        assert!(installed_script.contains(r#"CODEX_ROUTER_INSTALLED_SMOKE_ROUTER_ROOT"#));
+        assert!(installed_script.contains(r#"CODEX_ROUTER_INSTALLED_SMOKE_CODEX_HOME"#));
+        assert!(installed_script.contains(r#"CODEX_ROUTER_INSTALLED_SMOKE_PROCESS_HOME"#));
+        assert!(installed_script.contains(r#"CODEX_ROUTER_S8_RUN_ID"#));
+        assert!(installed_script.contains("os.path.realpath"));
+        assert!(!installed_script.contains("os.path.abspath(candidate)"));
+
         Ok(())
     }
 
@@ -5355,17 +6734,211 @@ mod tests {
         let mut command = std::process::Command::new("sh");
         command
             .arg("-c")
-            .arg("printf local-secret-canary; sleep 2")
+            .arg(
+                "printf 'local-secret-canary shell_command'; printf 'workdir: /tmp/raw-path session id: raw-session-id user prompt-canary diagnostic: waiting on loopback closed connection function_call_output' >&2; sleep 2",
+            )
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let error = match run_with_timeout(command, std::time::Duration::from_millis(10)) {
+        let error = match run_with_timeout(command, std::time::Duration::from_millis(250)) {
             Ok(_) => panic!("sleeping command must time out"),
             Err(error) => error,
         };
 
         assert!(!error.contains("local-secret-canary"));
+        assert!(!error.contains("raw-path"));
+        assert!(!error.contains("raw-session-id"));
+        assert!(!error.contains("prompt-canary"));
+        assert!(!error.contains("waiting on loopback"));
         assert!(error.contains("captured stdout/stderr suppressed"));
+        assert!(error.contains("stdout_preview=<suppressed>"));
+        assert!(error.contains("stderr_preview=<suppressed>"));
+        assert!(error.contains("stdout_markers=shell_command"));
+        assert!(
+            error.contains(
+                "stderr_markers=closed_connection,waiting_on_loopback,function_call_output"
+            )
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_drains_child_stderr_while_waiting() {
+        let mut command = std::process::Command::new("python3");
+        command
+            .arg("-c")
+            .arg("import sys; sys.stderr.write('x' * 200000); sys.stderr.flush()")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let output = match run_with_timeout(command, std::time::Duration::from_secs(2)) {
+            Ok(output) => output,
+            Err(error) => panic!("child output pipes should be drained while waiting: {error}"),
+        };
+
+        assert!(
+            output.status.success(),
+            "stderr writer should exit cleanly: {}",
+            output.status
+        );
+        assert_eq!(output.stderr.len(), 200000);
+    }
+
+    #[test]
+    fn copied_dev_state_roots_reject_live_style_paths_before_mutation() {
+        let test_root = SmokeTempRoot::new("copied-dev-state-live-style-rejection")
+            .unwrap_or_else(|error| panic!("failed to create temp root: {error}"));
+        let live_style_home = test_root.path().join("live-style-home");
+        let router_root = live_style_home.join(".codex-router");
+        let codex_home = live_style_home.join(".codex");
+
+        let error = expect_string_error(
+            validate_copied_dev_state_roots(&router_root, &codex_home, &live_style_home),
+            "live-style copied-dev-state roots must be rejected",
+        );
+
+        assert!(
+            error.contains("tmp/dev-state"),
+            "error should tell operators to use repo-local tmp/dev-state roots: {error}"
+        );
+        assert!(
+            !router_root.exists(),
+            "unsafe router root must be rejected before directory creation"
+        );
+        assert!(
+            !codex_home.exists(),
+            "unsafe Codex home must be rejected before directory creation"
+        );
+    }
+
+    #[test]
+    fn copied_dev_state_roots_reject_symlinked_roots_before_mutation() {
+        let workspace_root =
+            super::workspace_root().unwrap_or_else(|error| panic!("workspace root: {error}"));
+        let dev_state_root = workspace_root.join("tmp/dev-state");
+        fs::create_dir_all(&dev_state_root)
+            .unwrap_or_else(|error| panic!("failed to create dev-state fixture root: {error}"));
+        let test_root = SmokeTempRoot::new("copied-dev-state-symlink-root-rejection")
+            .unwrap_or_else(|error| panic!("failed to create temp root: {error}"));
+        let external_router_target = test_root.path().join("external-router");
+        fs::create_dir_all(&external_router_target)
+            .unwrap_or_else(|error| panic!("failed to create external router target: {error}"));
+        let router_root = dev_state_root.join(format!("symlink-router-{}", std::process::id()));
+        let _ = fs::remove_file(&router_root);
+        unix_fs::symlink(&external_router_target, &router_root)
+            .unwrap_or_else(|error| panic!("failed to create router symlink fixture: {error}"));
+        let codex_home = dev_state_root.join(format!("codex-home-{}", std::process::id()));
+        let process_home = dev_state_root.join(format!("process-home-{}", std::process::id()));
+
+        let error = expect_string_error(
+            validate_copied_dev_state_roots(&router_root, &codex_home, &process_home),
+            "symlinked router root must be rejected",
+        );
+
+        assert!(
+            error.contains("symlink") || error.contains("tmp/dev-state"),
+            "error should explain copied-dev-state symlink/root rejection: {error}"
+        );
+        fs::remove_file(&router_root)
+            .unwrap_or_else(|error| panic!("failed to clean router symlink fixture: {error}"));
+    }
+
+    #[test]
+    fn copied_dev_state_roots_reject_symlinked_db_and_secret_targets_before_mutation() {
+        let workspace_root =
+            super::workspace_root().unwrap_or_else(|error| panic!("workspace root: {error}"));
+        let dev_state_root = workspace_root.join("tmp/dev-state");
+        fs::create_dir_all(&dev_state_root)
+            .unwrap_or_else(|error| panic!("failed to create dev-state fixture root: {error}"));
+        let test_root = SmokeTempRoot::new("copied-dev-state-symlink-target-rejection")
+            .unwrap_or_else(|error| panic!("failed to create temp root: {error}"));
+        let fixture_suffix = format!("targets-{}", std::process::id());
+        let router_root = dev_state_root.join(format!("router-{fixture_suffix}"));
+        let codex_home = dev_state_root.join(format!("codex-{fixture_suffix}"));
+        let process_home = dev_state_root.join(format!("home-{fixture_suffix}"));
+        fs::create_dir_all(&router_root)
+            .unwrap_or_else(|error| panic!("failed to create router root fixture: {error}"));
+        fs::create_dir_all(&codex_home)
+            .unwrap_or_else(|error| panic!("failed to create codex home fixture: {error}"));
+        fs::create_dir_all(&process_home)
+            .unwrap_or_else(|error| panic!("failed to create process home fixture: {error}"));
+        let external_router_db = test_root.path().join("external-state.sqlite");
+        let external_codex_db = test_root.path().join("external-state_5.sqlite");
+        let external_secrets = test_root.path().join("external-secrets");
+        fs::write(&external_router_db, b"outside router db")
+            .unwrap_or_else(|error| panic!("failed to write external router DB: {error}"));
+        fs::write(&external_codex_db, b"outside codex db")
+            .unwrap_or_else(|error| panic!("failed to write external Codex DB: {error}"));
+        fs::create_dir_all(&external_secrets)
+            .unwrap_or_else(|error| panic!("failed to create external secrets dir: {error}"));
+        let _ = fs::remove_file(router_root.join("state.sqlite"));
+        let _ = fs::remove_file(codex_home.join("state_5.sqlite"));
+        let _ = fs::remove_file(router_root.join("secrets"));
+        unix_fs::symlink(&external_router_db, router_root.join("state.sqlite"))
+            .unwrap_or_else(|error| panic!("failed to create router DB symlink: {error}"));
+        unix_fs::symlink(&external_codex_db, codex_home.join("state_5.sqlite"))
+            .unwrap_or_else(|error| panic!("failed to create Codex DB symlink: {error}"));
+        unix_fs::symlink(&external_secrets, router_root.join("secrets"))
+            .unwrap_or_else(|error| panic!("failed to create secrets symlink: {error}"));
+
+        let error = expect_string_error(
+            validate_copied_dev_state_roots(&router_root, &codex_home, &process_home),
+            "symlinked copied-dev-state DB/secret targets must be rejected",
+        );
+
+        assert!(
+            error.contains("symlink") || error.contains("tmp/dev-state"),
+            "error should explain copied-dev-state symlink target rejection: {error}"
+        );
+        fs::remove_file(router_root.join("state.sqlite"))
+            .unwrap_or_else(|error| panic!("failed to clean router DB symlink: {error}"));
+        fs::remove_file(codex_home.join("state_5.sqlite"))
+            .unwrap_or_else(|error| panic!("failed to clean Codex DB symlink: {error}"));
+        fs::remove_file(router_root.join("secrets"))
+            .unwrap_or_else(|error| panic!("failed to clean secrets symlink: {error}"));
+    }
+
+    #[test]
+    fn child_timeout_diagnostics_report_last_message_shape_without_content_or_path() {
+        let test_root = SmokeTempRoot::new("child-timeout-diagnostics")
+            .unwrap_or_else(|error| panic!("failed to create temp root: {error}"));
+        let last_message_path = test_root.path().join("last-message.txt");
+        fs::write(&last_message_path, SMOKE_EXPECTED_TEXT)
+            .unwrap_or_else(|error| panic!("failed to write last message: {error}"));
+
+        let diagnostics = super::codex_child_timeout_diagnostics(Some(2), &last_message_path);
+
+        assert!(diagnostics.contains("client_index:2"));
+        assert!(diagnostics.contains("last_message_exists:true"));
+        assert!(diagnostics.contains("last_message_bytes:21"));
+        assert!(diagnostics.contains("last_message_contains_expected:true"));
+        assert!(!diagnostics.contains(SMOKE_EXPECTED_TEXT));
+        assert!(!diagnostics.contains(&last_message_path.display().to_string()));
+    }
+
+    #[test]
+    fn smoke_temp_root_is_retained_when_explicitly_requested() {
+        if std::env::var_os(RETAIN_SMOKE_ROOT_ENV).is_none() {
+            eprintln!("skipping retained-root assertion; set {RETAIN_SMOKE_ROOT_ENV}=1 to run it");
+            return;
+        }
+        let test_root = match SmokeTempRoot::new("retain-fixture") {
+            Ok(test_root) => test_root,
+            Err(error) => panic!("failed to create temp root: {error}"),
+        };
+        let retained_path = test_root.path().to_path_buf();
+
+        drop(test_root);
+
+        assert!(
+            retained_path.exists(),
+            "smoke temp root should remain when CODEX_ROUTER_RETAIN_SMOKE_ROOT=1"
+        );
+        fs::remove_dir_all(&retained_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to clean retained fixture {}: {error}",
+                retained_path.display()
+            )
+        });
     }
 
     #[test]
@@ -5436,6 +7009,113 @@ mod tests {
             );
         }
         assert!(payload.contains("first_frame_shape"));
+    }
+
+    #[test]
+    fn three_websocket_artifact_rejects_raw_session_and_local_port_fields() {
+        let seed = SmokeSeed {
+            local_token_assignment: "CODEX_ROUTER_TOKEN=local-secret-canary".to_owned(),
+            local_token: "local-secret-canary".to_owned(),
+            expected_upstream_token: "upstream-secret-canary".to_owned(),
+            expected_account_tag: "safe-tag".to_owned(),
+            expected_account_label: "unsafe:raw-account-label".to_owned(),
+            routable_upstream_tokens: vec!["upstream-secret-canary".to_owned()],
+            quota_status: valid_quota_status(),
+        };
+        let payload = serde_json::json!({
+            "router_process": {
+                "listener": "127.0.0.1:43210",
+                "readiness_line": "listening: 127.0.0.1:43210",
+                "argv": ["serve", "--port", "43210"],
+            },
+            "router_websocket_registry": {
+                "registered_session_ids": [1, 2, 3],
+                "session_peer_addrs": [{"session_id": 1, "local_port": 60001}],
+            },
+            "runtime_correlations": [{
+                "router_session_id": 1,
+                "upstream_session_id": 10,
+            }],
+            "session_continuity": {
+                "per_client_join_keys": [{
+                    "router_session_id": 1,
+                    "upstream_session_id": 10,
+                }],
+                "router_registered_session_ids": [1, 2, 3],
+                "upstream_session_ids": [10, 11, 12],
+            },
+            "upstream": {
+                "upstream_session_ids": [10, 11, 12],
+                "upstream_client_sessions": [{"client_index": 0, "upstream_session_id": 10}],
+            },
+        });
+
+        let error = expect_string_error(
+            assert_redacted_three_websocket_payload(&payload.to_string(), &[], &seed),
+            "raw session identifiers and local ports must be rejected",
+        );
+
+        assert!(
+            error.contains("forbidden structural key")
+                || error.contains("forbidden fragment")
+                || error.contains("loopback endpoint with numeric port"),
+            "unexpected redaction error: {error}"
+        );
+    }
+
+    #[test]
+    fn persisted_websocket_registry_report_accepts_sanitized_schema_without_raw_identifiers()
+    -> Result<(), String> {
+        let test_root = SmokeTempRoot::new("sanitized-registry-report")?;
+        let report_path = test_root.path().join("websocket-registry-report.json");
+        let report_json = serde_json::json!({
+            "schema_version": 2,
+            "handled_connections": 3,
+            "websocket_registry": {
+                "active_sessions": 0,
+                "high_water_sessions": 3,
+                "registered_sessions": 3,
+                "closed_sessions": 3,
+                "completed_response_sessions": 3,
+                "forwarded_upstream_messages": 9,
+                "registered_session_id_count": 3,
+                "completed_session_id_count": 3,
+                "closed_session_id_count": 3,
+                "session_peer_addr_count": 3,
+                "session_peer_join_observable": true,
+                "completed_session_forwarded_upstream_message_counts": [3, 3, 3],
+                "final_session_forwarded_upstream_message_counts": [3, 3, 3],
+                "quota_reconnect_signal_count": 1,
+                "quota_reconnect_signal_unix_ms": 1_720_000_000_000u64,
+            }
+        });
+        let rendered = serde_json::to_string_pretty(&report_json)
+            .map_err(|error| format!("failed to render sanitized registry report: {error}"))?;
+        fs::write(&report_path, &rendered)
+            .map_err(|error| format!("failed to write sanitized registry report: {error}"))?;
+
+        for forbidden_key in [
+            "registered_session_ids",
+            "completed_session_ids",
+            "closed_session_ids",
+            "session_peer_addrs",
+            "session_id",
+            "peer_addr",
+            "local_port",
+        ] {
+            assert!(
+                !rendered.contains(&format!("\"{forbidden_key}\"")),
+                "sanitized persisted registry report leaked raw key {forbidden_key}"
+            );
+        }
+        assert!(
+            !rendered.contains("127.0.0.1:") && !rendered.contains("[::1]:"),
+            "sanitized persisted registry report leaked a raw loopback peer port"
+        );
+
+        let _report = super::RouterWebSocketRegistryReport::from_file(&report_path)?;
+
+        Ok(())
     }
 
     #[test]
@@ -5563,6 +7243,21 @@ mod tests {
         assert!(report.transcript_path().exists());
         println!(
             "codex_router_three_websocket_artifact={}",
+            report.transcript_path().display()
+        );
+    }
+
+    #[test]
+    #[ignore = "S8 installed-Codex WebSocket overlap quota proof; run through tests/smoke/installed_codex_mock.sh --transport websocket --scenario s8-overlap-quota"]
+    fn installed_codex_websocket_s8_overlap_quota_reconnects_during_three_client_overlap() {
+        let report = match run_installed_codex_s8_overlap_quota_websocket_mock_smoke() {
+            Ok(report) => report,
+            Err(error) => panic!("installed Codex S8 overlap quota smoke failed: {error}"),
+        };
+
+        assert!(report.transcript_path().exists());
+        println!(
+            "codex_router_s8_overlap_quota_artifact={}",
             report.transcript_path().display()
         );
     }

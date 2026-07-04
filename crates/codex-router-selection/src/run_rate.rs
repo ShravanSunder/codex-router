@@ -217,7 +217,9 @@ impl QuotaRunRateEstimator {
             return QuotaRunRateEstimate::insufficient();
         }
 
-        let first_observation = segment_observations[0];
+        let Some(first_observation) = segment_observations.first().copied() else {
+            return QuotaRunRateEstimate::unknown();
+        };
         let span_seconds = latest_observation
             .observed_unix_seconds
             .saturating_sub(first_observation.observed_unix_seconds);

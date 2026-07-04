@@ -172,22 +172,33 @@ fn body_mentions_forbidden_auth_carrier_key(body: &[u8]) -> bool {
     let body = String::from_utf8_lossy(body);
     let mut cursor = 0_usize;
     while cursor < body.len() {
-        let Some((token_start, _character)) = body[cursor..]
+        let Some(remaining_body) = body.get(cursor..) else {
+            return false;
+        };
+        let Some((token_start, _character)) = remaining_body
             .char_indices()
             .find(|(_index, character)| is_auth_key_character(*character))
         else {
             return false;
         };
         let token_start = cursor + token_start;
-        let token_end = body[token_start..]
+        let Some(token_tail) = body.get(token_start..) else {
+            return false;
+        };
+        let token_end = token_tail
             .char_indices()
             .find(|(_index, character)| !is_auth_key_character(*character))
             .map_or(body.len(), |(index, _character)| token_start + index);
-        let token = &body[token_start..token_end];
+        let Some(token) = body.get(token_start..token_end) else {
+            return false;
+        };
+        let Some(tail) = body.get(token_end..) else {
+            return false;
+        };
         if canonical_auth_field_name(token)
             .as_deref()
             .is_some_and(is_forbidden_auth_field_name)
-            && raw_body_token_is_key(&body[token_end..])
+            && raw_body_token_is_key(tail)
         {
             return true;
         }
@@ -236,13 +247,14 @@ fn percent_decode(value: &str) -> Option<String> {
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' {
+        let byte = *bytes.get(index)?;
+        if byte == b'%' {
             let high = *bytes.get(index + 1)?;
             let low = *bytes.get(index + 2)?;
             output.push(hex_value(high)? << 4 | hex_value(low)?);
             index += 3;
         } else {
-            output.push(bytes[index]);
+            output.push(byte);
             index += 1;
         }
     }

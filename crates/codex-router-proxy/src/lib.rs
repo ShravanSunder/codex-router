@@ -1,15 +1,20 @@
 //! Loopback proxy boundary for codex-router.
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 pub mod account_selection;
 mod credential_runtime;
+pub mod db_write_actor;
 pub mod headers;
 pub mod http_sse;
 pub mod local_auth;
+pub mod maintenance_actor;
 pub mod provider_error;
 pub mod routes;
 mod secret_store_factory;
 pub mod server;
 pub mod telemetry;
+#[cfg(test)]
+mod test_log_capture;
 pub mod upstream;
 pub mod websocket;
 
@@ -54,6 +59,7 @@ mod tests {
     use crate::http_sse::UpstreamHttpTransport;
     use crate::http_sse::append_audit_event_with_reporter;
     use crate::local_auth::ProxyLocalAuthGate;
+    use crate::provider_error::classify_provider_error_envelope;
     use crate::provider_error::record_provider_error_observation;
     use crate::routes::Method;
     use crate::routes::RouteClass;
@@ -1615,7 +1621,7 @@ mod tests {
             &async_state,
             limited.account_id(),
             "responses",
-            usage_limit_body,
+            classify_provider_error_envelope(usage_limit_body),
             2_000,
         )
         .await
@@ -7677,7 +7683,7 @@ mod tests {
             &async_state,
             observed.account_id(),
             "responses",
-            observation_body,
+            classify_provider_error_envelope(observation_body),
             2_000,
         )
         .await
@@ -9769,6 +9775,115 @@ mod tests {
         assert_eq!(revocations.snapshot().high_water_sessions, 1);
         assert_eq!(revocations.snapshot().registered_sessions, 1);
         assert_eq!(revocations.snapshot().closed_sessions, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_websocket_tunnel_propagates_upstream_close_to_idle_local_client() {
+        let upstream_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) => panic!("mock websocket upstream should bind: {error}"),
+        };
+        let upstream_address = match upstream_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("mock websocket upstream address should read: {error}"),
+        };
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _peer_address) = match upstream_listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => panic!("mock websocket upstream should accept: {error}"),
+            };
+            let mut websocket = match tokio_tungstenite::accept_async(stream).await {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("mock websocket upstream handshake should accept: {error}"),
+            };
+            match websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("mock upstream should read first frame: {error}"),
+                None => panic!("mock upstream should receive first frame"),
+            }
+            if let Err(error) = websocket
+                .send(Message::text(r#"{"type":"response.completed"}"#))
+                .await
+            {
+                panic!("mock upstream should send completion: {error}");
+            }
+            if let Err(error) = websocket.close(None).await {
+                panic!("mock upstream should close after completion: {error}");
+            }
+        });
+
+        let local_listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) => panic!("router websocket listener should bind: {error}"),
+        };
+        let local_address = match local_listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => panic!("router websocket listener address should read: {error}"),
+        };
+        let auth_gate = local_auth_gate();
+        let selector = RecordingAsyncSelector::default();
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
+        let protocol_router = WebSocketProtocolRouter::new();
+        let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
+            .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+        let upstream_url = format!("ws://{upstream_address}/v1/responses");
+        let server_future = async {
+            let (stream, _peer_address) = match local_listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => panic!("router websocket listener should accept: {error}"),
+            };
+            let local_websocket = match tokio_tungstenite::accept_async(stream).await {
+                Ok(websocket) => websocket,
+                Err(error) => panic!("local websocket should accept: {error}"),
+            };
+            let handshake = WebSocketHandshakeRequest::new()
+                .with_header(Header::new("Authorization", "Bearer current-token"));
+            tunnel
+                .handle_upgraded_connection(local_websocket, handshake, &upstream_url)
+                .await
+        };
+        let client_future = async {
+            let local_url = format!("ws://{local_address}/v1/responses");
+            let (mut client_websocket, _response) =
+                match tokio_tungstenite::connect_async(local_url).await {
+                    Ok(connected) => connected,
+                    Err(error) => panic!("local websocket client should connect: {error}"),
+                };
+            if let Err(error) = client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+            {
+                panic!("local client should send first frame: {error}");
+            }
+            let completed = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("local client should receive completion: {error}"),
+                None => panic!("local client should receive completion"),
+            };
+            assert_eq!(completed, Message::text(r#"{"type":"response.completed"}"#));
+
+            let close_result =
+                tokio::time::timeout(Duration::from_secs(1), client_websocket.next())
+                    .await
+                    .unwrap_or_else(|_elapsed| {
+                        panic!("local client should observe upstream close")
+                    });
+            match close_result {
+                Some(Ok(Message::Close(_))) | None => {}
+                Some(Ok(message)) => panic!("local client should receive close, got {message:?}"),
+                Some(Err(error)) => panic!("local client close should be clean: {error}"),
+            }
+        };
+
+        let (server_result, ()) = tokio::join!(server_future, client_future);
+        match server_result {
+            Ok(()) => {}
+            Err(error) => panic!("async websocket tunnel should complete: {error}"),
+        }
+        match upstream_task.await {
+            Ok(()) => {}
+            Err(error) => panic!("mock upstream task should join: {error}"),
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

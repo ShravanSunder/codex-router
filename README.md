@@ -15,10 +15,12 @@ Current design source of truth:
 
 ## Current Local Flow
 
-By default, `codex-router` stores router-owned state under
+By default, installed or release `codex-router` stores router-owned state under
 `$HOME/.codex-router`, for example `/Users/shravansunder/.codex-router` on this
-machine. Use `--router-root <path>` only for tests or an alternate local router
-home.
+machine. Debug `cargo run -p codex-router-cli -- ...` builds default to
+`$HOME/.codex-router-debug` so local development does not touch the production
+router root. Use `--router-root <path>` only for tests or an alternate local
+router home.
 
 ```shell
 cargo run -p codex-router-cli -- account login --label primary --device-auth --allow-plaintext-file-secrets

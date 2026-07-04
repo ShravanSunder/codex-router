@@ -20,6 +20,7 @@ use codex_router_selection::burn_down::BurnDownAccountAssessment;
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentResult;
+use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
 use codex_router_selection::burn_down::SelectedPool;
@@ -43,17 +44,17 @@ use codex_router_state::repositories::AffinityRepository;
 #[cfg(test)]
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::selection_projection::AsyncSelectionProjectionRepository;
-use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts;
+use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts_read_only;
 use codex_router_state::sqlite::AsyncAffinityRepository;
-use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
 use sha2::Digest;
 use sha2::Sha256;
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio_util::task::TaskTracker;
 
+use crate::db_write_actor::DbWriteActor;
+use crate::db_write_actor::DbWriteCommand;
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::routes::RouteClass;
@@ -65,8 +66,64 @@ pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitS
 pub type RouteBandAccountHolds = Arc<Mutex<HashMap<String, AccountHold>>>;
 /// Process-lifetime active reservation state partitioned by route band.
 pub type RouteBandReservationBooks = Arc<Mutex<HashMap<String, ReservationBook>>>;
+/// Process-lifetime runtime quota exhaustion state partitioned by route band.
+pub type RouteBandRuntimeExhaustions = Arc<Mutex<HashMap<String, Vec<RuntimeQuotaExhaustion>>>>;
+/// Process-lifetime route-band queue health state partitioned by route band.
+pub type RouteBandQueueHealth = Arc<Mutex<HashMap<String, RouteBandQueueDegradedState>>>;
 /// Async critical section for active-count projection and reservation.
-type SelectionReservationLock = Arc<AsyncMutex<()>>;
+pub(crate) type SelectionReservationLock = Arc<AsyncMutex<()>>;
+
+/// Process-local dependencies shared by async account selectors.
+#[derive(Clone)]
+pub struct AsyncAccountSelectorRuntimeState {
+    weighted_selectors: RouteBandWeightedSelectors,
+    account_holds: RouteBandAccountHolds,
+    active_reservations: RouteBandReservationBooks,
+    runtime_exhaustions: RouteBandRuntimeExhaustions,
+    route_band_queue_health: RouteBandQueueHealth,
+    selection_reservation_lock: SelectionReservationLock,
+}
+
+impl AsyncAccountSelectorRuntimeState {
+    /// Creates selector runtime dependencies with a fresh selection lock.
+    #[must_use]
+    pub fn new(
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        active_reservations: RouteBandReservationBooks,
+        runtime_exhaustions: RouteBandRuntimeExhaustions,
+        route_band_queue_health: RouteBandQueueHealth,
+    ) -> Self {
+        Self::new_with_selection_lock(
+            weighted_selectors,
+            account_holds,
+            active_reservations,
+            runtime_exhaustions,
+            route_band_queue_health,
+            Arc::new(AsyncMutex::new(())),
+        )
+    }
+
+    /// Creates selector runtime dependencies with a shared selection lock.
+    #[must_use]
+    pub(crate) fn new_with_selection_lock(
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        active_reservations: RouteBandReservationBooks,
+        runtime_exhaustions: RouteBandRuntimeExhaustions,
+        route_band_queue_health: RouteBandQueueHealth,
+        selection_reservation_lock: SelectionReservationLock,
+    ) -> Self {
+        Self {
+            weighted_selectors,
+            account_holds,
+            active_reservations,
+            runtime_exhaustions,
+            route_band_queue_health,
+            selection_reservation_lock,
+        }
+    }
+}
 
 const ROUTING_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
 const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
@@ -75,6 +132,7 @@ const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
+const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
@@ -93,22 +151,20 @@ pub trait ActiveClientLeaseReporter: Send + Sync {
     fn record_released(&self, route_band: &str, reservation_handle: &ReservationHandle);
 }
 
-/// SQLx-backed active client lease reporter.
+/// Actor-backed active client lease reporter.
 #[derive(Clone)]
 pub struct SqliteActiveClientLeaseReporter {
-    state: AsyncSqliteStateStore,
-    tasks: TaskTracker,
+    db_write_actor: DbWriteActor,
     process_run_id: String,
     clock: UnixClock,
 }
 
 impl SqliteActiveClientLeaseReporter {
-    /// Creates a SQLx-backed active client lease reporter.
+    /// Creates an actor-backed active client lease reporter.
     #[must_use]
-    pub fn new(state: AsyncSqliteStateStore, tasks: TaskTracker, clock: UnixClock) -> Self {
+    pub fn new(db_write_actor: DbWriteActor, clock: UnixClock) -> Self {
         Self {
-            state,
-            tasks,
+            db_write_actor,
             process_run_id: new_process_run_id(),
             clock,
         }
@@ -123,69 +179,44 @@ impl ActiveClientLeaseReporter for SqliteActiveClientLeaseReporter {
         acquired_unix_seconds: u64,
         active_pressure: u32,
     ) {
-        let state = self.state.clone();
-        let route_band = route_band.to_owned();
-        let process_run_id = self.process_run_id.clone();
-        let reservation_id = reservation_handle.reservation_id().clone();
-        let account_id = reservation_handle.account_id().clone();
-        self.tasks.spawn(async move {
-            let result = state
-                .record_active_client_acquired(
-                    &route_band,
-                    &process_run_id,
-                    &reservation_id,
-                    &account_id,
+        let Some(route_band) = RouteBand::parse(route_band) else {
+            tracing::warn!(
+                route_band = "unknown",
+                error.class = "invalid_route_band",
+                "codex_router.active_client_mirror_failed"
+            );
+            return;
+        };
+        let _enqueue_result =
+            self.db_write_actor
+                .try_enqueue(DbWriteCommand::active_client_acquired(
+                    route_band,
+                    self.process_run_id.clone(),
+                    reservation_handle.reservation_id().clone(),
+                    reservation_handle.account_id().clone(),
                     acquired_unix_seconds,
                     active_pressure,
-                )
-                .await;
-            match result {
-                Ok(()) => tracing::info!(
-                    route_band = route_band.as_str(),
-                    account.hash = telemetry_hash(account_id.as_str()),
-                    reservation.hash = telemetry_hash(reservation_id.as_str()),
-                    "codex_router.active_client_mirror_acquired"
-                ),
-                Err(_error) => tracing::warn!(
-                    route_band = route_band.as_str(),
-                    account.hash = telemetry_hash(account_id.as_str()),
-                    reservation.hash = telemetry_hash(reservation_id.as_str()),
-                    error.class = "state_unavailable",
-                    "codex_router.active_client_mirror_failed"
-                ),
-            }
-        });
+                ));
     }
 
     fn record_released(&self, route_band: &str, reservation_handle: &ReservationHandle) {
-        let state = self.state.clone();
-        let route_band = route_band.to_owned();
-        let process_run_id = self.process_run_id.clone();
-        let reservation_id = reservation_handle.reservation_id().clone();
+        let Some(route_band) = RouteBand::parse(route_band) else {
+            tracing::warn!(
+                route_band = "unknown",
+                error.class = "invalid_route_band",
+                "codex_router.active_client_mirror_failed"
+            );
+            return;
+        };
         let released_unix_seconds = (self.clock)();
-        self.tasks.spawn(async move {
-            let result = state
-                .record_active_client_released(
-                    &route_band,
-                    &process_run_id,
-                    &reservation_id,
+        let _enqueue_result =
+            self.db_write_actor
+                .try_enqueue(DbWriteCommand::active_client_released(
+                    route_band,
+                    self.process_run_id.clone(),
+                    reservation_handle.reservation_id().clone(),
                     released_unix_seconds,
-                )
-                .await;
-            match result {
-                Ok(()) => tracing::info!(
-                    route_band = route_band.as_str(),
-                    reservation.hash = telemetry_hash(reservation_id.as_str()),
-                    "codex_router.active_client_mirror_released"
-                ),
-                Err(_error) => tracing::warn!(
-                    route_band = route_band.as_str(),
-                    reservation.hash = telemetry_hash(reservation_id.as_str()),
-                    error.class = "state_unavailable",
-                    "codex_router.active_client_mirror_failed"
-                ),
-            }
-        });
+                ));
     }
 }
 
@@ -384,6 +415,63 @@ impl AccountHold {
     }
 }
 
+/// Runtime-only account exclusion created when a live socket sees quota exhaustion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeQuotaExhaustion {
+    account_id: AccountId,
+    observed_unix_seconds: u64,
+}
+
+impl RuntimeQuotaExhaustion {
+    fn new(account_id: AccountId, observed_unix_seconds: u64) -> Self {
+        Self {
+            account_id,
+            observed_unix_seconds,
+        }
+    }
+}
+
+/// Low-cardinality route-band queue degraded reason.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteBandQueueDegradedReason {
+    /// DB write queue had no capacity.
+    DbWriteQueueFull,
+    /// DB write queue was closed.
+    DbWriteQueueClosed,
+    /// DB write actor accepted a command but durable storage failed.
+    DbWriteFailed,
+}
+
+/// Route-band degraded state for selection admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteBandQueueDegradedState {
+    reason: RouteBandQueueDegradedReason,
+    observed_unix_seconds: u64,
+}
+
+impl RouteBandQueueDegradedState {
+    fn new(reason: RouteBandQueueDegradedReason, observed_unix_seconds: u64) -> Self {
+        Self {
+            reason,
+            observed_unix_seconds,
+        }
+    }
+
+    /// Returns the degraded reason.
+    #[must_use]
+    pub const fn reason(&self) -> RouteBandQueueDegradedReason {
+        self.reason
+    }
+}
+
+pub(crate) fn route_band_queue_health_key(route_band: RouteBand, queue_name: &str) -> String {
+    format!("{}:{queue_name}", route_band.as_str())
+}
+
+pub(crate) fn route_band_queue_health_key_prefix(route_band: RouteBand) -> String {
+    format!("{}:", route_band.as_str())
+}
+
 /// Selected account material needed by the proxy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SelectedAccountDecision {
@@ -565,6 +653,8 @@ where
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
+    runtime_exhaustions: RouteBandRuntimeExhaustions,
+    route_band_queue_health: RouteBandQueueHealth,
     active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
     selection_reservation_lock: SelectionReservationLock,
     minimum_account_hold_cooldown_seconds: u64,
@@ -635,6 +725,8 @@ where
             weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
             account_holds: Arc::new(Mutex::new(HashMap::new())),
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
+            runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
+            route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
@@ -654,6 +746,8 @@ where
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
+            runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
+            route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
@@ -675,6 +769,8 @@ where
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
+            runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
+            route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
@@ -697,8 +793,57 @@ where
             weighted_selectors,
             account_holds,
             active_reservations,
+            runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
+            route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
+            minimum_account_hold_cooldown_seconds,
+            clock,
+        }
+    }
+
+    /// Creates an async selector with explicit process-local runtime state.
+    #[must_use]
+    pub fn new_with_runtime_state(
+        state_repository: &'a R,
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        active_reservations: RouteBandReservationBooks,
+        runtime_exhaustions: RouteBandRuntimeExhaustions,
+        minimum_account_hold_cooldown_seconds: u64,
+        clock: UnixClock,
+    ) -> Self {
+        Self::new_with_runtime_dependencies(
+            state_repository,
+            AsyncAccountSelectorRuntimeState::new(
+                weighted_selectors,
+                account_holds,
+                active_reservations,
+                runtime_exhaustions,
+                Arc::new(Mutex::new(HashMap::new())),
+            ),
+            minimum_account_hold_cooldown_seconds,
+            clock,
+        )
+    }
+
+    /// Creates an async selector with explicit process-local runtime dependencies.
+    #[must_use]
+    pub fn new_with_runtime_dependencies(
+        state_repository: &'a R,
+        runtime_state: AsyncAccountSelectorRuntimeState,
+        minimum_account_hold_cooldown_seconds: u64,
+        clock: UnixClock,
+    ) -> Self {
+        Self {
+            state_repository,
+            weighted_selectors: runtime_state.weighted_selectors,
+            account_holds: runtime_state.account_holds,
+            active_reservations: runtime_state.active_reservations,
+            runtime_exhaustions: runtime_state.runtime_exhaustions,
+            route_band_queue_health: runtime_state.route_band_queue_health,
+            active_client_leases: None,
+            selection_reservation_lock: runtime_state.selection_reservation_lock,
             minimum_account_hold_cooldown_seconds,
             clock,
         }
@@ -837,6 +982,10 @@ where
             let route_band = route_kind.route_band();
             let _selection_reservation_guard = self.selection_reservation_lock.lock().await;
             let now_unix_seconds = (self.clock)();
+            route_band_queue_health_allows_selection(&self.route_band_queue_health, route_band)
+                .map_err(|_error| HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                })?;
             let active_reservation_book = active_reservation_book_for_route_band(
                 &self.active_reservations,
                 route_band.as_str(),
@@ -845,7 +994,7 @@ where
             let active_session_overrides = active_reservation_book
                 .as_ref()
                 .map(active_session_counts_by_account);
-            let projection = project_route_band_selection_inputs_with_active_counts(
+            let projection = project_route_band_selection_inputs_with_active_counts_read_only(
                 self.state_repository,
                 route_band.as_str(),
                 now_unix_seconds,
@@ -858,6 +1007,15 @@ where
             })?;
             let selector_accounts =
                 projected_accounts_excluding_attempted(projection.accounts(), request);
+            let selector_accounts = projected_accounts_excluding_runtime_exhaustions(
+                selector_accounts,
+                &self.runtime_exhaustions,
+                route_band.as_str(),
+                now_unix_seconds,
+            )
+            .map_err(|_error| HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+            })?;
             let assessment_input = BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
@@ -1076,6 +1234,40 @@ fn projected_accounts_excluding_attempted(
         })
         .cloned()
         .collect()
+}
+
+fn projected_accounts_excluding_runtime_exhaustions(
+    accounts: Vec<BurnDownAccountInput>,
+    runtime_exhaustions: &RouteBandRuntimeExhaustions,
+    route_band: &str,
+    now_unix_seconds: u64,
+) -> Result<Vec<BurnDownAccountInput>, StateStoreError> {
+    let mut runtime_exhaustions =
+        runtime_exhaustions
+            .lock()
+            .map_err(|_error| StateStoreError::Sqlite {
+                message: "runtime quota exhaustion state unavailable".to_owned(),
+            })?;
+    let Some(route_band_exhaustions) = runtime_exhaustions.get_mut(route_band) else {
+        return Ok(accounts);
+    };
+    route_band_exhaustions.retain(|exhaustion| {
+        now_unix_seconds.saturating_sub(exhaustion.observed_unix_seconds)
+            <= RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS
+    });
+    if route_band_exhaustions.is_empty() {
+        runtime_exhaustions.remove(route_band);
+        return Ok(accounts);
+    }
+
+    Ok(accounts
+        .into_iter()
+        .filter(|account| {
+            !route_band_exhaustions
+                .iter()
+                .any(|exhaustion| &exhaustion.account_id == account.account_id())
+        })
+        .collect())
 }
 
 fn active_session_counts_by_account(book: &ReservationBook) -> HashMap<AccountId, u32> {
@@ -1347,10 +1539,138 @@ pub fn release_account_reservation(
     }
 }
 
+/// Marks an account exhausted in process-local runtime state before durable persistence catches up.
+pub fn mark_runtime_quota_exhausted(
+    runtime_exhaustions: &RouteBandRuntimeExhaustions,
+    route_band: RouteBand,
+    account_id: AccountId,
+    observed_unix_seconds: u64,
+) -> Result<(), StateStoreError> {
+    let mut runtime_exhaustions =
+        runtime_exhaustions
+            .lock()
+            .map_err(|_error| StateStoreError::Sqlite {
+                message: "runtime quota exhaustion state unavailable".to_owned(),
+            })?;
+    let route_band_exhaustions = runtime_exhaustions
+        .entry(route_band.as_str().to_owned())
+        .or_insert_with(Vec::new);
+    route_band_exhaustions.retain(|exhaustion| exhaustion.account_id != account_id);
+    route_band_exhaustions.push(RuntimeQuotaExhaustion::new(
+        account_id,
+        observed_unix_seconds,
+    ));
+
+    Ok(())
+}
+
+/// Marks a route band degraded because queue-backed mirror/proof writes are unhealthy.
+pub fn mark_route_band_queue_degraded(
+    route_band_queue_health: &RouteBandQueueHealth,
+    route_band: RouteBand,
+    reason: RouteBandQueueDegradedReason,
+    observed_unix_seconds: u64,
+) -> Result<(), StateStoreError> {
+    mark_route_band_queue_degraded_for_queue(
+        route_band_queue_health,
+        route_band,
+        "route_band",
+        reason,
+        observed_unix_seconds,
+    )
+}
+
+pub(crate) fn mark_route_band_queue_degraded_for_queue(
+    route_band_queue_health: &RouteBandQueueHealth,
+    route_band: RouteBand,
+    queue_name: &'static str,
+    reason: RouteBandQueueDegradedReason,
+    observed_unix_seconds: u64,
+) -> Result<(), StateStoreError> {
+    let mut queue_health =
+        route_band_queue_health
+            .lock()
+            .map_err(|_error| StateStoreError::Sqlite {
+                message: "route-band queue health unavailable".to_owned(),
+            })?;
+    queue_health.insert(
+        route_band_queue_health_key(route_band, queue_name),
+        RouteBandQueueDegradedState::new(reason, observed_unix_seconds),
+    );
+    Ok(())
+}
+
+/// Clears route-band queue degraded state after an explicit successful health signal.
+pub fn clear_route_band_queue_degraded(
+    route_band_queue_health: &RouteBandQueueHealth,
+    route_band: RouteBand,
+) -> Result<(), StateStoreError> {
+    let mut queue_health =
+        route_band_queue_health
+            .lock()
+            .map_err(|_error| StateStoreError::Sqlite {
+                message: "route-band queue health unavailable".to_owned(),
+            })?;
+    let prefix = route_band_queue_health_key_prefix(route_band);
+    queue_health.retain(|key, _state| key != route_band.as_str() && !key.starts_with(&prefix));
+    Ok(())
+}
+
+pub(crate) fn clear_route_band_queue_degraded_for_queue(
+    route_band_queue_health: &RouteBandQueueHealth,
+    route_band: RouteBand,
+    queue_name: &'static str,
+) -> Result<(), StateStoreError> {
+    let mut queue_health =
+        route_band_queue_health
+            .lock()
+            .map_err(|_error| StateStoreError::Sqlite {
+                message: "route-band queue health unavailable".to_owned(),
+            })?;
+    queue_health.remove(&route_band_queue_health_key(route_band, queue_name));
+    Ok(())
+}
+
+pub(crate) fn route_band_queue_health_allows_selection(
+    route_band_queue_health: &RouteBandQueueHealth,
+    route_band: RouteBand,
+) -> Result<(), StateStoreError> {
+    let queue_health = route_band_queue_health.lock().map_err(|_error| {
+        crate::telemetry::emit_snapshot_freshness_observed(
+            "queue_health",
+            route_band.as_str(),
+            "unavailable",
+            "fail_closed",
+            0,
+        );
+        StateStoreError::Sqlite {
+            message: "route-band queue health unavailable".to_owned(),
+        }
+    })?;
+    let prefix = route_band_queue_health_key_prefix(route_band);
+    if queue_health.contains_key(route_band.as_str())
+        || queue_health.keys().any(|key| key.starts_with(&prefix))
+    {
+        crate::telemetry::emit_snapshot_freshness_observed(
+            "queue_health",
+            route_band.as_str(),
+            "unavailable",
+            "fail_closed",
+            0,
+        );
+        return Err(StateStoreError::Sqlite {
+            message: "route-band queue health degraded".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Returns whether a route band still has a selectable account after excluding one account.
 pub async fn route_band_has_selectable_alternative<R>(
     state_repository: &R,
     active_reservations: Option<&RouteBandReservationBooks>,
+    runtime_exhaustions: Option<&RouteBandRuntimeExhaustions>,
+    route_band_queue_health: Option<&RouteBandQueueHealth>,
     route_band: RouteBand,
     excluded_account_id: &AccountId,
     now_unix_seconds: u64,
@@ -1358,6 +1678,9 @@ pub async fn route_band_has_selectable_alternative<R>(
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
+    if let Some(route_band_queue_health) = route_band_queue_health {
+        route_band_queue_health_allows_selection(route_band_queue_health, route_band)?;
+    }
     let active_session_overrides = match active_reservations {
         Some(active_reservations) => {
             let mut reservations =
@@ -1375,7 +1698,7 @@ where
         }
         None => None,
     };
-    let projection = project_route_band_selection_inputs_with_active_counts(
+    let projection = project_route_band_selection_inputs_with_active_counts_read_only(
         state_repository,
         route_band.as_str(),
         now_unix_seconds,
@@ -1389,12 +1712,60 @@ where
         .filter(|input| input.account_id() != excluded_account_id)
         .cloned()
         .collect::<Vec<_>>();
+    let account_inputs = match runtime_exhaustions {
+        Some(runtime_exhaustions) => projected_accounts_excluding_runtime_exhaustions(
+            account_inputs,
+            runtime_exhaustions,
+            route_band.as_str(),
+            now_unix_seconds,
+        )?,
+        None => account_inputs,
+    };
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         route_band,
         now_unix_seconds,
         account_inputs,
     ));
-    Ok(assessment.selected_pool() != SelectedPool::None)
+    post_exhaustion_assessment_has_safe_known_fresh_alternative(&assessment)
+}
+
+fn post_exhaustion_assessment_has_safe_known_fresh_alternative(
+    assessment: &BurnDownRouteBandAssessmentResult,
+) -> Result<bool, StateStoreError> {
+    let selected_pool = assessment.selected_pool();
+    if selected_pool == SelectedPool::None {
+        return Ok(false);
+    }
+    if selected_pool == SelectedPool::Unknown {
+        return Err(StateStoreError::Sqlite {
+            message: "post-exhaustion alternative quota evidence unavailable".to_owned(),
+        });
+    }
+
+    let candidates = assessment.weighted_candidates();
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+
+    let all_candidates_are_known_fresh = candidates.iter().all(|(account_id, _weight)| {
+        assessment.accounts().iter().any(|account| {
+            account.account_id() == account_id
+                && account.freshness() == QuotaEvidenceFreshness::Fresh
+                && matches!(
+                    (selected_pool, account.availability()),
+                    (SelectedPool::Usable, AccountAvailability::Usable)
+                        | (SelectedPool::Reserve, AccountAvailability::Reserve)
+                )
+        })
+    });
+
+    if all_candidates_are_known_fresh {
+        Ok(true)
+    } else {
+        Err(StateStoreError::Sqlite {
+            message: "post-exhaustion alternative quota evidence unavailable".to_owned(),
+        })
+    }
 }
 
 fn active_client_count_for_handle(
@@ -1546,13 +1917,13 @@ fn json_string_slice(body: &[u8], start: usize) -> Option<(&[u8], usize)> {
     }
     let mut cursor = start + 1;
     while cursor < body.len() {
-        match body[cursor] {
+        match body.get(cursor).copied()? {
             b'\\' => {
                 cursor = cursor.saturating_add(2);
             }
             b'"' => {
                 let end = cursor + 1;
-                return Some((&body[start..end], end));
+                return body.get(start..end).map(|slice| (slice, end));
             }
             _ => {
                 cursor += 1;
@@ -1620,8 +1991,9 @@ fn telemetry_hash(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     let digest = hasher.finalize();
-    digest[..8]
+    digest
         .iter()
+        .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
 }
@@ -1644,6 +2016,7 @@ mod tests {
     use super::AccountDecisionSelector;
     use super::ActiveClientLeaseReporter;
     use super::ActiveReservationGuard;
+    use super::AsyncAccountDecisionSelector;
     use super::QuotaAwareAccountSelector;
     use super::QuotaAwareAccountState;
     use super::RouteBandReservationBooks;
@@ -1661,7 +2034,10 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use tokio_util::task::TaskTracker;
+
+    use crate::db_write_actor::DbWriteActor;
+    use crate::db_write_actor::SqliteDbWriteRepository;
+    use crate::test_log_capture::capture_log_output;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -1776,9 +2152,10 @@ mod tests {
         let store = AsyncSqliteStateStore::open(&database_path)
             .await
             .unwrap_or_else(|error| panic!("async state store should open and migrate: {error}"));
-        let tasks = TaskTracker::new();
+        let db_write_actor =
+            DbWriteActor::start(Arc::new(SqliteDbWriteRepository::new(store.clone())), 4);
         let reporter =
-            SqliteActiveClientLeaseReporter::new(store.clone(), tasks.clone(), Arc::new(|| 1_100));
+            SqliteActiveClientLeaseReporter::new(db_write_actor.clone(), Arc::new(|| 1_100));
         let account_id = account_id("acct_release_clock");
         let mut reservation_book = ReservationBook::default();
         let reservation_handle = reservation_book.reserve_next_at(account_id, 1, 1_000);
@@ -1786,8 +2163,8 @@ mod tests {
         reporter.record_acquired("responses", &reservation_handle, 1_000, 1);
         wait_for_active_client_count(&store, "responses", 1, 1_050).await;
         reporter.record_released("responses", &reservation_handle);
-        tasks.close();
-        tasks.wait().await;
+        wait_for_active_client_count(&store, "responses", 0, 1_150).await;
+        db_write_actor.shutdown().await;
 
         store
             .refresh_active_session_rollups_for_interval("responses", 1_000, 1_300, 300)
@@ -1870,6 +2247,250 @@ mod tests {
     }
 
     #[test]
+    fn runtime_quota_exhaustion_excludes_account_before_sqlite_catches_up() {
+        let exhausted_account_id = account_id("acct_runtime_exhausted");
+        let fallback_account_id = account_id("acct_runtime_fallback");
+        let runtime_exhaustions = super::RouteBandRuntimeExhaustions::default();
+        super::mark_runtime_quota_exhausted(
+            &runtime_exhaustions,
+            codex_router_core::routes::RouteBand::Responses,
+            exhausted_account_id.clone(),
+            1_000,
+        )
+        .unwrap_or_else(|error| panic!("runtime exhaustion should record: {error}"));
+        let accounts = vec![
+            account_input_for_runtime_exhaustion_test(exhausted_account_id.clone()),
+            account_input_for_runtime_exhaustion_test(fallback_account_id.clone()),
+        ];
+
+        let filtered = super::projected_accounts_excluding_runtime_exhaustions(
+            accounts,
+            &runtime_exhaustions,
+            "responses",
+            1_001,
+        )
+        .unwrap_or_else(|error| panic!("runtime exhaustion filtering should succeed: {error}"));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].account_id(), &fallback_account_id);
+        assert_ne!(filtered[0].account_id(), &exhausted_account_id);
+    }
+
+    #[test]
+    fn route_band_queue_degraded_blocks_selection_until_recovered() {
+        let route_band_health = super::RouteBandQueueHealth::default();
+
+        super::mark_route_band_queue_degraded(
+            &route_band_health,
+            codex_router_core::routes::RouteBand::Responses,
+            super::RouteBandQueueDegradedReason::DbWriteQueueFull,
+            1_000,
+        )
+        .unwrap_or_else(|error| panic!("queue degraded state should record: {error}"));
+
+        assert!(
+            super::route_band_queue_health_allows_selection(
+                &route_band_health,
+                codex_router_core::routes::RouteBand::Responses,
+            )
+            .is_err(),
+            "new route-band selections must fail closed while DB write queue health is degraded"
+        );
+
+        super::clear_route_band_queue_degraded(
+            &route_band_health,
+            codex_router_core::routes::RouteBand::Responses,
+        )
+        .unwrap_or_else(|error| panic!("queue degraded state should clear: {error}"));
+
+        super::route_band_queue_health_allows_selection(
+            &route_band_health,
+            codex_router_core::routes::RouteBand::Responses,
+        )
+        .unwrap_or_else(|error| {
+            panic!("selection should recover after queue health clears: {error}")
+        });
+    }
+
+    #[test]
+    fn route_band_queue_degraded_selection_emits_scrubbed_freshness_log() {
+        let route_band_health = super::RouteBandQueueHealth::default();
+        super::mark_route_band_queue_degraded(
+            &route_band_health,
+            codex_router_core::routes::RouteBand::Responses,
+            super::RouteBandQueueDegradedReason::DbWriteQueueFull,
+            1_000,
+        )
+        .unwrap_or_else(|error| panic!("queue degraded state should record: {error}"));
+
+        let rendered_log = capture_log_output(|| {
+            assert!(
+                super::route_band_queue_health_allows_selection(
+                    &route_band_health,
+                    codex_router_core::routes::RouteBand::Responses,
+                )
+                .is_err(),
+                "selection should fail closed while route-band queue health is degraded"
+            );
+        });
+
+        assert!(rendered_log.contains("codex_router.snapshot_freshness_observed"));
+        assert!(rendered_log.contains("queue_health"));
+        assert!(rendered_log.contains("responses"));
+        assert!(rendered_log.contains("unavailable"));
+        assert!(rendered_log.contains("fail_closed"));
+        assert!(!rendered_log.contains("raw-provider-body-canary"));
+        assert!(!rendered_log.contains("sk-live-token-canary"));
+        assert!(!rendered_log.contains("Authorization"));
+        assert!(!rendered_log.contains("acct_raw_canary"));
+        assert!(!rendered_log.contains("friendly account label"));
+        assert!(!rendered_log.contains("reservation_raw_canary"));
+        assert!(!rendered_log.contains("/Users/shravansunder"));
+    }
+
+    #[tokio::test]
+    async fn post_exhaustion_alternative_selection_fails_closed_when_queue_health_degraded() {
+        let route_band_health = super::RouteBandQueueHealth::default();
+        super::mark_route_band_queue_degraded(
+            &route_band_health,
+            codex_router_core::routes::RouteBand::Responses,
+            super::RouteBandQueueDegradedReason::DbWriteQueueFull,
+            1_000,
+        )
+        .unwrap_or_else(|error| panic!("queue degraded state should record: {error}"));
+
+        let result = super::route_band_has_selectable_alternative(
+            &PanicSelectionProjectionRepository,
+            None,
+            None,
+            Some(&route_band_health),
+            codex_router_core::routes::RouteBand::Responses,
+            &account_id("acct_exhausted"),
+            1_001,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "post-exhaustion alternative selection must fail closed before projection reads when route-band queue health is degraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_exhaustion_alternative_selection_fails_closed_for_unknown_only_alternative() {
+        let exhausted_account_id = account_id("acct_exhausted_unknown");
+        let unknown_account_id = account_id("acct_unknown_alternative");
+        let repository = StaticSelectionProjectionRepository::new(vec![
+            selector_input_for_runtime_exhaustion_test(exhausted_account_id.clone()),
+            selector_input_for_post_exhaustion_test(
+                unknown_account_id,
+                "unknown-alternative",
+                codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Unknown,
+            ),
+        ]);
+
+        let result = super::route_band_has_selectable_alternative(
+            &repository,
+            None,
+            None,
+            None,
+            codex_router_core::routes::RouteBand::Responses,
+            &exhausted_account_id,
+            1_001,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "post-exhaustion reconnect must fail closed when the only alternative has unknown quota evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_exhaustion_alternative_selection_fails_closed_for_stale_only_alternative() {
+        let exhausted_account_id = account_id("acct_exhausted_stale");
+        let stale_account_id = account_id("acct_stale_alternative");
+        let repository = StaticSelectionProjectionRepository::new(vec![
+            selector_input_for_runtime_exhaustion_test(exhausted_account_id.clone()),
+            selector_input_for_post_exhaustion_test(
+                stale_account_id,
+                "stale-alternative",
+                codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Stale,
+            ),
+        ]);
+
+        let result = super::route_band_has_selectable_alternative(
+            &repository,
+            None,
+            None,
+            None,
+            codex_router_core::routes::RouteBand::Responses,
+            &exhausted_account_id,
+            1_001,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "post-exhaustion reconnect must fail closed when the only alternative has stale quota evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_selectors_share_atomic_selection_lock_before_projection() {
+        let repository = SlowSelectionProjectionRepository::new(account_id("acct_shared_lock"));
+        let weighted_selectors = super::RouteBandWeightedSelectors::default();
+        let account_holds = super::RouteBandAccountHolds::default();
+        let active_reservations = super::RouteBandReservationBooks::default();
+        let runtime_exhaustions = super::RouteBandRuntimeExhaustions::default();
+        let route_band_queue_health = super::RouteBandQueueHealth::default();
+        let selection_reservation_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses");
+        let first_selector =
+            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+                &repository,
+                super::AsyncAccountSelectorRuntimeState::new_with_selection_lock(
+                    Arc::clone(&weighted_selectors),
+                    Arc::clone(&account_holds),
+                    Arc::clone(&active_reservations),
+                    Arc::clone(&runtime_exhaustions),
+                    Arc::clone(&route_band_queue_health),
+                    Arc::clone(&selection_reservation_lock),
+                ),
+                super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+                Arc::new(|| 1_000),
+            );
+        let second_selector =
+            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+                &repository,
+                super::AsyncAccountSelectorRuntimeState::new_with_selection_lock(
+                    Arc::clone(&weighted_selectors),
+                    Arc::clone(&account_holds),
+                    Arc::clone(&active_reservations),
+                    Arc::clone(&runtime_exhaustions),
+                    Arc::clone(&route_band_queue_health),
+                    Arc::clone(&selection_reservation_lock),
+                ),
+                super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+                Arc::new(|| 1_000),
+            );
+
+        let (first_result, second_result) = tokio::join!(
+            first_selector.select_upstream_account(&request, TokenGeneration::new(1), None),
+            second_selector.select_upstream_account(&request, TokenGeneration::new(1), None),
+        );
+
+        first_result.unwrap_or_else(|error| panic!("first selection should succeed: {error}"));
+        second_result.unwrap_or_else(|error| panic!("second selection should succeed: {error}"));
+        assert_eq!(
+            repository.max_concurrent_selector_reads(),
+            1,
+            "fresh selectors must share the same process-wide assess/snapshot/reserve lock"
+        );
+    }
+
+    #[test]
     fn account_hold_cooldown_does_not_keep_materially_weaker_account() {
         let weak_account_id = account_id("acct_weekly_low");
         let strong_account_id = account_id("acct_weekly_healthy");
@@ -1946,6 +2567,458 @@ mod tests {
     fn account_id(value: &str) -> AccountId {
         AccountId::new(value)
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
+    }
+
+    struct PanicSelectionProjectionRepository;
+
+    impl codex_router_state::selection_projection::AsyncSelectionProjectionRepository
+        for PanicSelectionProjectionRepository
+    {
+        fn selector_inputs_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::quota_snapshot::SelectorQuotaInput>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { panic!("degraded queue health should prevent selector input reads") })
+        }
+
+        fn active_client_counts_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveClientCount>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { panic!("degraded queue health should prevent active count reads") })
+        }
+
+        fn active_client_counts_for_route_band_read_only<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveClientCount>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { panic!("degraded queue health should prevent active count reads") })
+        }
+
+        fn quota_history_observations_for_window<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+            _route_band: &'a str,
+            _limit_window_seconds: u64,
+            _observed_from_unix_seconds: u64,
+            _observed_to_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { panic!("degraded queue health should prevent quota history reads") })
+        }
+
+        fn active_session_rollups_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveSessionRollup>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { panic!("degraded queue health should prevent rollup reads") })
+        }
+
+        fn refresh_active_session_rollups_for_interval<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+            _bucket_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<(), codex_router_state::sqlite::StateStoreError>,
+        > {
+            Box::pin(async { panic!("read-only alternative selection must not refresh rollups") })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticSelectionProjectionRepository {
+        inputs: Vec<codex_router_state::quota_snapshot::SelectorQuotaInput>,
+    }
+
+    impl StaticSelectionProjectionRepository {
+        fn new(inputs: Vec<codex_router_state::quota_snapshot::SelectorQuotaInput>) -> Self {
+            Self { inputs }
+        }
+    }
+
+    impl codex_router_state::selection_projection::AsyncSelectionProjectionRepository
+        for StaticSelectionProjectionRepository
+    {
+        fn selector_inputs_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::quota_snapshot::SelectorQuotaInput>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async move { Ok(self.inputs.clone()) })
+        }
+
+        fn active_client_counts_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveClientCount>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn active_client_counts_for_route_band_read_only<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveClientCount>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn quota_history_observations_for_window<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+            _route_band: &'a str,
+            _limit_window_seconds: u64,
+            _observed_from_unix_seconds: u64,
+            _observed_to_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn active_session_rollups_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveSessionRollup>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn refresh_active_session_rollups_for_interval<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+            _bucket_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<(), codex_router_state::sqlite::StateStoreError>,
+        > {
+            Box::pin(async { panic!("read-only alternative selection must not refresh rollups") })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SlowSelectionProjectionRepository {
+        account_id: AccountId,
+        in_flight_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
+        max_concurrent_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SlowSelectionProjectionRepository {
+        fn new(account_id: AccountId) -> Self {
+            Self {
+                account_id,
+                in_flight_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                max_concurrent_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn max_concurrent_selector_reads(&self) -> usize {
+            self.max_concurrent_selector_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl codex_router_state::selection_projection::AsyncSelectionProjectionRepository
+        for SlowSelectionProjectionRepository
+    {
+        fn selector_inputs_for_route_band<'a>(
+            &'a self,
+            route_band: &'a str,
+            _now_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::quota_snapshot::SelectorQuotaInput>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async move {
+                let in_flight = self
+                    .in_flight_selector_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                self.max_concurrent_selector_reads
+                    .fetch_max(in_flight, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                self.in_flight_selector_reads
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![
+                    codex_router_state::quota_snapshot::SelectorQuotaInput::new(
+                        self.account_id.clone(),
+                        "shared-lock",
+                        codex_router_state::account::AccountStatus::Enabled,
+                        Some(1),
+                        route_band,
+                        vec![
+                        codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
+                            self.account_id.clone(),
+                            route_band,
+                            codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                            codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Eligible,
+                        )
+                        .with_remaining_headroom(90)
+                        .with_reset_unix_seconds(18_000)
+                        .with_effective(true)
+                        .with_observed_unix_seconds(900),
+                        codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
+                            self.account_id.clone(),
+                            route_band,
+                            codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                            codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Eligible,
+                        )
+                        .with_remaining_headroom(90)
+                        .with_reset_unix_seconds(604_800)
+                        .with_effective(true)
+                        .with_observed_unix_seconds(900),
+                    ],
+                    ),
+                ])
+            })
+        }
+
+        fn active_client_counts_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveClientCount>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn active_client_counts_for_route_band_read_only<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveClientCount>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn quota_history_observations_for_window<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+            _route_band: &'a str,
+            _limit_window_seconds: u64,
+            _observed_from_unix_seconds: u64,
+            _observed_to_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn active_session_rollups_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<codex_router_state::sqlite::ActiveSessionRollup>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn refresh_active_session_rollups_for_interval<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+            _bucket_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<(), codex_router_state::sqlite::StateStoreError>,
+        > {
+            Box::pin(async { panic!("read-only shared-lock test must not refresh rollups") })
+        }
+    }
+
+    impl codex_router_state::sqlite::AsyncAffinityRepository for SlowSelectionProjectionRepository {
+        fn write_previous_response_owner<'a>(
+            &'a self,
+            _owner: &'a codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<(), codex_router_state::sqlite::StateStoreError>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn load_previous_response_owner<'a>(
+            &'a self,
+            _affinity_key_hash: &'a codex_router_core::affinity::AffinityKeyHash,
+            _route_band: &'a str,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async {
+                Ok(codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup::Missing)
+            })
+        }
+    }
+
+    fn account_input_for_runtime_exhaustion_test(
+        account_id: AccountId,
+    ) -> codex_router_selection::burn_down::BurnDownAccountInput {
+        codex_router_selection::burn_down::BurnDownAccountInput::new(
+            account_id,
+            "runtime-test",
+            vec![
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(90)
+                .with_reset_unix_seconds(18_000),
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(90)
+                .with_reset_unix_seconds(604_800),
+            ],
+        )
+    }
+
+    fn selector_input_for_runtime_exhaustion_test(
+        account_id: AccountId,
+    ) -> codex_router_state::quota_snapshot::SelectorQuotaInput {
+        selector_input_for_post_exhaustion_test(
+            account_id,
+            "runtime-test",
+            codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Eligible,
+        )
+    }
+
+    fn selector_input_for_post_exhaustion_test(
+        account_id: AccountId,
+        account_label: &str,
+        status: codex_router_state::quota_snapshot::SelectorQuotaWindowStatus,
+    ) -> codex_router_state::quota_snapshot::SelectorQuotaInput {
+        codex_router_state::quota_snapshot::SelectorQuotaInput::new(
+            account_id.clone(),
+            account_label,
+            codex_router_state::account::AccountStatus::Enabled,
+            Some(1),
+            "responses",
+            vec![
+                codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
+                    account_id.clone(),
+                    "responses",
+                    codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                    status,
+                )
+                .with_remaining_headroom(90)
+                .with_reset_unix_seconds(18_000)
+                .with_effective(true)
+                .with_observed_unix_seconds(900),
+                codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
+                    account_id,
+                    "responses",
+                    codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                    status,
+                )
+                .with_remaining_headroom(90)
+                .with_reset_unix_seconds(604_800)
+                .with_effective(true)
+                .with_observed_unix_seconds(900),
+            ],
+        )
     }
 
     fn proxy_test_database_path(name: &str) -> PathBuf {

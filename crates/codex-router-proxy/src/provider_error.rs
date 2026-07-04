@@ -7,6 +7,8 @@ use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
 use thiserror::Error;
 
+use crate::db_write_actor::DbWriteEnqueueResult;
+
 const PROVIDER_ERROR_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,16 +22,37 @@ pub enum ProviderErrorClassification {
 pub enum ProviderErrorObservationError {
     #[error("state store unavailable while recording provider error")]
     State(#[from] StateStoreError),
+    #[error("selection state unavailable while checking post-exhaustion alternatives")]
+    SelectionStateUnavailable,
 }
 
 pub trait AsyncProviderErrorObserver: Send + Sync {
+    fn mark_runtime_account_quota_exhausted(
+        &self,
+        _account_id: AccountId,
+        _route_band: RouteBand,
+        _observed_unix_seconds: u64,
+    ) -> Result<(), ProviderErrorObservationError> {
+        Ok(())
+    }
+
     fn observe_provider_error<'a>(
         &'a self,
         account_id: AccountId,
         route_band: RouteBand,
-        body: Vec<u8>,
+        classification: ProviderErrorClassification,
         observed_unix_seconds: u64,
     ) -> BoxFuture<'a, Result<(), ProviderErrorObservationError>>;
+
+    fn enqueue_provider_quota_exhaustion(
+        &self,
+        _account_id: AccountId,
+        _route_band: RouteBand,
+        _classification: ProviderErrorClassification,
+        _observed_unix_seconds: u64,
+    ) -> DbWriteEnqueueResult {
+        DbWriteEnqueueResult::Enqueued
+    }
 
     fn route_band_has_selectable_alternative_after_exhaustion<'a>(
         &'a self,
@@ -37,7 +60,7 @@ pub trait AsyncProviderErrorObserver: Send + Sync {
         _route_band: RouteBand,
         _observed_unix_seconds: u64,
     ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
-        Box::pin(async { Ok(true) })
+        Box::pin(async { Err(ProviderErrorObservationError::SelectionStateUnavailable) })
     }
 }
 
@@ -104,13 +127,12 @@ pub async fn record_provider_error_observation<R>(
     repository: &R,
     account_id: &AccountId,
     route_band: &str,
-    body: &[u8],
+    classification: ProviderErrorClassification,
     observed_unix_seconds: u64,
 ) -> Result<ProviderErrorClassification, StateStoreError>
 where
     R: AsyncQuotaExhaustionRepository + Sync,
 {
-    let classification = classify_provider_error_envelope(body);
     if classification == ProviderErrorClassification::AccountQuotaExhausted {
         repository
             .mark_route_band_quota_exhausted(account_id, route_band, observed_unix_seconds)
@@ -127,8 +149,6 @@ fn is_provider_error_envelope(value: &Value) -> bool {
 
 fn explicit_error_tokens(value: &Value) -> Vec<&str> {
     let mut tokens = Vec::new();
-    push_string_field(value, "code", &mut tokens);
-    push_string_field(value, "type", &mut tokens);
     if let Some(error) = value.get("error").and_then(Value::as_object) {
         if let Some(code) = error.get("code").and_then(Value::as_str) {
             tokens.push(code);
@@ -139,12 +159,6 @@ fn explicit_error_tokens(value: &Value) -> Vec<&str> {
     }
 
     tokens
-}
-
-fn push_string_field<'a>(value: &'a Value, field_name: &str, tokens: &mut Vec<&'a str>) {
-    if let Some(token) = value.get(field_name).and_then(Value::as_str) {
-        tokens.push(token);
-    }
 }
 
 fn is_quota_exhaustion_token(token: &str) -> bool {
@@ -180,19 +194,23 @@ fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassifi
         return ProviderErrorClassification::Unknown;
     }
 
-    let mut tokens = Vec::new();
-    push_prefix_json_string_field_values(trimmed, "code", &mut tokens);
-    push_prefix_json_string_field_values(trimmed, "type", &mut tokens);
+    let Some(error_prefix) = prefix_top_level_object_field_prefix(trimmed, "error") else {
+        return ProviderErrorClassification::Unknown;
+    };
 
-    if tokens
-        .iter()
-        .any(|token| token == "websocket_connection_limit_reached")
-    {
+    if prefix_top_level_string_field_equals(
+        error_prefix,
+        "code",
+        "websocket_connection_limit_reached",
+    ) || prefix_top_level_string_field_equals(
+        error_prefix,
+        "type",
+        "websocket_connection_limit_reached",
+    ) {
         return ProviderErrorClassification::WebSocketConnectionLimit;
     }
-    if tokens
-        .iter()
-        .any(|token| is_quota_exhaustion_token(token.as_str()))
+    if prefix_top_level_string_field_matches(error_prefix, "code", is_quota_exhaustion_token)
+        || prefix_top_level_string_field_matches(error_prefix, "type", is_quota_exhaustion_token)
     {
         return ProviderErrorClassification::AccountQuotaExhausted;
     }
@@ -269,7 +287,7 @@ fn prefix_top_level_object_field_prefix<'a>(prefix: &'a str, field_name: &str) -
     let mut depth = 0_u32;
     let mut expect_field = false;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'{' => {
                 depth = depth.saturating_add(1);
                 expect_field = depth == 1;
@@ -319,7 +337,7 @@ fn prefix_json_object_slice(input: &str, object_start: usize) -> Option<&str> {
     let mut index = object_start;
     let mut depth = 0_u32;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'{' => {
                 depth = depth.saturating_add(1);
                 index += 1;
@@ -372,7 +390,7 @@ fn prefix_top_level_field_value<'a>(
     let mut depth = 0_u32;
     let mut expect_field = false;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'{' => {
                 depth = depth.saturating_add(1);
                 expect_field = depth == 1;
@@ -418,33 +436,6 @@ fn prefix_top_level_field_value<'a>(
     None
 }
 
-fn push_prefix_json_string_field_values(prefix: &str, field_name: &str, tokens: &mut Vec<String>) {
-    let bytes = prefix.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'"' {
-            index += 1;
-            continue;
-        }
-        let Some((field, after_field)) = parse_json_string_token(prefix, index) else {
-            return;
-        };
-        let Some(value_index) = prefix_json_value_start(bytes, after_field) else {
-            index = after_field;
-            continue;
-        };
-        if field == field_name
-            && bytes.get(value_index).copied() == Some(b'"')
-            && let Some((value, after_value)) = parse_json_string_token(prefix, value_index)
-        {
-            tokens.push(value.to_owned());
-            index = after_value;
-            continue;
-        }
-        index = after_field;
-    }
-}
-
 fn json_object_braces_are_balanced(input: &str) -> bool {
     let bytes = input.as_bytes();
     let mut index = 0;
@@ -457,30 +448,35 @@ fn json_object_braces_are_balanced(input: &str) -> bool {
 
     let mut depth = 0_u32;
     while index < bytes.len() {
-        match bytes[index] {
-            b'{' => {
-                depth = depth.saturating_add(1);
-                index += 1;
-            }
-            b'}' => {
-                let Some(next_depth) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next_depth;
-                index += 1;
-                if depth == 0 {
-                    return bytes[index..].iter().all(|byte| byte.is_ascii_whitespace());
+        match bytes.get(index).copied() {
+            Some(byte) => match byte {
+                b'{' => {
+                    depth = depth.saturating_add(1);
+                    index += 1;
                 }
-            }
-            b'"' => {
-                let Some((_, after_string)) = parse_json_string_token(input, index) else {
-                    return false;
-                };
-                index = after_string;
-            }
-            _ => {
-                index += 1;
-            }
+                b'}' => {
+                    let Some(next_depth) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = next_depth;
+                    index += 1;
+                    if depth == 0 {
+                        return bytes.get(index..).is_some_and(|tail| {
+                            tail.iter().all(|byte| byte.is_ascii_whitespace())
+                        });
+                    }
+                }
+                b'"' => {
+                    let Some((_, after_string)) = parse_json_string_token(input, index) else {
+                        return false;
+                    };
+                    index = after_string;
+                }
+                _ => {
+                    index += 1;
+                }
+            },
+            None => return false,
         }
     }
 
@@ -499,30 +495,35 @@ fn json_object_prefix_is_open_or_cleanly_closed(input: &str) -> bool {
 
     let mut depth = 0_u32;
     while index < bytes.len() {
-        match bytes[index] {
-            b'{' => {
-                depth = depth.saturating_add(1);
-                index += 1;
-            }
-            b'}' => {
-                let Some(next_depth) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next_depth;
-                index += 1;
-                if depth == 0 {
-                    return bytes[index..].iter().all(|byte| byte.is_ascii_whitespace());
+        match bytes.get(index).copied() {
+            Some(byte) => match byte {
+                b'{' => {
+                    depth = depth.saturating_add(1);
+                    index += 1;
                 }
-            }
-            b'"' => {
-                let Some((_, after_string)) = parse_json_string_token(input, index) else {
-                    return true;
-                };
-                index = after_string;
-            }
-            _ => {
-                index += 1;
-            }
+                b'}' => {
+                    let Some(next_depth) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = next_depth;
+                    index += 1;
+                    if depth == 0 {
+                        return bytes.get(index..).is_some_and(|tail| {
+                            tail.iter().all(|byte| byte.is_ascii_whitespace())
+                        });
+                    }
+                }
+                b'"' => {
+                    let Some((_, after_string)) = parse_json_string_token(input, index) else {
+                        return true;
+                    };
+                    index = after_string;
+                }
+                _ => {
+                    index += 1;
+                }
+            },
+            None => return false,
         }
     }
 
@@ -552,7 +553,7 @@ fn parse_json_string_token(input: &str, quote_index: usize) -> Option<(&str, usi
     }
     let mut index = quote_index + 1;
     while index < bytes.len() {
-        match bytes[index] {
+        match bytes.get(index).copied()? {
             b'\\' => {
                 index = index.saturating_add(2);
             }
@@ -696,6 +697,38 @@ mod tests {
         );
 
         let classification = classify_responses_websocket_error_envelope(envelope.as_bytes());
+
+        assert_eq!(classification, ProviderErrorClassification::Unknown);
+    }
+
+    #[test]
+    fn oversized_http_quota_token_outside_error_object_is_not_classified() {
+        let padding = "x".repeat(128 * 1024);
+        let envelope = format!(
+            r#"{{
+                "type":"error",
+                "debug":{{"code":"usage_limit_reached"}},
+                "error":{{"type":"invalid_request_error","code":"bad_request","message":"{padding}"}}
+            }}"#
+        );
+
+        let classification = classify_provider_error_envelope(envelope.as_bytes());
+
+        assert_eq!(classification, ProviderErrorClassification::Unknown);
+    }
+
+    #[test]
+    fn small_http_quota_token_outside_error_object_is_not_classified() {
+        let envelope = br#"{
+            "type": "error",
+            "code": "usage_limit_reached",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "bad_request"
+            }
+        }"#;
+
+        let classification = classify_provider_error_envelope(envelope);
 
         assert_eq!(classification, ProviderErrorClassification::Unknown);
     }

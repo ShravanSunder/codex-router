@@ -21,7 +21,7 @@ use crate::sqlite::ActiveSessionRollup;
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
 
-const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 604_800;
+const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 /// Projected selector inputs for one route band.
@@ -55,6 +55,14 @@ pub trait AsyncSelectionProjectionRepository {
 
     /// Loads current active client counts for one route band.
     fn active_client_counts_for_route_band<'a>(
+        &'a self,
+        route_band: &'a str,
+        now_unix_seconds: u64,
+        max_age_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>>;
+
+    /// Loads current active client counts for one route band without stale-lease cleanup.
+    fn active_client_counts_for_route_band_read_only<'a>(
         &'a self,
         route_band: &'a str,
         now_unix_seconds: u64,
@@ -108,8 +116,30 @@ impl AsyncSelectionProjectionRepository for AsyncSqliteStateStore {
         max_age_seconds: u64,
     ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
         Box::pin(async move {
-            self.active_client_counts_for_route_band(route_band, now_unix_seconds, max_age_seconds)
-                .await
+            AsyncSqliteStateStore::active_client_counts_for_route_band(
+                self,
+                route_band,
+                now_unix_seconds,
+                max_age_seconds,
+            )
+            .await
+        })
+    }
+
+    fn active_client_counts_for_route_band_read_only<'a>(
+        &'a self,
+        route_band: &'a str,
+        now_unix_seconds: u64,
+        max_age_seconds: u64,
+    ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
+        Box::pin(async move {
+            AsyncSqliteStateStore::active_client_counts_for_route_band_read_only(
+                self,
+                route_band,
+                now_unix_seconds,
+                max_age_seconds,
+            )
+            .await
         })
     }
 
@@ -178,12 +208,34 @@ pub async fn project_route_band_selection_inputs<R>(
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
-    project_route_band_selection_inputs_with_active_counts(
+    project_route_band_selection_inputs_with_active_counts_internal(
         state,
         route_band,
         now_unix_seconds,
         active_client_max_age_seconds,
         None,
+        true,
+    )
+    .await
+}
+
+/// Projects persisted state for read-only observer surfaces.
+pub async fn project_route_band_selection_inputs_read_only<R>(
+    state: &R,
+    route_band: &str,
+    now_unix_seconds: u64,
+    active_client_max_age_seconds: u64,
+) -> Result<RouteBandSelectionProjection, StateStoreError>
+where
+    R: AsyncSelectionProjectionRepository + Sync,
+{
+    project_route_band_selection_inputs_with_active_counts_internal(
+        state,
+        route_band,
+        now_unix_seconds,
+        active_client_max_age_seconds,
+        None,
+        false,
     )
     .await
 }
@@ -199,17 +251,70 @@ pub async fn project_route_band_selection_inputs_with_active_counts<R>(
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
+    project_route_band_selection_inputs_with_active_counts_internal(
+        state,
+        route_band,
+        now_unix_seconds,
+        active_client_max_age_seconds,
+        active_session_overrides,
+        true,
+    )
+    .await
+}
+
+/// Projects persisted state with caller-owned current active-session overrides for read-only observer paths.
+pub async fn project_route_band_selection_inputs_with_active_counts_read_only<R>(
+    state: &R,
+    route_band: &str,
+    now_unix_seconds: u64,
+    active_client_max_age_seconds: u64,
+    active_session_overrides: Option<&HashMap<AccountId, u32>>,
+) -> Result<RouteBandSelectionProjection, StateStoreError>
+where
+    R: AsyncSelectionProjectionRepository + Sync,
+{
+    project_route_band_selection_inputs_with_active_counts_internal(
+        state,
+        route_band,
+        now_unix_seconds,
+        active_client_max_age_seconds,
+        active_session_overrides,
+        false,
+    )
+    .await
+}
+
+async fn project_route_band_selection_inputs_with_active_counts_internal<R>(
+    state: &R,
+    route_band: &str,
+    now_unix_seconds: u64,
+    active_client_max_age_seconds: u64,
+    active_session_overrides: Option<&HashMap<AccountId, u32>>,
+    refresh_rollups: bool,
+) -> Result<RouteBandSelectionProjection, StateStoreError>
+where
+    R: AsyncSelectionProjectionRepository + Sync,
+{
     let selector_inputs = state
         .selector_inputs_for_route_band(route_band, now_unix_seconds)
         .await?;
-    let active_counts = state
-        .active_client_counts_for_route_band(
-            route_band,
-            now_unix_seconds,
-            active_client_max_age_seconds,
-        )
-        .await
-        .unwrap_or_default();
+    let active_counts = if refresh_rollups {
+        state
+            .active_client_counts_for_route_band(
+                route_band,
+                now_unix_seconds,
+                active_client_max_age_seconds,
+            )
+            .await
+    } else {
+        state
+            .active_client_counts_for_route_band_read_only(
+                route_band,
+                now_unix_seconds,
+                active_client_max_age_seconds,
+            )
+            .await
+    }?;
     let mut projected_accounts = Vec::with_capacity(selector_inputs.len());
 
     for input in selector_inputs {
@@ -230,6 +335,7 @@ where
                 route_band,
                 window,
                 now_unix_seconds,
+                refresh_rollups,
             )
             .await?;
             if let Some(per_connection_burn_basis_points_per_hour) =
@@ -298,6 +404,7 @@ async fn estimate_window_burn_rate(
     route_band: &str,
     window: &PersistedSelectorQuotaWindow,
     now_unix_seconds: u64,
+    refresh_rollups: bool,
 ) -> Result<ProjectedBurnRateEstimate, StateStoreError> {
     let Some(reset_unix_seconds) = window.reset_unix_seconds() else {
         return Ok(ProjectedBurnRateEstimate {
@@ -344,7 +451,13 @@ async fn estimate_window_burn_rate(
         });
     }
 
-    let first_observation = &observations[0];
+    let Some(first_observation) = observations.first() else {
+        return Ok(ProjectedBurnRateEstimate {
+            confidence: QuotaRunRateConfidence::Unknown,
+            per_connection_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
+        });
+    };
     let elapsed_seconds = latest_observation
         .observed_unix_seconds()
         .saturating_sub(first_observation.observed_unix_seconds());
@@ -366,14 +479,16 @@ async fn estimate_window_burn_rate(
         });
     }
 
-    state
-        .refresh_active_session_rollups_for_interval(
-            route_band,
-            first_observation.observed_unix_seconds(),
-            latest_observation.observed_unix_seconds(),
-            ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS,
-        )
-        .await?;
+    if refresh_rollups {
+        state
+            .refresh_active_session_rollups_for_interval(
+                route_band,
+                first_observation.observed_unix_seconds(),
+                latest_observation.observed_unix_seconds(),
+                ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS,
+            )
+            .await?;
+    }
     let rollups = state
         .active_session_rollups_for_route_band(
             route_band,
@@ -517,7 +632,11 @@ fn projected_exhaustion_unix_seconds(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use codex_router_core::ids::AccountId;
+
+    use crate::account::AccountStatus;
 
     use super::*;
 
@@ -533,5 +652,297 @@ mod tests {
             !active_session_rollups_cover_interval(&rollups, &account, 0, 900),
             "a missing middle rollup bucket must downgrade active-session history"
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_projection_returns_error_when_active_count_snapshot_is_unavailable() {
+        let state = ActiveCountUnavailableProjectionRepository::new(account_id("acct_snapshot"));
+
+        let result =
+            project_route_band_selection_inputs_read_only(&state, "responses", 1_000, 7_200).await;
+
+        assert_eq!(
+            result,
+            Err(active_count_snapshot_unavailable()),
+            "read-only active-count failure must propagate instead of becoming zero active sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_projection_does_not_call_refresh_rollups_or_mutating_active_count_reader() {
+        let account_id = account_id("acct_pure_projection");
+        let state = ReadOnlyProjectionPurityRepository::new(account_id.clone());
+
+        let projection =
+            project_route_band_selection_inputs_read_only(&state, "responses", 1_000, 7_200)
+                .await
+                .unwrap_or_else(|error| panic!("read-only projection should succeed: {error}"));
+
+        assert_eq!(
+            state.mutating_active_count_reads.load(Ordering::SeqCst),
+            0,
+            "read-only projection must not invoke stale-cleanup active-count reads"
+        );
+        assert_eq!(
+            state.read_only_active_count_reads.load(Ordering::SeqCst),
+            1,
+            "read-only projection should load active counts through the read-only repository method"
+        );
+        assert_eq!(
+            state.rollup_refreshes.load(Ordering::SeqCst),
+            0,
+            "read-only projection must not refresh active-session rollups"
+        );
+        assert_eq!(
+            state.rollup_reads.load(Ordering::SeqCst),
+            1,
+            "the fixture should reach rollup estimation instead of passing before the refresh boundary"
+        );
+        assert_eq!(
+            projection.accounts()[0].current_active_sessions(),
+            2,
+            "projection should use the read-only active-count snapshot"
+        );
+        assert_eq!(projection.accounts()[0].account_id(), &account_id);
+    }
+
+    struct ActiveCountUnavailableProjectionRepository {
+        account_id: AccountId,
+    }
+
+    impl ActiveCountUnavailableProjectionRepository {
+        fn new(account_id: AccountId) -> Self {
+            Self { account_id }
+        }
+    }
+
+    impl AsyncSelectionProjectionRepository for ActiveCountUnavailableProjectionRepository {
+        fn selector_inputs_for_route_band<'a>(
+            &'a self,
+            route_band: &'a str,
+            now_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<SelectorQuotaInput>, StateStoreError>> {
+            Box::pin(async move {
+                let window = PersistedSelectorQuotaWindow::new(
+                    self.account_id.clone(),
+                    route_band,
+                    18_000,
+                    SelectorQuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(80)
+                .with_observed_unix_seconds(now_unix_seconds)
+                .with_effective(true);
+                Ok(vec![SelectorQuotaInput::new(
+                    self.account_id.clone(),
+                    "safe-label",
+                    AccountStatus::Enabled,
+                    Some(1),
+                    route_band,
+                    vec![window],
+                )])
+            })
+        }
+
+        fn active_client_counts_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
+            Box::pin(async { Err(active_count_snapshot_unavailable()) })
+        }
+
+        fn active_client_counts_for_route_band_read_only<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
+            Box::pin(async { Err(active_count_snapshot_unavailable()) })
+        }
+
+        fn quota_history_observations_for_window<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+            _route_band: &'a str,
+            _limit_window_seconds: u64,
+            _observed_from_unix_seconds: u64,
+            _observed_to_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<PersistedQuotaHistoryObservation>, StateStoreError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn active_session_rollups_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<ActiveSessionRollup>, StateStoreError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn refresh_active_session_rollups_for_interval<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+            _bucket_seconds: u64,
+        ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct ReadOnlyProjectionPurityRepository {
+        account_id: AccountId,
+        mutating_active_count_reads: AtomicUsize,
+        read_only_active_count_reads: AtomicUsize,
+        rollup_refreshes: AtomicUsize,
+        rollup_reads: AtomicUsize,
+    }
+
+    impl ReadOnlyProjectionPurityRepository {
+        fn new(account_id: AccountId) -> Self {
+            Self {
+                account_id,
+                mutating_active_count_reads: AtomicUsize::new(0),
+                read_only_active_count_reads: AtomicUsize::new(0),
+                rollup_refreshes: AtomicUsize::new(0),
+                rollup_reads: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl AsyncSelectionProjectionRepository for ReadOnlyProjectionPurityRepository {
+        fn selector_inputs_for_route_band<'a>(
+            &'a self,
+            route_band: &'a str,
+            now_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<SelectorQuotaInput>, StateStoreError>> {
+            Box::pin(async move {
+                let window = PersistedSelectorQuotaWindow::new(
+                    self.account_id.clone(),
+                    route_band,
+                    18_000,
+                    SelectorQuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(80)
+                .with_reset_unix_seconds(2_000)
+                .with_observed_unix_seconds(now_unix_seconds)
+                .with_effective(true);
+                Ok(vec![SelectorQuotaInput::new(
+                    self.account_id.clone(),
+                    "safe-label",
+                    AccountStatus::Enabled,
+                    Some(1),
+                    route_band,
+                    vec![window],
+                )])
+            })
+        }
+
+        fn active_client_counts_for_route_band<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
+            Box::pin(async move {
+                self.mutating_active_count_reads
+                    .fetch_add(1, Ordering::SeqCst);
+                Err(StateStoreError::Sqlite {
+                    message: "read-only projection called mutating active-count reader".to_owned(),
+                })
+            })
+        }
+
+        fn active_client_counts_for_route_band_read_only<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _now_unix_seconds: u64,
+            _max_age_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<ActiveClientCount>, StateStoreError>> {
+            Box::pin(async move {
+                self.read_only_active_count_reads
+                    .fetch_add(1, Ordering::SeqCst);
+                Ok(vec![ActiveClientCount::new(self.account_id.clone(), 2, 2)])
+            })
+        }
+
+        fn quota_history_observations_for_window<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+            route_band: &'a str,
+            limit_window_seconds: u64,
+            _observed_from_unix_seconds: u64,
+            _observed_to_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<PersistedQuotaHistoryObservation>, StateStoreError>> {
+            Box::pin(async move {
+                Ok(vec![
+                    PersistedQuotaHistoryObservation::new(
+                        self.account_id.clone(),
+                        "safe-label",
+                        route_band,
+                        limit_window_seconds,
+                        700,
+                        90,
+                    )
+                    .with_reset_unix_seconds(2_000),
+                    PersistedQuotaHistoryObservation::new(
+                        self.account_id.clone(),
+                        "safe-label",
+                        route_band,
+                        limit_window_seconds,
+                        1_000,
+                        80,
+                    )
+                    .with_reset_unix_seconds(2_000),
+                ])
+            })
+        }
+
+        fn active_session_rollups_for_route_band<'a>(
+            &'a self,
+            route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<Vec<ActiveSessionRollup>, StateStoreError>> {
+            Box::pin(async move {
+                self.rollup_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![ActiveSessionRollup::new(
+                    self.account_id.clone(),
+                    route_band,
+                    700,
+                    1_000,
+                    300,
+                    2,
+                )])
+            })
+        }
+
+        fn refresh_active_session_rollups_for_interval<'a>(
+            &'a self,
+            _route_band: &'a str,
+            _interval_start_unix_seconds: u64,
+            _interval_end_unix_seconds: u64,
+            _bucket_seconds: u64,
+        ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+            Box::pin(async move {
+                self.rollup_refreshes.fetch_add(1, Ordering::SeqCst);
+                Err(StateStoreError::Sqlite {
+                    message: "read-only projection called rollup refresh".to_owned(),
+                })
+            })
+        }
+    }
+
+    fn active_count_snapshot_unavailable() -> StateStoreError {
+        StateStoreError::Sqlite {
+            message: "active count snapshot unavailable".to_owned(),
+        }
+    }
+
+    fn account_id(value: &str) -> AccountId {
+        AccountId::new(value)
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
     }
 }
