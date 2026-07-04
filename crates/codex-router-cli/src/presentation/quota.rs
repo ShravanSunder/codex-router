@@ -29,6 +29,7 @@ pub(crate) struct QuotaStatusAccountViewModel {
     pub(crate) account: String,
     pub(crate) status: String,
     pub(crate) active_clients: String,
+    pub(crate) reset_credits: String,
     pub(crate) reason: String,
     pub(crate) weekly_window: String,
     pub(crate) burn_meter: String,
@@ -634,18 +635,6 @@ fn render_account_row(
     let account = fit_line(&format!("{marker} {}", row.account), account_width);
     let status_color = if focused { Color::Yellow } else { Color::White };
     let metadata_color = if focused { Color::Yellow } else { Color::Grey };
-    let compact_pace = pace_width < 26;
-    let compact_status_pace = if compact_pace {
-        element! {
-            Text(content: fit_line(row.reset_pace.semantic_label, status_width), color: Some(reset_pace_color(row.reset_pace.state)), wrap: TextWrap::NoWrap)
-        }
-        .into_any()
-    } else {
-        element! {
-            Text(content: fit_line("", status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-        }
-        .into_any()
-    };
     let reset_sample_pace = reset_pace_row_line(&row.reset_pace, pace_width);
 
     element! {
@@ -667,7 +656,7 @@ fn render_account_row(
             }
             View(width: inner_width as u32) {
                 Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                #(compact_status_pace)
+                Text(content: fit_line(&row.reset_credits, status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
                 #(reset_sample_pace)
             }
         }
@@ -1231,7 +1220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quota_status_narrow_rows_preserve_reset_and_sample_semantics() {
+    async fn quota_status_narrow_rows_preserve_reset_credits_and_sample_semantics() {
         let text = render_quota_capture_model_at(
             quota_view_model(),
             48,
@@ -1243,15 +1232,15 @@ mod tests {
         )
         .await;
 
-        assert!(text.contains("healthy"), "{text}");
+        assert!(text.contains("2 resets"), "{text}");
         assert!(text.contains("sample fresh"), "{text}");
     }
 
     #[test]
-    fn quota_status_static_narrow_rows_preserve_reset_and_sample_semantics() {
+    fn quota_status_static_narrow_rows_preserve_reset_credits_and_sample_semantics() {
         let text = render_quota_static_capture(quota_view_model(), 48, false);
 
-        assert!(text.contains("healthy"), "{text}");
+        assert!(text.contains("2 resets"), "{text}");
         assert!(text.contains("sample fresh"), "{text}");
     }
 
@@ -1409,6 +1398,7 @@ mod tests {
                 account: "ssdev".to_owned(),
                 status: "[usable]".to_owned(),
                 active_clients: "1 client".to_owned(),
+                reset_credits: "2 resets available".to_owned(),
                 reason: "safest quota".to_owned(),
                 weekly_window: "weekly █████ 83%".to_owned(),
                 burn_meter: "legacy-meter-sentinel".to_owned(),
@@ -1613,6 +1603,7 @@ mod tests {
                 account: "ssdev".to_owned(),
                 status: "[usable]".to_owned(),
                 active_clients: "1 client".to_owned(),
+                reset_credits: "2 resets available".to_owned(),
                 reason: "safest quota".to_owned(),
                 weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
                 burn_meter: "▰▱▱▱".to_owned(),
@@ -1658,6 +1649,7 @@ mod tests {
                     account: "alpha".to_owned(),
                     status: "[usable]".to_owned(),
                     active_clients: "1 client".to_owned(),
+                    reset_credits: "2 resets available".to_owned(),
                     reason: "alpha detail".to_owned(),
                     weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
                     burn_meter: "▰▱▱▱".to_owned(),
@@ -1671,6 +1663,7 @@ mod tests {
                     account: "beta".to_owned(),
                     status: "[usable]".to_owned(),
                     active_clients: "0 clients".to_owned(),
+                    reset_credits: "2 resets available".to_owned(),
                     reason: "beta detail".to_owned(),
                     weekly_window: "weekly ████ 75% left, reset 6d".to_owned(),
                     burn_meter: "▰▰▱▱".to_owned(),
@@ -1695,6 +1688,7 @@ mod tests {
                 account,
                 status: "[usable]".to_owned(),
                 active_clients: format!("{index} clients"),
+                reset_credits: "2 resets available".to_owned(),
                 reason: format!("account {index:02} detail"),
                 weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
                 burn_meter: "▰▱▱▱".to_owned(),
@@ -1723,14 +1717,14 @@ mod tests {
             row.selected = false;
             row.status = "[blocked]".to_owned();
             row.reason = "quota ineligible".to_owned();
-            row.weekly_window = "weekly ░░░░░░░░░░ 0% left, empty".to_owned();
+            row.weekly_window = "weekly ░░░░░░░░░░ 0% left, reset 7d".to_owned();
             row.reset_pace = ResetPaceViewModel::default();
             row.details.status = "[blocked]".to_owned();
             row.details.reason = "quota ineligible".to_owned();
-            row.details.weekly_window = "░░░░░░░░░░ 0% left, empty".to_owned();
+            row.details.weekly_window = "░░░░░░░░░░ 0% left, reset 7d".to_owned();
             row.details.reset_pace = ResetPaceViewModel::default();
             row.details.total_rate = "rate unknown".to_owned();
-            row.details.connection_rate = "connection rate unknown".to_owned();
+            row.details.connection_rate = "not measured (unknown)".to_owned();
             row.details.guards = "5h 100% / weekly 100%".to_owned();
             row.details.note = "quota ineligible".to_owned();
         }
@@ -1863,6 +1857,7 @@ mod tests {
             account: account.to_owned(),
             status: "[usable]".to_owned(),
             active_clients: "0 clients".to_owned(),
+            reset_credits: "2 resets available".to_owned(),
             reason: semantic_label.to_owned(),
             weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
             burn_meter: String::new(),

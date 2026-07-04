@@ -1752,9 +1752,18 @@ fn post_exhaustion_assessment_has_safe_known_fresh_alternative(
             account.account_id() == account_id
                 && account.freshness() == QuotaEvidenceFreshness::Fresh
                 && matches!(
-                    (selected_pool, account.availability()),
-                    (SelectedPool::Usable, AccountAvailability::Usable)
-                        | (SelectedPool::Reserve, AccountAvailability::Reserve)
+                    (
+                        selected_pool,
+                        account.availability(),
+                        account.quota_evidence_reason()
+                    ),
+                    (SelectedPool::Usable, AccountAvailability::Usable, _)
+                        | (SelectedPool::Reserve, AccountAvailability::Reserve, _)
+                        | (
+                            SelectedPool::LastResort,
+                            AccountAvailability::Blocked,
+                            codex_router_selection::burn_down::QuotaEvidenceReason::ShortWindowGuard
+                        )
                 )
         })
     });
@@ -2562,6 +2571,112 @@ mod tests {
             holds.get("responses").map(|hold| hold.account_id.as_str()),
             Some(strong_account_id.as_str())
         );
+    }
+
+    #[test]
+    fn last_resort_short_window_guard_is_selected_when_no_better_candidate_exists() {
+        let (assessment, guarded_account_id) = last_resort_short_window_guard_assessment();
+        let mut holds = HashMap::new();
+        let mut weighted_selector =
+            codex_router_selection::weighted_deficit::WeightedDeficitSelector::default();
+
+        let selected = super::select_from_burn_down_assessment(
+            "responses",
+            &assessment,
+            &mut weighted_selector,
+            &mut holds,
+            120,
+            10_000,
+        )
+        .unwrap_or_else(|error| panic!("last-resort guarded selection should succeed: {error}"));
+
+        assert_eq!(selected.account_id(), &guarded_account_id);
+        assert_eq!(
+            selected.selection_reason(),
+            "preferred_last_resort_short_window_guard"
+        );
+    }
+
+    #[test]
+    fn post_exhaustion_alternative_allows_last_resort_short_window_guard() {
+        let (assessment, _guarded_account_id) = last_resort_short_window_guard_assessment();
+
+        assert_eq!(
+            super::post_exhaustion_assessment_has_safe_known_fresh_alternative(&assessment),
+            Ok(true)
+        );
+    }
+
+    fn last_resort_short_window_guard_assessment() -> (
+        codex_router_selection::burn_down::BurnDownRouteBandAssessmentResult,
+        AccountId,
+    ) {
+        let guarded_account_id = account_id("acct_guarded");
+        let empty_account_id = account_id("acct_empty");
+        let ineligible_account_id = account_id("acct_ineligible");
+        let account_inputs = vec![
+            codex_router_selection::burn_down::BurnDownAccountInput::new(
+                guarded_account_id.clone(),
+                "guarded",
+                vec![
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(2)
+                    .with_reset_unix_seconds(18_000)
+                    .with_per_connection_burn_basis_points_per_hour(100),
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(80)
+                    .with_reset_unix_seconds(4 * 86_400)
+                    .with_per_connection_burn_basis_points_per_hour(20),
+                ],
+            ),
+            codex_router_selection::burn_down::BurnDownAccountInput::new(
+                empty_account_id,
+                "empty",
+                vec![
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(0)
+                    .with_reset_unix_seconds(18_000),
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                    )
+                    .with_remaining_headroom(0)
+                    .with_reset_unix_seconds(4 * 86_400),
+                ],
+            ),
+            codex_router_selection::burn_down::BurnDownAccountInput::new(
+                ineligible_account_id,
+                "ineligible",
+                vec![
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Ineligible,
+                    ),
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Ineligible,
+                    ),
+                ],
+            ),
+        ];
+        let assessment = codex_router_selection::burn_down::assess_route_band(
+            codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput::new(
+                codex_router_core::routes::RouteBand::Responses,
+                10_000,
+                account_inputs,
+            ),
+        );
+
+        (assessment, guarded_account_id)
     }
 
     fn account_id(value: &str) -> AccountId {
