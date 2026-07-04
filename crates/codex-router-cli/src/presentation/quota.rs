@@ -2,6 +2,7 @@
 
 use std::io;
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::terminal;
@@ -13,12 +14,19 @@ const SIDECAR_QUOTA_WIDTH: usize = 160;
 const NARROW_QUOTA_WIDTH: usize = MIN_QUOTA_WIDTH;
 const DETAIL_LABEL_WIDTH: usize = 10;
 const LIVE_QUOTA_WIDTH_POLL_INTERVAL: Duration = Duration::from_millis(80);
+const LIVE_QUOTA_STATUS_RELOAD_INTERVAL: Duration = Duration::from_secs(60);
+const LIVE_QUOTA_STATUS_SPINNER_INTERVAL: Duration = Duration::from_millis(120);
+const QUOTA_STATUS_SPINNER_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(crate) type QuotaStatusViewModelLoader =
+    Arc<dyn Fn() -> Option<QuotaStatusViewModel> + Send + Sync>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct QuotaStatusViewModel {
     pub(crate) width: usize,
     pub(crate) route_line: String,
     pub(crate) why_line: String,
+    pub(crate) serving_clients: Option<u32>,
     pub(crate) rows: Vec<QuotaStatusAccountViewModel>,
     pub(crate) selected: Option<QuotaSelectedAccountViewModel>,
 }
@@ -125,6 +133,7 @@ pub(crate) struct QuotaSelectedAccountViewModel {
     pub(crate) burn_pace: String,
     pub(crate) sample_metadata: SampleMetadata,
     pub(crate) reset_pace: ResetPaceViewModel,
+    pub(crate) short_reset_pace: ResetPaceViewModel,
     pub(crate) total_rate: String,
     pub(crate) connection_rate: String,
     pub(crate) active_clients: String,
@@ -177,7 +186,10 @@ fn quota_static_render_height(view_model: &QuotaStatusViewModel, width: usize) -
     root_border_height + title_and_summary_height + body_height
 }
 
-pub(crate) fn run_quota_status_view(view_model: QuotaStatusViewModel) -> io::Result<()> {
+pub(crate) fn run_quota_status_view(
+    view_model: QuotaStatusViewModel,
+    reload_view_model: Option<QuotaStatusViewModelLoader>,
+) -> io::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -187,6 +199,9 @@ pub(crate) fn run_quota_status_view(view_model: QuotaStatusViewModel) -> io::Res
                 view_model: view_model,
                 width: 0usize,
                 height: 0usize,
+                reload_view_model,
+                reload_interval: LIVE_QUOTA_STATUS_RELOAD_INTERVAL,
+                spinner_interval: LIVE_QUOTA_STATUS_SPINNER_INTERVAL,
             )
         }
         .render_loop()
@@ -199,6 +214,9 @@ struct QuotaStatusComponentProps {
     view_model: QuotaStatusViewModel,
     width: usize,
     height: usize,
+    reload_view_model: Option<QuotaStatusViewModelLoader>,
+    reload_interval: Duration,
+    spinner_interval: Duration,
 }
 
 #[component]
@@ -210,7 +228,8 @@ fn QuotaStatusComponent(
     let (terminal_width, terminal_height) = hooks.use_terminal_size();
     let live_terminal_width = props.width == 0;
     let live_terminal_height = props.height == 0 && live_terminal_width;
-    let row_count = props.view_model.rows.len();
+    let view_model = hooks.use_state(|| props.view_model.clone());
+    let row_count = view_model.read().rows.len();
     let initial_focused_row_index = props
         .view_model
         .rows
@@ -237,6 +256,7 @@ fn QuotaStatusComponent(
         }
     });
     let focused_row_index = hooks.use_state(|| initial_focused_row_index);
+    let spinner_tick = hooks.use_state(|| 0usize);
     let mut should_exit = hooks.use_state(|| false);
     hooks.use_terminal_events({
         let mut observed_width = observed_width;
@@ -289,6 +309,47 @@ fn QuotaStatusComponent(
         }
     });
     hooks.use_future({
+        let mut view_model = view_model;
+        let reload_view_model = props.reload_view_model.clone();
+        let reload_interval = if props.reload_interval.is_zero() {
+            LIVE_QUOTA_STATUS_RELOAD_INTERVAL
+        } else {
+            props.reload_interval
+        };
+        async move {
+            let Some(reload_view_model) = reload_view_model else {
+                return;
+            };
+            let mut interval = tokio::time::interval(reload_interval);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let reload_view_model = reload_view_model.clone();
+                if let Ok(Some(next_view_model)) =
+                    tokio::task::spawn_blocking(move || reload_view_model()).await
+                {
+                    view_model.set(next_view_model);
+                }
+            }
+        }
+    });
+    hooks.use_future({
+        let mut spinner_tick = spinner_tick;
+        let spinner_interval = if props.spinner_interval.is_zero() {
+            LIVE_QUOTA_STATUS_SPINNER_INTERVAL
+        } else {
+            props.spinner_interval
+        };
+        async move {
+            let mut interval = tokio::time::interval(spinner_interval);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                spinner_tick += 1;
+            }
+        }
+    });
+    hooks.use_future({
         let mut observed_width = observed_width;
         async move {
             if !live_terminal_width {
@@ -322,10 +383,11 @@ fn QuotaStatusComponent(
         props.height.max(1)
     };
     let content_width = width.saturating_sub(4).max(44);
+    let view_model = view_model.read();
     let focused_row_index_value = focused_row_index_value(focused_row_index.get(), row_count);
     let focused_details = focused_row_index_value
-        .and_then(|index| props.view_model.rows.get(index).map(|row| &row.details))
-        .or(props.view_model.selected.as_ref());
+        .and_then(|index| view_model.rows.get(index).map(|row| &row.details))
+        .or(view_model.selected.as_ref());
     let body_budget = quota_body_budget(height);
     let details_content_height = selected_detail_height(focused_details.is_some());
     let sidecar = width >= SIDECAR_QUOTA_WIDTH;
@@ -374,7 +436,7 @@ fn QuotaStatusComponent(
         let details_width = content_width.saturating_sub(list_width + 2).max(34);
         element! {
             View(width: 100pct, height: body_height as u32) {
-                #(render_account_list(&props.view_model.rows, list_width, list_height, focused_row_index_value, visible_account_budget))
+                #(render_account_list(&view_model.rows, list_width, list_height, focused_row_index_value, visible_account_budget))
                 View(width: 2) { Text(content: "") }
                 #(render_selected_panel(focused_details, details_width, details_height))
             }
@@ -383,14 +445,14 @@ fn QuotaStatusComponent(
     } else if show_stacked_details {
         element! {
             View(width: content_width as u32, flex_direction: FlexDirection::Column) {
-                #(render_account_list(&props.view_model.rows, content_width, list_height, focused_row_index_value, visible_account_budget))
+                #(render_account_list(&view_model.rows, content_width, list_height, focused_row_index_value, visible_account_budget))
                 #(render_selected_panel(focused_details, content_width, stacked_details_height))
             }
         }
         .into_any()
     } else {
         render_account_list(
-            &props.view_model.rows,
+            &view_model.rows,
             content_width,
             list_height,
             focused_row_index_value,
@@ -411,12 +473,88 @@ fn QuotaStatusComponent(
             padding_bottom: 0,
             flex_direction: FlexDirection::Column,
         ) {
-            Text(content: "Quota status", color: Color::Cyan, weight: Weight::Bold)
-            Text(content: fit_line(&props.view_model.route_line, content_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-            Text(content: fit_line(&props.view_model.why_line, content_width), color: Color::White, wrap: TextWrap::NoWrap)
+            Text(content: quota_title_line(&view_model, content_width, spinner_tick.get()), color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            Text(content: fit_line(&view_model.route_line, content_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            Text(content: fit_line(&view_model.why_line, content_width), color: Color::White, wrap: TextWrap::NoWrap)
             #(body)
         }
     }
+}
+
+fn quota_title_line(
+    view_model: &QuotaStatusViewModel,
+    width: usize,
+    spinner_tick: usize,
+) -> String {
+    let title = "Quota status";
+    let status = quota_title_status(view_model, spinner_tick);
+    let title_width = title.chars().count();
+    let status_width = status.chars().count();
+    if title_width + status_width + 1 > width {
+        return fit_line(title, width);
+    }
+    format!(
+        "{title}{}{status}",
+        " ".repeat(width - title_width - status_width)
+    )
+}
+
+fn quota_title_status(view_model: &QuotaStatusViewModel, spinner_tick: usize) -> String {
+    let spinner = quota_spinner_tick(spinner_tick);
+    let freshness = quota_title_freshness(view_model);
+    if let Some(serving_clients) = view_model.serving_clients.filter(|clients| *clients > 0) {
+        return format!(
+            "{spinner} serving {}  {freshness}",
+            serving_client_count_label(serving_clients)
+        );
+    }
+    format!("{spinner} {freshness}")
+}
+
+fn quota_title_freshness(view_model: &QuotaStatusViewModel) -> String {
+    let metadata = view_model
+        .selected
+        .as_ref()
+        .map(|selected| &selected.sample_metadata)
+        .or_else(|| {
+            view_model
+                .rows
+                .iter()
+                .find(|row| row.selected)
+                .map(|row| &row.sample_metadata)
+        });
+    match metadata.map(|metadata| metadata.confidence) {
+        Some(SampleConfidence::Fresh) => {
+            let age = metadata
+                .map(|metadata| metadata.age_label.as_str())
+                .filter(|age| !age.is_empty())
+                .unwrap_or("unknown");
+            format!("fresh {age} ago")
+        }
+        Some(SampleConfidence::Stale) => {
+            let age = metadata
+                .map(|metadata| metadata.age_label.as_str())
+                .filter(|age| !age.is_empty())
+                .unwrap_or("unknown");
+            format!("stale {age} ago")
+        }
+        Some(SampleConfidence::Unknown) | None => "unknown".to_owned(),
+    }
+}
+
+fn serving_client_count_label(serving_clients: u32) -> String {
+    if serving_clients == 1 {
+        "1 client".to_owned()
+    } else {
+        format!("{serving_clients} clients")
+    }
+}
+
+fn quota_spinner_tick(tick: usize) -> &'static str {
+    QUOTA_STATUS_SPINNER_TICKS
+        .get(tick % QUOTA_STATUS_SPINNER_TICKS.len())
+        .copied()
+        .unwrap_or("⠋")
 }
 
 fn quota_status_height(height: usize) -> usize {
@@ -455,7 +593,15 @@ fn quota_account_list_height(
 }
 
 fn selected_detail_height(has_selected_details: bool) -> usize {
-    if has_selected_details { 20 } else { 3 }
+    if has_selected_details {
+        selected_detail_inner_height(true) + 2
+    } else {
+        3
+    }
+}
+
+fn selected_detail_inner_height(has_activity_gap: bool) -> usize {
+    if has_activity_gap { 21 } else { 20 }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -669,8 +815,11 @@ fn render_selected_panel(
     width: usize,
     height: usize,
 ) -> AnyElement<'static> {
+    let has_activity_gap = height.saturating_sub(2) >= selected_detail_inner_height(true);
     let details = selected
-        .map(|selected| render_selected_details(selected, width.saturating_sub(4)))
+        .map(|selected| {
+            render_selected_details(selected, width.saturating_sub(4), has_activity_gap)
+        })
         .unwrap_or_else(|| {
             element! {
                 Text(content: "No selectable account", color: Color::Grey)
@@ -700,7 +849,13 @@ fn render_selected_panel(
 fn render_selected_details(
     selected: &QuotaSelectedAccountViewModel,
     detail_width: usize,
+    has_activity_gap: bool,
 ) -> AnyElement<'static> {
+    let activity_gap = if has_activity_gap {
+        quota_gap()
+    } else {
+        element! { View(width: 0) {} }.into_any()
+    };
     element! {
         View(
             width: detail_width as u32,
@@ -721,6 +876,9 @@ fn render_selected_details(
             #(detail_line("rate", &selected.total_rate, detail_width, Color::White))
             #(detail_line("conn", &selected.connection_rate, detail_width, Color::White))
             #(quota_gap())
+            Text(content: "5h pace", color: Color::Cyan, weight: Weight::Bold)
+            #(reset_pace_detail_line("current", &selected.short_reset_pace, detail_width))
+            #(activity_gap)
             Text(content: "Activity", color: Color::Cyan, weight: Weight::Bold)
             #(detail_line("clients", &selected.active_clients, detail_width, Color::White))
             #(detail_line("guards", &selected.guards, detail_width, Color::White))
@@ -823,12 +981,17 @@ fn reset_pace_ansi_ranges(line: &str) -> Vec<(usize, usize, &'static str)> {
         (" reset pace healthy", "\u{1b}[38;5;10m"),
         (" reset pace under", "\u{1b}[38;5;11m"),
         (" reset pace over", "\u{1b}[38;5;9m"),
+        ("Exhausted", "\u{1b}[38;5;9m"),
     ] {
         let mut cursor = 0;
         while let Some(relative_index) = line.get(cursor..).and_then(|suffix| suffix.find(needle)) {
             let phrase_start = cursor + relative_index;
             let end = phrase_start + needle.len();
-            let start = reset_pace_segment_start(line, phrase_start);
+            let start = if needle == "Exhausted" {
+                phrase_start
+            } else {
+                reset_pace_segment_start(line, phrase_start)
+            };
             ranges.push((start, end, color));
             cursor = end;
         }
@@ -870,6 +1033,9 @@ fn reset_pace_summary_for_width(reset_pace: &ResetPaceViewModel, width: usize) -
         return fit_line(&summary, width);
     }
     if let Some(impact_label) = &reset_pace.impact_label {
+        if is_depleted_quota_label(impact_label) {
+            return fit_line(impact_label, width);
+        }
         return fit_line(impact_label, width);
     }
     fit_line(
@@ -890,6 +1056,9 @@ fn reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {
         );
     }
     if let Some(impact_label) = &reset_pace.impact_label {
+        if is_depleted_quota_label(impact_label) {
+            return impact_label.clone();
+        }
         return format!("{}  {}", reset_pace_meter(reset_pace), impact_label);
     }
     format!(
@@ -898,6 +1067,10 @@ fn reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {
         reset_pace.multiple_label,
         reset_pace.semantic_label
     )
+}
+
+fn is_depleted_quota_label(value: &str) -> bool {
+    value == "Exhausted"
 }
 
 fn reset_pace_meter(reset_pace: &ResetPaceViewModel) -> String {
@@ -947,6 +1120,9 @@ fn fit_line(value: &str, width: usize) -> String {
 mod tests {
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     use futures_util::StreamExt;
     use iocraft::prelude::*;
@@ -1201,6 +1377,7 @@ mod tests {
         let natural_height = quota_static_render_height(
             &QuotaStatusViewModel {
                 width: 120,
+                serving_clients: None,
                 ..view_model.clone()
             },
             120,
@@ -1242,6 +1419,82 @@ mod tests {
 
         assert!(text.contains("2 resets"), "{text}");
         assert!(text.contains("sample fresh"), "{text}");
+    }
+
+    #[test]
+    fn quota_status_title_right_aligns_live_freshness() {
+        let text = render_quota_static_capture(quota_view_model(), 120, false);
+        let title_line = text
+            .lines()
+            .find(|line| line.contains("Quota status"))
+            .unwrap_or_else(|| panic!("quota title line should render:\n{text}"));
+
+        assert!(title_line.contains("Quota status"), "{text}");
+        assert!(title_line.contains("fresh 14s ago"), "{text}");
+        assert!(
+            !title_line.contains("fresh ok") && !title_line.contains("sample fresh"),
+            "title should show compact freshness, not refresh-status or sample copy:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quota_status_title_shows_serving_spinner_when_active_clients_exist() {
+        let mut view_model = quota_view_model();
+        view_model.serving_clients = Some(1);
+
+        let text = render_quota_static_capture(view_model, 120, false);
+        let title_line = text
+            .lines()
+            .find(|line| line.contains("Quota status"))
+            .unwrap_or_else(|| panic!("quota title line should render:\n{text}"));
+
+        assert!(title_line.contains("serving 1 client"), "{text}");
+        assert!(title_line.contains("fresh 14s ago"), "{text}");
+    }
+
+    #[test]
+    fn quota_status_selected_panel_renders_5h_pace_between_reset_pace_and_activity() {
+        let text = render_quota_static_capture(quota_view_model(), 160, false);
+        let reset_pace_index = text
+            .find("Reset pace")
+            .unwrap_or_else(|| panic!("selected panel should render reset pace:\n{text}"));
+        let short_pace_index = text
+            .find("5h pace")
+            .unwrap_or_else(|| panic!("selected panel should render separate 5h pace:\n{text}"));
+        let activity_index = text
+            .find("Activity")
+            .unwrap_or_else(|| panic!("selected panel should render activity:\n{text}"));
+
+        assert!(
+            reset_pace_index < short_pace_index && short_pace_index < activity_index,
+            "5h pace should sit below reset pace and above activity:\n{text}"
+        );
+        assert!(
+            text.contains("current   ▱▱▱▱▱▱▱│▰▰▰▰▰▰▰  runs out 2d 16h"),
+            "5h pace should render only the current runout line:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quota_status_selected_panel_spaces_5h_pace_from_activity_when_height_allows() {
+        let text = render_quota_static_capture(quota_view_model(), 160, false);
+        let lines = text.lines().collect::<Vec<_>>();
+        let short_pace_line_index = lines
+            .iter()
+            .position(|line| line.contains("runs out 2d 16h"))
+            .unwrap_or_else(|| panic!("5h pace line should render:\n{text}"));
+        let spacer_line = lines
+            .get(short_pace_line_index + 1)
+            .unwrap_or_else(|| panic!("5h pace should have a following line:\n{text}"));
+        let activity_line = lines
+            .get(short_pace_line_index + 2)
+            .unwrap_or_else(|| panic!("activity should follow 5h pace spacer:\n{text}"));
+
+        assert!(
+            spacer_line.contains("│                                                            │"),
+            "5h pace should have a blank spacer before Activity when height allows:\n{text}"
+        );
+        assert!(activity_line.contains("Activity"), "{text}");
     }
 
     #[test]
@@ -1310,6 +1563,73 @@ mod tests {
         assert!(
             text.contains("beta    [usable]    beta detail"),
             "down arrow should show details for the next quota account:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_status_reloads_view_model_on_timer() {
+        let reload_count = Arc::new(AtomicUsize::new(0));
+        let reload_view_model: QuotaStatusViewModelLoader = {
+            let reload_count = Arc::clone(&reload_count);
+            Arc::new(move || {
+                reload_count.fetch_add(1, Ordering::SeqCst);
+                let mut view_model = quota_view_model();
+                view_model.route_line = "responses -> beta    [preferred]".to_owned();
+                let stale_sample = SampleMetadata {
+                    confidence: SampleConfidence::Stale,
+                    age_label: "15m 1s".to_owned(),
+                    age_seconds: Some(901),
+                    semantic_label: "sample stale",
+                };
+                view_model.rows[0].account = "beta".to_owned();
+                view_model.rows[0].sample_metadata = stale_sample.clone();
+                view_model.rows[0].details.account = "beta".to_owned();
+                view_model.rows[0].details.sample_metadata = stale_sample;
+                view_model.selected = Some(view_model.rows[0].details.clone());
+                Some(view_model)
+            })
+        };
+        let exit_events = futures_util::stream::unfold(false, |sent| async move {
+            if sent {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            Some((
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+                true,
+            ))
+        });
+
+        let frames = element! {
+            QuotaStatusComponent(
+                view_model: quota_view_model(),
+                width: 120usize,
+                height: 48usize,
+                reload_view_model,
+                reload_interval: Duration::from_millis(10),
+                spinner_interval: Duration::from_secs(60),
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(exit_events))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            reload_count.load(Ordering::SeqCst) > 0,
+            "quota status should invoke the reload callback"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("responses -> beta    [preferred]")),
+            "quota status should render the reloaded route line: {frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("stale 15m 1s ago")),
+            "quota status title should render reloaded stale freshness: {frames:?}"
         );
     }
 
@@ -1391,8 +1711,9 @@ mod tests {
         };
         let view_model = QuotaStatusViewModel {
             width: 120,
-            route_line: "responses -> ssdev    [usable]    refreshed ok".to_owned(),
+            route_line: "responses -> ssdev    [preferred]".to_owned(),
             why_line: "why: safest quota".to_owned(),
+            serving_clients: None,
             rows: vec![QuotaStatusAccountViewModel {
                 selected: true,
                 account: "ssdev".to_owned(),
@@ -1596,8 +1917,9 @@ mod tests {
         let selected_details = selected_account_details("ssdev", "safest quota");
         QuotaStatusViewModel {
             width: 100,
-            route_line: "responses -> ssdev    [usable]    refreshed ok".to_owned(),
+            route_line: "responses -> ssdev    [preferred]".to_owned(),
             why_line: "why: safest quota".to_owned(),
+            serving_clients: None,
             rows: vec![QuotaStatusAccountViewModel {
                 selected: true,
                 account: "ssdev".to_owned(),
@@ -1641,8 +1963,9 @@ mod tests {
         let beta_details = selected_account_details("beta", "beta detail");
         QuotaStatusViewModel {
             width: 120,
-            route_line: "responses -> alpha    [usable]    refreshed ok".to_owned(),
+            route_line: "responses -> alpha    [preferred]".to_owned(),
             why_line: "why: alpha detail".to_owned(),
+            serving_clients: None,
             rows: vec![
                 QuotaStatusAccountViewModel {
                     selected: true,
@@ -1700,8 +2023,9 @@ mod tests {
         }
         QuotaStatusViewModel {
             width: 160,
-            route_line: "responses -> acct00    [usable]    refreshed ok".to_owned(),
+            route_line: "responses -> acct00    [preferred]".to_owned(),
             why_line: "why: primary".to_owned(),
+            serving_clients: None,
             rows,
             selected: Some(selected_details),
         }
@@ -1762,6 +2086,22 @@ mod tests {
                 center_marker: '│',
                 unavailable_reason: None,
             },
+            short_reset_pace: ResetPaceViewModel {
+                state: ResetPaceState::OverBurning,
+                multiple_label: "2.50x reset pace".to_owned(),
+                impact_label: Some("runs out 2d 16h".to_owned()),
+                semantic_label: "over",
+                meter_left_segments: ResetPaceMeterSegments {
+                    filled: 0,
+                    empty: 7,
+                },
+                meter_right_segments: ResetPaceMeterSegments {
+                    filled: 7,
+                    empty: 0,
+                },
+                center_marker: '│',
+                unavailable_reason: None,
+            },
             total_rate: "0.10%/h".to_owned(),
             connection_rate: "0.05%/h/conn".to_owned(),
             active_clients: "1 client".to_owned(),
@@ -1775,8 +2115,9 @@ mod tests {
         let healthy_details = selected_account_details("healthy", "healthy");
         QuotaStatusViewModel {
             width: 160,
-            route_line: "responses -> healthy    [usable]    refreshed ok".to_owned(),
+            route_line: "responses -> healthy    [preferred]".to_owned(),
             why_line: "why: reset pace colors".to_owned(),
+            serving_clients: None,
             rows: vec![
                 quota_state_color_row("healthy", true, ResetPaceState::Healthy, "1.00x reset pace"),
                 quota_state_color_row(

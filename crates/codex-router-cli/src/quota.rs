@@ -74,6 +74,7 @@ use crate::credential_runtime::CliCredentialResolverOpenError;
 use crate::presentation::quota::QuotaSelectedAccountViewModel;
 use crate::presentation::quota::QuotaStatusAccountViewModel;
 use crate::presentation::quota::QuotaStatusViewModel;
+use crate::presentation::quota::QuotaStatusViewModelLoader;
 use crate::presentation::quota::ResetPaceMeterSegments;
 use crate::presentation::quota::ResetPaceState;
 use crate::presentation::quota::ResetPaceViewModel;
@@ -90,6 +91,7 @@ const QUOTA_STATUS_SAMPLE_FRESH_SECONDS: u64 = 900;
 const RESET_PACE_RUNOUT_LABEL_THRESHOLD_HUNDREDTHS: u32 = 200;
 const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
 const QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
+const DEPLETED_QUOTA_LABEL: &str = "Exhausted";
 
 /// Quota CLI command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1251,7 +1253,14 @@ fn render_quota_status_once(
             let rows = report.rows();
             let width = stdout_terminal_width.unwrap_or(100).max(40);
             let view_model = quota_status_view_model(&report, rows, width);
-            run_quota_status_view(view_model).map_err(QuotaCommandError::Stdout)
+            let reload_view_model = quota_status_view_model_loader(
+                router_root.to_path_buf(),
+                all_limits,
+                unicode_bars,
+                width,
+            );
+            run_quota_status_view(view_model, Some(reload_view_model))
+                .map_err(QuotaCommandError::Stdout)
         }
         QuotaStatusFormat::Table => write_quota_table_with_style(
             stdout,
@@ -1262,6 +1271,24 @@ fn render_quota_status_once(
         QuotaStatusFormat::Plain => write_quota_plain(stdout, &report),
         QuotaStatusFormat::Json => write_quota_json(stdout, &report),
     }
+}
+
+fn quota_status_view_model_loader(
+    router_root: PathBuf,
+    all_limits: bool,
+    unicode_bars: bool,
+    width: usize,
+) -> QuotaStatusViewModelLoader {
+    Arc::new(move || {
+        let report = load_quota_status_report(
+            &router_root,
+            all_limits,
+            current_unix_seconds(),
+            unicode_bars,
+        )
+        .ok()?;
+        Some(quota_status_view_model(&report, report.rows(), width))
+    })
 }
 
 fn effective_human_quota_format(
@@ -1548,13 +1575,13 @@ fn quota_status_view_model(
     QuotaStatusViewModel {
         width,
         route_line: format!(
-            "{} -> {}    {}    {}",
+            "{} -> {}    {}",
             report.route_band,
             selected_account_label(rows),
             selected_account_badge(rows),
-            refresh_summary(rows)
         ),
         why_line: format!("why: {}", selector_summary(rows)),
+        serving_clients: quota_status_serving_clients(rows),
         rows: rows
             .iter()
             .map(|row| QuotaStatusAccountViewModel {
@@ -1590,6 +1617,14 @@ fn quota_status_view_model(
     }
 }
 
+fn quota_status_serving_clients(rows: &[QuotaStatusRow]) -> Option<u32> {
+    let total = rows
+        .iter()
+        .filter_map(|row| row.active_clients_value)
+        .fold(0_u32, u32::saturating_add);
+    (total > 0).then_some(total)
+}
+
 fn quota_selected_account_view_model(
     report: &QuotaStatusReport,
     row: &QuotaStatusRow,
@@ -1621,6 +1656,14 @@ fn quota_selected_account_view_model(
             report.now_unix_seconds,
         ),
         reset_pace: reset_pace_view_model_from_snapshot(row.weekly_pace, report.now_unix_seconds),
+        short_reset_pace: reset_pace_view_model_from_snapshot(
+            quota_display_pace_snapshot(
+                &row.windows,
+                V1_SHORT_WINDOW_SECONDS,
+                report.now_unix_seconds,
+            ),
+            report.now_unix_seconds,
+        ),
         total_rate: quota_total_rate_summary(row.weekly_pace),
         connection_rate: quota_connection_rate_summary(row.weekly_pace),
         active_clients: active_clients_label(row),
@@ -1721,18 +1764,6 @@ fn selector_summary(rows: &[QuotaStatusRow]) -> String {
         return "no usable accounts".to_owned();
     };
     selected_row.routing.replace('\n', " ")
-}
-
-fn refresh_summary(rows: &[QuotaStatusRow]) -> String {
-    let Some(selected_row) = rows.iter().find(|row| row.preferred_next) else {
-        return "no selectable account".to_owned();
-    };
-    let updated = selected_row.updated.replace('\n', ", ");
-    if updated.contains("failed") || updated.contains("needs refresh") {
-        format!("refresh {updated}")
-    } else {
-        format!("fresh {updated}")
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2382,21 +2413,43 @@ fn quota_pace_snapshot(
     projected_weekly_window: Option<&QuotaWindowFact>,
     now_unix_seconds: u64,
 ) -> Option<QuotaPaceSnapshot> {
-    let weekly_window = windows
+    quota_pace_snapshot_for_window(
+        windows,
+        V1_WEEKLY_WINDOW_SECONDS,
+        projected_weekly_window,
+        now_unix_seconds,
+    )
+}
+
+fn quota_display_pace_snapshot(
+    windows: &[DisplayQuotaWindow],
+    window_seconds: u64,
+    now_unix_seconds: u64,
+) -> Option<QuotaPaceSnapshot> {
+    quota_pace_snapshot_for_window(windows, window_seconds, None, now_unix_seconds)
+}
+
+fn quota_pace_snapshot_for_window(
+    windows: &[DisplayQuotaWindow],
+    window_seconds: u64,
+    projected_window: Option<&QuotaWindowFact>,
+    now_unix_seconds: u64,
+) -> Option<QuotaPaceSnapshot> {
+    let display_window = windows
         .iter()
-        .find(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS)?;
+        .find(|window| window.window_seconds == window_seconds)?;
     let projected_aggregate_rate =
-        projected_weekly_window.and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour);
-    let display_aggregate_rate = weekly_window
+        projected_window.and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour);
+    let display_aggregate_rate = display_window
         .run_rate_estimate
         .burn_rate_basis_points_per_hour();
     let aggregate_rate = projected_aggregate_rate.or(display_aggregate_rate);
-    let projected_candidate_rate = projected_weekly_window
-        .and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour);
+    let projected_candidate_rate =
+        projected_window.and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour);
     let candidate_rate = projected_candidate_rate.or(aggregate_rate);
     let projected_exhaustion_from_projection =
-        projected_weekly_window.and_then(QuotaWindowFact::projected_exhaustion_unix_seconds);
-    let display_exhaustion = weekly_window
+        projected_window.and_then(QuotaWindowFact::projected_exhaustion_unix_seconds);
+    let display_exhaustion = display_window
         .run_rate_estimate
         .projected_exhaustion_unix_seconds(now_unix_seconds);
     let projected_exhaustion = projected_exhaustion_from_projection.or(display_exhaustion);
@@ -2404,20 +2457,20 @@ fn quota_pace_snapshot(
         || projected_candidate_rate.is_some()
         || projected_exhaustion_from_projection.is_some();
     let confidence = if projection_has_burn_estimate {
-        projected_weekly_window.map_or(
-            weekly_window.run_rate_estimate.confidence(),
+        projected_window.map_or(
+            display_window.run_rate_estimate.confidence(),
             QuotaWindowFact::burn_rate_confidence,
         )
     } else {
-        weekly_window.run_rate_estimate.confidence()
+        display_window.run_rate_estimate.confidence()
     };
     Some(QuotaPaceSnapshot {
-        remaining_headroom: weekly_window.remaining_headroom,
-        reset_unix_seconds: weekly_window.reset_unix_seconds,
+        remaining_headroom: display_window.remaining_headroom,
+        reset_unix_seconds: display_window.reset_unix_seconds,
         projected_exhaustion_unix_seconds: projected_exhaustion,
         projected_candidate_burn_basis_points_per_hour: candidate_rate,
         aggregate_burn_basis_points_per_hour: aggregate_rate,
-        per_connection_burn_basis_points_per_hour: projected_weekly_window
+        per_connection_burn_basis_points_per_hour: projected_window
             .and_then(QuotaWindowFact::per_connection_burn_basis_points_per_hour),
         confidence,
     })
@@ -2611,7 +2664,7 @@ fn reset_pace_impact_label(
     now_unix_seconds: u64,
 ) -> Option<String> {
     if snapshot.remaining_headroom == 0 && snapshot.reset_unix_seconds.is_some() {
-        return Some("runs out now".to_owned());
+        return Some(DEPLETED_QUOTA_LABEL.to_owned());
     }
     if multiple_hundredths? <= RESET_PACE_RUNOUT_LABEL_THRESHOLD_HUNDREDTHS {
         return None;
@@ -3954,6 +4007,42 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_selected_details_carry_5h_reset_pace_from_short_window() {
+        let mut report = quota_capture_report();
+        let selected_row = report
+            .rows
+            .first_mut()
+            .unwrap_or_else(|| panic!("capture report should include selected row"));
+        let short_window = selected_row
+            .windows
+            .iter_mut()
+            .find(|window| window.window_seconds == V1_SHORT_WINDOW_SECONDS)
+            .unwrap_or_else(|| panic!("selected row should include a short window"));
+        short_window.run_rate_estimate = QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+            QuotaRunRateConfidence::Low,
+            5_000,
+            short_window.remaining_headroom,
+        );
+
+        let view_model = quota_status_view_model(&report, report.rows(), 120);
+        let selected = view_model
+            .selected
+            .as_ref()
+            .unwrap_or_else(|| panic!("quota view model should include selected details"));
+
+        assert_eq!(selected.short_reset_pace.state, ResetPaceState::OverBurning);
+        assert!(
+            selected
+                .short_reset_pace
+                .impact_label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("runs out ")),
+            "5h reset pace should carry its own runout impact: {:?}",
+            selected.short_reset_pace
+        );
+    }
+
+    #[test]
     fn quota_status_width_contract_preserves_layout() {
         let report = quota_capture_report();
 
@@ -3979,7 +4068,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_status_empty_windows_still_show_reset_time() {
+    fn quota_status_empty_windows_keep_weekly_bar_and_show_exhausted_reset_pace() {
         let mut report = blocked_quota_capture_report();
         for row in &mut report.rows {
             for window in &mut row.windows {
@@ -3993,15 +4082,35 @@ mod tests {
 
         assert!(
             text.contains("░░░░░░░░░░ 0% left, reset 7d"),
-            "ineligible depleted quota windows should expose the known reset time:\n{text}"
+            "depleted weekly quota should keep its quota bar and reset hint:\n{text}"
+        );
+        assert!(text.contains("Exhausted"), "{text}");
+        assert!(
+            !text.contains("🅇  Exhausted"),
+            "depleted reset pace should not include the icon marker:\n{text}"
         );
         assert!(
-            !text.contains("0% left, empty"),
-            "0% already communicates depleted quota; the row should not repeat empty:\n{text}"
+            !text.contains("runs out now"),
+            "depleted reset pace should not show old runout copy:\n{text}"
         );
+    }
+
+    #[test]
+    fn quota_status_terminal_color_keeps_exhausted_red() {
+        let report = blocked_quota_capture_report();
+        let mut output = Vec::new();
+
+        must_ok(write_quota_table_with_style(
+            &mut output,
+            &report,
+            Some(120),
+            QuotaTableStyle::TerminalColor,
+        ));
+        let text = must_ok(String::from_utf8(output));
+
         assert!(
-            text.contains("runs out now"),
-            "depleted quota with burn data should show immediate runout instead of burn unavailable:\n{text}"
+            text.contains("\u{1b}[38;5;9mExhausted"),
+            "exhausted quota label should keep the red over-burning color:\n{text:?}"
         );
     }
 
@@ -4084,6 +4193,25 @@ mod tests {
             !text.contains("needs refresh"),
             "stale value-bearing status output should show values and mark sample stale once:\n{text}"
         );
+    }
+
+    #[test]
+    fn quota_status_view_model_route_line_excludes_freshness_summary() {
+        let report = quota_capture_report();
+        let view_model = quota_status_view_model(&report, report.rows(), 120);
+
+        assert_eq!(
+            view_model.route_line, "responses -> ssdev    [preferred]",
+            "route line should identify the selected account without duplicating live freshness"
+        );
+    }
+
+    #[test]
+    fn quota_status_view_model_reports_serving_clients_from_active_mirror() {
+        let report = quota_capture_report();
+        let view_model = quota_status_view_model(&report, report.rows(), 120);
+
+        assert_eq!(view_model.serving_clients, Some(5));
     }
 
     #[test]
