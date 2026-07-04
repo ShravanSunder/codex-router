@@ -54,6 +54,7 @@ tokio-util = { version = "0.7.17", features = ["rt"] }
 tracing = "0.1.44"
 tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "json"] }
+unicode-width = "0.2.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

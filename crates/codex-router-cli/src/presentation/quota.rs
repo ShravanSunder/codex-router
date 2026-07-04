@@ -8,6 +8,7 @@ use crossterm::terminal;
 use iocraft::prelude::*;
 
 const MIN_QUOTA_WIDTH: usize = 48;
+const MIN_RENDER_HEIGHT: usize = 24;
 const SIDECAR_QUOTA_WIDTH: usize = 160;
 const NARROW_QUOTA_WIDTH: usize = MIN_QUOTA_WIDTH;
 const DETAIL_LABEL_WIDTH: usize = 10;
@@ -135,8 +136,9 @@ pub(crate) fn write_quota_status_view(
     ansi: bool,
 ) -> io::Result<()> {
     let width = view_model.width.max(MIN_QUOTA_WIDTH);
+    let height = quota_static_render_height(&view_model, width);
     let mut element = element! {
-        QuotaStatusComponent(view_model: view_model, width: width)
+        QuotaStatusComponent(view_model: view_model, width: width, height: height)
     };
     let canvas = element.render(None);
     if ansi {
@@ -150,6 +152,28 @@ pub(crate) fn write_quota_status_view(
     }
 }
 
+fn quota_static_render_height(view_model: &QuotaStatusViewModel, width: usize) -> usize {
+    let row_count = view_model.rows.len();
+    let focused_row_index = view_model
+        .rows
+        .iter()
+        .position(|row| row.selected)
+        .or_else(|| (row_count > 0).then_some(0));
+    let list_height = quota_account_list_height(row_count, focused_row_index, row_count);
+    let details_height =
+        selected_detail_height(focused_row_index.is_some() || view_model.selected.is_some());
+    let body_height = if width >= SIDECAR_QUOTA_WIDTH {
+        list_height.max(details_height)
+    } else if width >= NARROW_QUOTA_WIDTH {
+        list_height + details_height
+    } else {
+        list_height
+    };
+    let root_border_height = 2;
+    let title_and_summary_height = 3;
+    root_border_height + title_and_summary_height + body_height
+}
+
 pub(crate) fn run_quota_status_view(view_model: QuotaStatusViewModel) -> io::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -159,6 +183,7 @@ pub(crate) fn run_quota_status_view(view_model: QuotaStatusViewModel) -> io::Res
             QuotaStatusComponent(
                 view_model: view_model,
                 width: 0usize,
+                height: 0usize,
             )
         }
         .render_loop()
@@ -170,6 +195,7 @@ pub(crate) fn run_quota_status_view(view_model: QuotaStatusViewModel) -> io::Res
 struct QuotaStatusComponentProps {
     view_model: QuotaStatusViewModel,
     width: usize,
+    height: usize,
 }
 
 #[component]
@@ -178,7 +204,9 @@ fn QuotaStatusComponent(
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
+    let (terminal_width, terminal_height) = hooks.use_terminal_size();
     let live_terminal_width = props.width == 0;
+    let live_terminal_height = props.height == 0 && live_terminal_width;
     let row_count = props.view_model.rows.len();
     let initial_focused_row_index = props
         .view_model
@@ -187,20 +215,41 @@ fn QuotaStatusComponent(
         .position(|row| row.selected)
         .unwrap_or(0);
     let observed_width = hooks.use_state(|| {
-        current_terminal_width()
-            .unwrap_or(props.view_model.width)
-            .max(MIN_QUOTA_WIDTH)
+        if live_terminal_width {
+            current_terminal_width()
+                .or_else(|| Some(usize::from(terminal_width)))
+                .unwrap_or(props.view_model.width)
+                .max(MIN_QUOTA_WIDTH)
+        } else {
+            props.width.max(MIN_QUOTA_WIDTH)
+        }
+    });
+    let observed_height = hooks.use_state(|| {
+        if live_terminal_height {
+            usize::from(terminal_height).max(MIN_RENDER_HEIGHT)
+        } else if props.height == 0 {
+            MIN_RENDER_HEIGHT
+        } else {
+            props.height.max(1)
+        }
     });
     let focused_row_index = hooks.use_state(|| initial_focused_row_index);
     let mut should_exit = hooks.use_state(|| false);
     hooks.use_terminal_events({
         let mut observed_width = observed_width;
+        let mut observed_height = observed_height;
         let mut focused_row_index = focused_row_index;
         move |event| match event {
-            TerminalEvent::Resize(width, _) if live_terminal_width => {
-                let mut width_value = observed_width.get();
-                if apply_live_terminal_width_sample(&mut width_value, Some(usize::from(width))) {
-                    observed_width.set(width_value);
+            TerminalEvent::Resize(width, height) => {
+                if live_terminal_width {
+                    let mut width_value = observed_width.get();
+                    if apply_live_terminal_width_sample(&mut width_value, Some(usize::from(width)))
+                    {
+                        observed_width.set(width_value);
+                    }
+                }
+                if live_terminal_height {
+                    observed_height.set(usize::from(height).max(MIN_RENDER_HEIGHT));
                 }
             }
             TerminalEvent::Key(KeyEvent {
@@ -262,24 +311,59 @@ fn QuotaStatusComponent(
         props.width
     }
     .max(MIN_QUOTA_WIDTH);
+    let height = if live_terminal_height {
+        observed_height.get()
+    } else if props.height == 0 {
+        MIN_RENDER_HEIGHT
+    } else {
+        props.height.max(1)
+    };
     let content_width = width.saturating_sub(4).max(44);
     let focused_row_index_value = focused_row_index_value(focused_row_index.get(), row_count);
-    let focused_details = props.view_model.selected.as_ref().and_then(|selected| {
-        focused_row_index_value
-            .and_then(|index| props.view_model.rows.get(index).map(|row| &row.details))
-            .or(Some(selected))
-    });
-    let list_height = quota_account_list_height(row_count);
-    let details_height = selected_detail_height(focused_details.is_some());
+    let focused_details = focused_row_index_value
+        .and_then(|index| props.view_model.rows.get(index).map(|row| &row.details))
+        .or(props.view_model.selected.as_ref());
+    let body_budget = quota_body_budget(height);
+    let details_content_height = selected_detail_height(focused_details.is_some());
     let sidecar = width >= SIDECAR_QUOTA_WIDTH;
+    let stacked_details = !sidecar
+        && width >= NARROW_QUOTA_WIDTH
+        && (focused_details.is_some() || props.view_model.selected.is_none());
+    let details_height = details_content_height.min(body_budget);
+    let list_budget = if sidecar {
+        body_budget
+    } else if stacked_details {
+        let minimum_list_height = if row_count == 0 {
+            quota_account_list_height(row_count, None, 0)
+        } else {
+            quota_account_list_height(row_count, focused_row_index_value, 1)
+        };
+        if minimum_list_height + details_content_height <= body_budget {
+            body_budget.saturating_sub(details_content_height)
+        } else {
+            minimum_list_height.min(body_budget)
+        }
+    } else {
+        body_budget
+    };
+    let visible_account_budget =
+        quota_visible_account_budget(row_count, focused_row_index_value, list_budget);
+    let list_height =
+        quota_account_list_height(row_count, focused_row_index_value, visible_account_budget);
+    let stacked_details_height = if stacked_details {
+        body_budget.saturating_sub(list_height)
+    } else {
+        0
+    };
+    let show_stacked_details = stacked_details && stacked_details_height > 0;
     let body_height = if sidecar {
         list_height.max(details_height)
-    } else if width >= NARROW_QUOTA_WIDTH {
-        list_height + details_height
+    } else if show_stacked_details {
+        list_height + stacked_details_height
     } else {
         list_height
     };
-    let component_height = quota_status_height(body_height);
+    let component_height = quota_status_height(height);
     let body = if sidecar {
         let list_width = (content_width.saturating_sub(2) * 3 / 5)
             .max(58)
@@ -287,17 +371,17 @@ fn QuotaStatusComponent(
         let details_width = content_width.saturating_sub(list_width + 2).max(34);
         element! {
             View(width: 100pct, height: body_height as u32) {
-                #(render_account_list(&props.view_model.rows, list_width, body_height, focused_row_index_value))
+                #(render_account_list(&props.view_model.rows, list_width, list_height, focused_row_index_value, visible_account_budget))
                 View(width: 2) { Text(content: "") }
-                #(render_selected_panel(focused_details, details_width, body_height))
+                #(render_selected_panel(focused_details, details_width, details_height))
             }
         }
         .into_any()
-    } else if width >= NARROW_QUOTA_WIDTH {
+    } else if show_stacked_details {
         element! {
             View(width: content_width as u32, flex_direction: FlexDirection::Column) {
-                #(render_account_list(&props.view_model.rows, content_width, list_height, focused_row_index_value))
-                #(render_selected_panel(focused_details, content_width, details_height))
+                #(render_account_list(&props.view_model.rows, content_width, list_height, focused_row_index_value, visible_account_budget))
+                #(render_selected_panel(focused_details, content_width, stacked_details_height))
             }
         }
         .into_any()
@@ -307,6 +391,7 @@ fn QuotaStatusComponent(
             content_width,
             list_height,
             focused_row_index_value,
+            visible_account_budget,
         )
     };
 
@@ -331,22 +416,43 @@ fn QuotaStatusComponent(
     }
 }
 
-fn quota_status_height(body_height: usize) -> usize {
-    let root_border_height = 2;
-    let title_and_summary_height = 3;
-    root_border_height + title_and_summary_height + body_height
+fn quota_status_height(height: usize) -> usize {
+    height.max(1)
 }
 
-fn quota_account_list_height(row_count: usize) -> usize {
+fn quota_body_budget(height: usize) -> usize {
+    let root_border_height = 2;
+    let title_and_summary_height = 3;
+    height
+        .max(1)
+        .saturating_sub(root_border_height + title_and_summary_height)
+}
+
+fn quota_account_list_height(
+    row_count: usize,
+    focused_row_index: Option<usize>,
+    visible_rows: usize,
+) -> usize {
+    let visible_rows = visible_rows.min(row_count);
+    let window_start = visible_account_window_start(focused_row_index, row_count, visible_rows);
+    let visible_count = row_count.saturating_sub(window_start).min(visible_rows);
+    let remaining = row_count.saturating_sub(window_start + visible_rows);
     let header_height = 2;
-    let row_height = row_count * 3;
-    let row_gap_height = row_count.saturating_sub(1);
-    let border_and_padding_height = 4;
-    border_and_padding_height + header_height + row_height + row_gap_height
+    let row_height = visible_count * 3;
+    let row_gap_height = visible_count.saturating_sub(1);
+    let more_above_height = if window_start > 0 { 2 } else { 0 };
+    let more_below_height = if remaining > 0 { 2 } else { 0 };
+    let border_and_padding_height = 2;
+    border_and_padding_height
+        + header_height
+        + more_above_height
+        + row_height
+        + row_gap_height
+        + more_below_height
 }
 
 fn selected_detail_height(has_selected_details: bool) -> usize {
-    if has_selected_details { 20 } else { 4 }
+    if has_selected_details { 20 } else { 3 }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -378,6 +484,37 @@ fn move_quota_focus(index: &mut usize, row_count: usize, movement: QuotaFocusMov
     true
 }
 
+fn quota_visible_account_budget(
+    row_count: usize,
+    focused_row_index: Option<usize>,
+    available_height: usize,
+) -> usize {
+    if row_count == 0 {
+        return 0;
+    }
+    for candidate in (1..=row_count).rev() {
+        if quota_account_list_height(row_count, focused_row_index, candidate) <= available_height {
+            return candidate;
+        }
+    }
+    1
+}
+
+fn visible_account_window_start(
+    focused_row_index: Option<usize>,
+    row_count: usize,
+    visible_rows: usize,
+) -> usize {
+    if row_count == 0 || visible_rows == 0 || row_count <= visible_rows {
+        return 0;
+    }
+    let focused_row_index = focused_row_index.unwrap_or(0).min(row_count - 1);
+    focused_row_index
+        .saturating_add(1)
+        .saturating_sub(visible_rows)
+        .min(row_count.saturating_sub(visible_rows))
+}
+
 fn current_terminal_width() -> Option<usize> {
     terminal::size().ok().map(|(width, _)| usize::from(width))
 }
@@ -402,18 +539,32 @@ fn render_account_list(
     width: usize,
     height: usize,
     focused_row_index: Option<usize>,
+    visible_rows: usize,
 ) -> AnyElement<'static> {
-    let row_width = width.saturating_sub(6).max(32);
+    let row_width = width.saturating_sub(4).max(32);
     let mut children = vec![render_table_header(row_width)];
-    for (index, row) in rows.iter().enumerate() {
-        if index > 0 {
+    let window_start = visible_account_window_start(focused_row_index, rows.len(), visible_rows);
+    if window_start > 0 {
+        children.push(quota_more_marker(format!("+{window_start} more above")));
+        children.push(quota_gap());
+    }
+    let window_end = (window_start + visible_rows).min(rows.len());
+    for (offset, index) in (window_start..window_end).enumerate() {
+        if offset > 0 {
             children.push(quota_gap());
         }
-        children.push(render_account_row(
-            row,
-            row_width,
-            focused_row_index == Some(index),
-        ));
+        if let Some(row) = rows.get(index) {
+            children.push(render_account_row(
+                row,
+                row_width,
+                focused_row_index == Some(index),
+            ));
+        }
+    }
+    let remaining = rows.len().saturating_sub(window_start + visible_rows);
+    if remaining > 0 {
+        children.push(quota_gap());
+        children.push(quota_more_marker(format!("+{remaining} more below")));
     }
 
     element! {
@@ -426,11 +577,18 @@ fn render_account_list(
             overflow: Overflow::Hidden,
             padding_left: 1,
             padding_right: 1,
-            padding_top: 1,
-            padding_bottom: 1,
+            padding_top: 0,
+            padding_bottom: 0,
         ) {
             #(children)
         }
+    }
+    .into_any()
+}
+
+fn quota_more_marker(content: String) -> AnyElement<'static> {
+    element! {
+        Text(content, color: Color::DarkGrey, weight: Weight::Light)
     }
     .into_any()
 }
@@ -457,9 +615,9 @@ fn render_table_header(width: usize) -> AnyElement<'static> {
 }
 
 fn quota_list_columns(width: usize) -> (usize, usize, usize) {
-    let account_width = if width < 74 { 15 } else { 17 };
-    let status_width = if width < 74 { 14 } else { 18 };
-    let pace_width = width.saturating_sub(account_width + status_width).max(16);
+    let account_width = if width < 74 { 13 } else { 17 };
+    let status_width = if width < 74 { 13 } else { 18 };
+    let pace_width = width.saturating_sub(account_width + status_width);
     (account_width, status_width, pace_width)
 }
 
@@ -468,7 +626,8 @@ fn render_account_row(
     width: usize,
     focused: bool,
 ) -> AnyElement<'static> {
-    let (account_width, status_width, pace_width) = quota_list_columns(width);
+    let inner_width = width.saturating_sub(2);
+    let (account_width, status_width, pace_width) = quota_list_columns(inner_width);
     let marker = if focused { "❯" } else { " " };
     let account = fit_line(&format!("{marker} {}", row.account), account_width);
     let status_color = if focused { Color::Yellow } else { Color::White };
@@ -485,19 +644,7 @@ fn render_account_row(
         }
         .into_any()
     };
-    let reset_sample_pace = if compact_pace {
-        element! {
-            Text(content: fit_line(sample_metadata_compact_summary(&row.sample_metadata), pace_width), color: metadata_color, wrap: TextWrap::NoWrap)
-        }
-        .into_any()
-    } else {
-        reset_pace_row_line(
-            &row.reset_pace,
-            &row.sample_metadata,
-            pace_width,
-            metadata_color,
-        )
-    };
+    let reset_sample_pace = reset_pace_row_line(&row.reset_pace, pace_width);
 
     element! {
         View(
@@ -506,17 +653,17 @@ fn render_account_row(
             padding_left: 1,
             padding_right: 1,
         ) {
-            View(width: width.saturating_sub(2) as u32) {
+            View(width: inner_width as u32) {
                 Text(content: account, color: if focused { Color::Yellow } else { Color::White }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
                 Text(content: fit_line(&row.status, status_width), color: status_color, wrap: TextWrap::NoWrap)
                 Text(content: fit_line(&row.reason, pace_width), color: metadata_color, wrap: TextWrap::NoWrap)
             }
-            View(width: width.saturating_sub(2) as u32) {
+            View(width: inner_width as u32) {
                 Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
                 Text(content: fit_line(&row.active_clients, status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
                 Text(content: fit_line(&row.weekly_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
             }
-            View(width: width.saturating_sub(2) as u32) {
+            View(width: inner_width as u32) {
                 Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
                 #(compact_status_pace)
                 #(reset_sample_pace)
@@ -550,8 +697,8 @@ fn render_selected_panel(
             overflow: Overflow::Hidden,
             padding_left: 1,
             padding_right: 1,
-            padding_top: 1,
-            padding_bottom: 1,
+            padding_top: 0,
+            padding_bottom: 0,
         ) {
             #(details)
         }
@@ -625,24 +772,14 @@ fn detail_line(label: &str, value: &str, width: usize, color: Color) -> AnyEleme
     .into_any()
 }
 
-fn reset_pace_row_line(
-    reset_pace: &ResetPaceViewModel,
-    sample_metadata: &SampleMetadata,
-    width: usize,
-    sample_color: Color,
-) -> AnyElement<'static> {
-    let sample = sample_metadata_summary(sample_metadata);
-    let sample_width = sample.chars().count().min(width / 3).max(12);
-    let reset_width = width.saturating_sub(sample_width).saturating_sub(2);
-    let reset_pace_text = reset_pace_summary_for_width(reset_pace, reset_width);
+fn reset_pace_row_line(reset_pace: &ResetPaceViewModel, width: usize) -> AnyElement<'static> {
+    let reset_pace_text = reset_pace_summary_for_width(reset_pace, width);
     element! {
         View(width: width as u32) {
             MixedText(
                 contents: vec![
                     MixedTextContent::new(reset_pace_text)
                         .color(reset_pace_color(reset_pace.state)),
-                    MixedTextContent::new("  "),
-                    MixedTextContent::new(fit_line(&sample, sample_width)).color(sample_color),
                 ],
                 wrap: TextWrap::NoWrap,
             )
@@ -787,14 +924,6 @@ fn sample_metadata_summary(sample_metadata: &SampleMetadata) -> String {
     )
 }
 
-fn sample_metadata_compact_summary(sample_metadata: &SampleMetadata) -> &'static str {
-    match sample_metadata.confidence {
-        SampleConfidence::Fresh => "fresh",
-        SampleConfidence::Stale => "stale",
-        SampleConfidence::Unknown => "unknown",
-    }
-}
-
 fn quota_gap() -> AnyElement<'static> {
     element! {
         View(height: 1) {
@@ -819,6 +948,9 @@ fn fit_line(value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::path::PathBuf;
+
     use futures_util::StreamExt;
     use iocraft::prelude::*;
 
@@ -868,28 +1000,247 @@ mod tests {
         );
     }
 
-    #[test]
-    fn quota_status_without_authoritative_selection_does_not_show_selected_details() {
-        let mut view_model = quota_view_model();
-        view_model.route_line =
-            "responses -> none    [blocked]    no selectable account".to_owned();
-        view_model.why_line = "why: no usable accounts".to_owned();
-        view_model.selected = None;
-        for row in &mut view_model.rows {
-            row.selected = false;
+    #[tokio::test]
+    async fn quota_status_renders_minimum_height_from_short_resize() {
+        let text = render_quota_capture_model_at(
+            quota_view_model(),
+            0,
+            0,
+            vec![
+                TerminalEvent::Resize(160, 12),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            meaningful_line_count(&text),
+            24,
+            "short terminals should still render the 24-row quota minimum:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_status_uses_taller_height_for_account_rows() {
+        let short_text = render_quota_capture_model_at(
+            quota_many_account_view_model(),
+            160,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        let tall_text = render_quota_capture_model_at(
+            quota_many_account_view_model(),
+            160,
+            32,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        let short_rows = visible_quota_account_count(&short_text);
+        let tall_rows = visible_quota_account_count(&tall_text);
+        assert!(
+            tall_rows > short_rows,
+            "taller quota view should spend height on more account rows; short={short_rows}, tall={tall_rows}\nshort:\n{short_text}\ntall:\n{tall_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_status_keeps_focused_account_visible_when_height_clips_list() {
+        let text = render_quota_capture_model_at(
+            quota_many_account_view_model(),
+            160,
+            24,
+            vec![
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )
+        .await;
+
+        assert!(
+            text.contains("❯ acct06"),
+            "focused quota account should stay visible when height clips the list:\n{text}"
+        );
+        assert!(
+            text.contains("more above"),
+            "clipped focused quota view should expose above-window context:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_status_preserves_selected_panel_at_stacked_minimum_height() {
+        let text = render_quota_capture_model_at(
+            quota_many_account_view_model(),
+            100,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert!(
+            text.contains("Selected account"),
+            "stacked 100x24 quota view should preserve the selected panel:\n{text}"
+        );
+        assert!(
+            text.contains("❯ acct00"),
+            "stacked 100x24 quota view should still show a focused account row:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_status_removes_panel_top_padding_and_dead_tail() {
+        let text = render_quota_capture_model_at(
+            quota_view_model(),
+            160,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        let lines = text.lines().collect::<Vec<_>>();
+        let sidecar_top_border_index = lines
+            .iter()
+            .position(|line| line.matches('┌').count() >= 2)
+            .unwrap_or_else(|| panic!("quota sidecar panels should render:\n{text}"));
+        let first_panel_content = lines
+            .get(sidecar_top_border_index + 1)
+            .unwrap_or_else(|| panic!("quota panel content should follow top border:\n{text}"));
+        assert!(
+            first_panel_content.contains("Account")
+                && first_panel_content.contains("Selected account"),
+            "account and selected headers should sit directly below panel borders:\n{text}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .rev()
+                .skip(1)
+                .take(3)
+                .any(|line| line.trim_matches(['│', '╰', '╯', ' ', '─']).is_empty()),
+            "quota inner panels should not leave a dead blank tail near the bottom border:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "writes visual quota presentation capture artifacts for design review"]
+    async fn quota_status_capture_artifacts_for_design_review() {
+        let capture_dir = capture_dir();
+        for (width, height) in [(160, 24), (160, 32), (100, 24)] {
+            let text = render_quota_capture_model_at(
+                quota_many_account_view_model(),
+                width,
+                height,
+                vec![TerminalEvent::Key(KeyEvent::new(
+                    KeyEventKind::Press,
+                    KeyCode::Esc,
+                ))],
+            )
+            .await;
+            write_capture_pair(&capture_dir, &format!("quota-{width}x{height}"), &text);
         }
+    }
+
+    #[test]
+    fn quota_status_without_authoritative_selection_shows_focused_account_details() {
+        let view_model = quota_no_authoritative_selection_view_model();
 
         let text = render_quota_static_capture(view_model, 160, false);
 
-        assert!(text.contains("No selectable account"), "{text}");
+        assert!(text.contains("Selected account"), "{text}");
         assert!(
-            !text.contains("Selected account"),
-            "degraded status must not turn a focused row into an authoritative selection:\n{text}"
+            text.contains("ssdev    [blocked]    quota ineligible"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("No selectable account"),
+            "blocked quota status should still expose focused account details:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_status_stacked_without_authoritative_selection_shows_focused_account_details() {
+        let text = render_quota_capture_model_at(
+            quota_no_authoritative_selection_view_model(),
+            100,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert!(text.contains("Selected account"), "{text}");
+        assert!(
+            text.contains("ssdev    [blocked]    quota ineligible"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("No selectable account"),
+            "stacked blocked quota status should still expose focused account details:\n{text}"
         );
     }
 
     #[test]
-    fn quota_status_narrow_rows_preserve_reset_and_sample_semantics() {
+    fn quota_status_static_output_uses_natural_height_without_tui_padding() {
+        let view_model = quota_no_authoritative_selection_view_model();
+        let natural_height = quota_static_render_height(
+            &QuotaStatusViewModel {
+                width: 120,
+                ..view_model.clone()
+            },
+            120,
+        );
+        let text = render_quota_static_capture(view_model, 120, false);
+
+        assert_eq!(
+            meaningful_line_count(&text),
+            natural_height,
+            "static quota output should use natural content height instead of the interactive viewport minimum:\n{text}"
+        );
+        assert!(text.contains("Selected account"), "{text}");
+        assert!(
+            text.contains("ssdev    [blocked]    quota ineligible"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_status_narrow_rows_preserve_reset_and_sample_semantics() {
+        let text = render_quota_capture_model_at(
+            quota_view_model(),
+            48,
+            48,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert!(text.contains("healthy"), "{text}");
+        assert!(text.contains("sample fresh"), "{text}");
+    }
+
+    #[test]
+    fn quota_status_static_narrow_rows_preserve_reset_and_sample_semantics() {
         let text = render_quota_static_capture(quota_view_model(), 48, false);
 
         assert!(text.contains("healthy"), "{text}");
@@ -942,6 +1293,7 @@ mod tests {
             QuotaStatusComponent(
                 view_model: quota_two_account_view_model(),
                 width: 120usize,
+                height: 48usize,
             )
         }
         .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
@@ -970,6 +1322,7 @@ mod tests {
             QuotaStatusComponent(
                 view_model: quota_two_account_view_model(),
                 width: 120usize,
+                height: 48usize,
             )
         }
         .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
@@ -1012,7 +1365,32 @@ mod tests {
 
     #[tokio::test]
     async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() {
-        let selected_details = selected_account_details("ssdev", "safest quota");
+        let sample_metadata = SampleMetadata {
+            confidence: SampleConfidence::Stale,
+            age_label: "15m 1s".to_owned(),
+            age_seconds: Some(901),
+            semantic_label: "sample stale",
+        };
+        let reset_pace = ResetPaceViewModel {
+            state: ResetPaceState::OverBurning,
+            multiple_label: "1.21x reset pace".to_owned(),
+            semantic_label: "over",
+            meter_left_segments: ResetPaceMeterSegments {
+                filled: 0,
+                empty: 7,
+            },
+            meter_right_segments: ResetPaceMeterSegments {
+                filled: 3,
+                empty: 4,
+            },
+            center_marker: '│',
+            unavailable_reason: Some("conflicting unavailable sentinel".to_owned()),
+        };
+        let selected_details = QuotaSelectedAccountViewModel {
+            sample_metadata: sample_metadata.clone(),
+            reset_pace: reset_pace.clone(),
+            ..selected_account_details("ssdev", "safest quota")
+        };
         let view_model = QuotaStatusViewModel {
             width: 120,
             route_line: "responses -> ssdev    [usable]    refreshed ok".to_owned(),
@@ -1025,27 +1403,8 @@ mod tests {
                 reason: "safest quota".to_owned(),
                 weekly_window: "weekly █████ 83%".to_owned(),
                 burn_meter: "legacy-meter-sentinel".to_owned(),
-                sample_metadata: SampleMetadata {
-                    confidence: SampleConfidence::Stale,
-                    age_label: "15m 1s".to_owned(),
-                    age_seconds: Some(901),
-                    semantic_label: "sample stale",
-                },
-                reset_pace: ResetPaceViewModel {
-                    state: ResetPaceState::OverBurning,
-                    multiple_label: "1.21x reset pace".to_owned(),
-                    semantic_label: "over",
-                    meter_left_segments: ResetPaceMeterSegments {
-                        filled: 0,
-                        empty: 7,
-                    },
-                    meter_right_segments: ResetPaceMeterSegments {
-                        filled: 3,
-                        empty: 4,
-                    },
-                    center_marker: '│',
-                    unavailable_reason: Some("conflicting unavailable sentinel".to_owned()),
-                },
+                sample_metadata,
+                reset_pace,
                 weekly_pace: "legacy safe pace sentinel".to_owned(),
                 details: selected_details.clone(),
             }],
@@ -1053,7 +1412,7 @@ mod tests {
         };
 
         let frames = element! {
-            QuotaStatusComponent(view_model: view_model, width: 120usize)
+            QuotaStatusComponent(view_model: view_model, width: 120usize, height: 48usize)
         }
         .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
             vec![TerminalEvent::Key(KeyEvent::new(
@@ -1082,26 +1441,103 @@ mod tests {
     }
 
     async fn render_quota_capture(width: usize) -> String {
-        let frames = element! {
-            QuotaStatusComponent(
-                view_model: quota_view_model(),
-                width,
-            )
-        }
-        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+        render_quota_capture_model_at(
+            quota_view_model(),
+            width,
+            MIN_RENDER_HEIGHT,
             vec![TerminalEvent::Key(KeyEvent::new(
                 KeyEventKind::Press,
                 KeyCode::Esc,
             ))],
+        )
+        .await
+    }
+
+    async fn render_quota_capture_model_at(
+        view_model: QuotaStatusViewModel,
+        width: usize,
+        height: usize,
+        events: Vec<TerminalEvent>,
+    ) -> String {
+        let frames = element! {
+            QuotaStatusComponent(
+                view_model,
+                width,
+                height,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            events,
         )))
         .map(|canvas| canvas.to_string())
         .collect::<Vec<_>>()
         .await;
-
         frames
             .last()
             .cloned()
             .unwrap_or_else(|| panic!("quota status should render at least one frame"))
+    }
+
+    fn meaningful_line_count(text: &str) -> usize {
+        text.lines().count()
+    }
+
+    fn visible_quota_account_count(text: &str) -> usize {
+        text.lines()
+            .filter(|line| line.contains("acct") && !line.contains("Selected account"))
+            .count()
+    }
+
+    fn capture_dir() -> PathBuf {
+        let dir = std::env::var_os("CODEX_ROUTER_CAPTURE_DIR").map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tmp/ux-proof/production"),
+            PathBuf::from,
+        );
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("capture dir should be writable: {error}"));
+        dir
+    }
+
+    fn write_capture_pair(dir: &Path, name: &str, text: &str) {
+        std::fs::write(dir.join(format!("{name}.txt")), text)
+            .unwrap_or_else(|error| panic!("text capture should write: {error}"));
+        std::fs::write(dir.join(format!("{name}.svg")), terminal_svg(name, text))
+            .unwrap_or_else(|error| panic!("svg capture should write: {error}"));
+    }
+
+    fn terminal_svg(title: &str, text: &str) -> String {
+        let lines = text.lines().collect::<Vec<_>>();
+        let width = lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(1);
+        let height = lines.len().max(1);
+        let pixel_width = width * 9 + 32;
+        let pixel_height = height * 18 + 34;
+        let mut svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pixel_width}\" height=\"{pixel_height}\" viewBox=\"0 0 {pixel_width} {pixel_height}\"><rect width=\"100%\" height=\"100%\" fill=\"#111318\"/>"
+        );
+        svg.push_str(&format!(
+            "<text x=\"16\" y=\"24\" xml:space=\"preserve\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"14\" fill=\"#e6edf3\"><tspan>{}</tspan>",
+            escape_xml(title)
+        ));
+        for (index, line) in lines.iter().enumerate() {
+            svg.push_str(&format!(
+                "<tspan x=\"16\" dy=\"{}\">{}</tspan>",
+                if index == 0 { 20 } else { 18 },
+                escape_xml(line)
+            ));
+        }
+        svg.push_str("</text></svg>");
+        svg
+    }
+
+    fn escape_xml(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
 
     fn render_quota_static_capture(
@@ -1207,6 +1643,59 @@ mod tests {
             ],
             selected: Some(alpha_details),
         }
+    }
+
+    fn quota_many_account_view_model() -> QuotaStatusViewModel {
+        let selected_details = selected_account_details("acct00", "primary");
+        let mut rows = Vec::new();
+        for index in 0..10 {
+            let account = format!("acct{index:02}");
+            let details = selected_account_details(&account, &format!("account {index:02} detail"));
+            rows.push(QuotaStatusAccountViewModel {
+                selected: index == 0,
+                account,
+                status: "[usable]".to_owned(),
+                active_clients: format!("{index} clients"),
+                reason: format!("account {index:02} detail"),
+                weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
+                burn_meter: "▰▱▱▱".to_owned(),
+                sample_metadata: SampleMetadata::default(),
+                reset_pace: ResetPaceViewModel::default(),
+                weekly_pace: "ahead reset by 2d".to_owned(),
+                details,
+            });
+        }
+        QuotaStatusViewModel {
+            width: 160,
+            route_line: "responses -> acct00    [usable]    refreshed ok".to_owned(),
+            why_line: "why: primary".to_owned(),
+            rows,
+            selected: Some(selected_details),
+        }
+    }
+
+    fn quota_no_authoritative_selection_view_model() -> QuotaStatusViewModel {
+        let mut view_model = quota_view_model();
+        view_model.route_line =
+            "responses -> none    [blocked]    no selectable account".to_owned();
+        view_model.why_line = "why: no usable accounts".to_owned();
+        view_model.selected = None;
+        for row in &mut view_model.rows {
+            row.selected = false;
+            row.status = "[blocked]".to_owned();
+            row.reason = "quota ineligible".to_owned();
+            row.weekly_window = "weekly ░░░░░░░░░░ 0% left, empty".to_owned();
+            row.reset_pace = ResetPaceViewModel::default();
+            row.details.status = "[blocked]".to_owned();
+            row.details.reason = "quota ineligible".to_owned();
+            row.details.weekly_window = "░░░░░░░░░░ 0% left, empty".to_owned();
+            row.details.reset_pace = ResetPaceViewModel::default();
+            row.details.total_rate = "rate unknown".to_owned();
+            row.details.connection_rate = "connection rate unknown".to_owned();
+            row.details.guards = "5h 100% / weekly 100%".to_owned();
+            row.details.note = "quota ineligible".to_owned();
+        }
+        view_model
     }
 
     fn selected_account_details(account: &str, reason: &str) -> QuotaSelectedAccountViewModel {
