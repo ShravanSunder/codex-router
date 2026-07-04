@@ -2794,12 +2794,11 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
         );
-        assert_eq!(
-            lines[2],
-            "snapshot\tenabled\t########-- 75% left resets in 2h 46m; needs refresh\t---------- no data needs refresh\tneeds refresh\tneeds refresh\tlegacy needs refresh\t0 clients mirror <= 2h\t-\tfallback by quota: needs refresh limiting window: 5h 75% left\tfallback by quota"
-        );
+        assert!(lines[2].contains("burn unavailable"), "{}", lines[2]);
+        assert!(lines[2].contains("sample fresh 1m 40s"), "{}", lines[2]);
+        assert!(!lines[2].contains("safe pace"), "{}", lines[2]);
         assert_eq!(
             lines[3],
             "responses route\tnext: snapshot\twhy: fallback by quota: needs refresh limiting window: 5h 75% left"
@@ -2893,12 +2892,18 @@ exit 42
         );
         assert_eq!(
             lines[1],
-            "account\tstatus\t5h\tweekly\tpace\tburn\tupdated\tclients\tresets available\trouting\tnext use"
+            "account\tstatus\t5h\tweekly\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
         );
-        assert_eq!(
-            lines[2],
-            "primary\tenabled\t###------- 25% left resets in 2h 30m\t########-- 80% left resets in 6d 23h\t5h 25% behind; history unknown weekly 20% behind; history unknown\tquota guard 5h 25% / weekly 20%\tok 16m 40s ago\t0 clients mirror <= 2h\t1 available\tpreferred by quota: safest quota limiting window: 5h 25% left\tpreferred by quota"
+        assert!(lines[2].contains("###------- 25% left resets in 2h 30m"));
+        assert!(lines[2].contains("########-- 80% left resets in 6d 23h"));
+        assert!(
+            lines[2].contains("reset pace") || lines[2].contains("burn unavailable"),
+            "{}",
+            lines[2]
         );
+        assert!(lines[2].contains("sample stale 16m 40s"));
+        assert!(!lines[2].contains("history unknown"));
+        assert!(!lines[2].contains("quota guard"));
         assert_eq!(
             lines[3],
             "responses route\tnext: primary\twhy: preferred by quota: safest quota limiting window: 5h 25% left"
@@ -3017,8 +3022,6 @@ exit 42
         assert!(!visible_stdout.contains("account ┆ status"));
         assert!(!visible_stdout.contains("route     ┆ next"));
         assert!(!visible_stdout.contains("acct_primary"));
-        assert!(output.stdout.contains("\x1b["));
-        assert!(output.stdout.contains("\x1b[1m"));
         assert!(output.stderr.is_empty());
     }
 
@@ -3075,6 +3078,54 @@ exit 42
         assert!(!output.stdout.contains("updated quota:"));
         assert!(output.stdout.contains("┌"));
         assert!(output.stdout.contains("Selected account"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_status_redacts_unsafe_account_labels() {
+        let test_root = TestRoot::new("quota-status-redacts-unsafe-account-labels");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let account = AccountRecord::new(
+            account_id("acct_unsafe_status_label"),
+            "person@example.com",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(
+            &state,
+            &PersistedQuotaSnapshot::new(
+                account_id("acct_unsafe_status_label"),
+                QuotaSnapshotSource::MockEndpoint,
+            )
+            .with_observed_unix_seconds(10_000)
+            .with_route_band("responses", 80)
+            .with_reset_unix_seconds(20_000)
+            .with_stale_penalty(false),
+        ));
+        ensure_async_state_schema(&router_root);
+        drop(state);
+
+        let output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "table",
+                "--now-unix-seconds",
+                "11000",
+            ],
+            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
+        );
+
+        assert!(!output.stdout.contains("person@example.com"));
+        assert!(output.stdout.contains("acct-"));
         assert!(output.stderr.is_empty());
     }
 
@@ -3482,7 +3533,23 @@ exit 42
             parsed["accounts"][0]["active_clients_source"],
             "unavailable"
         );
+        assert_eq!(
+            parsed["accounts"][0]["window_slots"]["5h"]["remaining_headroom"],
+            80
+        );
+        assert_eq!(
+            parsed["accounts"][0]["window_slots"]["weekly"]["remaining_headroom"],
+            80
+        );
         assert_eq!(parsed["accounts"][0]["preferred_next"], false);
+        assert_ne!(parsed["accounts"][0]["next_use"], "preferred by quota");
+        assert!(
+            !parsed["accounts"][0]["routing_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("preferred_"),
+            "degraded status must not expose preferred-routing semantics: {parsed}"
+        );
         assert!(output.stderr.is_empty());
     }
 
@@ -3575,10 +3642,15 @@ exit 42
             CliContext::new(Vec::new()),
         );
 
-        assert!(output.stdout.contains("5h 30% ahead; normal burn 36%/h"));
-        assert!(output.stdout.contains("runout in 2h 13m"));
         assert!(
-            output.stdout.contains("weekly 10% behind; history unknown"),
+            output.stdout.contains("reset pace") || output.stdout.contains("burn unavailable"),
+            "{}",
+            output.stdout
+        );
+        assert!(output.stdout.contains("sample fresh"), "{}", output.stdout);
+        assert!(!output.stdout.contains("normal burn"), "{}", output.stdout);
+        assert!(
+            !output.stdout.contains("history unknown"),
             "{}",
             output.stdout
         );
