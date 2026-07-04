@@ -448,6 +448,7 @@ fn interactive_candidate_command(command: &SessionsCommand) -> SessionsCommand {
     candidate_command.root = SessionsRoot::Any;
     candidate_command.provider = SessionsProvider::Any;
     candidate_command.source = SessionsSource::All;
+    candidate_command.limit = 0;
     candidate_command
 }
 

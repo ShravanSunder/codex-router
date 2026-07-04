@@ -1,10 +1,13 @@
 # AGENTS.md
 
-## Succinct Release Notes
+## Local Debug Boundaries
 
-### 0.1.2
-
-- `codex-router sessions --new` starts a fresh Codex session through the router profile.
-- `codex-router sessions` always offers a `New Codex session` picker choice.
-- Session launches pass trailing Codex flags through, including `--yolo`, for both new and resumed sessions.
-- Legacy router-owned `sessions --scope` remains rejected; use `--checkout`, `--repo`, or `--any`.
+- Codex session state is normal Codex state. `codex-router sessions` reads
+  `$HOME/.codex/state_5.sqlite` and `$HOME/.codex/sessions/*.jsonl` read-only;
+  it must not redirect to a repo-local fake Codex home in debug builds.
+- Router-owned runtime state is separate. Debug `cargo run -p codex-router-cli`
+  defaults router state/secrets to `$HOME/.codex-router-debug`; installed or
+  home-default runs use `$HOME/.codex-router`.
+- The debug Codex profile lives in normal Codex home as
+  `$HOME/.codex/codex-router-debug.config.toml` and points Codex at the debug
+  router port. Keep this profile/config separate from router-owned state.

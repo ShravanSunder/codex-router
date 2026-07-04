@@ -6031,6 +6031,81 @@ exit 42
     }
 
     #[test]
+    fn sessions_interactive_picker_loads_older_repo_matches_beyond_default_limit() {
+        let test_root = TestRoot::new("sessions-picker-older-repo-match");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        let unrelated_project = test_root.path().join("unrelated-project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        must_ok(fs::create_dir(&unrelated_project));
+
+        let target_session_id = "thread-target-older-subagent";
+        let mut rows = Vec::new();
+        for index in 0..101 {
+            rows.push(CodexStateThreadFixture::new(
+                &format!("thread-unrelated-newer-{index}"),
+                &unrelated_project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                10_000 + i64::from(index),
+            ));
+        }
+        rows.push(CodexStateThreadFixture::new(
+            target_session_id,
+            &project,
+            "codex-router",
+            "subagent",
+            "subagent",
+            "main",
+            1_000,
+        ));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "PICKER_CANARY_SHOULD_NOT_LEAK",
+            &rows,
+        );
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--repo"),
+            OsString::from("--source"),
+            OsString::from("subagents"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new(target_session_id);
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert!(
+            picker
+                .offered_session_ids
+                .iter()
+                .any(|session_id| session_id == target_session_id)
+        );
+        assert_eq!(runner.resumed_session_ids, [target_session_id]);
+    }
+
+    #[test]
     fn sessions_interactive_empty_filter_can_start_new_router_profile_session() {
         let test_root = TestRoot::new("sessions-picker-start-new");
         must_ok(fs::create_dir(test_root.path()));
