@@ -20,11 +20,27 @@ jobs:
           toolchain: 1.95.0
           components: clippy,rustfmt,rust-src
 
+      - name: Cache cargo crates, tools, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/advisory-db
+            ~/.cargo/bin/cargo-nextest
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-audit
+            target
+          key: ${{ runner.os }}-cargo-1.95.0-${{ hashFiles('Cargo.lock', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-1.95.0-
+            ${{ runner.os }}-cargo-
+
       - name: Install cargo tools
         run: |
-          cargo install cargo-nextest --locked
-          cargo install cargo-deny --locked
-          cargo install cargo-audit --locked
+          command -v cargo-nextest >/dev/null || cargo install cargo-nextest --locked
+          command -v cargo-deny >/dev/null || cargo install cargo-deny --locked
+          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -50,4 +66,3 @@ jobs:
 
       - name: Check GitHub Actions
         uses: raven-actions/actionlint@v2
-
