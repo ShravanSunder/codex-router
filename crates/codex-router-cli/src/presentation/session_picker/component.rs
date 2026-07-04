@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::io;
 
 use iocraft::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
 use crate::presentation::session_picker::action::SessionsPickerKey;
 use crate::presentation::session_picker::action::SessionsPickerOutcome;
 use crate::presentation::session_picker::model::SessionsPickerModel;
-use crate::presentation::session_picker::model::VISIBLE_SESSION_ROWS;
 use crate::presentation::session_picker::model::visible_window_start;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
 use crate::presentation::session_picker::request::SessionsPickerDataQuery;
@@ -19,10 +19,10 @@ use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
+const MIN_RENDER_HEIGHT: usize = 24;
 const SIDECAR_PICKER_WIDTH: usize = 160;
 const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
-const MAX_VISIBLE_RECORDS: usize = VISIBLE_SESSION_ROWS;
 const START_NEW_DETAILS_HEIGHT: usize = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +48,7 @@ pub(crate) struct SessionsPickerComponentProps<'a> {
     request: SessionsPickerRequest,
     record_loader: Option<SessionsPickerRecordLoader>,
     width: usize,
+    height: usize,
     selected_outcome_out: Option<&'a mut Option<SessionsPickerOutcome>>,
 }
 
@@ -63,8 +64,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
-    let (terminal_width, _) = hooks.use_terminal_size();
+    let (terminal_width, terminal_height) = hooks.use_terminal_size();
     let live_terminal_width = props.width == 0;
+    let live_terminal_height = props.height == 0 && live_terminal_width;
     let observed_width = hooks.use_state(|| {
         if live_terminal_width {
             let width = usize::from(terminal_width);
@@ -73,7 +75,17 @@ pub(crate) fn SessionsPickerComponent<'a>(
             props.width
         }
     });
+    let observed_height = hooks.use_state(|| {
+        if live_terminal_height {
+            usize::from(terminal_height).max(MIN_RENDER_HEIGHT)
+        } else if props.height == 0 {
+            MIN_RENDER_HEIGHT
+        } else {
+            props.height.max(MIN_RENDER_HEIGHT)
+        }
+    });
     let width = observed_width.get();
+    let height = observed_height.get();
     let mut model = hooks.use_state(|| SessionsPickerModel::new(props.request.clone(), width));
     if model.read().width != width {
         model.write().set_width(width);
@@ -123,11 +135,15 @@ pub(crate) fn SessionsPickerComponent<'a>(
 
     hooks.use_terminal_events({
         let mut observed_width = observed_width;
+        let mut observed_height = observed_height;
         let record_loader = record_loader.clone();
         move |event| {
-            if let TerminalEvent::Resize(width, _) = event {
+            if let TerminalEvent::Resize(width, height) = event {
                 if live_terminal_width {
                     observed_width.set(usize::from(width));
+                }
+                if live_terminal_height {
+                    observed_height.set(usize::from(height).max(MIN_RENDER_HEIGHT));
                 }
                 return;
             }
@@ -248,7 +264,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
         })
     };
 
-    render_picker_view(&model.read(), selected_conversation.as_ref())
+    render_picker_view(&model.read(), selected_conversation.as_ref(), height)
 }
 
 fn selected_conversation_preview_for_record(
@@ -284,8 +300,12 @@ fn selected_conversation_preview_for_record(
 fn render_picker_view(
     model: &SessionsPickerModel,
     selected_conversation: Option<&SessionConversationPreview>,
+    height: usize,
 ) -> Element<'static, View> {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
+    let filter_controls = render_filter_controls(model, content_width);
+    let control_height = filter_controls.len();
+    let body_budget = picker_body_budget(height, control_height);
     let mut children = vec![
         element! {
             Text(
@@ -296,43 +316,72 @@ fn render_picker_view(
         }
         .into_any(),
     ];
-    children.extend(render_filter_controls(model, content_width));
+    children.extend(filter_controls);
 
     let visible_len = model.visible_len();
     let selected_record = model.selected_record();
     if model.width >= SIDECAR_PICKER_WIDTH {
         let list_width = (content_width.saturating_sub(2) / 2).max(42);
         let detail_width = content_width.saturating_sub(list_width + 2).max(28);
-        let list_height = session_list_height(visible_len, model.selected_index);
+        let visible_row_budget =
+            session_visible_row_budget(visible_len, model.selected_index, body_budget);
+        let list_height =
+            session_list_height(visible_len, model.selected_index, visible_row_budget);
         let details_panel_height = selected_record
             .map(|record| {
                 detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
             })
             .unwrap_or(START_NEW_DETAILS_HEIGHT);
+        let details_panel_height = details_panel_height.min(body_budget);
         let main_height = list_height.max(details_panel_height);
         children.push(
             element! {
                 View(width: 100pct, height: main_height as u32) {
-                    #(render_session_list(model, list_width))
+                    #(render_session_list(model, list_width, visible_row_budget))
                     View(width: 2) { Text(content: "") }
                     #(selected_record
-                        .map(|record| render_details(record, detail_width, selected_conversation))
+                        .map(|record| render_details(record, detail_width, selected_conversation, details_panel_height))
                         .unwrap_or_else(|| render_start_new_details(model, detail_width)))
                 }
             }
             .into_any(),
         );
     } else {
-        children.push(render_session_list(model, content_width));
-        if model.width >= NARROW_PICKER_WIDTH
-            && let Some(record) = selected_record
-        {
-            children.push(render_details(record, content_width, selected_conversation));
+        let details_height = selected_record
+            .filter(|_| model.width >= NARROW_PICKER_WIDTH)
+            .map(|record| detail_height(selected_conversation.or(Some(&record.conversation))));
+        let minimum_list_height = if visible_len == 0 {
+            0
+        } else {
+            session_list_height(visible_len, model.selected_index, 1)
+        };
+        let show_stacked_details = details_height
+            .map(|height| minimum_list_height + height <= body_budget)
+            .unwrap_or(false);
+        let list_budget = body_budget.saturating_sub(if show_stacked_details {
+            details_height.unwrap_or(0)
+        } else {
+            0
+        });
+        let visible_row_budget =
+            session_visible_row_budget(visible_len, model.selected_index, list_budget);
+        children.push(render_session_list(
+            model,
+            content_width,
+            visible_row_budget,
+        ));
+        if show_stacked_details && let Some(record) = selected_record {
+            children.push(render_details(
+                record,
+                content_width,
+                selected_conversation,
+                details_height.unwrap_or(0),
+            ));
         }
     }
 
     children.push(render_footer(content_width));
-    let picker_height = picker_content_height(model, selected_conversation);
+    let picker_height = height.max(MIN_RENDER_HEIGHT);
 
     element! {
         View(
@@ -343,8 +392,8 @@ fn render_picker_view(
             overflow: Overflow::Hidden,
             padding_left: 1,
             padding_right: 1,
-            padding_top: 1,
-            padding_bottom: 1,
+            padding_top: 0,
+            padding_bottom: 0,
             flex_direction: FlexDirection::Column,
             row_gap: 0,
         ) {
@@ -353,60 +402,46 @@ fn render_picker_view(
     }
 }
 
-fn picker_content_height(
-    model: &SessionsPickerModel,
-    selected_conversation: Option<&SessionConversationPreview>,
-) -> usize {
-    let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
-    let heading_height = 1 + filter_control_height(content_width);
-    let visible_len = model.visible_len();
-    let body_height = if model.width >= SIDECAR_PICKER_WIDTH {
-        let details_height = if let Some(record) = model.selected_record() {
-            let conversation = selected_conversation.unwrap_or(&record.conversation);
-            detail_height(Some(conversation))
-        } else {
-            START_NEW_DETAILS_HEIGHT
-        };
-        session_list_height(visible_len, model.selected_index).max(details_height)
-    } else {
-        let list_height = session_list_height(visible_len, model.selected_index);
-        if model.width >= NARROW_PICKER_WIDTH && model.selected_record().is_some() {
-            let conversation = selected_conversation
-                .or_else(|| model.selected_record().map(|record| &record.conversation));
-            list_height + detail_height(conversation)
-        } else {
-            list_height
-        }
-    };
-
+fn picker_body_budget(height: usize, control_height: usize) -> usize {
+    let root_border_height = 2;
+    let title_height = 1;
     let footer_height = 2;
-    let root_border_and_padding_height = 4;
-    root_border_and_padding_height + heading_height + body_height + footer_height
+    height
+        .max(MIN_RENDER_HEIGHT)
+        .saturating_sub(root_border_height + title_height + control_height + footer_height)
 }
 
-fn filter_control_height(width: usize) -> usize {
-    if width < COMPACT_PICKER_WIDTH {
-        4
-    } else if width < NARROW_PICKER_WIDTH {
-        3
-    } else {
-        2
+fn session_visible_row_budget(
+    visible_len: usize,
+    selected_index: usize,
+    available_height: usize,
+) -> usize {
+    if visible_len == 0 {
+        return 0;
     }
+    for candidate in (1..=visible_len).rev() {
+        if session_list_height(visible_len, selected_index, candidate) <= available_height {
+            return candidate;
+        }
+    }
+    1
 }
 
-fn session_list_height(visible_len: usize, selected_index: usize) -> usize {
-    let window_start = visible_window_start(selected_index, visible_len, MAX_VISIBLE_RECORDS);
-    let visible_count = visible_len
-        .saturating_sub(window_start)
-        .min(MAX_VISIBLE_RECORDS);
-    let remaining = visible_len.saturating_sub(window_start + MAX_VISIBLE_RECORDS);
+fn session_list_height(visible_len: usize, selected_index: usize, visible_rows: usize) -> usize {
+    let visible_rows = visible_rows.max(1);
+    let window_start = visible_window_start(selected_index, visible_len, visible_rows);
+    let window_end = (window_start + visible_rows).min(visible_len);
+    let visible_count = window_end.saturating_sub(window_start);
+    let remaining = visible_len.saturating_sub(window_start + visible_rows);
 
     let header_height = 2;
-    let record_rows_height = visible_count * 2;
+    let record_rows_height = (window_start..window_end)
+        .map(session_choice_row_height)
+        .sum::<usize>();
     let record_gap_height = visible_count.saturating_sub(1);
     let more_above_height = if window_start > 0 { 2 } else { 0 };
     let more_below_height = if remaining > 0 { 2 } else { 0 };
-    let list_border_and_padding_height = 4;
+    let list_border_and_padding_height = 2;
 
     list_border_and_padding_height
         + header_height
@@ -414,6 +449,10 @@ fn session_list_height(visible_len: usize, selected_index: usize) -> usize {
         + record_rows_height
         + record_gap_height
         + more_below_height
+}
+
+const fn session_choice_row_height(visible_index: usize) -> usize {
+    if visible_index == 0 { 4 } else { 2 }
 }
 
 fn detail_height(conversation: Option<&SessionConversationPreview>) -> usize {
@@ -445,6 +484,10 @@ fn render_filter_controls(model: &SessionsPickerModel, width: usize) -> Vec<AnyE
     let threads = format!("Threads: [{}]", source_label(model.source));
     let sort = format!("Sort: [{}]", sort_label(model.sort));
 
+    if one_line_filter_controls_fit_for_parts(width, [&filter, &scope, &threads, &sort]) {
+        return vec![control_line(vec![filter, scope, threads, sort])];
+    }
+
     if width < COMPACT_PICKER_WIDTH {
         return [filter, scope, threads, sort]
             .into_iter()
@@ -464,6 +507,10 @@ fn render_filter_controls(model: &SessionsPickerModel, width: usize) -> Vec<AnyE
         control_line(vec![filter]),
         control_line(vec![scope, threads, sort]),
     ]
+}
+
+fn one_line_filter_controls_fit_for_parts<const N: usize>(width: usize, parts: [&str; N]) -> bool {
+    UnicodeWidthStr::width(parts.join("    ").as_str()) <= width
 }
 
 fn control_line(parts: Vec<String>) -> AnyElement<'static> {
@@ -502,12 +549,17 @@ fn render_start_new_details(model: &SessionsPickerModel, width: usize) -> AnyEle
     .into_any()
 }
 
-fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<'static> {
+fn render_session_list(
+    model: &SessionsPickerModel,
+    width: usize,
+    visible_rows: usize,
+) -> AnyElement<'static> {
     let row_width = width.saturating_sub(6).max(24);
     let mut rows = vec![render_session_header(row_width)];
     let visible_len = model.visible_len();
     let selected_index = model.selected_index;
-    let window_start = visible_window_start(selected_index, visible_len, MAX_VISIBLE_RECORDS);
+    let visible_rows = visible_rows.max(1);
+    let window_start = visible_window_start(selected_index, visible_len, visible_rows);
     if window_start > 0 {
         rows.push(
             element! {
@@ -521,7 +573,7 @@ fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<
         );
         rows.push(list_gap());
     }
-    let window_end = (window_start + MAX_VISIBLE_RECORDS).min(visible_len);
+    let window_end = (window_start + visible_rows).min(visible_len);
     for visible_index in window_start..window_end {
         if visible_index > window_start {
             rows.push(list_gap());
@@ -540,7 +592,7 @@ fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<
             ));
         }
     }
-    let remaining = visible_len.saturating_sub(window_start + MAX_VISIBLE_RECORDS);
+    let remaining = visible_len.saturating_sub(window_start + visible_rows);
     if remaining > 0 {
         rows.push(list_gap());
         rows.push(
@@ -558,15 +610,15 @@ fn render_session_list(model: &SessionsPickerModel, width: usize) -> AnyElement<
     element! {
         View(
             width: width as u32,
-            height: session_list_height(visible_len, selected_index) as u32,
+            height: session_list_height(visible_len, selected_index, visible_rows) as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
             overflow: Overflow::Hidden,
             padding_left: 1,
             padding_right: 1,
-            padding_top: 1,
-            padding_bottom: 1,
+            padding_top: 0,
+            padding_bottom: 0,
         ) {
             #(rows)
         }
@@ -581,13 +633,14 @@ fn render_start_new_row(
 ) -> AnyElement<'static> {
     let foreground = if selected { Color::White } else { Color::Grey };
     let title_prefix = if selected { "❯ " } else { "  " };
-    let title_width = width.saturating_sub(18).max(14);
+    let inner_width = width.saturating_sub(4);
+    let title_width = inner_width.saturating_sub(18).max(14);
     let first_line = fit_line(
         &format!(
             "{title_prefix}{:<title_width$} {:>6} {:>6}",
             "Start new session", "-", "-"
         ),
-        width.saturating_sub(2),
+        inner_width,
     );
     let metadata_line = if model.visible_record_len() == 0 {
         format!(
@@ -598,13 +651,14 @@ fn render_start_new_row(
     } else {
         format!("    {}", start_new_args_label(model))
     };
-    let second_line = fit_line(&metadata_line, width.saturating_sub(2));
+    let second_line = fit_line(&metadata_line, inner_width);
 
     element! {
         View(
             width: width as u32,
             flex_direction: FlexDirection::Column,
-            background_color: Color::DarkGrey,
+            border_style: BorderStyle::Single,
+            border_color: Color::DarkGrey,
             padding_left: 1,
             padding_right: 1,
             padding_top: 0,
@@ -712,11 +766,12 @@ fn render_details(
     record: &SessionPickerRecord,
     width: usize,
     selected_conversation: Option<&SessionConversationPreview>,
+    height: usize,
 ) -> AnyElement<'static> {
     let detail_width = width.saturating_sub(4);
     let preview = record.preview.as_deref().unwrap_or(&record.title);
     let conversation = selected_conversation.unwrap_or(&record.conversation);
-    let panel_height = detail_height(Some(conversation));
+    let panel_height = height.max(1);
     let conversation_rows = if conversation.snippets.is_empty() {
         vec![detail_text(
             conversation
@@ -1207,6 +1262,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sessions_picker_start_new_row_uses_outline_instead_of_filled_background() {
+        let mut request = picker_request();
+        request.new_session_args_display =
+            "--router-root /Users/shravansunder/.codex-router".to_owned();
+        let text = render_picker_capture(
+            request,
+            100,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        let lines = text.lines().collect::<Vec<_>>();
+        let start_index = lines
+            .iter()
+            .position(|line| line.contains("Start new session"))
+            .unwrap_or_else(|| panic!("start-new row should render:\n{text}"));
+
+        assert!(
+            lines
+                .get(start_index.saturating_sub(1))
+                .is_some_and(|line| line.contains('┌') && line.contains('┐')),
+            "start-new row should have a thin outline top border:\n{text}"
+        );
+        assert!(
+            lines
+                .get(start_index + 2)
+                .is_some_and(|line| line.contains('└') && line.contains('┘')),
+            "start-new row should have a thin outline bottom border:\n{text}"
+        );
+        assert!(
+            !lines[start_index].contains('█'),
+            "start-new row should not read as a filled selected row:\n{text}"
+        );
+    }
+
     #[test]
     fn selected_conversation_preview_requests_background_load_without_reading_jsonl() {
         let mut record = picker_request().records.remove(0);
@@ -1304,7 +1397,7 @@ mod tests {
                 .rposition(|line| line.contains('╰'))
                 .unwrap_or_else(|| panic!("capture should render bottom border:\n{text}"));
             assert!(
-                bottom_border_index <= footer_index + 2,
+                bottom_border_index <= footer_index + 3,
                 "picker outer border should stop after footer at width {width}:\n{text}"
             );
         }
@@ -1323,6 +1416,248 @@ mod tests {
         assert!(
             empty_text.contains("Start new session"),
             "empty state should offer a new session:\n{empty_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_renders_minimum_height_from_short_resize() {
+        let text = render_picker_capture_at(
+            capture_picker_request(),
+            160,
+            12,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert_eq!(
+            meaningful_line_count(&text),
+            24,
+            "short terminals should still render the 24-row minimum:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_uses_taller_height_for_more_visible_rows() {
+        let short_text = render_picker_capture_at(
+            capture_picker_request(),
+            160,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        let tall_text = render_picker_capture_at(
+            capture_picker_request(),
+            160,
+            32,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        let short_rows = visible_followup_row_count(&short_text);
+        let tall_rows = visible_followup_row_count(&tall_text);
+        assert!(
+            tall_rows > short_rows,
+            "taller sessions view should spend height on visible rows before blank space; short={short_rows}, tall={tall_rows}\nshort:\n{short_text}\ntall:\n{tall_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_live_resize_uses_minimum_and_taller_heights() {
+        let short_text = render_picker_capture_at(
+            capture_picker_request(),
+            0,
+            0,
+            vec![
+                TerminalEvent::Resize(160, 12),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )
+        .await;
+        let tall_text = render_picker_capture_at(
+            capture_picker_request(),
+            0,
+            0,
+            vec![
+                TerminalEvent::Resize(160, 32),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            meaningful_line_count(&short_text),
+            24,
+            "live resize below 24 rows should still render the minimum:\n{short_text}"
+        );
+        let short_rows = visible_followup_row_count(&short_text);
+        let tall_rows = visible_followup_row_count(&tall_text);
+        assert!(
+            tall_rows > short_rows,
+            "live resize to a taller terminal should render more rows; short={short_rows}, tall={tall_rows}\nshort:\n{short_text}\ntall:\n{tall_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_sidecar_clamps_tall_details_to_body_budget() {
+        let mut request = capture_picker_request();
+        let record = request
+            .records
+            .get_mut(0)
+            .unwrap_or_else(|| panic!("capture request should have a record"));
+        record.conversation.snippets = vec![
+            "first long sidecar snippet".to_owned(),
+            "second long sidecar snippet".to_owned(),
+            "third long sidecar snippet".to_owned(),
+            "fourth long sidecar snippet".to_owned(),
+        ];
+        let text = render_picker_capture_at(
+            request,
+            160,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert_eq!(
+            meaningful_line_count(&text),
+            24,
+            "sidecar details should stay within the 24-row frame:\n{text}"
+        );
+        assert!(
+            text.contains("type search"),
+            "sidecar details should not clip the footer at 160x24:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_renders_one_line_controls_when_width_allows() {
+        let text = render_picker_capture_at(
+            capture_picker_request(),
+            160,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert!(
+            text.lines().any(|line| {
+                line.contains("Type to search")
+                    && line.contains("Scope:")
+                    && line.contains("Threads:")
+                    && line.contains("Sort:")
+            }),
+            "wide sessions controls should fit on one line:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_budgets_wrapped_controls_from_actual_search_text() {
+        let mut events = "012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+            .chars()
+            .map(|character| {
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char(character)))
+            })
+            .collect::<Vec<_>>();
+        events.push(TerminalEvent::Key(KeyEvent::new(
+            KeyEventKind::Press,
+            KeyCode::Esc,
+        )));
+        events.push(TerminalEvent::Key(KeyEvent::new(
+            KeyEventKind::Press,
+            KeyCode::Esc,
+        )));
+        let text = render_picker_capture_at(capture_picker_request(), 100, 24, events).await;
+
+        assert_eq!(
+            meaningful_line_count(&text),
+            24,
+            "long search controls should not grow the picker past the 24-row frame:\n{text}"
+        );
+        assert!(
+            text.contains("type search"),
+            "wrapped controls should not clip the footer at 100x24:\n{text}"
+        );
+        assert!(
+            text.lines().all(|line| line.chars().count() <= 100),
+            "wrapped controls should fit the terminal width:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_removes_top_padding_and_dead_list_tail() {
+        let text = render_picker_capture_at(
+            capture_picker_request(),
+            160,
+            24,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        let lines = text.lines().collect::<Vec<_>>();
+        let title_index = lines
+            .iter()
+            .position(|line| line.contains("Resume a previous session"))
+            .unwrap_or_else(|| panic!("sessions title should render:\n{text}"));
+        let top_border_index = lines
+            .iter()
+            .position(|line| line.contains('╭'))
+            .unwrap_or_else(|| panic!("sessions top border should render:\n{text}"));
+        assert_eq!(
+            title_index,
+            top_border_index + 1,
+            "title should sit directly below the outer border:\n{text}"
+        );
+
+        let header_index = lines
+            .iter()
+            .position(|line| line.contains("Session") && line.contains("Upd"))
+            .unwrap_or_else(|| panic!("sessions list header should render:\n{text}"));
+        let list_top_border_index = lines[..header_index]
+            .iter()
+            .rposition(|line| line.contains('┌'))
+            .unwrap_or_else(|| panic!("sessions list top border should render:\n{text}"));
+        assert_eq!(
+            header_index,
+            list_top_border_index + 1,
+            "list header should sit directly below the list border:\n{text}"
+        );
+
+        let more_below_index = lines
+            .iter()
+            .position(|line| line.contains("more below"))
+            .unwrap_or_else(|| panic!("sessions list should render a more-below row:\n{text}"));
+        let list_bottom_border_index = more_below_index + 1;
+        assert!(
+            lines
+                .get(list_bottom_border_index)
+                .is_some_and(|line| line.contains('└')),
+            "sessions list bottom border should sit directly below the more-below row:\n{text}"
+        );
+        let row_before_bottom = lines
+            .get(list_bottom_border_index.saturating_sub(1))
+            .unwrap_or_else(|| panic!("sessions list should have content above bottom:\n{text}"));
+        assert!(
+            row_before_bottom.contains("Follow-up implementation lane")
+                || row_before_bottom.contains("more below")
+                || row_before_bottom.contains("more above"),
+            "sessions list should not leave an empty tail above its bottom border:\n{text}"
         );
     }
 
@@ -1404,6 +1739,20 @@ mod tests {
             write_capture_pair(&capture_dir, &format!("sessions-{width}"), &text);
         }
 
+        for (width, height) in [(160, 24), (160, 32), (100, 24)] {
+            let text = render_picker_capture_at(
+                capture_picker_request(),
+                width,
+                height,
+                vec![TerminalEvent::Key(KeyEvent::new(
+                    KeyEventKind::Press,
+                    KeyCode::Esc,
+                ))],
+            )
+            .await;
+            write_capture_pair(&capture_dir, &format!("sessions-{width}x{height}"), &text);
+        }
+
         let mut empty_request = picker_request();
         empty_request.records.clear();
         let empty_text = render_picker_capture(
@@ -1423,10 +1772,20 @@ mod tests {
         width: usize,
         events: Vec<TerminalEvent>,
     ) -> String {
+        render_picker_capture_at(request, width, MIN_RENDER_HEIGHT, events).await
+    }
+
+    async fn render_picker_capture_at(
+        request: SessionsPickerRequest,
+        width: usize,
+        height: usize,
+        events: Vec<TerminalEvent>,
+    ) -> String {
         let frames = element! {
             SessionsPickerComponent(
                 request,
                 width,
+                height,
             )
         }
         .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
@@ -1440,6 +1799,16 @@ mod tests {
             .last()
             .cloned()
             .unwrap_or_else(|| panic!("picker should render at least one frame"))
+    }
+
+    fn meaningful_line_count(text: &str) -> usize {
+        text.lines().count()
+    }
+
+    fn visible_followup_row_count(text: &str) -> usize {
+        text.lines()
+            .filter(|line| line.contains("Follow-up implementation lane"))
+            .count()
     }
 
     fn has_sidecar_details(text: &str) -> bool {

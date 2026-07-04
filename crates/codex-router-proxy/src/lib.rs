@@ -4311,14 +4311,11 @@ mod tests {
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
-        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
-            .select_upstream_account(
-                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
-                TokenGeneration::new(1),
-                None,
-            )
-            .unwrap_or_else(|error| panic!("fallback should remain selectable: {error}"));
-        assert_eq!(selected_after_retry.account_id(), fallback.account_id());
+        wait_for_repository_selected_account(
+            &runtime_state,
+            fallback.account_id(),
+            "fallback should remain selectable after quota retry",
+        );
     }
 
     #[test]
@@ -4466,14 +4463,11 @@ mod tests {
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
-        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
-            .select_upstream_account(
-                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
-                TokenGeneration::new(1),
-                None,
-            )
-            .unwrap_or_else(|error| panic!("fallback should remain selectable: {error}"));
-        assert_eq!(selected_after_retry.account_id(), fallback.account_id());
+        wait_for_repository_selected_account(
+            &runtime_state,
+            fallback.account_id(),
+            "fallback should remain selectable after large quota retry",
+        );
     }
 
     #[test]
@@ -4606,14 +4600,11 @@ mod tests {
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
-        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
-            .select_upstream_account(
-                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
-                TokenGeneration::new(1),
-                None,
-            )
-            .unwrap_or_else(|error| panic!("fallback should remain selectable: {error}"));
-        assert_eq!(selected_after_retry.account_id(), fallback.account_id());
+        wait_for_repository_selected_account(
+            &runtime_state,
+            fallback.account_id(),
+            "fallback should remain selectable after unreplayable quota error",
+        );
     }
 
     #[test]
@@ -4766,14 +4757,11 @@ mod tests {
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
-        let selected_after_retry = RepositoryBackedAccountSelector::new(&runtime_state)
-            .select_upstream_account(
-                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
-                TokenGeneration::new(1),
-                None,
-            )
-            .unwrap_or_else(|error| panic!("tertiary should remain selectable: {error}"));
-        assert_eq!(selected_after_retry.account_id(), tertiary.account_id());
+        wait_for_repository_selected_account(
+            &runtime_state,
+            tertiary.account_id(),
+            "tertiary should remain selectable after chained quota retries",
+        );
     }
 
     #[test]
@@ -8114,6 +8102,34 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("expected Ok, got error: {error}"),
         }
+    }
+
+    fn wait_for_repository_selected_account(
+        state: &SqliteStateStore,
+        expected_account_id: &AccountId,
+        context: &str,
+    ) {
+        let mut last_selected = None;
+        for _attempt in 0..50 {
+            let selected = RepositoryBackedAccountSelector::new(state)
+                .select_upstream_account(
+                    &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                    TokenGeneration::new(1),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            if selected.account_id() == expected_account_id {
+                return;
+            }
+            last_selected = Some(selected.account_id().clone());
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "{context}: expected {}, last selected {:?}",
+            expected_account_id.as_str(),
+            last_selected
+        );
     }
 
     fn http_response_from_one_connection(

@@ -252,6 +252,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tungstenite 0.28.0",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
