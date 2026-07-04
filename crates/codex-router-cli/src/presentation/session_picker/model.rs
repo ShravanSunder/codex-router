@@ -118,6 +118,10 @@ impl SessionsPickerModel {
         }
     }
 
+    pub(crate) fn set_width(&mut self, width: usize) {
+        self.width = width;
+    }
+
     pub(crate) fn selected_session_id(&self) -> Option<&str> {
         self.selected_record()
             .map(|record| record.session_id.as_str())

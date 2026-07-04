@@ -17,7 +17,7 @@ use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
-const SIDECAR_PICKER_WIDTH: usize = 96;
+const SIDECAR_PICKER_WIDTH: usize = 160;
 const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
 const MAX_VISIBLE_RECORDS: usize = VISIBLE_SESSION_ROWS;
@@ -60,6 +60,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
         props.width
     };
     let mut model = hooks.use_state(|| SessionsPickerModel::new(props.request.clone(), width));
+    if model.read().width != width {
+        model.write().set_width(width);
+    }
     let mut conversation_cache =
         hooks.use_state(BTreeMap::<String, ConversationPreviewLoadState>::new);
     let load_conversation = hooks.use_async_handler({
@@ -1149,6 +1152,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessions_picker_uses_sidecar_only_at_160_columns() {
+        let stacked_text = render_picker_capture(
+            capture_picker_request(),
+            159,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        assert!(
+            !has_sidecar_details(&stacked_text),
+            "session picker should stack details below 160 columns:\n{stacked_text}"
+        );
+
+        let sidecar_text = render_picker_capture(
+            capture_picker_request(),
+            160,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        assert!(
+            has_sidecar_details(&sidecar_text),
+            "session picker should place details on the right at 160 columns:\n{sidecar_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_reflows_when_terminal_width_changes() {
+        let frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 0usize,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                TerminalEvent::Resize(159, 40),
+                TerminalEvent::Resize(160, 40),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            frames.iter().any(|frame| !has_sidecar_details(frame)),
+            "session picker should render a stacked frame after shrinking below 160 columns: {frames:?}"
+        );
+        assert!(
+            frames.iter().any(|frame| has_sidecar_details(frame)),
+            "session picker should render a sidecar frame after growing to 160 columns: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "writes visual session picker capture artifacts for design review"]
     async fn sessions_picker_capture_artifacts_for_design_review() {
         let capture_dir = capture_dir();
@@ -1202,6 +1265,11 @@ mod tests {
             .last()
             .cloned()
             .unwrap_or_else(|| panic!("picker should render at least one frame"))
+    }
+
+    fn has_sidecar_details(text: &str) -> bool {
+        text.lines()
+            .any(|line| line.matches('┌').count() >= 2 && line.matches('┐').count() >= 2)
     }
 
     fn ctrl_key(character: char) -> TerminalEvent {

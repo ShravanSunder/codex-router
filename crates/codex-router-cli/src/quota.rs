@@ -1,6 +1,7 @@
 //! Quota command glue for persisted router-owned quota state.
 
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -73,6 +74,7 @@ use crate::credential_runtime::CliCredentialResolverOpenError;
 use crate::presentation::quota::QuotaSelectedAccountViewModel;
 use crate::presentation::quota::QuotaStatusAccountViewModel;
 use crate::presentation::quota::QuotaStatusViewModel;
+use crate::presentation::quota::run_quota_status_view;
 use crate::presentation::quota::write_quota_status_view;
 use crate::router_root_or_default;
 
@@ -1238,6 +1240,12 @@ fn render_quota_status_once(
     let unicode_bars = effective_format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
     match effective_format {
+        QuotaStatusFormat::Table if std::io::stdout().is_terminal() => {
+            let rows = report.rows();
+            let width = stdout_terminal_width.unwrap_or(100).max(40);
+            let view_model = quota_status_view_model(&report, rows, width);
+            run_quota_status_view(view_model).map_err(QuotaCommandError::Stdout)
+        }
         QuotaStatusFormat::Table => write_quota_table_with_style(
             stdout,
             &report,
@@ -1544,38 +1552,45 @@ fn quota_status_view_model(
                 ),
                 burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
                 weekly_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds),
+                details: quota_selected_account_view_model(report, row),
             })
             .collect(),
-        selected: selected_row.map(|row| QuotaSelectedAccountViewModel {
-            account: row.account_label.clone(),
-            status: quota_state_text(row).to_owned(),
-            reason: first_line(&row.routing).to_owned(),
-            short_window: quota_window_visual_summary(
-                &row.windows,
-                V1_SHORT_WINDOW_SECONDS,
-                "",
-                report.now_unix_seconds,
-            )
-            .trim()
-            .to_owned(),
-            weekly_window: quota_window_visual_summary(
-                &row.windows,
-                V1_WEEKLY_WINDOW_SECONDS,
-                "",
-                report.now_unix_seconds,
-            )
-            .trim()
-            .to_owned(),
-            burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
-            burn_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds)
-                .replace("  ", " "),
-            total_rate: quota_total_rate_summary(row.weekly_pace),
-            connection_rate: quota_connection_rate_summary(row.weekly_pace),
-            active_clients: active_clients_label(row),
-            guards: format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure),
-            reset: row.reset_credits_available.clone(),
-            note: first_line(&row.routing).to_owned(),
-        }),
+        selected: selected_row.map(|row| quota_selected_account_view_model(report, row)),
+    }
+}
+
+fn quota_selected_account_view_model(
+    report: &QuotaStatusReport,
+    row: &QuotaStatusRow,
+) -> QuotaSelectedAccountViewModel {
+    QuotaSelectedAccountViewModel {
+        account: row.account_label.clone(),
+        status: quota_state_text(row).to_owned(),
+        reason: first_line(&row.routing).to_owned(),
+        short_window: quota_window_visual_summary(
+            &row.windows,
+            V1_SHORT_WINDOW_SECONDS,
+            "",
+            report.now_unix_seconds,
+        )
+        .trim()
+        .to_owned(),
+        weekly_window: quota_window_visual_summary(
+            &row.windows,
+            V1_WEEKLY_WINDOW_SECONDS,
+            "",
+            report.now_unix_seconds,
+        )
+        .trim()
+        .to_owned(),
+        burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
+        burn_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds).replace("  ", " "),
+        total_rate: quota_total_rate_summary(row.weekly_pace),
+        connection_rate: quota_connection_rate_summary(row.weekly_pace),
+        active_clients: active_clients_label(row),
+        guards: format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure),
+        reset: row.reset_credits_available.clone(),
+        note: first_line(&row.routing).to_owned(),
     }
 }
 

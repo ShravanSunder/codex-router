@@ -245,6 +245,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "terminal_size",
  "thiserror",
  "tokio",
  "tracing",
