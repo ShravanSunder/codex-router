@@ -1845,9 +1845,9 @@ fn reset_credits_account_list_label(reset_credits_available: Option<u32>) -> Str
         || "resets unknown".to_owned(),
         |credits| {
             if credits == 1 {
-                "1 reset available".to_owned()
+                "1 reset".to_owned()
             } else {
-                format!("{credits} resets available")
+                format!("{credits} resets")
             }
         },
     )
@@ -4028,7 +4028,7 @@ mod tests {
             "main account rows should expose active clients under Status:\n{text}"
         );
         assert!(
-            text.contains("2 resets available"),
+            text.contains("2 resets"),
             "main account rows should expose reset credits under active clients:\n{text}"
         );
         assert!(
