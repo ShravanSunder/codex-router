@@ -3935,6 +3935,20 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_empty_windows_still_show_reset_time() {
+        let report = blocked_quota_capture_report();
+        let mut output = Vec::new();
+
+        must_ok(write_quota_table(&mut output, &report, Some(120)));
+        let text = must_ok(String::from_utf8(output));
+
+        assert!(
+            text.contains("weekly ░░░░░░░░░░ 0% left, reset"),
+            "empty quota windows should still expose the known reset time:\n{text}"
+        );
+    }
+
+    #[test]
     fn quota_status_table_separates_quota_bars_from_burn_bars() {
         let report = quota_capture_report();
         let mut output = Vec::new();
