@@ -2078,7 +2078,7 @@ fn attach_history_estimates_to_display_windows(
     now_unix_seconds: u64,
     windows: &mut [DisplayQuotaWindow],
 ) -> Result<(), QuotaCommandError> {
-    let estimator = QuotaRunRateEstimator::new(DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS);
+    let estimator = display_quota_run_rate_estimator();
     let observed_from_unix_seconds =
         now_unix_seconds.saturating_sub(QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS);
     for window in windows {
@@ -2103,6 +2103,10 @@ fn attach_history_estimates_to_display_windows(
     }
 
     Ok(())
+}
+
+fn display_quota_run_rate_estimator() -> QuotaRunRateEstimator {
+    QuotaRunRateEstimator::new(QUOTA_STATUS_SAMPLE_FRESH_SECONDS)
 }
 
 fn quota_run_rate_observation_from_history(
@@ -2361,23 +2365,32 @@ fn quota_pace_snapshot(
     let weekly_window = windows
         .iter()
         .find(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS)?;
-    let aggregate_rate = projected_weekly_window
-        .and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour)
-        .or_else(|| {
-            weekly_window
-                .run_rate_estimate
-                .burn_rate_basis_points_per_hour()
-        });
-    let candidate_rate = projected_weekly_window
-        .and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour)
-        .or(aggregate_rate);
-    let projected_exhaustion = projected_weekly_window
-        .and_then(QuotaWindowFact::projected_exhaustion_unix_seconds)
-        .or_else(|| {
-            weekly_window
-                .run_rate_estimate
-                .projected_exhaustion_unix_seconds(now_unix_seconds)
-        });
+    let projected_aggregate_rate =
+        projected_weekly_window.and_then(QuotaWindowFact::aggregate_burn_basis_points_per_hour);
+    let display_aggregate_rate = weekly_window
+        .run_rate_estimate
+        .burn_rate_basis_points_per_hour();
+    let aggregate_rate = projected_aggregate_rate.or(display_aggregate_rate);
+    let projected_candidate_rate = projected_weekly_window
+        .and_then(QuotaWindowFact::projected_candidate_burn_basis_points_per_hour);
+    let candidate_rate = projected_candidate_rate.or(aggregate_rate);
+    let projected_exhaustion_from_projection =
+        projected_weekly_window.and_then(QuotaWindowFact::projected_exhaustion_unix_seconds);
+    let display_exhaustion = weekly_window
+        .run_rate_estimate
+        .projected_exhaustion_unix_seconds(now_unix_seconds);
+    let projected_exhaustion = projected_exhaustion_from_projection.or(display_exhaustion);
+    let projection_has_burn_estimate = projected_aggregate_rate.is_some()
+        || projected_candidate_rate.is_some()
+        || projected_exhaustion_from_projection.is_some();
+    let confidence = if projection_has_burn_estimate {
+        projected_weekly_window.map_or(
+            weekly_window.run_rate_estimate.confidence(),
+            QuotaWindowFact::burn_rate_confidence,
+        )
+    } else {
+        weekly_window.run_rate_estimate.confidence()
+    };
     Some(QuotaPaceSnapshot {
         remaining_headroom: weekly_window.remaining_headroom,
         reset_unix_seconds: weekly_window.reset_unix_seconds,
@@ -2386,10 +2399,7 @@ fn quota_pace_snapshot(
         aggregate_burn_basis_points_per_hour: aggregate_rate,
         per_connection_burn_basis_points_per_hour: projected_weekly_window
             .and_then(QuotaWindowFact::per_connection_burn_basis_points_per_hour),
-        confidence: projected_weekly_window.map_or(
-            weekly_window.run_rate_estimate.confidence(),
-            QuotaWindowFact::burn_rate_confidence,
-        ),
+        confidence,
     })
 }
 
@@ -3744,14 +3754,71 @@ mod tests {
     }
 
     #[test]
-    fn quota_status_reset_pace_unavailable_has_no_fake_meter() {
+    fn quota_status_reset_pace_unavailable_has_marker_meter() {
         let view_model = reset_pace_view_model_from_multiple_basis_points(None);
 
         assert_eq!(view_model.state, ResetPaceState::Unavailable);
         assert_eq!(view_model.semantic_label, "burn unavailable");
         assert_eq!(view_model.meter_left_segments.filled, 0);
         assert_eq!(view_model.meter_right_segments.filled, 0);
+        assert_eq!(view_model.meter_left_segments.empty, 7);
+        assert_eq!(view_model.meter_right_segments.empty, 7);
+        assert_eq!(view_model.center_marker, '│');
         assert!(view_model.unavailable_reason.is_some());
+    }
+
+    #[test]
+    fn quota_status_display_reset_pace_accepts_15_minute_history_without_routing_authority() {
+        let reset_unix_seconds = NOW + V1_WEEKLY_WINDOW_SECONDS;
+        let observations = [
+            QuotaRunRateObservation::new(NOW - 899, reset_unix_seconds, 50),
+            QuotaRunRateObservation::new(NOW - 600, reset_unix_seconds, 48),
+        ];
+
+        let display_estimate =
+            display_quota_run_rate_estimator().estimate(NOW, reset_unix_seconds, &observations);
+        let routing_authority_estimate = QuotaRunRateEstimator::new(
+            DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS,
+        )
+        .estimate(NOW, reset_unix_seconds, &observations);
+
+        assert_eq!(display_estimate.confidence(), QuotaRunRateConfidence::Low);
+        assert!(display_estimate.burn_rate_basis_points_per_hour().is_some());
+        assert_eq!(
+            routing_authority_estimate.confidence(),
+            QuotaRunRateConfidence::Stale,
+            "runtime authority must still go stale at the persisted 300s boundary"
+        );
+    }
+
+    #[test]
+    fn quota_status_display_reset_pace_uses_display_estimate_when_projection_is_stale() {
+        let windows = vec![display_window(
+            V1_WEEKLY_WINDOW_SECONDS,
+            50,
+            NOW + V1_WEEKLY_WINDOW_SECONDS,
+            QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+                QuotaRunRateConfidence::Low,
+                2_000,
+                50,
+            ),
+        )];
+        let stale_projected_weekly_window =
+            QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Stale)
+                .with_remaining_headroom(50)
+                .with_reset_unix_seconds(NOW + V1_WEEKLY_WINDOW_SECONDS)
+                .with_observed_unix_seconds(NOW - 301)
+                .with_burn_rate_confidence(QuotaRunRateConfidence::Stale);
+
+        let snapshot = quota_pace_snapshot(&windows, Some(&stale_projected_weekly_window), NOW)
+            .unwrap_or_else(|| panic!("weekly display window should produce pace snapshot"));
+
+        assert_eq!(snapshot.aggregate_burn_basis_points_per_hour, Some(2_000));
+        assert_eq!(
+            snapshot.projected_candidate_burn_basis_points_per_hour,
+            Some(2_000)
+        );
+        assert_eq!(snapshot.confidence, QuotaRunRateConfidence::Low);
     }
 
     #[test]

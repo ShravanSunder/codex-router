@@ -752,7 +752,11 @@ fn reset_pace_summary_for_width(reset_pace: &ResetPaceViewModel, width: usize) -
 
 fn reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {
     if reset_pace.state == ResetPaceState::Unavailable {
-        return reset_pace.semantic_label.to_owned();
+        return format!(
+            "{}  {}",
+            reset_pace_meter(reset_pace),
+            reset_pace.semantic_label
+        );
     }
     format!(
         "{}  {} {}",
@@ -763,9 +767,6 @@ fn reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {
 }
 
 fn reset_pace_meter(reset_pace: &ResetPaceViewModel) -> String {
-    if reset_pace.state == ResetPaceState::Unavailable {
-        return String::new();
-    }
     format!(
         "{}{}{}{}{}",
         "▱".repeat(reset_pace.meter_left_segments.empty),
@@ -893,6 +894,27 @@ mod tests {
 
         assert!(text.contains("healthy"), "{text}");
         assert!(text.contains("sample fresh"), "{text}");
+    }
+
+    #[test]
+    fn quota_status_unavailable_reset_pace_renders_marker_meter() {
+        let mut view_model = quota_view_model();
+        let unavailable_reset_pace = ResetPaceViewModel::default();
+        let selected_details = selected_account_details("ssdev", "safest quota");
+        view_model.rows[0].reset_pace = unavailable_reset_pace.clone();
+        view_model.rows[0].details = QuotaSelectedAccountViewModel {
+            reset_pace: unavailable_reset_pace,
+            ..selected_details
+        };
+        view_model.selected = Some(view_model.rows[0].details.clone());
+
+        let text = render_quota_static_capture(view_model, 160, false);
+
+        assert!(
+            text.contains("▱▱▱▱▱▱▱│▱▱▱▱▱▱▱"),
+            "unavailable reset pace must keep the visible center-marker meter:\n{text}"
+        );
+        assert!(text.contains("burn unavailable"), "{text}");
     }
 
     #[test]
