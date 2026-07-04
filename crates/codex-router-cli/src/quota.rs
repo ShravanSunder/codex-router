@@ -1567,9 +1567,11 @@ fn quota_status_view_model(
                 weekly_window: quota_window_visual_summary(
                     &row.windows,
                     V1_WEEKLY_WINDOW_SECONDS,
-                    "weekly",
+                    "",
                     report.now_unix_seconds,
-                ),
+                )
+                .trim()
+                .to_owned(),
                 burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
                 sample_metadata: sample_metadata_from_display_window(
                     &row.windows,
@@ -3990,7 +3992,7 @@ mod tests {
         let text = must_ok(String::from_utf8(output));
 
         assert!(
-            text.contains("weekly ░░░░░░░░░░ 0% left, reset 7d"),
+            text.contains("░░░░░░░░░░ 0% left, reset 7d"),
             "ineligible depleted quota windows should expose the known reset time:\n{text}"
         );
         assert!(
@@ -4036,7 +4038,7 @@ mod tests {
             "quota table should expose total and per-connection rate units:\n{text}"
         );
         assert!(
-            text.contains("weekly █"),
+            text.contains("█") && text.contains("% left, reset"),
             "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
         );
         assert!(
@@ -4076,7 +4078,7 @@ mod tests {
         must_ok(write_quota_table(&mut output, &report, Some(120)));
         let text = must_ok(String::from_utf8(output));
 
-        assert!(text.contains("weekly █"), "{text}");
+        assert!(text.contains("█") && text.contains("% left"), "{text}");
         assert!(text.contains("sample stale 15m 1s"), "{text}");
         assert!(
             !text.contains("needs refresh"),

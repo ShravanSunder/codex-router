@@ -430,11 +430,14 @@ fn session_visible_row_budget(
 fn session_list_height(visible_len: usize, selected_index: usize, visible_rows: usize) -> usize {
     let visible_rows = visible_rows.max(1);
     let window_start = visible_window_start(selected_index, visible_len, visible_rows);
-    let visible_count = visible_len.saturating_sub(window_start).min(visible_rows);
+    let window_end = (window_start + visible_rows).min(visible_len);
+    let visible_count = window_end.saturating_sub(window_start);
     let remaining = visible_len.saturating_sub(window_start + visible_rows);
 
     let header_height = 2;
-    let record_rows_height = visible_count * 2;
+    let record_rows_height = (window_start..window_end)
+        .map(session_choice_row_height)
+        .sum::<usize>();
     let record_gap_height = visible_count.saturating_sub(1);
     let more_above_height = if window_start > 0 { 2 } else { 0 };
     let more_below_height = if remaining > 0 { 2 } else { 0 };
@@ -446,6 +449,10 @@ fn session_list_height(visible_len: usize, selected_index: usize, visible_rows: 
         + record_rows_height
         + record_gap_height
         + more_below_height
+}
+
+const fn session_choice_row_height(visible_index: usize) -> usize {
+    if visible_index == 0 { 4 } else { 2 }
 }
 
 fn detail_height(conversation: Option<&SessionConversationPreview>) -> usize {
@@ -626,13 +633,14 @@ fn render_start_new_row(
 ) -> AnyElement<'static> {
     let foreground = if selected { Color::White } else { Color::Grey };
     let title_prefix = if selected { "❯ " } else { "  " };
-    let title_width = width.saturating_sub(18).max(14);
+    let inner_width = width.saturating_sub(4);
+    let title_width = inner_width.saturating_sub(18).max(14);
     let first_line = fit_line(
         &format!(
             "{title_prefix}{:<title_width$} {:>6} {:>6}",
             "Start new session", "-", "-"
         ),
-        width.saturating_sub(2),
+        inner_width,
     );
     let metadata_line = if model.visible_record_len() == 0 {
         format!(
@@ -643,13 +651,14 @@ fn render_start_new_row(
     } else {
         format!("    {}", start_new_args_label(model))
     };
-    let second_line = fit_line(&metadata_line, width.saturating_sub(2));
+    let second_line = fit_line(&metadata_line, inner_width);
 
     element! {
         View(
             width: width as u32,
             flex_direction: FlexDirection::Column,
-            background_color: Color::DarkGrey,
+            border_style: BorderStyle::Single,
+            border_color: Color::DarkGrey,
             padding_left: 1,
             padding_right: 1,
             padding_top: 0,
@@ -1253,6 +1262,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sessions_picker_start_new_row_uses_outline_instead_of_filled_background() {
+        let mut request = picker_request();
+        request.new_session_args_display =
+            "--router-root /Users/shravansunder/.codex-router".to_owned();
+        let text = render_picker_capture(
+            request,
+            100,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        let lines = text.lines().collect::<Vec<_>>();
+        let start_index = lines
+            .iter()
+            .position(|line| line.contains("Start new session"))
+            .unwrap_or_else(|| panic!("start-new row should render:\n{text}"));
+
+        assert!(
+            lines
+                .get(start_index.saturating_sub(1))
+                .is_some_and(|line| line.contains('┌') && line.contains('┐')),
+            "start-new row should have a thin outline top border:\n{text}"
+        );
+        assert!(
+            lines
+                .get(start_index + 2)
+                .is_some_and(|line| line.contains('└') && line.contains('┘')),
+            "start-new row should have a thin outline bottom border:\n{text}"
+        );
+        assert!(
+            !lines[start_index].contains('█'),
+            "start-new row should not read as a filled selected row:\n{text}"
+        );
+    }
+
     #[test]
     fn selected_conversation_preview_requests_background_load_without_reading_jsonl() {
         let mut record = picker_request().records.remove(0);
@@ -1350,7 +1397,7 @@ mod tests {
                 .rposition(|line| line.contains('╰'))
                 .unwrap_or_else(|| panic!("capture should render bottom border:\n{text}"));
             assert!(
-                bottom_border_index <= footer_index + 2,
+                bottom_border_index <= footer_index + 3,
                 "picker outer border should stop after footer at width {width}:\n{text}"
             );
         }
@@ -1592,10 +1639,17 @@ mod tests {
             "list header should sit directly below the list border:\n{text}"
         );
 
-        let list_bottom_border_index = lines
+        let more_below_index = lines
             .iter()
-            .position(|line| line.contains('└'))
-            .unwrap_or_else(|| panic!("sessions list bottom border should render:\n{text}"));
+            .position(|line| line.contains("more below"))
+            .unwrap_or_else(|| panic!("sessions list should render a more-below row:\n{text}"));
+        let list_bottom_border_index = more_below_index + 1;
+        assert!(
+            lines
+                .get(list_bottom_border_index)
+                .is_some_and(|line| line.contains('└')),
+            "sessions list bottom border should sit directly below the more-below row:\n{text}"
+        );
         let row_before_bottom = lines
             .get(list_bottom_border_index.saturating_sub(1))
             .unwrap_or_else(|| panic!("sessions list should have content above bottom:\n{text}"));

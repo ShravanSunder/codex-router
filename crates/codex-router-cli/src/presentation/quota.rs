@@ -412,7 +412,7 @@ fn QuotaStatusComponent(
             flex_direction: FlexDirection::Column,
         ) {
             Text(content: "Quota status", color: Color::Cyan, weight: Weight::Bold)
-            Text(content: fit_line(&props.view_model.route_line, content_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            Text(content: fit_line(&props.view_model.route_line, content_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             Text(content: fit_line(&props.view_model.why_line, content_width), color: Color::White, wrap: TextWrap::NoWrap)
             #(body)
         }
@@ -709,7 +709,7 @@ fn render_selected_details(
             padding_top: 0,
         ) {
             Text(content: "Selected account", color: Color::Cyan, weight: Weight::Bold)
-            Text(content: fit_line(&format!("{}    {}    {}", selected.account, selected.status, selected.reason), detail_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            Text(content: fit_line(&format!("{}    {}    {}", selected.account, selected.status, selected.reason), detail_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             #(quota_gap())
             Text(content: "Quota windows", color: Color::Cyan, weight: Weight::Bold)
             #(detail_line("5h", &selected.short_window, detail_width, Color::White))
@@ -1400,7 +1400,7 @@ mod tests {
                 active_clients: "1 client".to_owned(),
                 reset_credits: "2 resets".to_owned(),
                 reason: "safest quota".to_owned(),
-                weekly_window: "weekly █████ 83%".to_owned(),
+                weekly_window: "█████ 83%".to_owned(),
                 burn_meter: "legacy-meter-sentinel".to_owned(),
                 sample_metadata,
                 reset_pace,
@@ -1605,7 +1605,7 @@ mod tests {
                 active_clients: "1 client".to_owned(),
                 reset_credits: "2 resets".to_owned(),
                 reason: "safest quota".to_owned(),
-                weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
+                weekly_window: "█████ 83% left, reset 7d".to_owned(),
                 burn_meter: "▰▱▱▱".to_owned(),
                 sample_metadata: SampleMetadata {
                     confidence: SampleConfidence::Fresh,
@@ -1651,7 +1651,7 @@ mod tests {
                     active_clients: "1 client".to_owned(),
                     reset_credits: "2 resets".to_owned(),
                     reason: "alpha detail".to_owned(),
-                    weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
+                    weekly_window: "█████ 83% left, reset 7d".to_owned(),
                     burn_meter: "▰▱▱▱".to_owned(),
                     sample_metadata: SampleMetadata::default(),
                     reset_pace: ResetPaceViewModel::default(),
@@ -1665,7 +1665,7 @@ mod tests {
                     active_clients: "0 clients".to_owned(),
                     reset_credits: "2 resets".to_owned(),
                     reason: "beta detail".to_owned(),
-                    weekly_window: "weekly ████ 75% left, reset 6d".to_owned(),
+                    weekly_window: "████ 75% left, reset 6d".to_owned(),
                     burn_meter: "▰▰▱▱".to_owned(),
                     sample_metadata: SampleMetadata::default(),
                     reset_pace: ResetPaceViewModel::default(),
@@ -1690,7 +1690,7 @@ mod tests {
                 active_clients: format!("{index} clients"),
                 reset_credits: "2 resets".to_owned(),
                 reason: format!("account {index:02} detail"),
-                weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
+                weekly_window: "█████ 83% left, reset 7d".to_owned(),
                 burn_meter: "▰▱▱▱".to_owned(),
                 sample_metadata: SampleMetadata::default(),
                 reset_pace: ResetPaceViewModel::default(),
@@ -1717,7 +1717,7 @@ mod tests {
             row.selected = false;
             row.status = "[blocked]".to_owned();
             row.reason = "quota ineligible".to_owned();
-            row.weekly_window = "weekly ░░░░░░░░░░ 0% left, reset 7d".to_owned();
+            row.weekly_window = "░░░░░░░░░░ 0% left, reset 7d".to_owned();
             row.reset_pace = ResetPaceViewModel::default();
             row.details.status = "[blocked]".to_owned();
             row.details.reason = "quota ineligible".to_owned();
@@ -1859,7 +1859,7 @@ mod tests {
             active_clients: "0 clients".to_owned(),
             reset_credits: "2 resets".to_owned(),
             reason: semantic_label.to_owned(),
-            weekly_window: "weekly █████ 83% left, reset 7d".to_owned(),
+            weekly_window: "█████ 83% left, reset 7d".to_owned(),
             burn_meter: String::new(),
             sample_metadata: SampleMetadata {
                 confidence: SampleConfidence::Fresh,
