@@ -54,11 +54,16 @@ pub(crate) fn SessionsPickerComponent<'a>(
 ) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
     let (terminal_width, _) = hooks.use_terminal_size();
-    let width = if props.width == 0 {
-        usize::from(terminal_width)
-    } else {
-        props.width
-    };
+    let live_terminal_width = props.width == 0;
+    let observed_width = hooks.use_state(|| {
+        if live_terminal_width {
+            let width = usize::from(terminal_width);
+            if width == 0 { MIN_PICKER_WIDTH } else { width }
+        } else {
+            props.width
+        }
+    });
+    let width = observed_width.get();
     let mut model = hooks.use_state(|| SessionsPickerModel::new(props.request.clone(), width));
     if model.read().width != width {
         model.write().set_width(width);
@@ -87,7 +92,14 @@ pub(crate) fn SessionsPickerComponent<'a>(
     let mut should_cancel = hooks.use_state(|| false);
 
     hooks.use_terminal_events({
+        let mut observed_width = observed_width;
         move |event| {
+            if let TerminalEvent::Resize(width, _) = event {
+                if live_terminal_width {
+                    observed_width.set(usize::from(width));
+                }
+                return;
+            }
             let TerminalEvent::Key(KeyEvent {
                 code,
                 kind,
