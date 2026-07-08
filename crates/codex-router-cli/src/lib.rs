@@ -3005,8 +3005,10 @@ exit 42
         assert!(visible_stdout.contains("Quota status"));
         assert!(visible_stdout.contains("─"));
         assert!(visible_stdout.contains("╰"));
-        assert!(visible_stdout.contains("responses -> primary    [preferred]"));
-        assert!(visible_stdout.contains("why: preferred by quota: safest quota"));
+        assert!(visible_stdout.contains("responses -> primary"));
+        assert!(visible_stdout.contains("safest quota"));
+        assert!(visible_stdout.contains("burn "));
+        assert!(!visible_stdout.contains("why: preferred by quota"));
         assert!(visible_stdout.contains("  Account"));
         assert!(visible_stdout.contains("❯ primary"));
         assert!(visible_stdout.contains("preferred"));
@@ -3253,7 +3255,7 @@ exit 42
         );
         assert_eq!(
             parsed["accounts"][0]["window_slots"]["5h"]["run_rate"]["confidence"],
-            "unknown"
+            "insufficient"
         );
         assert_eq!(
             parsed["accounts"][0]["window_slots"]["weekly"]["remaining_headroom"],
@@ -3269,7 +3271,7 @@ exit 42
         );
         assert_eq!(
             parsed["accounts"][0]["windows"][1]["run_rate"]["confidence"],
-            "unknown"
+            "insufficient"
         );
         assert!(!output.stdout.contains("access-token"));
         assert!(!output.stdout.contains("refresh-token"));

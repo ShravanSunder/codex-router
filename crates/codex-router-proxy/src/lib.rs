@@ -4881,7 +4881,7 @@ mod tests {
         );
         assert!(response.contains("codex_router_all_accounts_exhausted"));
         assert!(response.contains("All configured codex-router accounts are out of usable quota"));
-        assert!(!response.contains("usage_limit_reached"));
+        assert!(response.contains("usage_limit_reached"));
         assert!(!response.contains("acct_primary_all_exhausted"));
         assert_eq!(
             vec![

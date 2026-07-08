@@ -182,7 +182,7 @@ fn quota_static_render_height(view_model: &QuotaStatusViewModel, width: usize) -
         list_height
     };
     let root_border_height = 2;
-    let title_and_summary_height = 3;
+    let title_and_summary_height = 2;
     root_border_height + title_and_summary_height + body_height
 }
 
@@ -475,7 +475,6 @@ fn QuotaStatusComponent(
         ) {
             Text(content: quota_title_line(&view_model, content_width, spinner_tick.get()), color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             Text(content: fit_line(&view_model.route_line, content_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-            Text(content: fit_line(&view_model.why_line, content_width), color: Color::White, wrap: TextWrap::NoWrap)
             #(body)
         }
     }
@@ -522,6 +521,14 @@ fn quota_title_freshness(view_model: &QuotaStatusViewModel) -> String {
                 .iter()
                 .find(|row| row.selected)
                 .map(|row| &row.sample_metadata)
+        })
+        .or_else(|| {
+            view_model
+                .rows
+                .iter()
+                .map(|row| &row.sample_metadata)
+                .filter(|metadata| metadata.confidence != SampleConfidence::Unknown)
+                .min_by_key(|metadata| metadata.age_seconds.unwrap_or(u64::MAX))
         });
     match metadata.map(|metadata| metadata.confidence) {
         Some(SampleConfidence::Fresh) => {
@@ -563,7 +570,7 @@ fn quota_status_height(height: usize) -> usize {
 
 fn quota_body_budget(height: usize) -> usize {
     let root_border_height = 2;
-    let title_and_summary_height = 3;
+    let title_and_summary_height = 2;
     height
         .max(1)
         .saturating_sub(root_border_height + title_and_summary_height)
@@ -987,7 +994,7 @@ fn reset_pace_segment_start(line: &str, phrase_start: usize) -> usize {
     });
     cursor = scan_back_while(line, cursor, char::is_whitespace);
     scan_back_while(line, cursor, |character| {
-        matches!(character, '▱' | '▰' | '│')
+        matches!(character, '□' | '■' | '│')
     })
 }
 
@@ -1055,14 +1062,38 @@ fn is_depleted_quota_label(value: &str) -> bool {
 }
 
 fn reset_pace_meter(reset_pace: &ResetPaceViewModel) -> String {
-    format!(
-        "{}{}{}{}{}",
-        "▱".repeat(reset_pace.meter_left_segments.empty),
-        "▰".repeat(reset_pace.meter_left_segments.filled),
+    reset_pace_meter_slots(
+        reset_pace.meter_left_segments.filled,
         reset_pace.center_marker,
-        "▰".repeat(reset_pace.meter_right_segments.filled),
-        "▱".repeat(reset_pace.meter_right_segments.empty),
+        reset_pace.meter_right_segments.filled,
     )
+}
+
+fn reset_pace_meter_slots(left_filled: usize, center_marker: char, right_filled: usize) -> String {
+    const RESET_PACE_METER_SIDE_WIDTH: usize = 7;
+    const RESET_PACE_METER_EMPTY: char = '□';
+    const RESET_PACE_METER_FILLED: char = '■';
+    let mut left_slots = [RESET_PACE_METER_EMPTY; RESET_PACE_METER_SIDE_WIDTH];
+    let mut right_slots = [RESET_PACE_METER_EMPTY; RESET_PACE_METER_SIDE_WIDTH];
+    for slot in left_slots
+        .iter_mut()
+        .rev()
+        .take(left_filled.min(RESET_PACE_METER_SIDE_WIDTH))
+    {
+        *slot = RESET_PACE_METER_FILLED;
+    }
+    for slot in right_slots
+        .iter_mut()
+        .take(right_filled.min(RESET_PACE_METER_SIDE_WIDTH))
+    {
+        *slot = RESET_PACE_METER_FILLED;
+    }
+
+    left_slots
+        .into_iter()
+        .chain(std::iter::once(center_marker))
+        .chain(right_slots)
+        .collect()
 }
 
 fn sample_metadata_summary(sample_metadata: &SampleMetadata) -> String {
@@ -1434,13 +1465,32 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_title_uses_row_freshness_when_all_accounts_are_exhausted() {
+        let mut view_model = quota_view_model();
+        view_model.route_line = "responses -> none    [blocked]".to_owned();
+        view_model.why_line = "why: no usable accounts".to_owned();
+        view_model.rows[0].selected = false;
+        view_model.rows[0].status = "blocked".to_owned();
+        view_model.selected = None;
+
+        let text = render_quota_static_capture(view_model, 120, false);
+        let title_line = text
+            .lines()
+            .find(|line| line.contains("Quota status"))
+            .unwrap_or_else(|| panic!("quota title line should render:\n{text}"));
+
+        assert!(title_line.contains("fresh 14s ago"), "{text}");
+        assert!(!title_line.contains("unknown"), "{text}");
+    }
+
+    #[test]
     fn quota_status_selected_panel_renders_5h_after_conn_before_activity() {
         let text = render_quota_static_capture(quota_view_model(), 160, false);
         let reset_pace_index = text
             .find("Reset pace")
             .unwrap_or_else(|| panic!("selected panel should render reset pace:\n{text}"));
         let short_pace_index = text
-            .find("5h        ▱▱▱▱▱▱▱│▰▰▰▰▰▰▰  runs out 2d 16h")
+            .find("5h        □□□□□□□│■■■■■■■  runs out 2d 16h")
             .unwrap_or_else(|| panic!("selected panel should render 5h after conn:\n{text}"));
         let activity_index = text
             .find("Activity")
@@ -1498,7 +1548,7 @@ mod tests {
         let text = render_quota_static_capture(view_model, 160, false);
 
         assert!(
-            text.contains("▱▱▱▱▱▱▱│▱▱▱▱▱▱▱"),
+            text.contains("□□□□□□□│□□□□□□□"),
             "unavailable reset pace must keep the visible center-marker meter:\n{text}"
         );
         assert!(text.contains("burn unavailable"), "{text}");
@@ -1737,7 +1787,7 @@ mod tests {
         assert!(text.contains("1.21x reset pace"), "{text}");
         assert!(text.contains("over"), "{text}");
         assert!(text.contains("sample stale 15m 1s"), "{text}");
-        assert!(text.contains("│▰▰▰"), "{text}");
+        assert!(text.contains("│■■■"), "{text}");
         assert!(
             !text.contains("legacy safe pace sentinel")
                 && !text.contains("legacy-meter-sentinel")
@@ -1914,7 +1964,7 @@ mod tests {
                 reset_credits: "2 resets".to_owned(),
                 reason: "safest quota".to_owned(),
                 weekly_window: "█████ 83% left, reset 7d".to_owned(),
-                burn_meter: "▰▱▱▱".to_owned(),
+                burn_meter: "■□□□".to_owned(),
                 sample_metadata: SampleMetadata {
                     confidence: SampleConfidence::Fresh,
                     age_label: "14s".to_owned(),
@@ -1961,7 +2011,7 @@ mod tests {
                     reset_credits: "2 resets".to_owned(),
                     reason: "alpha detail".to_owned(),
                     weekly_window: "█████ 83% left, reset 7d".to_owned(),
-                    burn_meter: "▰▱▱▱".to_owned(),
+                    burn_meter: "■□□□".to_owned(),
                     sample_metadata: SampleMetadata::default(),
                     reset_pace: ResetPaceViewModel::default(),
                     weekly_pace: "ahead reset by 2d".to_owned(),
@@ -1975,7 +2025,7 @@ mod tests {
                     reset_credits: "2 resets".to_owned(),
                     reason: "beta detail".to_owned(),
                     weekly_window: "████ 75% left, reset 6d".to_owned(),
-                    burn_meter: "▰▰▱▱".to_owned(),
+                    burn_meter: "■■□□".to_owned(),
                     sample_metadata: SampleMetadata::default(),
                     reset_pace: ResetPaceViewModel::default(),
                     weekly_pace: "behind reset by 1d".to_owned(),
@@ -2000,7 +2050,7 @@ mod tests {
                 reset_credits: "2 resets".to_owned(),
                 reason: format!("account {index:02} detail"),
                 weekly_window: "█████ 83% left, reset 7d".to_owned(),
-                burn_meter: "▰▱▱▱".to_owned(),
+                burn_meter: "■□□□".to_owned(),
                 sample_metadata: SampleMetadata::default(),
                 reset_pace: ResetPaceViewModel::default(),
                 weekly_pace: "ahead reset by 2d".to_owned(),
@@ -2048,7 +2098,7 @@ mod tests {
             reason: reason.to_owned(),
             short_window: "█████ 99% left, reset 5h".to_owned(),
             weekly_window: "████ 83% left, reset 7d".to_owned(),
-            burn_meter: "▰▱▱▱".to_owned(),
+            burn_meter: "■□□□".to_owned(),
             burn_pace: "ahead reset by 2d".to_owned(),
             sample_metadata: SampleMetadata {
                 confidence: SampleConfidence::Fresh,
@@ -2149,8 +2199,8 @@ mod tests {
         } else if state == ResetPaceState::UnderBurning {
             (
                 ResetPaceMeterSegments {
-                    filled: 4,
-                    empty: 3,
+                    filled: 0,
+                    empty: 7,
                 },
                 ResetPaceMeterSegments {
                     filled: 0,

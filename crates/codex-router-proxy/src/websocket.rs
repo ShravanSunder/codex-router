@@ -98,7 +98,7 @@ const WEBSOCKET_METADATA_SCAN_LIMIT_BYTES: usize = 64 * 1024;
 const WEBSOCKET_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 const WEBSOCKET_REQUEST_LOCAL_CREDENTIAL_ATTEMPT_LIMIT: usize = 16;
 const CODEX_WEBSOCKET_RECONNECT_SIGNAL: &str = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}"#;
-pub(crate) const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"codex_router_quota_exhausted","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
+pub(crate) const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
 pub(crate) const ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL: &str = r#"{"type":"error","status":503,"error":{"type":"codex_router_quota_state_unavailable","code":"codex_router_quota_state_unavailable","message":"codex-router cannot safely rotate accounts because quota state is unavailable."}}"#;
 const POST_EXHAUSTION_ALTERNATIVE_SELECTION_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -1928,7 +1928,8 @@ mod async_forwarding_tests {
             let rendered = message.to_string();
             assert_eq!(rendered, super::ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL);
             assert!(!rendered.contains("acct_"));
-            assert!(!rendered.contains("usage_limit_reached"));
+            assert!(rendered.contains("usage_limit_reached"));
+            assert!(rendered.contains("codex_router_all_accounts_exhausted"));
         };
 
         let (router_result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
@@ -3503,8 +3504,14 @@ mod async_forwarding_tests {
                 "last-account quota exhaustion must not ask Codex to reconnect when no alternative can be selected"
             );
             assert!(
-                !client_message.to_string().contains("usage_limit_reached"),
-                "single-account quota exhaustion must not leak provider wording to Codex"
+                client_message.to_string().contains("usage_limit_reached"),
+                "single-account quota exhaustion must use Codex's usage-limit error shape"
+            );
+            assert!(
+                client_message
+                    .to_string()
+                    .contains("codex_router_all_accounts_exhausted"),
+                "single-account quota exhaustion should preserve the router-specific code"
             );
             provider_error_observer.release_observation();
             drop(upstream_websocket);
@@ -3921,8 +3928,14 @@ mod async_forwarding_tests {
                 "last-account quota exhaustion must not ask Codex to reconnect when no alternative can be selected"
             );
             assert!(
-                !client_message.to_string().contains("usage_limit_reached"),
-                "last-account quota exhaustion must not leak provider wording to Codex"
+                client_message.to_string().contains("usage_limit_reached"),
+                "last-account quota exhaustion must use Codex's usage-limit error shape"
+            );
+            assert!(
+                client_message
+                    .to_string()
+                    .contains("codex_router_all_accounts_exhausted"),
+                "last-account quota exhaustion should preserve the router-specific code"
             );
             drop(upstream_websocket);
         };

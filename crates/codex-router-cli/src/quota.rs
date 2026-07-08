@@ -88,9 +88,12 @@ const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
 const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 300;
 const QUOTA_STATUS_SAMPLE_FRESH_SECONDS: u64 = 900;
+const QUOTA_STATUS_SHORT_BURN_LOOKBACK_SECONDS: u64 = 30 * 60;
+const QUOTA_STATUS_WEEKLY_BURN_LOOKBACK_SECONDS: u64 = 3 * 60 * 60;
+const QUOTA_STATUS_DISPLAY_MIN_RATE_SAMPLES: usize = 3;
+const QUOTA_STATUS_DISPLAY_NORMAL_CONFIDENCE_SAMPLES: usize = 5;
 const RESET_PACE_RUNOUT_LABEL_THRESHOLD_HUNDREDTHS: u32 = 200;
 const ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS: u64 = 7_200;
-const QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
 const DEPLETED_QUOTA_LABEL: &str = "Exhausted";
 
 /// Quota CLI command.
@@ -1574,13 +1577,8 @@ fn quota_status_view_model(
     let selected_row = rows.iter().find(|row| row.preferred_next);
     QuotaStatusViewModel {
         width,
-        route_line: format!(
-            "{} -> {}    {}",
-            report.route_band,
-            selected_account_label(rows),
-            selected_account_badge(rows),
-        ),
-        why_line: format!("why: {}", selector_summary(rows)),
+        route_line: quota_status_route_line(report, rows),
+        why_line: String::new(),
         serving_clients: quota_status_serving_clients(rows),
         rows: rows
             .iter()
@@ -1623,6 +1621,38 @@ fn quota_status_serving_clients(rows: &[QuotaStatusRow]) -> Option<u32> {
         .filter_map(|row| row.active_clients_value)
         .fold(0_u32, u32::saturating_add);
     (total > 0).then_some(total)
+}
+
+fn quota_status_route_line(report: &QuotaStatusReport, rows: &[QuotaStatusRow]) -> String {
+    let Some(selected_row) = rows.iter().find(|row| row.preferred_next) else {
+        return format!(
+            "{} -> none    {}",
+            report.route_band,
+            selector_summary(rows)
+        );
+    };
+    let mut parts = vec![
+        format!("{} -> {}", report.route_band, selected_row.account_label),
+        compact_routing_summary(selected_row),
+    ];
+    if let Some(total_rate) = quota_compact_total_burn_rate(selected_row.weekly_pace) {
+        parts.push(total_rate);
+    }
+    if let Some(limiting_window) = selected_row.limiting_window {
+        parts.push(format!(
+            "{} {} left",
+            quota_window_label(limiting_window.window_seconds()),
+            format_percent(limiting_window.remaining_headroom())
+        ));
+    }
+    parts.join("    ")
+}
+
+fn compact_routing_summary(row: &QuotaStatusRow) -> String {
+    first_line(&row.routing)
+        .strip_prefix("preferred by quota: ")
+        .unwrap_or_else(|| first_line(&row.routing))
+        .to_owned()
 }
 
 fn quota_selected_account_view_model(
@@ -1753,12 +1783,6 @@ fn selected_account_label(rows: &[QuotaStatusRow]) -> &str {
         .unwrap_or("none")
 }
 
-fn selected_account_badge(rows: &[QuotaStatusRow]) -> &'static str {
-    rows.iter()
-        .find(|row| row.preferred_next)
-        .map_or("[blocked]", quota_state_badge)
-}
-
 fn selector_summary(rows: &[QuotaStatusRow]) -> String {
     let Some(selected_row) = rows.iter().find(|row| row.preferred_next) else {
         return "no usable accounts".to_owned();
@@ -1795,24 +1819,6 @@ fn quota_human_group(row: &QuotaStatusRow) -> QuotaHumanGroup {
             | AccountAvailability::Unknown
             | AccountAvailability::Excluded => QuotaHumanGroup::BlockedOrStale,
         },
-    }
-}
-
-fn quota_state_badge(row: &QuotaStatusRow) -> &'static str {
-    if row.preferred_next {
-        return "[preferred]";
-    }
-    if row.freshness == QuotaEvidenceFreshness::Stale {
-        return "[stale]";
-    }
-    if row.freshness == QuotaEvidenceFreshness::Unknown {
-        return "[unknown]";
-    }
-    match quota_human_group(row) {
-        QuotaHumanGroup::Preferred => "[preferred]",
-        QuotaHumanGroup::Available => "[available]",
-        QuotaHumanGroup::Held => "[held]",
-        QuotaHumanGroup::BlockedOrStale => "[blocked]",
     }
 }
 
@@ -2129,13 +2135,13 @@ fn attach_history_estimates_to_display_windows(
     now_unix_seconds: u64,
     windows: &mut [DisplayQuotaWindow],
 ) -> Result<(), QuotaCommandError> {
-    let estimator = display_quota_run_rate_estimator();
-    let observed_from_unix_seconds =
-        now_unix_seconds.saturating_sub(QUOTA_STATUS_HISTORY_LOOKBACK_SECONDS);
     for window in windows {
         let Some(reset_unix_seconds) = window.reset_unix_seconds else {
             continue;
         };
+        let observed_from_unix_seconds = now_unix_seconds.saturating_sub(
+            quota_status_display_burn_lookback_seconds(window.window_seconds),
+        );
         let observations = quota_history_runtime.block_on(
             quota_history_state.quota_history_observations_for_window(
                 account_id,
@@ -2149,11 +2155,62 @@ fn attach_history_estimates_to_display_windows(
             .iter()
             .filter_map(quota_run_rate_observation_from_history)
             .collect::<Vec<_>>();
-        window.run_rate_estimate =
-            estimator.estimate(now_unix_seconds, reset_unix_seconds, &observations);
+        window.run_rate_estimate = display_quota_run_rate_estimate(
+            window.window_seconds,
+            now_unix_seconds,
+            reset_unix_seconds,
+            &observations,
+        );
     }
 
     Ok(())
+}
+
+fn display_quota_run_rate_estimate(
+    window_seconds: u64,
+    now_unix_seconds: u64,
+    reset_unix_seconds: u64,
+    observations: &[QuotaRunRateObservation],
+) -> QuotaRunRateEstimate {
+    let observed_from_unix_seconds =
+        now_unix_seconds.saturating_sub(quota_status_display_burn_lookback_seconds(window_seconds));
+    let recent_observations = observations
+        .iter()
+        .copied()
+        .filter(|observation| observation.observed_unix_seconds() >= observed_from_unix_seconds)
+        .collect::<Vec<_>>();
+    if recent_observations.len() < QUOTA_STATUS_DISPLAY_MIN_RATE_SAMPLES {
+        return QuotaRunRateEstimate::insufficient();
+    }
+    let estimate = display_quota_run_rate_estimator().estimate(
+        now_unix_seconds,
+        reset_unix_seconds,
+        &recent_observations,
+    );
+    if recent_observations.len() < QUOTA_STATUS_DISPLAY_NORMAL_CONFIDENCE_SAMPLES
+        && estimate.confidence() == QuotaRunRateConfidence::Normal
+        && let (Some(rate), Some(headroom)) = (
+            estimate.burn_rate_basis_points_per_hour(),
+            estimate.latest_remaining_headroom_percent(),
+        )
+    {
+        return QuotaRunRateEstimate::with_rate_basis_points_per_hour(
+            QuotaRunRateConfidence::Low,
+            rate,
+            headroom,
+        );
+    }
+    estimate
+}
+
+const fn quota_status_display_burn_lookback_seconds(window_seconds: u64) -> u64 {
+    if window_seconds == V1_SHORT_WINDOW_SECONDS {
+        QUOTA_STATUS_SHORT_BURN_LOOKBACK_SECONDS
+    } else if window_seconds == V1_WEEKLY_WINDOW_SECONDS {
+        QUOTA_STATUS_WEEKLY_BURN_LOOKBACK_SECONDS
+    } else {
+        QUOTA_STATUS_SAMPLE_FRESH_SECONDS
+    }
 }
 
 fn display_quota_run_rate_estimator() -> QuotaRunRateEstimator {
@@ -2508,6 +2565,15 @@ fn quota_total_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
     )
 }
 
+fn quota_compact_total_burn_rate(snapshot: Option<QuotaPaceSnapshot>) -> Option<String> {
+    let snapshot = snapshot?;
+    snapshot
+        .projected_candidate_burn_basis_points_per_hour
+        .or(snapshot.aggregate_burn_basis_points_per_hour)
+        .map(format_burn_rate_basis_points_per_hour)
+        .map(|rate| format!("burn {rate}"))
+}
+
 fn quota_connection_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
     let Some(snapshot) = snapshot else {
         return "connection rate unknown".to_owned();
@@ -2561,13 +2627,8 @@ fn quota_pace_direction(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> S
 }
 
 fn quota_safe_pace_meter(snapshot: Option<QuotaPaceSnapshot>, now_unix_seconds: u64) -> String {
-    let Some(snapshot) = snapshot else {
-        return "??????????".to_owned();
-    };
-    let load = quota_pace_load(snapshot, now_unix_seconds).unwrap_or(0);
-    let filled = load.min(100).div_ceil(10) as usize;
-    let empty = 10_usize.saturating_sub(filled);
-    format!("{}{}", "▰".repeat(filled), "▱".repeat(empty))
+    let reset_pace = reset_pace_view_model_from_snapshot(snapshot, now_unix_seconds);
+    reset_pace_meter_text(&reset_pace)
 }
 
 fn quota_pace_load(snapshot: QuotaPaceSnapshot, now_unix_seconds: u64) -> Option<u32> {
@@ -2654,6 +2715,18 @@ fn reset_pace_view_model_from_snapshot(
     let multiple_hundredths = quota_pace_load(snapshot, now_unix_seconds);
     let impact_label = reset_pace_impact_label(snapshot, multiple_hundredths, now_unix_seconds);
     let mut view_model = reset_pace_view_model_from_multiple_basis_points(multiple_hundredths);
+    if let Some(multiple_hundredths) = multiple_hundredths {
+        let (left_filled, right_filled) =
+            reset_pace_meter_fill_for_snapshot(snapshot, multiple_hundredths, now_unix_seconds);
+        view_model.meter_left_segments = ResetPaceMeterSegments {
+            filled: left_filled,
+            empty: 7_usize.saturating_sub(left_filled),
+        };
+        view_model.meter_right_segments = ResetPaceMeterSegments {
+            filled: right_filled,
+            empty: 7_usize.saturating_sub(right_filled),
+        };
+    }
     view_model.impact_label = impact_label;
     view_model
 }
@@ -2719,16 +2792,95 @@ fn reset_pace_view_model_from_multiple_basis_points(
     }
 }
 
+fn reset_pace_meter_text(reset_pace: &ResetPaceViewModel) -> String {
+    reset_pace_meter_slots(
+        reset_pace.meter_left_segments.filled,
+        reset_pace.center_marker,
+        reset_pace.meter_right_segments.filled,
+    )
+}
+
+fn reset_pace_meter_slots(left_filled: usize, center_marker: char, right_filled: usize) -> String {
+    const RESET_PACE_METER_SIDE_WIDTH: usize = 7;
+    const RESET_PACE_METER_EMPTY: char = '□';
+    const RESET_PACE_METER_FILLED: char = '■';
+    let mut left_slots = [RESET_PACE_METER_EMPTY; RESET_PACE_METER_SIDE_WIDTH];
+    let mut right_slots = [RESET_PACE_METER_EMPTY; RESET_PACE_METER_SIDE_WIDTH];
+    for slot in left_slots
+        .iter_mut()
+        .rev()
+        .take(left_filled.min(RESET_PACE_METER_SIDE_WIDTH))
+    {
+        *slot = RESET_PACE_METER_FILLED;
+    }
+    for slot in right_slots
+        .iter_mut()
+        .take(right_filled.min(RESET_PACE_METER_SIDE_WIDTH))
+    {
+        *slot = RESET_PACE_METER_FILLED;
+    }
+
+    left_slots
+        .into_iter()
+        .chain(std::iter::once(center_marker))
+        .chain(right_slots)
+        .collect()
+}
+
 fn reset_pace_meter_fill(multiple_hundredths: u32) -> (usize, usize) {
-    if multiple_hundredths < 100 {
-        let under_distance = 100_u32.saturating_sub(multiple_hundredths).min(100);
-        (under_distance.saturating_mul(7).div_ceil(100) as usize, 0)
-    } else if multiple_hundredths > 100 {
-        let over_distance = multiple_hundredths.saturating_sub(100).min(100);
-        (0, over_distance.saturating_mul(7).div_ceil(100) as usize)
+    const HEALTHY_LOWER_BOUND_HUNDREDTHS: u32 = 80;
+    const HEALTHY_UPPER_BOUND_HUNDREDTHS: u32 = 120;
+    const METER_SIDE_WIDTH: u32 = 7;
+
+    if multiple_hundredths < HEALTHY_LOWER_BOUND_HUNDREDTHS {
+        let under_distance = HEALTHY_LOWER_BOUND_HUNDREDTHS.saturating_sub(multiple_hundredths);
+        (
+            under_distance
+                .saturating_mul(METER_SIDE_WIDTH)
+                .div_ceil(HEALTHY_LOWER_BOUND_HUNDREDTHS) as usize,
+            0,
+        )
+    } else if multiple_hundredths > HEALTHY_UPPER_BOUND_HUNDREDTHS {
+        let over_distance = multiple_hundredths
+            .saturating_sub(HEALTHY_UPPER_BOUND_HUNDREDTHS)
+            .min(HEALTHY_LOWER_BOUND_HUNDREDTHS);
+        (
+            0,
+            over_distance
+                .saturating_mul(METER_SIDE_WIDTH)
+                .div_ceil(HEALTHY_LOWER_BOUND_HUNDREDTHS) as usize,
+        )
     } else {
         (0, 0)
     }
+}
+
+fn reset_pace_meter_fill_for_snapshot(
+    snapshot: QuotaPaceSnapshot,
+    multiple_hundredths: u32,
+    now_unix_seconds: u64,
+) -> (usize, usize) {
+    let Some(reset_unix_seconds) = snapshot.reset_unix_seconds else {
+        return reset_pace_meter_fill(multiple_hundredths);
+    };
+    let Some(projected_exhaustion_unix_seconds) = snapshot.projected_exhaustion_unix_seconds else {
+        return reset_pace_meter_fill(multiple_hundredths);
+    };
+    if projected_exhaustion_unix_seconds >= reset_unix_seconds {
+        return reset_pace_meter_fill(multiple_hundredths);
+    }
+    let time_until_reset_seconds = reset_unix_seconds.saturating_sub(now_unix_seconds);
+    if time_until_reset_seconds == 0 {
+        return reset_pace_meter_fill(multiple_hundredths);
+    }
+    let early_by_seconds =
+        reset_unix_seconds.saturating_sub(projected_exhaustion_unix_seconds.max(now_unix_seconds));
+    (
+        0,
+        early_by_seconds
+            .saturating_mul(7)
+            .div_ceil(time_until_reset_seconds) as usize,
+    )
 }
 
 fn format_reset_pace_multiple_label(multiple_hundredths: u32) -> String {
@@ -3879,6 +4031,66 @@ mod tests {
     }
 
     #[test]
+    fn quota_status_reset_pace_meter_fills_from_center_by_direction() {
+        for (multiple_basis_points, expected_meter) in [
+            (9, "■■■■■■■│□□□□□□□"),
+            (25, "□□■■■■■│□□□□□□□"),
+            (50, "□□□□■■■│□□□□□□□"),
+            (79, "□□□□□□■│□□□□□□□"),
+            (80, "□□□□□□□│□□□□□□□"),
+            (100, "□□□□□□□│□□□□□□□"),
+            (120, "□□□□□□□│□□□□□□□"),
+            (121, "□□□□□□□│■□□□□□□"),
+            (150, "□□□□□□□│■■■□□□□"),
+            (200, "□□□□□□□│■■■■■■■"),
+        ] {
+            let view_model =
+                reset_pace_view_model_from_multiple_basis_points(Some(multiple_basis_points));
+
+            assert_eq!(
+                reset_pace_meter_text(&view_model),
+                expected_meter,
+                "{multiple_basis_points} reset-pace basis points should fill from the center in the matching direction"
+            );
+            assert_eq!(
+                reset_pace_meter_text(&view_model).chars().count(),
+                15,
+                "reset-pace meter must always replace fixed slots, not add glyphs"
+            );
+        }
+    }
+
+    #[test]
+    fn quota_status_reset_pace_over_meter_uses_window_reset_denominator() {
+        for (reset_seconds, projected_exhaustion_seconds, expected_meter) in [
+            (
+                V1_WEEKLY_WINDOW_SECONDS,
+                2 * 24 * 60 * 60,
+                "□□□□□□□│■■■■■□□",
+            ),
+            (V1_SHORT_WINDOW_SECONDS, 2 * 60 * 60, "□□□□□□□│■■■■■□□"),
+        ] {
+            let snapshot = QuotaPaceSnapshot {
+                remaining_headroom: 10,
+                reset_unix_seconds: Some(NOW + reset_seconds),
+                projected_exhaustion_unix_seconds: Some(NOW + projected_exhaustion_seconds),
+                projected_candidate_burn_basis_points_per_hour: Some(300),
+                aggregate_burn_basis_points_per_hour: Some(300),
+                per_connection_burn_basis_points_per_hour: None,
+                confidence: QuotaRunRateConfidence::Low,
+            };
+
+            let view_model = reset_pace_view_model_from_snapshot(Some(snapshot), NOW);
+
+            assert_eq!(
+                reset_pace_meter_text(&view_model),
+                expected_meter,
+                "over-pace meter should normalize early runout by this window's reset time"
+            );
+        }
+    }
+
+    #[test]
     fn quota_status_reset_pace_over_two_x_shows_runout_impact() {
         let snapshot = QuotaPaceSnapshot {
             remaining_headroom: 10,
@@ -3930,26 +4142,123 @@ mod tests {
     }
 
     #[test]
-    fn quota_status_display_reset_pace_accepts_15_minute_history_without_routing_authority() {
+    fn quota_status_display_reset_pace_requires_three_recent_samples() {
         let reset_unix_seconds = NOW + V1_WEEKLY_WINDOW_SECONDS;
         let observations = [
             QuotaRunRateObservation::new(NOW - 899, reset_unix_seconds, 50),
             QuotaRunRateObservation::new(NOW - 600, reset_unix_seconds, 48),
         ];
 
-        let display_estimate =
-            display_quota_run_rate_estimator().estimate(NOW, reset_unix_seconds, &observations);
+        let display_estimate = display_quota_run_rate_estimate(
+            V1_WEEKLY_WINDOW_SECONDS,
+            NOW,
+            reset_unix_seconds,
+            &observations,
+        );
         let routing_authority_estimate = QuotaRunRateEstimator::new(
             DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS,
         )
         .estimate(NOW, reset_unix_seconds, &observations);
 
-        assert_eq!(display_estimate.confidence(), QuotaRunRateConfidence::Low);
-        assert!(display_estimate.burn_rate_basis_points_per_hour().is_some());
+        assert_eq!(
+            display_estimate.confidence(),
+            QuotaRunRateConfidence::Insufficient
+        );
+        assert!(display_estimate.burn_rate_basis_points_per_hour().is_none());
         assert_eq!(
             routing_authority_estimate.confidence(),
             QuotaRunRateConfidence::Stale,
             "runtime authority must still go stale at the persisted 300s boundary"
+        );
+    }
+
+    #[test]
+    fn quota_status_display_burn_uses_recent_window_and_sample_confidence() {
+        let reset_unix_seconds = NOW + V1_WEEKLY_WINDOW_SECONDS;
+        let observations = [
+            QuotaRunRateObservation::new(NOW - 20_000, reset_unix_seconds, 100),
+            QuotaRunRateObservation::new(NOW - 19_000, reset_unix_seconds, 50),
+            QuotaRunRateObservation::new(NOW - 3_000, reset_unix_seconds, 50),
+            QuotaRunRateObservation::new(NOW - 1_800, reset_unix_seconds, 49),
+            QuotaRunRateObservation::new(NOW - 900, reset_unix_seconds, 48),
+            QuotaRunRateObservation::new(NOW - 300, reset_unix_seconds, 47),
+        ];
+
+        let estimate = display_quota_run_rate_estimate(
+            V1_WEEKLY_WINDOW_SECONDS,
+            NOW,
+            reset_unix_seconds,
+            &observations,
+        );
+
+        assert_eq!(estimate.confidence(), QuotaRunRateConfidence::Low);
+        assert_eq!(estimate.burn_rate_basis_points_per_hour(), Some(400));
+    }
+
+    #[test]
+    fn quota_status_display_burn_requires_five_recent_samples_for_normal_confidence() {
+        let reset_unix_seconds = NOW + V1_WEEKLY_WINDOW_SECONDS;
+        let four_observations = [
+            QuotaRunRateObservation::new(NOW - 2_700, reset_unix_seconds, 50),
+            QuotaRunRateObservation::new(NOW - 1_800, reset_unix_seconds, 49),
+            QuotaRunRateObservation::new(NOW - 900, reset_unix_seconds, 48),
+            QuotaRunRateObservation::new(NOW, reset_unix_seconds, 47),
+        ];
+        let five_observations = [
+            QuotaRunRateObservation::new(NOW - 3_600, reset_unix_seconds, 51),
+            QuotaRunRateObservation::new(NOW - 2_700, reset_unix_seconds, 50),
+            QuotaRunRateObservation::new(NOW - 1_800, reset_unix_seconds, 49),
+            QuotaRunRateObservation::new(NOW - 900, reset_unix_seconds, 48),
+            QuotaRunRateObservation::new(NOW, reset_unix_seconds, 47),
+        ];
+
+        let four_sample_estimate = display_quota_run_rate_estimate(
+            V1_WEEKLY_WINDOW_SECONDS,
+            NOW,
+            reset_unix_seconds,
+            &four_observations,
+        );
+        let five_sample_estimate = display_quota_run_rate_estimate(
+            V1_WEEKLY_WINDOW_SECONDS,
+            NOW,
+            reset_unix_seconds,
+            &five_observations,
+        );
+
+        assert_eq!(
+            four_sample_estimate.confidence(),
+            QuotaRunRateConfidence::Low
+        );
+        assert_eq!(
+            five_sample_estimate.confidence(),
+            QuotaRunRateConfidence::Normal
+        );
+    }
+
+    #[test]
+    fn quota_status_display_burn_uses_all_recent_samples() {
+        let reset_unix_seconds = NOW + V1_WEEKLY_WINDOW_SECONDS;
+        let observations = [
+            QuotaRunRateObservation::new(NOW - 9_000, reset_unix_seconds, 80),
+            QuotaRunRateObservation::new(NOW - 3_600, reset_unix_seconds, 54),
+            QuotaRunRateObservation::new(NOW - 2_700, reset_unix_seconds, 53),
+            QuotaRunRateObservation::new(NOW - 1_800, reset_unix_seconds, 52),
+            QuotaRunRateObservation::new(NOW - 900, reset_unix_seconds, 51),
+            QuotaRunRateObservation::new(NOW, reset_unix_seconds, 50),
+        ];
+
+        let estimate = display_quota_run_rate_estimate(
+            V1_WEEKLY_WINDOW_SECONDS,
+            NOW,
+            reset_unix_seconds,
+            &observations,
+        );
+
+        assert_eq!(estimate.confidence(), QuotaRunRateConfidence::Normal);
+        assert_eq!(
+            estimate.burn_rate_basis_points_per_hour(),
+            Some(1_200),
+            "display burn should use every sample inside the recent lookback, not only the newest five samples"
         );
     }
 
@@ -3999,6 +4308,10 @@ mod tests {
         assert!(
             row.reset_pace.multiple_label.contains("reset pace"),
             "reset pace should be carried as typed row metadata, not rebuilt from safe-pace strings"
+        );
+        assert!(
+            row.burn_meter.contains('│'),
+            "row burn meter should use the same center-out reset-pace meter as the visible reset pace"
         );
         assert!(
             !row.weekly_pace.contains("safe pace"),
@@ -4058,8 +4371,8 @@ mod tests {
         must_ok(write_quota_table(&mut output, &blocked_report, Some(80)));
         let text = must_ok(String::from_utf8(output));
         assert!(
-            text.contains("[blocked]"),
-            "blocked capture should expose route state:\n{text}"
+            text.contains("responses -> none    no usable accounts"),
+            "blocked capture should expose compact no-selection route state:\n{text}"
         );
         assert!(
             text.lines().all(|line| line.chars().count() <= 80),
@@ -4160,7 +4473,6 @@ mod tests {
         );
         assert!(
             !text.contains("current [")
-                && !text.contains('■')
                 && !text.contains("safe pace")
                 && !text.contains("ahead to reset")
                 && !text.contains("safe pace unknown"),
@@ -4196,14 +4508,15 @@ mod tests {
     }
 
     #[test]
-    fn quota_status_view_model_route_line_excludes_freshness_summary() {
+    fn quota_status_view_model_route_line_compacts_reason_and_burn_rate() {
         let report = quota_capture_report();
         let view_model = quota_status_view_model(&report, report.rows(), 120);
 
         assert_eq!(
-            view_model.route_line, "responses -> ssdev    [preferred]",
-            "route line should identify the selected account without duplicating live freshness"
+            view_model.route_line, "responses -> ssdev    safest quota    burn 0.1%/h",
+            "route line should identify the selected account, reason, burn rate, and limiting window without a second header line"
         );
+        assert!(view_model.why_line.is_empty());
     }
 
     #[test]
