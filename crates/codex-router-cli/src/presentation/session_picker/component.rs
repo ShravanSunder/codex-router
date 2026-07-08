@@ -77,7 +77,12 @@ pub(crate) fn SessionsPickerComponent<'a>(
     });
     let observed_height = hooks.use_state(|| {
         if live_terminal_height {
-            usize::from(terminal_height).max(MIN_RENDER_HEIGHT)
+            let height = usize::from(terminal_height);
+            if height == 0 {
+                MIN_RENDER_HEIGHT
+            } else {
+                height
+            }
         } else if props.height == 0 {
             MIN_RENDER_HEIGHT
         } else {
@@ -143,7 +148,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     observed_width.set(usize::from(width));
                 }
                 if live_terminal_height {
-                    observed_height.set(usize::from(height).max(MIN_RENDER_HEIGHT));
+                    observed_height.set(usize::from(height).max(1));
                 }
                 return;
             }
@@ -264,7 +269,17 @@ pub(crate) fn SessionsPickerComponent<'a>(
         })
     };
 
-    render_picker_view(&model.read(), selected_conversation.as_ref(), height)
+    let minimum_render_height = if live_terminal_height {
+        1
+    } else {
+        MIN_RENDER_HEIGHT
+    };
+    render_picker_view(
+        &model.read(),
+        selected_conversation.as_ref(),
+        height,
+        minimum_render_height,
+    )
 }
 
 fn selected_conversation_preview_for_record(
@@ -301,11 +316,12 @@ fn render_picker_view(
     model: &SessionsPickerModel,
     selected_conversation: Option<&SessionConversationPreview>,
     height: usize,
+    minimum_render_height: usize,
 ) -> Element<'static, View> {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let filter_controls = render_filter_controls(model, content_width);
     let control_height = filter_controls.len();
-    let body_budget = picker_body_budget(height, control_height);
+    let body_budget = picker_body_budget(height, control_height, minimum_render_height);
     let mut children = vec![
         element! {
             Text(
@@ -381,7 +397,7 @@ fn render_picker_view(
     }
 
     children.push(render_footer(content_width));
-    let picker_height = height.max(MIN_RENDER_HEIGHT);
+    let picker_height = height.max(minimum_render_height);
 
     element! {
         View(
@@ -402,12 +418,12 @@ fn render_picker_view(
     }
 }
 
-fn picker_body_budget(height: usize, control_height: usize) -> usize {
+fn picker_body_budget(height: usize, control_height: usize, minimum_render_height: usize) -> usize {
     let root_border_height = 2;
     let title_height = 1;
     let footer_height = 2;
     height
-        .max(MIN_RENDER_HEIGHT)
+        .max(minimum_render_height)
         .saturating_sub(root_border_height + title_height + control_height + footer_height)
 }
 
@@ -1420,6 +1436,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessions_picker_stacked_details_truncates_long_preview_inside_frame() {
+        let mut request = capture_picker_request();
+        let record = request
+            .records
+            .get_mut(0)
+            .unwrap_or_else(|| panic!("capture request should have a record"));
+        record.preview = Some("preview-without-spaces-".repeat(16));
+
+        let width = 120;
+        let text = render_picker_capture(
+            request,
+            width,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert!(
+            text.lines().all(|line| line.chars().count() <= width),
+            "long preview should not overflow stacked details frame:\n{text}"
+        );
+    }
+
+    #[tokio::test]
     async fn sessions_picker_renders_minimum_height_from_short_resize() {
         let text = render_picker_capture_at(
             capture_picker_request(),
@@ -1471,7 +1513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_picker_live_resize_uses_minimum_and_taller_heights() {
+    async fn sessions_picker_live_resize_uses_terminal_height_and_taller_heights() {
         let short_text = render_picker_capture_at(
             capture_picker_request(),
             0,
@@ -1495,8 +1537,8 @@ mod tests {
 
         assert_eq!(
             meaningful_line_count(&short_text),
-            24,
-            "live resize below 24 rows should still render the minimum:\n{short_text}"
+            12,
+            "live resize below 24 rows should respect terminal height:\n{short_text}"
         );
         let short_rows = visible_followup_row_count(&short_text);
         let tall_rows = visible_followup_row_count(&tall_text);

@@ -2585,7 +2585,7 @@ fn quota_connection_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String 
                 .is_some()
         {
             return format!(
-                "not measured ({})",
+                "not attributed ({})",
                 run_rate_confidence_label(snapshot.confidence)
             );
         }
@@ -3902,6 +3902,24 @@ mod tests {
         assert_eq!(
             format_run_rate_estimate(estimate, NOW),
             "normal burn 0.45%/h; runout in 13h 20m"
+        );
+    }
+
+    #[test]
+    fn quota_status_connection_rate_distinguishes_aggregate_only_burn() {
+        let aggregate_only_snapshot = QuotaPaceSnapshot {
+            remaining_headroom: 55,
+            reset_unix_seconds: Some(NOW + V1_WEEKLY_WINDOW_SECONDS),
+            projected_exhaustion_unix_seconds: Some(NOW + 36 * 60 * 60),
+            projected_candidate_burn_basis_points_per_hour: Some(141),
+            aggregate_burn_basis_points_per_hour: Some(141),
+            per_connection_burn_basis_points_per_hour: None,
+            confidence: QuotaRunRateConfidence::Low,
+        };
+
+        assert_eq!(
+            quota_connection_rate_summary(Some(aggregate_only_snapshot)),
+            "not attributed (low)"
         );
     }
 
