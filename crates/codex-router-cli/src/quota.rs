@@ -1686,7 +1686,7 @@ fn quota_selected_account_view_model(
             report.now_unix_seconds,
         ),
         reset_pace: reset_pace_view_model_from_snapshot(row.weekly_pace, report.now_unix_seconds),
-        short_reset_pace: reset_pace_view_model_from_snapshot(
+        short_reset_pace: short_reset_pace_view_model_from_snapshot(
             quota_display_pace_snapshot(
                 &row.windows,
                 V1_SHORT_WINDOW_SECONDS,
@@ -2728,6 +2728,22 @@ fn reset_pace_view_model_from_snapshot(
         };
     }
     view_model.impact_label = impact_label;
+    view_model
+}
+
+fn short_reset_pace_view_model_from_snapshot(
+    snapshot: Option<QuotaPaceSnapshot>,
+    now_unix_seconds: u64,
+) -> ResetPaceViewModel {
+    let mut view_model = reset_pace_view_model_from_snapshot(snapshot, now_unix_seconds);
+    if view_model.state == ResetPaceState::Unavailable
+        && snapshot
+            .is_some_and(|snapshot| snapshot.confidence == QuotaRunRateConfidence::Insufficient)
+    {
+        view_model.semantic_label = "collecting data";
+        view_model.multiple_label = "collecting data".to_owned();
+        view_model.unavailable_reason = Some("collecting quota samples".to_owned());
+    }
     view_model
 }
 
@@ -4157,6 +4173,25 @@ mod tests {
         assert_eq!(view_model.meter_right_segments.empty, 7);
         assert_eq!(view_model.center_marker, '│');
         assert!(view_model.unavailable_reason.is_some());
+    }
+
+    #[test]
+    fn quota_status_short_reset_pace_collects_data_for_insufficient_snapshot_samples() {
+        let snapshot = QuotaPaceSnapshot {
+            remaining_headroom: 99,
+            reset_unix_seconds: Some(NOW + V1_SHORT_WINDOW_SECONDS),
+            projected_exhaustion_unix_seconds: None,
+            projected_candidate_burn_basis_points_per_hour: None,
+            aggregate_burn_basis_points_per_hour: None,
+            per_connection_burn_basis_points_per_hour: None,
+            confidence: QuotaRunRateConfidence::Insufficient,
+        };
+
+        let view_model = short_reset_pace_view_model_from_snapshot(Some(snapshot), NOW);
+
+        assert_eq!(view_model.state, ResetPaceState::Unavailable);
+        assert_eq!(view_model.semantic_label, "collecting data");
+        assert_eq!(reset_pace_meter_text(&view_model), "□□□□□□□│□□□□□□□");
     }
 
     #[test]
