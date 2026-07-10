@@ -2185,18 +2185,10 @@ mod tests {
             ResetPaceState::OverBurning => "over",
             ResetPaceState::Unavailable => "burn unavailable",
         };
-        let meter_segments = if state == ResetPaceState::Healthy {
-            (
-                ResetPaceMeterSegments {
-                    filled: 0,
-                    empty: 7,
-                },
-                ResetPaceMeterSegments {
-                    filled: 0,
-                    empty: 7,
-                },
-            )
-        } else if state == ResetPaceState::UnderBurning {
+        let meter_segments = if matches!(
+            state,
+            ResetPaceState::Healthy | ResetPaceState::UnderBurning
+        ) {
             (
                 ResetPaceMeterSegments {
                     filled: 0,
