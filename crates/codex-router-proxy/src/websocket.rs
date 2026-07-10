@@ -69,6 +69,7 @@ use tokio_util::task::TaskTracker;
 use crate::account_selection::AccountDecisionSelector;
 use crate::account_selection::ActiveReservationGuard;
 use crate::account_selection::AsyncAccountDecisionSelector;
+use crate::account_selection::PostExhaustionRouteBandOutcome;
 use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::db_write_actor::DbWriteEnqueueResult;
 use crate::headers::Header;
@@ -101,6 +102,12 @@ const CODEX_WEBSOCKET_RECONNECT_SIGNAL: &str = r#"{"type":"error","status":400,"
 pub(crate) const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
 pub(crate) const ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL: &str = r#"{"type":"error","status":503,"error":{"type":"codex_router_quota_state_unavailable","code":"codex_router_quota_state_unavailable","message":"codex-router cannot safely rotate accounts because quota state is unavailable."}}"#;
 const POST_EXHAUSTION_ALTERNATIVE_SELECTION_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn short_quota_wait_signal(retry_after_seconds: u64) -> String {
+    format!(
+        r#"{{"type":"response.failed","response":{{"id":"resp_router_short_quota_wait","status":"failed","error":{{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in {retry_after_seconds} seconds."}}}}}}"#
+    )
+}
 
 pub(crate) fn router_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
@@ -1248,6 +1255,7 @@ mod registry_tests {
 mod async_forwarding_tests {
     use super::ActiveTurnReservationState;
     use super::AsyncWebSocketTunnel;
+    use super::PostExhaustionRouteBandOutcome;
     use super::TokenGeneration;
     use super::WebSocketAffinityOwnerContext;
     use super::WebSocketForwardingContext;
@@ -1338,7 +1346,7 @@ mod async_forwarding_tests {
     struct RecordingAsyncProviderErrorObserver {
         records: Arc<Mutex<Vec<RecordedProviderError>>>,
         observed: Arc<Notify>,
-        selectable_alternative: bool,
+        post_exhaustion_outcome: PostExhaustionRouteBandOutcome,
     }
 
     impl Default for RecordingAsyncProviderErrorObserver {
@@ -1346,7 +1354,7 @@ mod async_forwarding_tests {
             Self {
                 records: Arc::new(Mutex::new(Vec::new())),
                 observed: Arc::new(Notify::new()),
-                selectable_alternative: true,
+                post_exhaustion_outcome: PostExhaustionRouteBandOutcome::SelectableAlternative,
             }
         }
     }
@@ -1354,7 +1362,20 @@ mod async_forwarding_tests {
     impl RecordingAsyncProviderErrorObserver {
         fn with_selectable_alternative(selectable_alternative: bool) -> Self {
             Self {
-                selectable_alternative,
+                post_exhaustion_outcome: if selectable_alternative {
+                    PostExhaustionRouteBandOutcome::SelectableAlternative
+                } else {
+                    PostExhaustionRouteBandOutcome::NoSelectableAlternative
+                },
+                ..Self::default()
+            }
+        }
+
+        fn with_post_exhaustion_outcome(
+            post_exhaustion_outcome: PostExhaustionRouteBandOutcome,
+        ) -> Self {
+            Self {
+                post_exhaustion_outcome,
                 ..Self::default()
             }
         }
@@ -1389,13 +1410,14 @@ mod async_forwarding_tests {
             })
         }
 
-        fn route_band_has_selectable_alternative_after_exhaustion<'a>(
+        fn route_band_post_exhaustion_outcome<'a>(
             &'a self,
             _exhausted_account_id: AccountId,
             _route_band: codex_router_core::routes::RouteBand,
             _observed_unix_seconds: u64,
-        ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
-            Box::pin(async move { Ok(self.selectable_alternative) })
+        ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>>
+        {
+            Box::pin(async move { Ok(self.post_exhaustion_outcome) })
         }
 
         fn enqueue_provider_quota_exhaustion(
@@ -1480,13 +1502,20 @@ mod async_forwarding_tests {
             })
         }
 
-        fn route_band_has_selectable_alternative_after_exhaustion<'a>(
+        fn route_band_post_exhaustion_outcome<'a>(
             &'a self,
             _exhausted_account_id: AccountId,
             _route_band: codex_router_core::routes::RouteBand,
             _observed_unix_seconds: u64,
-        ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
-            Box::pin(async move { Ok(self.selectable_alternative) })
+        ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>>
+        {
+            Box::pin(async move {
+                Ok(if self.selectable_alternative {
+                    PostExhaustionRouteBandOutcome::SelectableAlternative
+                } else {
+                    PostExhaustionRouteBandOutcome::NoSelectableAlternative
+                })
+            })
         }
 
         fn enqueue_provider_quota_exhaustion(
@@ -1533,12 +1562,13 @@ mod async_forwarding_tests {
             DbWriteEnqueueResult::Enqueued
         }
 
-        fn route_band_has_selectable_alternative_after_exhaustion<'a>(
+        fn route_band_post_exhaustion_outcome<'a>(
             &'a self,
             _exhausted_account_id: AccountId,
             _route_band: codex_router_core::routes::RouteBand,
             _observed_unix_seconds: u64,
-        ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
+        ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>>
+        {
             Box::pin(async { std::future::pending().await })
         }
     }
@@ -1941,6 +1971,66 @@ mod async_forwarding_tests {
         assert!(
             router_result.is_ok(),
             "all-accounts exhausted should be a clean router-level WebSocket error, got {router_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_quota_exhaustion_sends_retryable_response_failed_before_upstream_connect() {
+        let account_id = AccountId::new("acct_ws_test")
+            .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+        let selector = RejectingAsyncSelector {
+            reason: QuotaAwareAccountSelectorError::ShortQuotaExhausted {
+                retry_after_seconds: 2,
+            },
+        };
+        let credential_resolver = FixedAsyncCredentialResolver { account_id };
+        let auth_gate = ProxyLocalAuthGate::disabled();
+        let affinity_secret_provider = FixedAffinitySecretProvider::new();
+        let protocol_router = WebSocketProtocolRouter::new();
+        let tunnel = AsyncWebSocketTunnel::new(
+            &auth_gate,
+            &selector,
+            &credential_resolver,
+            &protocol_router,
+        )
+        .with_affinity_secret_provider(&affinity_secret_provider);
+        let (router_local_stream, client_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let router_future = tunnel.handle_upgraded_connection(
+            router_local_websocket,
+            WebSocketHandshakeRequest::new(),
+            "ws://127.0.0.1:1/v1/responses",
+        );
+        let peer_future = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first local frame should send: {error}"));
+            let message = match client_websocket.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => panic!("client should receive short quota wait event: {error}"),
+                None => panic!("client should receive short quota wait event"),
+            };
+            assert_eq!(
+                message.to_string(),
+                r#"{"type":"response.failed","response":{"id":"resp_router_short_quota_wait","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in 2 seconds."}}}"#,
+            );
+        };
+
+        let (router_result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(router_future, peer_future)
+        })
+        .await
+        .unwrap_or_else(|_elapsed| {
+            panic!("router should deliver a short quota wait event promptly")
+        });
+
+        assert!(
+            router_result.is_ok(),
+            "short-only quota exhaustion should be a clean retryable router signal, got {router_result:?}"
         );
     }
 
@@ -3962,6 +4052,94 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
+    async fn upstream_usage_limit_frame_emits_retryable_wait_when_every_alternative_is_short_exhausted()
+     {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let provider_error_observer = Arc::new(
+            RecordingAsyncProviderErrorObserver::with_post_exhaustion_outcome(
+                PostExhaustionRouteBandOutcome::ShortQuotaWait {
+                    retry_after_seconds: 2,
+                },
+            ),
+        );
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let selected_account = AccountId::new("acct_selected")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account,
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: Some(provider_error_observer),
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            let _first_upstream_frame = upstream_websocket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("upstream should receive first frame"))
+                .unwrap_or_else(|error| panic!("upstream should receive first frame: {error}"));
+            upstream_websocket
+                .send(Message::text(usage_limit_frame))
+                .await
+                .unwrap_or_else(|error| panic!("usage limit should send: {error}"));
+            let client_message = client_websocket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("client should receive short quota wait"))
+                .unwrap_or_else(|error| panic!("client should receive short quota wait: {error}"));
+            assert_eq!(
+                client_message.to_string(),
+                r#"{"type":"response.failed","response":{"id":"resp_router_short_quota_wait","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in 2 seconds."}}}"#,
+            );
+            drop(upstream_websocket);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should send a retryable short-quota wait after provider exhaustion, got {router_result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn upstream_usage_limit_frame_emits_state_unavailable_when_queue_is_degraded() {
         let (router_local_stream, client_stream) = duplex(4096);
         let (router_upstream_stream, upstream_stream) = duplex(4096);
@@ -4819,16 +4997,22 @@ where
     Ok(true)
 }
 
-fn pre_upstream_router_signal(close_reason: &WebSocketCloseReason) -> Option<&'static str> {
+fn pre_upstream_router_signal(close_reason: &WebSocketCloseReason) -> Option<String> {
     match close_reason {
         WebSocketCloseReason::Selection {
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-        } => Some(ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL),
+        } => Some(ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL.to_owned()),
+        WebSocketCloseReason::Selection {
+            reason:
+                QuotaAwareAccountSelectorError::ShortQuotaExhausted {
+                    retry_after_seconds,
+                },
+        } => Some(short_quota_wait_signal(*retry_after_seconds)),
         WebSocketCloseReason::Selection {
             reason:
                 QuotaAwareAccountSelectorError::StateUnavailable
                 | QuotaAwareAccountSelectorError::SelectorStateUnavailable,
-        } => Some(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL),
+        } => Some(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL.to_owned()),
         _ => None,
     }
 }
@@ -5212,15 +5396,14 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
         };
     }
 
-    let alternative_selection = provider_error_observer
-        .route_band_has_selectable_alternative_after_exhaustion(
-            exhausted_account_id,
-            RouteBand::Responses,
-            observed_unix_seconds,
-        );
-    tokio::pin!(alternative_selection);
-    let alternative_selection_result = tokio::select! {
-        result = &mut alternative_selection => result,
+    let post_exhaustion_outcome = provider_error_observer.route_band_post_exhaustion_outcome(
+        exhausted_account_id,
+        RouteBand::Responses,
+        observed_unix_seconds,
+    );
+    tokio::pin!(post_exhaustion_outcome);
+    let post_exhaustion_outcome_result = tokio::select! {
+        result = &mut post_exhaustion_outcome => result,
         () = context.revocation.cancelled() => {
             Err(ProviderErrorObservationError::SelectionStateUnavailable)
         }
@@ -5232,8 +5415,8 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
         }
     };
 
-    match alternative_selection_result {
-        Ok(true) => {
+    match post_exhaustion_outcome_result {
+        Ok(PostExhaustionRouteBandOutcome::SelectableAlternative) => {
             crate::telemetry::record_websocket_event(
                 RouteBand::Responses.as_str(),
                 "quota_reconnect",
@@ -5244,7 +5427,19 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
                 close_after_send: true,
             }
         }
-        Ok(false) => {
+        Ok(PostExhaustionRouteBandOutcome::ShortQuotaWait {
+            retry_after_seconds,
+        }) => {
+            crate::telemetry::record_websocket_event(
+                RouteBand::Responses.as_str(),
+                "quota_short_window_wait",
+            );
+            UpstreamMessageOutcome {
+                message: Message::text(short_quota_wait_signal(retry_after_seconds)),
+                close_after_send: true,
+            }
+        }
+        Ok(PostExhaustionRouteBandOutcome::NoSelectableAlternative) => {
             crate::telemetry::record_websocket_event(
                 RouteBand::Responses.as_str(),
                 "quota_all_accounts_exhausted",

@@ -7,6 +7,7 @@ use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
 use thiserror::Error;
 
+use crate::account_selection::PostExhaustionRouteBandOutcome;
 use crate::db_write_actor::DbWriteEnqueueResult;
 
 const PROVIDER_ERROR_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
@@ -54,12 +55,12 @@ pub trait AsyncProviderErrorObserver: Send + Sync {
         DbWriteEnqueueResult::Enqueued
     }
 
-    fn route_band_has_selectable_alternative_after_exhaustion<'a>(
+    fn route_band_post_exhaustion_outcome<'a>(
         &'a self,
         _exhausted_account_id: AccountId,
         _route_band: RouteBand,
         _observed_unix_seconds: u64,
-    ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
+    ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>> {
         Box::pin(async { Err(ProviderErrorObservationError::SelectionStateUnavailable) })
     }
 }

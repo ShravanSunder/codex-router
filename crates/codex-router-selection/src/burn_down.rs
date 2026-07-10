@@ -154,6 +154,12 @@ impl BurnDownAccountInput {
     pub const fn current_active_sessions(&self) -> u32 {
         self.current_active_sessions
     }
+
+    /// Returns whether account metadata permits routing.
+    #[must_use]
+    pub const fn routing_enabled(&self) -> bool {
+        self.account_enabled && self.has_active_credential
+    }
 }
 
 /// Pure fact for one provider quota window.
@@ -287,6 +293,24 @@ impl QuotaWindowFact {
     #[must_use]
     pub const fn window_seconds(&self) -> u64 {
         self.window_seconds
+    }
+
+    /// Returns quota evidence status.
+    #[must_use]
+    pub const fn status(&self) -> QuotaWindowStatus {
+        self.status
+    }
+
+    /// Returns remaining headroom.
+    #[must_use]
+    pub const fn remaining_headroom(&self) -> u32 {
+        self.remaining_headroom
+    }
+
+    /// Returns reset time.
+    #[must_use]
+    pub const fn reset_unix_seconds(&self) -> Option<u64> {
+        self.reset_unix_seconds
     }
 
     /// Returns observed per-connection burn rate in basis points per hour.
