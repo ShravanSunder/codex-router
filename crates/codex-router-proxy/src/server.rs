@@ -74,7 +74,7 @@ use crate::account_selection::RouteBandWeightedSelectors;
 use crate::account_selection::SelectionReservationLock;
 use crate::account_selection::SqliteActiveClientLeaseReporter;
 use crate::account_selection::mark_runtime_quota_exhausted;
-use crate::account_selection::route_band_has_selectable_alternative;
+use crate::account_selection::route_band_post_exhaustion_outcome;
 use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
 use crate::credential_runtime::ProxyRuntimeCredentialResources;
 use crate::credential_runtime::ProxyRuntimeCredentialResourcesOpenError;
@@ -2297,14 +2297,20 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
             ))
     }
 
-    fn route_band_has_selectable_alternative_after_exhaustion<'a>(
+    fn route_band_post_exhaustion_outcome<'a>(
         &'a self,
         exhausted_account_id: codex_router_core::ids::AccountId,
         route_band: RouteBand,
         observed_unix_seconds: u64,
-    ) -> BoxFuture<'a, Result<bool, ProviderErrorObservationError>> {
+    ) -> BoxFuture<
+        'a,
+        Result<
+            crate::account_selection::PostExhaustionRouteBandOutcome,
+            ProviderErrorObservationError,
+        >,
+    > {
         Box::pin(async move {
-            route_band_has_selectable_alternative(
+            route_band_post_exhaustion_outcome(
                 &self.selection_state_store,
                 Some(&self.active_reservations),
                 Some(&self.runtime_exhaustions),

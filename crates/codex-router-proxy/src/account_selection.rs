@@ -133,6 +133,7 @@ pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
+const SHORT_QUOTA_WAIT_JITTER_SECONDS: u64 = 60;
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
@@ -581,6 +582,12 @@ pub enum QuotaAwareAccountSelectorError {
     /// No account has usable headroom.
     #[error("no eligible accounts")]
     NoEligibleAccounts,
+    /// All accounts have exhausted only their short quota window until the supplied delay elapses.
+    #[error("short quota exhausted; retry after {retry_after_seconds} seconds")]
+    ShortQuotaExhausted {
+        /// Conservative delay until the earliest verified short-window reset.
+        retry_after_seconds: u64,
+    },
     /// Weighted selector state was unavailable.
     #[error("selector state unavailable")]
     SelectorStateUnavailable,
@@ -599,6 +606,20 @@ pub enum QuotaAwareAccountSelectorError {
     /// Previous-response affinity owner is not currently routable.
     #[error("affinity owner unavailable")]
     AffinityOwnerUnavailable,
+}
+
+/// Safe post-exhaustion routing outcome for one Responses route band.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PostExhaustionRouteBandOutcome {
+    /// A fresh alternative account can receive the replay immediately.
+    SelectableAlternative,
+    /// Every fresh alternative is short-window exhausted until this delay elapses.
+    ShortQuotaWait {
+        /// Conservative delay until the earliest verified short-window reset.
+        retry_after_seconds: u64,
+    },
+    /// No safe alternative exists and retrying at a short reset is not proven safe.
+    NoSelectableAlternative,
 }
 
 /// Account selector adapter using quota freshness and weighted deficit state.
@@ -1016,6 +1037,8 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
             })?;
+            let short_quota_wait_delay_seconds =
+                short_quota_wait_delay_seconds(&selector_accounts, now_unix_seconds);
             let assessment_input = BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
@@ -1023,6 +1046,13 @@ where
             );
             let assessment = assess_route_band(assessment_input);
             if assessment.selected_pool() == SelectedPool::None {
+                if let Some(retry_after_seconds) = short_quota_wait_delay_seconds {
+                    return Err(HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::ShortQuotaExhausted {
+                            retry_after_seconds,
+                        },
+                    });
+                }
                 return Err(account_selection_rejected_no_eligible(route_band.as_str()));
             }
 
@@ -1406,6 +1436,58 @@ fn account_selection_rejected_no_eligible(route_band: &str) -> HttpProxyError {
     }
 }
 
+fn short_quota_wait_delay_seconds(
+    accounts: &[BurnDownAccountInput],
+    now_unix_seconds: u64,
+) -> Option<u64> {
+    let mut earliest_short_reset_unix_seconds: Option<u64> = None;
+    let mut routable_account_count = 0_u64;
+
+    for account in accounts {
+        if !account.routing_enabled() {
+            continue;
+        }
+        routable_account_count = routable_account_count.saturating_add(1);
+
+        let short_window = account
+            .windows()
+            .iter()
+            .find(|window| window.window_seconds() == V1_SHORT_WINDOW_SECONDS)?;
+        let weekly_window = account
+            .windows()
+            .iter()
+            .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)?;
+
+        if short_window.status() != QuotaWindowStatus::Ineligible
+            || short_window.remaining_headroom() != 0
+            || weekly_window.status() != QuotaWindowStatus::Eligible
+            || weekly_window.remaining_headroom() == 0
+        {
+            return None;
+        }
+
+        let short_reset_unix_seconds = short_window.reset_unix_seconds()?;
+        if short_reset_unix_seconds <= now_unix_seconds {
+            return None;
+        }
+        earliest_short_reset_unix_seconds = Some(
+            earliest_short_reset_unix_seconds.map_or(short_reset_unix_seconds, |earliest| {
+                earliest.min(short_reset_unix_seconds)
+            }),
+        );
+    }
+
+    if routable_account_count == 0 {
+        return None;
+    }
+
+    earliest_short_reset_unix_seconds.map(|short_reset_unix_seconds| {
+        short_reset_unix_seconds
+            .saturating_sub(now_unix_seconds)
+            .saturating_add(SHORT_QUOTA_WAIT_JITTER_SECONDS)
+    })
+}
+
 fn reusable_held_account_id(
     route_band: &str,
     account_holds: &mut HashMap<String, AccountHold>,
@@ -1665,8 +1747,8 @@ pub(crate) fn route_band_queue_health_allows_selection(
     Ok(())
 }
 
-/// Returns whether a route band still has a selectable account after excluding one account.
-pub async fn route_band_has_selectable_alternative<R>(
+/// Classifies the safe route-band action after one account reports quota exhaustion.
+pub async fn route_band_post_exhaustion_outcome<R>(
     state_repository: &R,
     active_reservations: Option<&RouteBandReservationBooks>,
     runtime_exhaustions: Option<&RouteBandRuntimeExhaustions>,
@@ -1674,7 +1756,7 @@ pub async fn route_band_has_selectable_alternative<R>(
     route_band: RouteBand,
     excluded_account_id: &AccountId,
     now_unix_seconds: u64,
-) -> Result<bool, StateStoreError>
+) -> Result<PostExhaustionRouteBandOutcome, StateStoreError>
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
@@ -1721,12 +1803,24 @@ where
         )?,
         None => account_inputs,
     };
+    let short_quota_wait_delay_seconds =
+        short_quota_wait_delay_seconds(&account_inputs, now_unix_seconds);
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         route_band,
         now_unix_seconds,
         account_inputs,
     ));
-    post_exhaustion_assessment_has_safe_known_fresh_alternative(&assessment)
+    if post_exhaustion_assessment_has_safe_known_fresh_alternative(&assessment)? {
+        return Ok(PostExhaustionRouteBandOutcome::SelectableAlternative);
+    }
+
+    if let Some(retry_after_seconds) = short_quota_wait_delay_seconds {
+        return Ok(PostExhaustionRouteBandOutcome::ShortQuotaWait {
+            retry_after_seconds,
+        });
+    }
+
+    Ok(PostExhaustionRouteBandOutcome::NoSelectableAlternative)
 }
 
 fn post_exhaustion_assessment_has_safe_known_fresh_alternative(
@@ -2368,7 +2462,7 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("queue degraded state should record: {error}"));
 
-        let result = super::route_band_has_selectable_alternative(
+        let result = super::route_band_post_exhaustion_outcome(
             &PanicSelectionProjectionRepository,
             None,
             None,
@@ -2398,7 +2492,7 @@ mod tests {
             ),
         ]);
 
-        let result = super::route_band_has_selectable_alternative(
+        let result = super::route_band_post_exhaustion_outcome(
             &repository,
             None,
             None,
@@ -2428,7 +2522,7 @@ mod tests {
             ),
         ]);
 
-        let result = super::route_band_has_selectable_alternative(
+        let result = super::route_band_post_exhaustion_outcome(
             &repository,
             None,
             None,
@@ -2442,6 +2536,34 @@ mod tests {
         assert!(
             result.is_err(),
             "post-exhaustion reconnect must fail closed when the only alternative has stale quota evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_exhaustion_outcome_waits_only_for_fresh_short_quota_exhaustion() {
+        let exhausted_account_id = account_id("acct_exhausted_short_wait");
+        let short_exhausted_account_id = account_id("acct_short_wait");
+        let repository = StaticSelectionProjectionRepository::new(vec![
+            selector_input_for_runtime_exhaustion_test(exhausted_account_id.clone()),
+            selector_input_for_short_only_exhaustion_test(short_exhausted_account_id),
+        ]);
+
+        let result = super::route_band_post_exhaustion_outcome(
+            &repository,
+            None,
+            None,
+            None,
+            codex_router_core::routes::RouteBand::Responses,
+            &exhausted_account_id,
+            1_000,
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Ok(super::PostExhaustionRouteBandOutcome::ShortQuotaWait {
+                retry_after_seconds: 65,
+            })
         );
     }
 
@@ -2682,6 +2804,98 @@ mod tests {
     fn account_id(value: &str) -> AccountId {
         AccountId::new(value)
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
+    }
+
+    #[test]
+    fn short_quota_wait_uses_earliest_fresh_short_reset_when_weekly_is_usable() {
+        let accounts = vec![
+            short_only_exhausted_account_input("acct_short_a", 1_008),
+            short_only_exhausted_account_input("acct_short_b", 1_005),
+        ];
+
+        assert_eq!(
+            super::short_quota_wait_delay_seconds(&accounts, 1_000),
+            Some(65),
+            "the first usable 5h reset plus the conservative jitter should drive the retry delay"
+        );
+    }
+
+    #[test]
+    fn short_quota_wait_rejects_weekly_exhaustion() {
+        let account = codex_router_selection::burn_down::BurnDownAccountInput::new(
+            account_id("acct_weekly_exhausted"),
+            "weekly-exhausted",
+            vec![
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Ineligible,
+                )
+                .with_remaining_headroom(0)
+                .with_reset_unix_seconds(1_005),
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Ineligible,
+                )
+                .with_remaining_headroom(0)
+                .with_reset_unix_seconds(100_000),
+            ],
+        );
+
+        assert_eq!(
+            super::short_quota_wait_delay_seconds(&[account], 1_000),
+            None
+        );
+    }
+
+    #[test]
+    fn short_quota_wait_rejects_stale_short_quota_evidence() {
+        let account = codex_router_selection::burn_down::BurnDownAccountInput::new(
+            account_id("acct_short_stale"),
+            "short-stale",
+            vec![
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Stale,
+                )
+                .with_remaining_headroom(0)
+                .with_reset_unix_seconds(1_005),
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(80)
+                .with_reset_unix_seconds(100_000),
+            ],
+        );
+
+        assert_eq!(
+            super::short_quota_wait_delay_seconds(&[account], 1_000),
+            None
+        );
+    }
+
+    fn short_only_exhausted_account_input(
+        account_id_value: &str,
+        short_reset_unix_seconds: u64,
+    ) -> codex_router_selection::burn_down::BurnDownAccountInput {
+        codex_router_selection::burn_down::BurnDownAccountInput::new(
+            account_id(account_id_value),
+            account_id_value,
+            vec![
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Ineligible,
+                )
+                .with_remaining_headroom(0)
+                .with_reset_unix_seconds(short_reset_unix_seconds),
+                codex_router_selection::burn_down::QuotaWindowFact::new(
+                    codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                    codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(80)
+                .with_reset_unix_seconds(100_000),
+            ],
+        )
     }
 
     struct PanicSelectionProjectionRepository;
@@ -3130,6 +3344,40 @@ mod tests {
                 )
                 .with_remaining_headroom(90)
                 .with_reset_unix_seconds(604_800)
+                .with_effective(true)
+                .with_observed_unix_seconds(900),
+            ],
+        )
+    }
+
+    fn selector_input_for_short_only_exhaustion_test(
+        account_id: AccountId,
+    ) -> codex_router_state::quota_snapshot::SelectorQuotaInput {
+        codex_router_state::quota_snapshot::SelectorQuotaInput::new(
+            account_id.clone(),
+            "short-only-exhausted",
+            codex_router_state::account::AccountStatus::Enabled,
+            Some(1),
+            "responses",
+            vec![
+                codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
+                    account_id.clone(),
+                    "responses",
+                    codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                    codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Ineligible,
+                )
+                .with_remaining_headroom(0)
+                .with_reset_unix_seconds(1_005)
+                .with_effective(true)
+                .with_observed_unix_seconds(900),
+                codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
+                    account_id,
+                    "responses",
+                    codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                    codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(80)
+                .with_reset_unix_seconds(100_000)
                 .with_effective(true)
                 .with_observed_unix_seconds(900),
             ],
