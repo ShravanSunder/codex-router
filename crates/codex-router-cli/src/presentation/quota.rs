@@ -586,7 +586,7 @@ fn quota_account_list_height(
     let visible_count = row_count.saturating_sub(window_start).min(visible_rows);
     let remaining = row_count.saturating_sub(window_start + visible_rows);
     let header_height = 2;
-    let row_height = visible_count * 3;
+    let row_height = visible_count * 5;
     let row_gap_height = visible_count.saturating_sub(1);
     let more_above_height = if window_start > 0 { 2 } else { 0 };
     let more_below_height = if remaining > 0 { 2 } else { 0 };
@@ -747,7 +747,7 @@ fn render_table_header(width: usize) -> AnyElement<'static> {
         "{}{}{}",
         fit_line("  Account", account_width),
         fit_line("Status", status_width),
-        fit_line("Weekly pace", pace_width),
+        fit_line("Pace", pace_width),
     );
     element! {
         View(
@@ -780,7 +780,60 @@ fn render_account_row(
     let account = fit_line(&format!("{marker} {}", row.account), account_width);
     let status_color = if focused { Color::Yellow } else { Color::White };
     let metadata_color = if focused { Color::Yellow } else { Color::Grey };
-    let reset_sample_pace = reset_pace_row_line(&row.reset_pace, pace_width);
+    let compact = inner_width < 74;
+    let weekly_line = if compact {
+        element! {
+            Text(content: fit_line(&format!("weekly  {}", row.weekly_window), inner_width), color: Color::White, wrap: TextWrap::NoWrap)
+        }
+        .into_any()
+    } else {
+        element! {
+            View(width: inner_width as u32) {
+                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
+                Text(content: fit_line("weekly", status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&row.weekly_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
+            }
+        }
+        .into_any()
+    };
+    let short_window_line = if compact {
+        element! {
+            Text(content: fit_line(&format!("5h      {}", row.details.short_window), inner_width), color: Color::White, wrap: TextWrap::NoWrap)
+        }
+        .into_any()
+    } else {
+        element! {
+            View(width: inner_width as u32) {
+                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
+                Text(content: fit_line("5h", status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&row.details.short_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
+            }
+        }
+        .into_any()
+    };
+    let forecast_line = if compact {
+        element! {
+            Text(content: list_pace_summary_for_width(&row.reset_pace, inner_width), color: reset_pace_color(row.reset_pace.state), wrap: TextWrap::NoWrap)
+        }
+        .into_any()
+    } else {
+        reset_pace_row_line(&row.reset_pace, pace_width)
+    };
+    let connection_line = if compact {
+        element! {
+            Text(content: fit_line(&format!("conn    {} · {}", row.active_clients, row.reset_credits), inner_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+        }
+        .into_any()
+    } else {
+        element! {
+            View(width: inner_width as u32) {
+                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
+                Text(content: fit_line("conn", status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&format!("{} · {}", row.active_clients, row.reset_credits), pace_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+            }
+        }
+        .into_any()
+    };
 
     element! {
         View(
@@ -794,16 +847,10 @@ fn render_account_row(
                 Text(content: fit_line(&row.status, status_width), color: status_color, wrap: TextWrap::NoWrap)
                 Text(content: fit_line(&row.reason, pace_width), color: metadata_color, wrap: TextWrap::NoWrap)
             }
-            View(width: inner_width as u32) {
-                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&row.active_clients, status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&row.weekly_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
-            }
-            View(width: inner_width as u32) {
-                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&row.reset_credits, status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                #(reset_sample_pace)
-            }
+            #(weekly_line)
+            #(short_window_line)
+            #(forecast_line)
+            #(connection_line)
         }
     }
     .into_any()
@@ -910,7 +957,7 @@ fn detail_line(label: &str, value: &str, width: usize, color: Color) -> AnyEleme
 }
 
 fn reset_pace_row_line(reset_pace: &ResetPaceViewModel, width: usize) -> AnyElement<'static> {
-    let reset_pace_text = reset_pace_summary_for_width(reset_pace, width);
+    let reset_pace_text = list_pace_summary_for_width(reset_pace, width);
     element! {
         View(width: width as u32) {
             MixedText(
@@ -923,6 +970,27 @@ fn reset_pace_row_line(reset_pace: &ResetPaceViewModel, width: usize) -> AnyElem
         }
     }
     .into_any()
+}
+
+fn list_pace_summary_for_width(reset_pace: &ResetPaceViewModel, width: usize) -> String {
+    let summary = if reset_pace.state == ResetPaceState::Unavailable {
+        format!(
+            "{}  {}",
+            reset_pace_meter(reset_pace),
+            reset_pace.semantic_label
+        )
+    } else if let Some(impact_label) = &reset_pace.impact_label {
+        format!("{}  weekly {impact_label}", reset_pace_meter(reset_pace))
+    } else {
+        format!(
+            "{}  {}",
+            reset_pace_meter(reset_pace),
+            reset_pace
+                .multiple_label
+                .replace("reset pace", "weekly pace"),
+        )
+    };
+    fit_line(&summary, width)
 }
 
 const fn reset_pace_color(state: ResetPaceState) -> Color {
@@ -969,6 +1037,10 @@ fn reset_pace_ansi_ranges(line: &str) -> Vec<(usize, usize, &'static str)> {
         (" reset pace healthy", "\u{1b}[38;5;10m"),
         (" reset pace under", "\u{1b}[38;5;11m"),
         (" reset pace over", "\u{1b}[38;5;9m"),
+        (" pace healthy", "\u{1b}[38;5;10m"),
+        (" pace under", "\u{1b}[38;5;11m"),
+        (" pace over", "\u{1b}[38;5;9m"),
+        (" weekly runs out", "\u{1b}[38;5;9m"),
         ("Exhausted", "\u{1b}[38;5;9m"),
     ] {
         let mut cursor = 0;
@@ -1010,29 +1082,6 @@ fn scan_back_while(line: &str, cursor: usize, mut predicate: impl FnMut(char) ->
         start = index;
     }
     start
-}
-
-fn reset_pace_summary_for_width(reset_pace: &ResetPaceViewModel, width: usize) -> String {
-    let summary = reset_pace_summary(reset_pace);
-    if summary.chars().count() <= width {
-        return fit_line(&summary, width);
-    }
-    if reset_pace.state == ResetPaceState::Unavailable {
-        return fit_line(&summary, width);
-    }
-    if let Some(impact_label) = &reset_pace.impact_label {
-        if is_depleted_quota_label(impact_label) {
-            return fit_line(impact_label, width);
-        }
-        return fit_line(impact_label, width);
-    }
-    fit_line(
-        &format!(
-            "{} {}",
-            reset_pace.multiple_label, reset_pace.semantic_label
-        ),
-        width,
-    )
 }
 
 fn reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {
@@ -1409,7 +1458,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quota_status_narrow_rows_preserve_reset_credits_and_sample_semantics() {
+    async fn quota_status_narrow_rows_preserve_quota_windows_and_forecast() {
         let text = render_quota_capture_model_at(
             quota_view_model(),
             48,
@@ -1421,16 +1470,26 @@ mod tests {
         )
         .await;
 
-        assert!(text.contains("2 resets"), "{text}");
-        assert!(text.contains("sample fresh"), "{text}");
+        assert!(text.contains("weekly"), "{text}");
+        assert!(text.contains("5h"), "{text}");
+        assert!(text.contains("□□□□□□□│"), "{text}");
+        assert!(
+            text.contains("1 client") && text.contains("2 resets"),
+            "{text}"
+        );
     }
 
     #[test]
-    fn quota_status_static_narrow_rows_preserve_reset_credits_and_sample_semantics() {
+    fn quota_status_static_narrow_rows_preserve_quota_windows_and_forecast() {
         let text = render_quota_static_capture(quota_view_model(), 48, false);
 
-        assert!(text.contains("2 resets"), "{text}");
-        assert!(text.contains("sample fresh"), "{text}");
+        assert!(text.contains("weekly"), "{text}");
+        assert!(text.contains("5h"), "{text}");
+        assert!(text.contains("□□□□□□□│"), "{text}");
+        assert!(
+            text.contains("1 client") && text.contains("2 resets"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1512,7 +1571,7 @@ mod tests {
         let lines = text.lines().collect::<Vec<_>>();
         let conn_line_index = lines
             .iter()
-            .position(|line| line.contains("conn"))
+            .rposition(|line| line.contains("conn"))
             .unwrap_or_else(|| panic!("conn line should render:\n{text}"));
         let short_pace_line = lines
             .get(conn_line_index + 1)
@@ -1555,21 +1614,13 @@ mod tests {
     }
 
     #[test]
-    fn quota_status_ansi_colors_reset_pace_by_state() {
+    fn quota_status_ansi_colors_selected_reset_pace() {
         let view_model = quota_state_color_view_model();
         let text = render_quota_static_capture(view_model, 160, true);
 
         assert!(
             text.contains("\u{1b}[38;5;10m") && text.contains("1.00x reset pace healthy"),
             "healthy reset pace should render green:\n{text:?}"
-        );
-        assert!(
-            text.contains("\u{1b}[38;5;11m") && text.contains("0.50x reset pace under"),
-            "under-burning reset pace should render yellow:\n{text:?}"
-        );
-        assert!(
-            text.contains("\u{1b}[38;5;9m") && text.contains("1.50x reset pace over"),
-            "over-burning reset pace should render red:\n{text:?}"
         );
     }
 
@@ -1823,6 +1874,37 @@ mod tests {
             !text.contains("3.00x reset pace over"),
             "runout impact should replace the capped over-pace copy in account rows:\n{text}"
         );
+    }
+
+    #[test]
+    fn quota_status_list_shows_weekly_5h_and_weekly_forecast() {
+        let mut view_model = quota_view_model();
+        view_model.rows[0].weekly_window = "██████████ 94% left, resets 6d 19h".to_owned();
+        view_model.rows[0].details.short_window = "████████░░ 72% left, resets 3h 12m".to_owned();
+        view_model.rows[0].reset_pace = ResetPaceViewModel {
+            state: ResetPaceState::OverBurning,
+            multiple_label: "1.37x pace".to_owned(),
+            impact_label: Some("runs out 2d 4h".to_owned()),
+            semantic_label: "over",
+            meter_left_segments: ResetPaceMeterSegments {
+                filled: 0,
+                empty: 7,
+            },
+            meter_right_segments: ResetPaceMeterSegments {
+                filled: 5,
+                empty: 2,
+            },
+            center_marker: '│',
+            unavailable_reason: None,
+        };
+
+        let text = render_quota_static_capture(view_model, 120, false);
+
+        assert!(text.contains("Pace"), "{text}");
+        assert!(text.contains("weekly"), "{text}");
+        assert!(text.contains("5h"), "{text}");
+        assert!(text.contains("weekly runs out 2d 4h"), "{text}");
+        assert!(!text.contains("Weekly pace"), "{text}");
     }
 
     async fn render_quota_capture(width: usize) -> String {

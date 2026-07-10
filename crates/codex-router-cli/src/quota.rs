@@ -4489,8 +4489,8 @@ mod tests {
         let text = must_ok(String::from_utf8(output));
 
         assert!(
-            text.contains("Weekly pace"),
-            "quota table should make weekly pace the main-list quota column:\n{text}"
+            text.contains("Pace"),
+            "quota table should label the main-list forecast column:\n{text}"
         );
         assert!(
             text.contains("  Account"),
@@ -4501,28 +4501,23 @@ mod tests {
             "selected account details should separate quota windows from reset pace:\n{text}"
         );
         assert!(
-            text.contains("0 clients") || text.contains("1 client"),
-            "main account rows should expose active clients under Status:\n{text}"
-        );
-        assert!(
-            text.contains("2 resets"),
-            "main account rows should expose reset credits under active clients:\n{text}"
-        );
-        assert!(
             text.contains("%/h") && text.contains("%/h/conn"),
             "quota table should expose total and per-connection rate units:\n{text}"
         );
         assert!(
-            text.contains("█") && text.contains("% left, reset"),
-            "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
+            text.contains("weekly")
+                && text.contains("5h")
+                && text.contains("█")
+                && text.contains("% left, reset"),
+            "main account rows should show both quota windows with quota bars:\n{text}"
         );
         assert!(
             text.contains("weekly") && text.contains("5h") && text.contains("reset pace"),
             "quota table should show the selected reset pace as an explicit block meter:\n{text}"
         );
         assert!(
-            text.contains("reset pace") && text.contains("sample fresh"),
-            "main account rows should show reset pace and sample metadata in Weekly pace:\n{text}"
+            text.contains("reset pace"),
+            "main account rows should show the weekly pace meter:\n{text}"
         );
         assert!(
             !text.contains("current [")
@@ -4598,8 +4593,8 @@ mod tests {
             "quota table should emit ANSI styling:\n{text:?}"
         );
         assert!(
-            text.contains("\x1b[38;5;11m") && text.contains("reset pace under"),
-            "quota reset pace should emit state color:\n{text:?}"
+            text.contains("\x1b[38;5;11m") && text.contains("pace under"),
+            "quota pace should emit state color:\n{text:?}"
         );
         assert!(
             !text.contains("\x1b[32m"),
