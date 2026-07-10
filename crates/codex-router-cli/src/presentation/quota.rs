@@ -817,7 +817,14 @@ fn render_account_row(
         }
         .into_any()
     } else {
-        reset_pace_row_line(&row.reset_pace, pace_width)
+        element! {
+            View(width: inner_width as u32) {
+                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
+                Text(content: " ".repeat(status_width), wrap: TextWrap::NoWrap)
+                #(reset_pace_row_line(&row.reset_pace, pace_width))
+            }
+        }
+        .into_any()
     };
     let connection_line = if compact {
         element! {
@@ -1905,6 +1912,20 @@ mod tests {
         assert!(text.contains("5h"), "{text}");
         assert!(text.contains("weekly runs out 2d 4h"), "{text}");
         assert!(!text.contains("Weekly pace"), "{text}");
+
+        let weekly_line = text
+            .lines()
+            .find(|line| line.contains("94% left, resets 6d 19h"))
+            .unwrap_or_else(|| panic!("weekly account-list line should render:\n{text}"));
+        let forecast_line = text
+            .lines()
+            .find(|line| line.contains("weekly runs out 2d 4h"))
+            .unwrap_or_else(|| panic!("weekly account-list forecast should render:\n{text}"));
+        assert_eq!(
+            weekly_line.find("██████████"),
+            forecast_line.find("□□□□□□□│"),
+            "weekly capacity and forecast meters must share the Pace-column origin:\n{text}"
+        );
     }
 
     async fn render_quota_capture(width: usize) -> String {
