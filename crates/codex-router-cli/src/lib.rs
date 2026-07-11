@@ -3009,7 +3009,7 @@ exit 42
         assert!(visible_stdout.contains("safest quota"));
         assert!(visible_stdout.contains("burn "));
         assert!(!visible_stdout.contains("why: preferred by quota"));
-        assert!(visible_stdout.contains("  Account"));
+        assert!(!visible_stdout.contains("  Account"));
         assert!(visible_stdout.contains("❯ primary"));
         assert!(visible_stdout.contains("preferred"));
         assert!(visible_stdout.contains("25% left, reset 2h 30m"));
