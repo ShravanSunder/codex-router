@@ -40,6 +40,7 @@ pub(crate) struct QuotaStatusAccountViewModel {
     pub(crate) reset_credits: String,
     pub(crate) reason: String,
     pub(crate) weekly_window: String,
+    pub(crate) short_window: String,
     pub(crate) burn_meter: String,
     pub(crate) sample_metadata: SampleMetadata,
     pub(crate) reset_pace: ResetPaceViewModel,
@@ -585,18 +586,12 @@ fn quota_account_list_height(
     let window_start = visible_account_window_start(focused_row_index, row_count, visible_rows);
     let visible_count = row_count.saturating_sub(window_start).min(visible_rows);
     let remaining = row_count.saturating_sub(window_start + visible_rows);
-    let header_height = 2;
-    let row_height = visible_count * 5;
+    let row_height = visible_count * 4;
     let row_gap_height = visible_count.saturating_sub(1);
     let more_above_height = if window_start > 0 { 2 } else { 0 };
     let more_below_height = if remaining > 0 { 2 } else { 0 };
     let border_and_padding_height = 2;
-    border_and_padding_height
-        + header_height
-        + more_above_height
-        + row_height
-        + row_gap_height
-        + more_below_height
+    border_and_padding_height + more_above_height + row_height + row_gap_height + more_below_height
 }
 
 fn selected_detail_height(has_selected_details: bool) -> usize {
@@ -690,7 +685,7 @@ fn render_account_list(
     visible_rows: usize,
 ) -> AnyElement<'static> {
     let row_width = width.saturating_sub(4).max(32);
-    let mut children = vec![render_table_header(row_width)];
+    let mut children = Vec::new();
     let window_start = visible_account_window_start(focused_row_index, rows.len(), visible_rows);
     if window_start > 0 {
         children.push(quota_more_marker(format!("+{window_start} more above")));
@@ -741,32 +736,18 @@ fn quota_more_marker(content: String) -> AnyElement<'static> {
     .into_any()
 }
 
-fn render_table_header(width: usize) -> AnyElement<'static> {
-    let (account_width, status_width, pace_width) = quota_list_columns(width);
-    let header = format!(
-        "{}{}{}",
-        fit_line("  Account", account_width),
-        fit_line("Status", status_width),
-        fit_line("Pace", pace_width),
-    );
-    element! {
-        View(
-            width: width as u32,
-            border_style: BorderStyle::Single,
-            border_edges: Edges::Bottom,
-            border_color: Color::DarkGrey,
-        ) {
-            Text(content: fit_line(&header, width), color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-        }
-    }
-    .into_any()
-}
-
 fn quota_list_columns(width: usize) -> (usize, usize, usize) {
     let account_width = if width < 74 { 13 } else { 17 };
     let status_width = if width < 74 { 13 } else { 18 };
     let pace_width = width.saturating_sub(account_width + status_width);
     (account_width, status_width, pace_width)
+}
+
+fn fit_column(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    format!("{} ", fit_line(value, width - 1))
 }
 
 fn render_account_row(
@@ -777,70 +758,10 @@ fn render_account_row(
     let inner_width = width.saturating_sub(2);
     let (account_width, status_width, pace_width) = quota_list_columns(inner_width);
     let marker = if focused { "❯" } else { " " };
-    let account = fit_line(&format!("{marker} {}", row.account), account_width);
+    let account = fit_column(&format!("{marker} {}", row.account), account_width);
     let status_color = if focused { Color::Yellow } else { Color::White };
     let metadata_color = if focused { Color::Yellow } else { Color::Grey };
-    let compact = inner_width < 74;
-    let weekly_line = if compact {
-        element! {
-            Text(content: fit_line(&format!("weekly  {}", row.weekly_window), inner_width), color: Color::White, wrap: TextWrap::NoWrap)
-        }
-        .into_any()
-    } else {
-        element! {
-            View(width: inner_width as u32) {
-                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                Text(content: fit_line("weekly", status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&row.weekly_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
-            }
-        }
-        .into_any()
-    };
-    let short_window_line = if compact {
-        element! {
-            Text(content: fit_line(&format!("5h      {}", row.details.short_window), inner_width), color: Color::White, wrap: TextWrap::NoWrap)
-        }
-        .into_any()
-    } else {
-        element! {
-            View(width: inner_width as u32) {
-                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                Text(content: fit_line("5h", status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&row.details.short_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
-            }
-        }
-        .into_any()
-    };
-    let forecast_line = if compact {
-        element! {
-            Text(content: list_pace_summary_for_width(&row.reset_pace, inner_width), color: reset_pace_color(row.reset_pace.state), wrap: TextWrap::NoWrap)
-        }
-        .into_any()
-    } else {
-        element! {
-            View(width: inner_width as u32) {
-                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                Text(content: " ".repeat(status_width), wrap: TextWrap::NoWrap)
-                #(reset_pace_row_line(&row.reset_pace, pace_width))
-            }
-        }
-        .into_any()
-    };
-    let connection_line = if compact {
-        element! {
-            Text(content: fit_line(&format!("conn    {} · {}", row.active_clients, row.reset_credits), inner_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-        }
-        .into_any()
-    } else {
-        element! {
-            View(width: inner_width as u32) {
-                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                Text(content: fit_line("conn", status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&format!("{} · {}", row.active_clients, row.reset_credits), pace_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-            }
-        }
-        .into_any()
-    };
+    let reset_sample_pace = reset_pace_row_line(&row.reset_pace, pace_width);
 
     element! {
         View(
@@ -851,13 +772,24 @@ fn render_account_row(
         ) {
             View(width: inner_width as u32) {
                 Text(content: account, color: if focused { Color::Yellow } else { Color::White }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&row.status, status_width), color: status_color, wrap: TextWrap::NoWrap)
+                Text(content: fit_column(&row.status, status_width), color: status_color, wrap: TextWrap::NoWrap)
                 Text(content: fit_line(&row.reason, pace_width), color: metadata_color, wrap: TextWrap::NoWrap)
             }
-            #(weekly_line)
-            #(short_window_line)
-            #(forecast_line)
-            #(connection_line)
+            View(width: inner_width as u32) {
+                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
+                Text(content: fit_column(&row.active_clients, status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&row.weekly_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
+            }
+            View(width: inner_width as u32) {
+                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
+                Text(content: fit_column(&row.reset_credits, status_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&row.short_window, pace_width), color: Color::White, wrap: TextWrap::NoWrap)
+            }
+            View(width: inner_width as u32) {
+                Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
+                Text(content: " ".repeat(status_width), wrap: TextWrap::NoWrap)
+                #(reset_sample_pace)
+            }
         }
     }
     .into_any()
@@ -987,7 +919,7 @@ fn list_pace_summary_for_width(reset_pace: &ResetPaceViewModel, width: usize) ->
             reset_pace.semantic_label
         )
     } else if let Some(impact_label) = &reset_pace.impact_label {
-        format!("{}  weekly {impact_label}", reset_pace_meter(reset_pace))
+        format!("{}  weekly · {impact_label}", reset_pace_meter(reset_pace))
     } else {
         format!(
             "{}  {}",
@@ -1364,9 +1296,9 @@ mod tests {
             .get(sidecar_top_border_index + 1)
             .unwrap_or_else(|| panic!("quota panel content should follow top border:\n{text}"));
         assert!(
-            first_panel_content.contains("Account")
+            first_panel_content.contains("ssdev")
                 && first_panel_content.contains("Selected account"),
-            "account and selected headers should sit directly below panel borders:\n{text}"
+            "first account and selected header should sit directly below panel borders:\n{text}"
         );
         assert!(
             !lines
@@ -1816,6 +1748,7 @@ mod tests {
                 reset_credits: "2 resets".to_owned(),
                 reason: "safest quota".to_owned(),
                 weekly_window: "█████ 83%".to_owned(),
+                short_window: "█████ 99%".to_owned(),
                 burn_meter: "legacy-meter-sentinel".to_owned(),
                 sample_metadata,
                 reset_pace,
@@ -1886,8 +1819,8 @@ mod tests {
     #[test]
     fn quota_status_list_shows_weekly_5h_and_weekly_forecast() {
         let mut view_model = quota_view_model();
-        view_model.rows[0].weekly_window = "██████████ 94% left, resets 6d 19h".to_owned();
-        view_model.rows[0].details.short_window = "████████░░ 72% left, resets 3h 12m".to_owned();
+        view_model.rows[0].weekly_window = "██████████ 94% weekly · resets 6d 19h".to_owned();
+        view_model.rows[0].short_window = "████████░░ 72% 5h · resets 3h 12m".to_owned();
         view_model.rows[0].reset_pace = ResetPaceViewModel {
             state: ResetPaceState::OverBurning,
             multiple_label: "1.37x pace".to_owned(),
@@ -1907,19 +1840,21 @@ mod tests {
 
         let text = render_quota_static_capture(view_model, 120, false);
 
-        assert!(text.contains("Pace"), "{text}");
-        assert!(text.contains("weekly"), "{text}");
-        assert!(text.contains("5h"), "{text}");
-        assert!(text.contains("weekly runs out 2d 4h"), "{text}");
-        assert!(!text.contains("Weekly pace"), "{text}");
+        assert!(text.contains("94% weekly · resets 6d 19h"), "{text}");
+        assert!(text.contains("72% 5h · resets 3h 12m"), "{text}");
+        assert!(text.contains("weekly · runs out 2d 4h"), "{text}");
+        assert!(
+            !text.contains("Account") && !text.contains("Status") && !text.contains("Pace"),
+            "{text}"
+        );
 
         let weekly_line = text
             .lines()
-            .find(|line| line.contains("94% left, resets 6d 19h"))
+            .find(|line| line.contains("94% weekly · resets 6d 19h"))
             .unwrap_or_else(|| panic!("weekly account-list line should render:\n{text}"));
         let forecast_line = text
             .lines()
-            .find(|line| line.contains("weekly runs out 2d 4h"))
+            .find(|line| line.contains("weekly · runs out 2d 4h"))
             .unwrap_or_else(|| panic!("weekly account-list forecast should render:\n{text}"));
         assert_eq!(
             weekly_line.find("██████████"),
@@ -2067,6 +2002,7 @@ mod tests {
                 reset_credits: "2 resets".to_owned(),
                 reason: "safest quota".to_owned(),
                 weekly_window: "█████ 83% left, reset 7d".to_owned(),
+                short_window: "█████ 99% left, reset 5h".to_owned(),
                 burn_meter: "■□□□".to_owned(),
                 sample_metadata: SampleMetadata {
                     confidence: SampleConfidence::Fresh,
@@ -2114,6 +2050,7 @@ mod tests {
                     reset_credits: "2 resets".to_owned(),
                     reason: "alpha detail".to_owned(),
                     weekly_window: "█████ 83% left, reset 7d".to_owned(),
+                    short_window: "█████ 99% left, reset 5h".to_owned(),
                     burn_meter: "■□□□".to_owned(),
                     sample_metadata: SampleMetadata::default(),
                     reset_pace: ResetPaceViewModel::default(),
@@ -2128,6 +2065,7 @@ mod tests {
                     reset_credits: "2 resets".to_owned(),
                     reason: "beta detail".to_owned(),
                     weekly_window: "████ 75% left, reset 6d".to_owned(),
+                    short_window: "████ 70% left, reset 4h".to_owned(),
                     burn_meter: "■■□□".to_owned(),
                     sample_metadata: SampleMetadata::default(),
                     reset_pace: ResetPaceViewModel::default(),
@@ -2153,6 +2091,7 @@ mod tests {
                 reset_credits: "2 resets".to_owned(),
                 reason: format!("account {index:02} detail"),
                 weekly_window: "█████ 83% left, reset 7d".to_owned(),
+                short_window: "█████ 99% left, reset 5h".to_owned(),
                 burn_meter: "■□□□".to_owned(),
                 sample_metadata: SampleMetadata::default(),
                 reset_pace: ResetPaceViewModel::default(),
@@ -2332,6 +2271,7 @@ mod tests {
             reset_credits: "2 resets".to_owned(),
             reason: semantic_label.to_owned(),
             weekly_window: "█████ 83% left, reset 7d".to_owned(),
+            short_window: "█████ 99% left, reset 5h".to_owned(),
             burn_meter: String::new(),
             sample_metadata: SampleMetadata {
                 confidence: SampleConfidence::Fresh,
