@@ -16,6 +16,7 @@ const PROVIDER_ERROR_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
 pub enum ProviderErrorClassification {
     Unknown,
     AccountQuotaExhausted,
+    ModelCapacity,
     WebSocketConnectionLimit,
 }
 
@@ -99,11 +100,16 @@ pub fn classify_responses_websocket_error_envelope(body: &[u8]) -> ProviderError
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return ProviderErrorClassification::Unknown;
     };
-    if value.get("type").and_then(Value::as_str) != Some("error") {
-        return ProviderErrorClassification::Unknown;
-    }
-
-    let Some(error) = value.get("error").and_then(Value::as_object) else {
+    let error = match value.get("type").and_then(Value::as_str) {
+        Some("error") => value.get("error").and_then(Value::as_object),
+        Some("response.failed") => value
+            .get("response")
+            .and_then(Value::as_object)
+            .and_then(|response| response.get("error"))
+            .and_then(Value::as_object),
+        _ => None,
+    };
+    let Some(error) = error else {
         return ProviderErrorClassification::Unknown;
     };
     let mut tokens = Vec::new();
@@ -116,6 +122,9 @@ pub fn classify_responses_websocket_error_envelope(body: &[u8]) -> ProviderError
 
     if tokens.contains(&"websocket_connection_limit_reached") {
         return ProviderErrorClassification::WebSocketConnectionLimit;
+    }
+    if tokens.iter().any(|token| is_model_capacity_token(token)) {
+        return ProviderErrorClassification::ModelCapacity;
     }
     if tokens.iter().any(|token| is_quota_exhaustion_token(token)) {
         return ProviderErrorClassification::AccountQuotaExhausted;
@@ -167,6 +176,10 @@ fn is_quota_exhaustion_token(token: &str) -> bool {
         token,
         "usage_limit_reached" | "quota_exceeded" | "insufficient_quota"
     )
+}
+
+fn is_model_capacity_token(token: &str) -> bool {
+    matches!(token, "server_is_overloaded" | "slow_down")
 }
 
 fn classify_provider_error_envelope_prefix(body: &[u8]) -> ProviderErrorClassification {
@@ -248,6 +261,11 @@ fn classify_responses_websocket_error_envelope_prefix(body: &[u8]) -> ProviderEr
         "websocket_connection_limit_reached",
     ) {
         return ProviderErrorClassification::WebSocketConnectionLimit;
+    }
+    if prefix_top_level_string_field_matches(error_prefix, "code", is_model_capacity_token)
+        || prefix_top_level_string_field_matches(error_prefix, "type", is_model_capacity_token)
+    {
+        return ProviderErrorClassification::ModelCapacity;
     }
     if prefix_top_level_string_field_matches(error_prefix, "code", is_quota_exhaustion_token)
         || prefix_top_level_string_field_matches(error_prefix, "type", is_quota_exhaustion_token)
@@ -615,6 +633,36 @@ mod tests {
             classification,
             ProviderErrorClassification::AccountQuotaExhausted
         );
+    }
+
+    #[test]
+    fn responses_websocket_model_capacity_codes_are_not_quota() {
+        for code in ["server_is_overloaded", "slow_down"] {
+            for envelope in [
+                format!(r#"{{"type":"error","error":{{"code":"{code}","message":"capacity"}}}}"#),
+                format!(
+                    r#"{{"type":"response.failed","response":{{"error":{{"code":"{code}","message":"capacity"}}}}}}"#
+                ),
+            ] {
+                assert_eq!(
+                    classify_responses_websocket_error_envelope(envelope.as_bytes()),
+                    ProviderErrorClassification::ModelCapacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_responses_websocket_model_capacity_codes_are_not_quota() {
+        let padding = "x".repeat(128 * 1024);
+        for code in ["server_is_overloaded", "slow_down"] {
+            let envelope =
+                format!(r#"{{"type":"error","error":{{"code":"{code}","message":"{padding}"}}}}"#);
+            assert_eq!(
+                classify_responses_websocket_error_envelope(envelope.as_bytes()),
+                ProviderErrorClassification::ModelCapacity
+            );
+        }
     }
 
     #[test]

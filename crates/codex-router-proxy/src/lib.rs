@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 pub mod account_selection;
+mod capacity_retry;
 mod credential_runtime;
 pub mod db_write_actor;
 pub mod headers;

@@ -1,5 +1,12 @@
 //! Installed Codex smoke harness.
 
+mod retry;
+
+pub use retry::run_all_weekly_exhausted_terminal;
+pub use retry::run_capacity_retry_limit_terminal;
+pub use retry::run_model_capacity_reconnect;
+pub use retry::run_three_account_short_quota_reconnect;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -358,6 +365,7 @@ pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
         .write(&profile, true)
         .map_err(|error| format!("failed to write quota reconnect Codex profile: {error}"))?;
     let router_process = start_router_process_with_options(RouterProcessStartOptions {
+        now_unix_seconds: Some(1_030),
         router_port,
         state_path: runtime_roots.state_path.clone(),
         secret_root: runtime_roots.secret_root.clone(),
@@ -636,6 +644,7 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
             .join("websocket-registry-report.json")
     });
     let router_process = start_router_process_with_options(RouterProcessStartOptions {
+        now_unix_seconds: Some(1_030),
         router_port,
         state_path: runtime_roots.state_path.clone(),
         secret_root: runtime_roots.secret_root.clone(),
@@ -1635,6 +1644,7 @@ fn start_router_process(
     audit_path: PathBuf,
 ) -> Result<RouterProcessGuard, String> {
     start_router_process_with_options(RouterProcessStartOptions {
+        now_unix_seconds: Some(1_030),
         router_port,
         state_path,
         secret_root,
@@ -1647,6 +1657,7 @@ fn start_router_process(
 }
 
 struct RouterProcessStartOptions {
+    now_unix_seconds: Option<u64>,
     router_port: u16,
     state_path: PathBuf,
     secret_root: PathBuf,
@@ -1673,8 +1684,6 @@ fn start_router_process_with_options(
         options.secret_root.display().to_string(),
         "--upstream-base-url".to_owned(),
         options.upstream_base_url,
-        "--now-unix-seconds".to_owned(),
-        "1030".to_owned(),
         "--max-snapshot-age-seconds".to_owned(),
         "60".to_owned(),
         "--disable-background-quota-refresh".to_owned(),
@@ -1683,6 +1692,12 @@ fn start_router_process_with_options(
         "--audit-file".to_owned(),
         options.audit_path.display().to_string(),
     ];
+    if let Some(now_unix_seconds) = options.now_unix_seconds {
+        argv.extend([
+            "--now-unix-seconds".to_owned(),
+            now_unix_seconds.to_string(),
+        ]);
+    }
     if let Some(report_file) = options.websocket_registry_report_file {
         argv.extend([
             "--websocket-registry-report-file".to_owned(),
@@ -1694,6 +1709,11 @@ fn start_router_process_with_options(
     }
     let mut command = Command::new(&binary_path);
     command.args(&argv);
+    if cfg!(debug_assertions) {
+        command
+            .env("CODEX_ROUTER_TEST_CAPACITY_RETRY_DELAY_SECONDS", "2")
+            .env("CODEX_ROUTER_TEST_SHORT_QUOTA_WAIT_JITTER_SECONDS", "2");
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
