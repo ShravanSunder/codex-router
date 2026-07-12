@@ -71,6 +71,9 @@ use crate::account_selection::ActiveReservationGuard;
 use crate::account_selection::AsyncAccountDecisionSelector;
 use crate::account_selection::PostExhaustionRouteBandOutcome;
 use crate::account_selection::QuotaAwareAccountSelectorError;
+use crate::capacity_retry::CapacityRetryOutcome;
+use crate::capacity_retry::CapacityRetryTracker;
+use crate::capacity_retry::MAX_THREAD_ID_BYTES;
 use crate::db_write_actor::DbWriteEnqueueResult;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
@@ -106,6 +109,12 @@ const POST_EXHAUSTION_ALTERNATIVE_SELECTION_TIMEOUT: Duration = Duration::from_m
 fn short_quota_wait_signal(retry_after_seconds: u64) -> String {
     format!(
         r#"{{"type":"response.failed","response":{{"id":"resp_router_short_quota_wait","status":"failed","error":{{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in {retry_after_seconds} seconds."}}}}}}"#
+    )
+}
+
+fn model_capacity_wait_signal(retry_after_seconds: u64) -> String {
+    format!(
+        r#"{{"type":"response.failed","response":{{"id":"resp_router_model_capacity_wait","status":"failed","error":{{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in {retry_after_seconds} seconds."}}}}}}"#
     )
 }
 
@@ -792,6 +801,7 @@ fn websocket_credential_rejection_audit_event(account_hash: String) -> AuditEven
 
 /// Tracks active local WebSocket streams by local token generation.
 const MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS: usize = 1024;
+const MAX_CAPACITY_RETRY_SESSION_IDENTITIES: usize = 1024;
 
 /// Tracks active local WebSocket streams by local token generation.
 #[derive(Clone, Debug, Default)]
@@ -809,6 +819,8 @@ pub struct WebSocketRevocationRegistry {
     final_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
     quota_reconnect_signal_count: Arc<Mutex<usize>>,
     quota_reconnect_signal_unix_ms: Arc<Mutex<Option<u128>>>,
+    capacity_retry_tracker: CapacityRetryTracker,
+    capacity_retry_thread_ids: Arc<Mutex<HashMap<u64, String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -883,6 +895,35 @@ impl WebSocketRevocationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn set_capacity_retry_thread_id(&self, session_id: u64, thread_id: Option<String>) {
+        if let Some(thread_id) = thread_id
+            && let Ok(mut thread_ids) = self.capacity_retry_thread_ids.lock()
+            && thread_ids.len() < MAX_CAPACITY_RETRY_SESSION_IDENTITIES
+        {
+            thread_ids.insert(session_id, thread_id);
+        }
+    }
+
+    fn record_capacity_retry(&self, session_id: u64) -> Option<CapacityRetryOutcome> {
+        let thread_id = self
+            .capacity_retry_thread_ids
+            .lock()
+            .ok()
+            .and_then(|thread_ids| thread_ids.get(&session_id).cloned())?;
+        Some(self.capacity_retry_tracker.record_or_exhaust(&thread_id))
+    }
+
+    fn clear_capacity_retry(&self, session_id: u64) {
+        let thread_id = self
+            .capacity_retry_thread_ids
+            .lock()
+            .ok()
+            .and_then(|thread_ids| thread_ids.get(&session_id).cloned());
+        if let Some(thread_id) = thread_id {
+            self.capacity_retry_tracker.clear(&thread_id);
+        }
     }
 
     #[cfg(test)]
@@ -1031,6 +1072,9 @@ impl WebSocketRevocationRegistry {
         }
         if let Ok(mut forwarded_by_session) = self.forwarded_upstream_messages_by_session.lock() {
             forwarded_by_session.remove(&session_id);
+        }
+        if let Ok(mut thread_ids) = self.capacity_retry_thread_ids.lock() {
+            thread_ids.remove(&session_id);
         }
     }
 
@@ -1255,16 +1299,23 @@ mod registry_tests {
 mod async_forwarding_tests {
     use super::ActiveTurnReservationState;
     use super::AsyncWebSocketTunnel;
+    use super::CapacityRetryOutcome;
+    use super::Header;
+    use super::HeaderCollection;
+    use super::MAX_THREAD_ID_BYTES;
     use super::PostExhaustionRouteBandOutcome;
     use super::TokenGeneration;
+    use super::UpstreamToLocalPumpContext;
     use super::WebSocketAffinityOwnerContext;
     use super::WebSocketForwardingContext;
     use super::WebSocketHandshakeRequest;
     use super::WebSocketProtocolRouter;
     use super::WebSocketRevocationRegistry;
+    use super::capacity_retry_thread_id;
     use super::forward_duplex_until_complete;
     use super::is_response_completed;
     use super::is_response_create;
+    use super::maybe_replace_account_quota_exhaustion_with_reconnect_signal;
     use super::provider_error_classification_from_message;
     use super::record_forwarded_websocket_metadata;
     use super::websocket_affinity_owner_record;
@@ -4140,6 +4191,164 @@ mod async_forwarding_tests {
     }
 
     #[tokio::test]
+    async fn upstream_model_capacity_frame_emits_retryable_wait_and_closes() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        registry.set_capacity_retry_thread_id(session.session_id, Some("thread_1".to_owned()));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let provider_error_observer =
+            Arc::new(RecordingAsyncProviderErrorObserver::with_selectable_alternative(false));
+        let provider_error_observer_for_context: Arc<dyn AsyncProviderErrorObserver> =
+            provider_error_observer.clone();
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: AccountId::new("acct_selected")
+                .unwrap_or_else(|error| panic!("test account id should parse: {error}")),
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+
+        let router_task = forward_duplex_until_complete(
+            router_local_websocket,
+            router_upstream_websocket,
+            WebSocketForwardingContext {
+                session_registration: session,
+                affinity_owner_recorder: None,
+                async_affinity_owner_recorder: None,
+                affinity_record_tasks: TaskTracker::new(),
+                affinity_owner_context: Some(&affinity_owner_context),
+                provider_error_observer: Some(provider_error_observer_for_context),
+                revocation: &revocation,
+                session_shutdown: &session_shutdown,
+            },
+        );
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+                .unwrap_or_else(|error| panic!("local frame should send: {error}"));
+            let _first = upstream_websocket.next().await;
+            let original = r#"{"type":"error","status":503,"error":{"code":"server_is_overloaded","message":"capacity"}}"#;
+            upstream_websocket
+                .send(Message::text(original))
+                .await
+                .unwrap_or_else(|error| panic!("capacity frame should send: {error}"));
+            let received = client_websocket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("client should receive capacity wait"))
+                .unwrap_or_else(|error| panic!("client should receive capacity wait: {error}"));
+            assert_eq!(
+                received.to_string(),
+                r#"{"type":"response.failed","response":{"id":"resp_router_model_capacity_wait","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in 300 seconds."}}}"#
+            );
+        };
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should send then close: {router_result:?}"
+        );
+        assert!(
+            provider_error_observer.records().is_empty(),
+            "model capacity must not reach the quota observer"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_model_capacity_retry_forwards_original_error() {
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        registry.set_capacity_retry_thread_id(session.session_id, Some("thread_1".to_owned()));
+        for _ in 0..10 {
+            assert!(matches!(
+                registry.record_capacity_retry(session.session_id),
+                Some(CapacityRetryOutcome::Retry { .. })
+            ));
+        }
+        let original = Message::text(
+            r#"{"type":"error","status":503,"error":{"code":"server_is_overloaded","message":"capacity"}}"#,
+        );
+        let outcome = maybe_replace_account_quota_exhaustion_with_reconnect_signal(
+            original.clone(),
+            ProviderErrorClassification::ModelCapacity,
+            None,
+            &UpstreamToLocalPumpContext {
+                revocation: session.cancellation().clone(),
+                session_shutdown: CancellationToken::new(),
+                tunnel_shutdown: CancellationToken::new(),
+                session_registry: registry,
+                session_id: session.session_id,
+                affinity_owner_recorder: None,
+                async_affinity_owner_recorder: None,
+                affinity_record_tasks: TaskTracker::new(),
+                affinity_owner_context: None,
+                active_turn_reservation: ActiveTurnReservationState::new(None),
+                provider_error_observer: None,
+            },
+        )
+        .await;
+        assert!(!outcome.close_after_send);
+        assert_eq!(outcome.message.to_string(), original.to_string());
+    }
+
+    #[test]
+    fn completed_capacity_retry_state_resets_for_a_reconnected_session() {
+        let registry = WebSocketRevocationRegistry::new();
+        let first = registry.register_cancellation(TokenGeneration::new(1));
+        registry.set_capacity_retry_thread_id(first.session_id, Some("thread_1".to_owned()));
+        for _ in 0..10 {
+            let _retry = registry.record_capacity_retry(first.session_id);
+        }
+        registry.clear_capacity_retry(first.session_id);
+        let reconnected = registry.register_cancellation(TokenGeneration::new(1));
+        registry.set_capacity_retry_thread_id(reconnected.session_id, Some("thread_1".to_owned()));
+        assert!(matches!(
+            registry.record_capacity_retry(reconnected.session_id),
+            Some(CapacityRetryOutcome::Retry { .. })
+        ));
+    }
+
+    #[test]
+    fn capacity_retry_thread_id_requires_one_bounded_nonempty_header() {
+        assert_eq!(
+            capacity_retry_thread_id(&HeaderCollection::new(vec![Header::new(
+                "thread-id",
+                "one"
+            )])),
+            Some("one".to_owned())
+        );
+        for headers in [
+            HeaderCollection::new(Vec::new()),
+            HeaderCollection::new(vec![Header::new("thread-id", "")]),
+            HeaderCollection::new(vec![
+                Header::new("thread-id", "one"),
+                Header::new("thread-id", "two"),
+            ]),
+            HeaderCollection::new(vec![Header::new(
+                "thread-id",
+                "x".repeat(MAX_THREAD_ID_BYTES + 1),
+            )]),
+        ] {
+            assert_eq!(capacity_retry_thread_id(&headers), None);
+        }
+    }
+
+    #[tokio::test]
     async fn upstream_usage_limit_frame_emits_state_unavailable_when_queue_is_degraded() {
         let (router_local_stream, client_stream) = duplex(4096);
         let (router_upstream_stream, upstream_stream) = duplex(4096);
@@ -4932,6 +5141,10 @@ where
         let session_registration = self
             .revocations
             .register_cancellation_with_peer_addr(token_generation, self.local_peer_addr);
+        self.revocations.set_capacity_retry_thread_id(
+            session_registration.session_id,
+            capacity_retry_thread_id(&headers),
+        );
         let revocation = session_registration.cancellation().clone();
 
         let mut upstream_request = upstream_url.into_client_request()?;
@@ -4980,6 +5193,17 @@ where
         )
         .await
     }
+}
+
+fn capacity_retry_thread_id(headers: &HeaderCollection) -> Option<String> {
+    let values = headers.values("thread-id");
+    let [thread_id] = values.as_slice() else {
+        return None;
+    };
+    if thread_id.is_empty() || thread_id.len() > MAX_THREAD_ID_BYTES {
+        return None;
+    }
+    Some((*thread_id).to_owned())
 }
 
 async fn handle_pre_upstream_close_reason<LocalStream>(
@@ -5275,6 +5499,7 @@ where
                 context.session_registry.note_upstream_message_forwarded(context.session_id);
                 if let Some(metadata_text) = metadata_text {
                     if is_response_completed_text(&metadata_text) {
+                        context.session_registry.clear_capacity_retry(context.session_id);
                         context.active_turn_reservation.release_current();
                         context.session_registry.note_response_completed(context.session_id);
                     }
@@ -5292,7 +5517,9 @@ where
                         .await;
                     });
                 }
-                if provider_error_classification != ProviderErrorClassification::AccountQuotaExhausted
+                if !matches!(provider_error_classification,
+                    ProviderErrorClassification::AccountQuotaExhausted
+                        | ProviderErrorClassification::ModelCapacity)
                     && provider_error_body.is_some()
                     && let Some(provider_error_observer) = context.provider_error_observer.clone()
                     && let Some(affinity_owner_context) = context.affinity_owner_context.as_ref()
@@ -5330,6 +5557,25 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
     provider_error_body: Option<&[u8]>,
     context: &UpstreamToLocalPumpContext,
 ) -> UpstreamMessageOutcome {
+    if classification == ProviderErrorClassification::ModelCapacity {
+        return match context
+            .session_registry
+            .record_capacity_retry(context.session_id)
+        {
+            Some(CapacityRetryOutcome::Retry {
+                retry_after_seconds,
+            }) => UpstreamMessageOutcome {
+                message: Message::text(model_capacity_wait_signal(retry_after_seconds)),
+                close_after_send: true,
+            },
+            Some(CapacityRetryOutcome::Exhausted | CapacityRetryOutcome::Full) | None => {
+                UpstreamMessageOutcome {
+                    message: upstream_message,
+                    close_after_send: false,
+                }
+            }
+        };
+    }
     if classification != ProviderErrorClassification::AccountQuotaExhausted {
         return UpstreamMessageOutcome {
             message: upstream_message,
@@ -5376,28 +5622,8 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
         };
     }
 
-    let enqueue_result = provider_error_observer.enqueue_provider_quota_exhaustion(
-        exhausted_account_id.clone(),
-        RouteBand::Responses,
-        classification,
-        observed_unix_seconds,
-    );
-    if matches!(
-        enqueue_result,
-        DbWriteEnqueueResult::FullDegraded | DbWriteEnqueueResult::ClosedDegraded
-    ) {
-        crate::telemetry::record_websocket_event(
-            RouteBand::Responses.as_str(),
-            "quota_state_unavailable",
-        );
-        return UpstreamMessageOutcome {
-            message: Message::text(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL),
-            close_after_send: true,
-        };
-    }
-
     let post_exhaustion_outcome = provider_error_observer.route_band_post_exhaustion_outcome(
-        exhausted_account_id,
+        exhausted_account_id.clone(),
         RouteBand::Responses,
         observed_unix_seconds,
     );
@@ -5414,6 +5640,36 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
             Err(ProviderErrorObservationError::SelectionStateUnavailable)
         }
     };
+
+    let short_quota_wait = matches!(
+        post_exhaustion_outcome_result,
+        Ok(PostExhaustionRouteBandOutcome::ShortQuotaWait { .. })
+    );
+    let enqueue_result = if short_quota_wait {
+        DbWriteEnqueueResult::Enqueued
+    } else {
+        provider_error_observer.enqueue_provider_quota_exhaustion(
+            exhausted_account_id,
+            RouteBand::Responses,
+            classification,
+            observed_unix_seconds,
+        )
+    };
+    if !short_quota_wait
+        && matches!(
+            enqueue_result,
+            DbWriteEnqueueResult::FullDegraded | DbWriteEnqueueResult::ClosedDegraded
+        )
+    {
+        crate::telemetry::record_websocket_event(
+            RouteBand::Responses.as_str(),
+            "quota_state_unavailable",
+        );
+        return UpstreamMessageOutcome {
+            message: Message::text(ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL),
+            close_after_send: true,
+        };
+    }
 
     match post_exhaustion_outcome_result {
         Ok(PostExhaustionRouteBandOutcome::SelectableAlternative) => {

@@ -133,7 +133,9 @@ pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
-const SHORT_QUOTA_WAIT_JITTER_SECONDS: u64 = 60;
+const SHORT_QUOTA_WAIT_MIN_JITTER_SECONDS: u64 = 60;
+const SHORT_QUOTA_WAIT_MAX_JITTER_SECONDS: u64 = 120;
+const TEST_SHORT_QUOTA_WAIT_JITTER_ENV: &str = "CODEX_ROUTER_TEST_SHORT_QUOTA_WAIT_JITTER_SECONDS";
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
@@ -420,14 +422,15 @@ impl AccountHold {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeQuotaExhaustion {
     account_id: AccountId,
-    observed_unix_seconds: u64,
+    expires_unix_seconds: u64,
 }
 
 impl RuntimeQuotaExhaustion {
     fn new(account_id: AccountId, observed_unix_seconds: u64) -> Self {
         Self {
             account_id,
-            observed_unix_seconds,
+            expires_unix_seconds: observed_unix_seconds
+                .saturating_add(RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS),
         }
     }
 }
@@ -1281,10 +1284,7 @@ fn projected_accounts_excluding_runtime_exhaustions(
     let Some(route_band_exhaustions) = runtime_exhaustions.get_mut(route_band) else {
         return Ok(accounts);
     };
-    route_band_exhaustions.retain(|exhaustion| {
-        now_unix_seconds.saturating_sub(exhaustion.observed_unix_seconds)
-            <= RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS
-    });
+    route_band_exhaustions.retain(|exhaustion| now_unix_seconds < exhaustion.expires_unix_seconds);
     if route_band_exhaustions.is_empty() {
         runtime_exhaustions.remove(route_band);
         return Ok(accounts);
@@ -1440,6 +1440,42 @@ fn short_quota_wait_delay_seconds(
     accounts: &[BurnDownAccountInput],
     now_unix_seconds: u64,
 ) -> Option<u64> {
+    short_quota_wait_delay_seconds_with_jitter(
+        accounts,
+        now_unix_seconds,
+        short_quota_wait_jitter_seconds(),
+    )
+}
+
+fn short_quota_wait_jitter_seconds() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Some(jitter_seconds) = bounded_positive_test_jitter(
+        std::env::var(TEST_SHORT_QUOTA_WAIT_JITTER_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        return jitter_seconds;
+    }
+    let jitter_range = SHORT_QUOTA_WAIT_MAX_JITTER_SECONDS
+        .saturating_sub(SHORT_QUOTA_WAIT_MIN_JITTER_SECONDS)
+        .saturating_add(1);
+    let subsecond_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| u64::from(duration.subsec_nanos()));
+    SHORT_QUOTA_WAIT_MIN_JITTER_SECONDS.saturating_add(subsecond_nanos % jitter_range)
+}
+
+fn bounded_positive_test_jitter(value: Option<&str>) -> Option<u64> {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| (1..=SHORT_QUOTA_WAIT_MAX_JITTER_SECONDS).contains(value))
+}
+
+fn short_quota_wait_delay_seconds_with_jitter(
+    accounts: &[BurnDownAccountInput],
+    now_unix_seconds: u64,
+    jitter_seconds: u64,
+) -> Option<u64> {
     let mut earliest_short_reset_unix_seconds: Option<u64> = None;
     let mut routable_account_count = 0_u64;
 
@@ -1449,26 +1485,34 @@ fn short_quota_wait_delay_seconds(
         }
         routable_account_count = routable_account_count.saturating_add(1);
 
-        let short_window = account
+        let Some(short_window) = account
             .windows()
             .iter()
-            .find(|window| window.window_seconds() == V1_SHORT_WINDOW_SECONDS)?;
-        let weekly_window = account
+            .find(|window| window.window_seconds() == V1_SHORT_WINDOW_SECONDS)
+        else {
+            continue;
+        };
+        let Some(weekly_window) = account
             .windows()
             .iter()
-            .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)?;
+            .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+        else {
+            continue;
+        };
 
         if short_window.status() != QuotaWindowStatus::Ineligible
             || short_window.remaining_headroom() != 0
             || weekly_window.status() != QuotaWindowStatus::Eligible
             || weekly_window.remaining_headroom() == 0
         {
-            return None;
+            continue;
         }
 
-        let short_reset_unix_seconds = short_window.reset_unix_seconds()?;
+        let Some(short_reset_unix_seconds) = short_window.reset_unix_seconds() else {
+            continue;
+        };
         if short_reset_unix_seconds <= now_unix_seconds {
-            return None;
+            continue;
         }
         earliest_short_reset_unix_seconds = Some(
             earliest_short_reset_unix_seconds.map_or(short_reset_unix_seconds, |earliest| {
@@ -1484,8 +1528,40 @@ fn short_quota_wait_delay_seconds(
     earliest_short_reset_unix_seconds.map(|short_reset_unix_seconds| {
         short_reset_unix_seconds
             .saturating_sub(now_unix_seconds)
-            .saturating_add(SHORT_QUOTA_WAIT_JITTER_SECONDS)
+            .saturating_add(jitter_seconds)
     })
+}
+
+fn exhausted_account_short_quota_wait_delay_seconds(
+    account: &BurnDownAccountInput,
+    now_unix_seconds: u64,
+    jitter_seconds: u64,
+) -> Option<u64> {
+    if !account.routing_enabled() {
+        return None;
+    }
+    let short_window = account
+        .windows()
+        .iter()
+        .find(|window| window.window_seconds() == V1_SHORT_WINDOW_SECONDS)?;
+    let weekly_window = account
+        .windows()
+        .iter()
+        .find(|window| window.window_seconds() == V1_WEEKLY_WINDOW_SECONDS)?;
+    if weekly_window.status() != QuotaWindowStatus::Eligible
+        || weekly_window.remaining_headroom() == 0
+    {
+        return None;
+    }
+    let short_reset_unix_seconds = short_window.reset_unix_seconds()?;
+    if short_reset_unix_seconds <= now_unix_seconds {
+        return None;
+    }
+    Some(
+        short_reset_unix_seconds
+            .saturating_sub(now_unix_seconds)
+            .saturating_add(jitter_seconds),
+    )
 }
 
 fn reusable_held_account_id(
@@ -1788,6 +1864,18 @@ where
         active_session_overrides.as_ref(),
     )
     .await?;
+    let short_quota_wait_jitter_seconds = short_quota_wait_jitter_seconds();
+    let selected_account_wait_delay_seconds = projection
+        .accounts()
+        .iter()
+        .find(|input| input.account_id() == excluded_account_id)
+        .and_then(|account| {
+            exhausted_account_short_quota_wait_delay_seconds(
+                account,
+                now_unix_seconds,
+                short_quota_wait_jitter_seconds,
+            )
+        });
     let account_inputs = projection
         .accounts()
         .iter()
@@ -1803,8 +1891,11 @@ where
         )?,
         None => account_inputs,
     };
-    let short_quota_wait_delay_seconds =
-        short_quota_wait_delay_seconds(&account_inputs, now_unix_seconds);
+    let short_quota_wait_delay_seconds = short_quota_wait_delay_seconds_with_jitter(
+        &account_inputs,
+        now_unix_seconds,
+        short_quota_wait_jitter_seconds,
+    );
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         route_band,
         now_unix_seconds,
@@ -1814,7 +1905,32 @@ where
         return Ok(PostExhaustionRouteBandOutcome::SelectableAlternative);
     }
 
-    if let Some(retry_after_seconds) = short_quota_wait_delay_seconds {
+    let retry_after_seconds = match (
+        selected_account_wait_delay_seconds,
+        short_quota_wait_delay_seconds,
+    ) {
+        (Some(selected), Some(alternative)) => Some(selected.min(alternative)),
+        (Some(selected), None) => Some(selected),
+        (None, alternative) => alternative,
+    };
+    if let Some(retry_after_seconds) = retry_after_seconds {
+        if let Some(runtime_exhaustions) = runtime_exhaustions {
+            let mut runtime_exhaustions =
+                runtime_exhaustions
+                    .lock()
+                    .map_err(|_error| StateStoreError::Sqlite {
+                        message: "runtime quota exhaustion state unavailable".to_owned(),
+                    })?;
+            if let Some(exhaustions) = runtime_exhaustions.get_mut(route_band.as_str())
+                && let Some(exhaustion) = exhaustions
+                    .iter_mut()
+                    .find(|exhaustion| &exhaustion.account_id == excluded_account_id)
+            {
+                exhaustion.expires_unix_seconds = now_unix_seconds.saturating_add(
+                    retry_after_seconds.saturating_sub(short_quota_wait_jitter_seconds),
+                );
+            }
+        }
         return Ok(PostExhaustionRouteBandOutcome::ShortQuotaWait {
             retry_after_seconds,
         });
@@ -2559,11 +2675,69 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
+        assert!(
+            matches!(
+                result,
+                Ok(super::PostExhaustionRouteBandOutcome::ShortQuotaWait {
+                    retry_after_seconds: 65..=125,
+                })
+            ),
+            "5h retry should target reset plus one-to-two-minute jitter: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_exhaustion_outcome_waits_for_selected_single_account_with_healthy_weekly_window()
+    {
+        let exhausted_account_id = account_id("acct_single_short_wait");
+        let repository = StaticSelectionProjectionRepository::new(vec![
+            selector_input_for_runtime_exhaustion_test(exhausted_account_id.clone()),
+        ]);
+
+        let result = super::route_band_post_exhaustion_outcome(
+            &repository,
+            None,
+            None,
+            None,
+            codex_router_core::routes::RouteBand::Responses,
+            &exhausted_account_id,
+            1_000,
+        )
+        .await;
+
+        assert!(matches!(
             result,
             Ok(super::PostExhaustionRouteBandOutcome::ShortQuotaWait {
-                retry_after_seconds: 65,
+                retry_after_seconds: 17_060..=17_120,
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn post_exhaustion_outcome_stops_for_selected_account_with_exhausted_weekly_window() {
+        let exhausted_account_id = account_id("acct_single_weekly_exhausted");
+        let repository = StaticSelectionProjectionRepository::new(vec![
+            selector_input_for_post_exhaustion_test(
+                exhausted_account_id.clone(),
+                "weekly-exhausted",
+                codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Ineligible,
+            ),
+        ]);
+
+        let result = super::route_band_post_exhaustion_outcome(
+            &repository,
+            None,
+            None,
+            None,
+            codex_router_core::routes::RouteBand::Responses,
+            &exhausted_account_id,
+            1_000,
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Ok(super::PostExhaustionRouteBandOutcome::NoSelectableAlternative)
         );
     }
 
@@ -2814,9 +2988,25 @@ mod tests {
         ];
 
         assert_eq!(
-            super::short_quota_wait_delay_seconds(&accounts, 1_000),
+            super::short_quota_wait_delay_seconds_with_jitter(&accounts, 1_000, 90),
+            Some(95),
+            "the first usable 5h reset plus the injected jitter should drive the retry delay"
+        );
+
+        let production_delay = super::short_quota_wait_delay_seconds(&accounts, 1_000);
+        assert!(
+            matches!(production_delay, Some(65..=125)),
+            "production jitter must remain between one and two minutes: {production_delay:?}"
+        );
+        assert_eq!(
+            super::short_quota_wait_delay_seconds_with_jitter(&accounts, 1_000, 60),
             Some(65),
-            "the first usable 5h reset plus the conservative jitter should drive the retry delay"
+            "minimum jitter should be one minute"
+        );
+        assert_eq!(
+            super::short_quota_wait_delay_seconds_with_jitter(&accounts, 1_000, 120),
+            Some(125),
+            "maximum jitter should be two minutes"
         );
     }
 
@@ -2872,6 +3062,15 @@ mod tests {
             super::short_quota_wait_delay_seconds(&[account], 1_000),
             None
         );
+    }
+
+    #[test]
+    fn test_short_quota_jitter_override_is_positive_bounded_and_fails_closed() {
+        assert_eq!(super::bounded_positive_test_jitter(Some("2")), Some(2));
+        for invalid in ["", "0", "121", "not-a-number"] {
+            assert_eq!(super::bounded_positive_test_jitter(Some(invalid)), None);
+        }
+        assert_eq!(super::bounded_positive_test_jitter(None), None);
     }
 
     fn short_only_exhausted_account_input(
