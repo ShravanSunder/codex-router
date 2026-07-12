@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use serde::Deserialize;
+use serde::Deserializer;
 use thiserror::Error;
 
 /// Default ChatGPT backend base used by Codex OAuth quota checks.
@@ -86,9 +87,18 @@ pub struct UsageResponse {
     pub rate_limit: Option<WindowPair>,
     /// Optional code-review usage windows.
     pub code_review_rate_limit: Option<WindowPair>,
-    /// Other provider windows, counted but not rendered verbatim.
-    #[serde(default)]
+    /// Independently metered provider windows.
+    #[serde(default, deserialize_with = "deserialize_additional_rate_limits")]
     pub additional_rate_limits: Vec<serde_json::Value>,
+}
+
+fn deserialize_additional_rate_limits<'de, D>(
+    deserializer: D,
+) -> Result<Vec<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Live quota auth or provider failure.
@@ -236,6 +246,7 @@ impl LiveQuotaClient {
 #[cfg(test)]
 mod tests {
     use super::LiveQuotaError;
+    use super::UsageResponse;
     use super::reset_credits_url;
     use super::usage_auth_from_auth_text;
     use super::usage_url;
@@ -286,5 +297,39 @@ mod tests {
         };
 
         assert_eq!(auth.access_token(), "bearer-token");
+    }
+
+    #[test]
+    fn usage_response_accepts_null_additional_rate_limits() {
+        let response: UsageResponse =
+            match serde_json::from_str(r#"{"rate_limit":null,"additional_rate_limits":null}"#) {
+                Ok(response) => response,
+                Err(error) => panic!("null additional rate limits should deserialize: {error}"),
+            };
+
+        assert!(response.additional_rate_limits.is_empty());
+    }
+
+    #[test]
+    fn usage_response_keeps_canonical_quota_when_additional_meter_shape_drifts() {
+        let response: UsageResponse = serde_json::from_str(
+            r#"{
+                "rate_limit": {
+                    "primary_window": null,
+                    "secondary_window": {
+                        "used_percent": 20,
+                        "reset_at": 9000,
+                        "limit_window_seconds": 604800
+                    }
+                },
+                "additional_rate_limits": [null, 42, {"unexpected": true}]
+            }"#,
+        )
+        .unwrap_or_else(|error| {
+            panic!("independent meter drift must not veto canonical quota: {error}")
+        });
+
+        assert!(response.rate_limit.is_some());
+        assert_eq!(response.additional_rate_limits.len(), 3);
     }
 }

@@ -2004,7 +2004,10 @@ mod tests {
             Err(error) => panic!("selector input should load: {error}"),
         };
         assert_eq!(selector_inputs.len(), 1);
-        assert_eq!(selector_inputs[0].windows(), &[short_window, weekly_window]);
+        assert_eq!(
+            selector_inputs[0].windows(),
+            &[short_window.clone(), weekly_window.clone()]
+        );
         let statuses = match SelectorQuotaRepository::quota_refresh_statuses_for_route_band(
             &store,
             "responses",
@@ -2022,6 +2025,43 @@ mod tests {
         assert_eq!(statuses[0].last_attempt_unix_seconds(), Some(1_000));
         assert_eq!(statuses[0].last_error_class(), None);
         assert_eq!(statuses[0].stale_after_unix_seconds(), Some(2_000));
+
+        if let Err(error) =
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &store,
+                &account_id,
+                "responses",
+                std::slice::from_ref(&weekly_window),
+                1_100,
+                2_100,
+            )
+        {
+            panic!("weekly-only refresh should replace the current pair: {error}");
+        }
+        let weekly_only_inputs =
+            SelectorQuotaRepository::selector_inputs_for_route_band(&store, "responses", 1_500)
+                .unwrap_or_else(|error| panic!("weekly-only selector input should load: {error}"));
+        assert_eq!(
+            weekly_only_inputs[0].windows(),
+            std::slice::from_ref(&weekly_window)
+        );
+
+        if let Err(error) =
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &store,
+                &account_id,
+                "responses",
+                &[short_window.clone(), weekly_window.clone()],
+                1_200,
+                2_200,
+            )
+        {
+            panic!("returned short window should restore the current pair: {error}");
+        }
+        let restored_inputs =
+            SelectorQuotaRepository::selector_inputs_for_route_band(&store, "responses", 1_500)
+                .unwrap_or_else(|error| panic!("restored selector input should load: {error}"));
+        assert_eq!(restored_inputs[0].windows(), &[short_window, weekly_window]);
     }
 
     #[test]

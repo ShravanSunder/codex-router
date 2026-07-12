@@ -1033,7 +1033,7 @@ fn assess_account(
     if windows.is_empty() {
         return base;
     }
-    if missing_expected_v1_window(&windows) {
+    if missing_required_weekly_window(&windows) {
         return BurnDownAccountAssessment {
             limiting_window: limiting_window(&windows),
             quota_evidence_reason: QuotaEvidenceReason::MissingExpectedWindow,
@@ -1351,15 +1351,10 @@ fn assess_window(
     }
 }
 
-fn missing_expected_v1_window(windows: &[WindowAssessment]) -> bool {
-    let has_short = windows
+fn missing_required_weekly_window(windows: &[WindowAssessment]) -> bool {
+    !windows
         .iter()
-        .any(|window| window.window_seconds == V1_SHORT_WINDOW_SECONDS);
-    let has_weekly = windows
-        .iter()
-        .any(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS);
-
-    has_short != has_weekly
+        .any(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS)
 }
 
 fn long_window_requires_reserve(
@@ -3557,6 +3552,70 @@ mod tests {
         assert_eq!(missing_expected.selected_pool(), SelectedPool::Unknown);
         assert_eq!(missing_reset.weighted_candidates().len(), 1);
         assert_eq!(missing_expected.weighted_candidates().len(), 1);
+    }
+
+    #[test]
+    fn weekly_only_quota_is_known_and_ranked_while_five_hour_only_stays_unknown() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_weekly_healthier",
+                vec![window(WEEKLY, 90, 5 * 86_400)],
+            ),
+            account("acct_weekly_lower", vec![window(WEEKLY, 70, 5 * 86_400)]),
+            account(
+                "acct_five_hour_only",
+                vec![window(FIVE_HOURS, 95, 4 * 3_600)],
+            ),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_weekly_healthier")
+        );
+        assert_account(
+            &assessment,
+            "acct_weekly_healthier",
+            AccountAvailability::Usable,
+            Some(90),
+        );
+        assert_account(
+            &assessment,
+            "acct_five_hour_only",
+            AccountAvailability::Unknown,
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn returned_exhausted_five_hour_window_becomes_binding() {
+        let weekly_only = assess_route_band(input(vec![account(
+            "acct_dynamic",
+            vec![window(WEEKLY, 90, 5 * 86_400)],
+        )]));
+        let with_exhausted_five_hour = assess_route_band(input(vec![account(
+            "acct_dynamic",
+            vec![
+                window(FIVE_HOURS, 0, 4 * 3_600),
+                window(WEEKLY, 90, 5 * 86_400),
+            ],
+        )]));
+
+        assert_eq!(weekly_only.selected_pool(), SelectedPool::Usable);
+        assert_eq!(
+            weekly_only.preferred_next().map(AccountId::as_str),
+            Some("acct_dynamic")
+        );
+        assert_eq!(with_exhausted_five_hour.selected_pool(), SelectedPool::None);
+        assert_eq!(with_exhausted_five_hour.preferred_next(), None);
+        assert_eq!(
+            account_assessment(&with_exhausted_five_hour, "acct_dynamic").availability(),
+            AccountAvailability::Blocked
+        );
+        assert_eq!(
+            account_assessment(&with_exhausted_five_hour, "acct_dynamic").quota_evidence_reason(),
+            QuotaEvidenceReason::WindowExhausted
+        );
     }
 
     #[test]

@@ -2734,6 +2734,37 @@ mod tests {
     }
 
     #[test]
+    fn repository_backed_selector_routes_with_fresh_weekly_only_quota() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_weekly_only");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path)
+            .unwrap_or_else(|error| panic!("state store should open: {error}"));
+        let account = AccountRecord::new(
+            account_id("acct_weekly_only"),
+            "weekly-only",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &account,
+            "responses",
+            &[(604_800, 90, true)],
+        );
+
+        let selector = RepositoryBackedAccountSelector::new(&state);
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("weekly-only quota should remain routable: {error:?}"));
+
+        assert_eq!(selected.account_id(), account.account_id());
+        assert_ne!(selected.selection_reason(), "fallback_unknown_quota");
+    }
+
+    #[test]
     fn repository_backed_selector_reuses_held_account_inside_cooldown() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_hold_cooldown");
         let database_path = temp_dir.path().join("state.sqlite");

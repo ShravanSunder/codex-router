@@ -4401,7 +4401,7 @@ exit 42
     }
 
     #[test]
-    fn quota_refresh_partial_window_response_is_unknown_fallback() {
+    fn quota_refresh_weekly_only_response_is_known_with_five_hour_no_data() {
         let test_root = TestRoot::new("quota-refresh-partial-window");
         must_ok(fs::create_dir(test_root.path()));
         let router_root = test_root.path().join("router");
@@ -4429,7 +4429,7 @@ exit 42
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
         let provider = StaticQuotaRefreshProvider::new(vec![QuotaRefreshProviderWindow {
-            limit_window_seconds: 18_000,
+            limit_window_seconds: 604_800,
             remaining_headroom: 80,
             reset_unix_seconds: Some(20_000),
             effective: true,
@@ -4466,15 +4466,10 @@ exit 42
             CliContext::new(Vec::new()),
         );
         assert!(status_output.stdout.contains("partial"));
-        assert!(status_output.stdout.contains("needs refresh"));
+        assert!(status_output.stdout.contains("no data"));
+        assert!(!status_output.stdout.contains("same unknown pool"));
         assert!(
-            status_output
-                .stdout
-                .lines()
-                .any(|line| line.ends_with("\tfallback by quota"))
-        );
-        assert!(
-            status_output
+            !status_output
                 .stdout
                 .contains("fallback by quota: needs refresh")
         );
@@ -4485,6 +4480,29 @@ exit 42
         );
         assert!(!status_output.stdout.contains("partial-quota-token"));
         assert!(status_output.stderr.is_empty());
+
+        let json_status_output = run_cli(
+            [
+                "codex-router",
+                "quota",
+                "status",
+                "--router-root",
+                path_to_str(&router_root),
+                "--format",
+                "json",
+                "--now-unix-seconds",
+                "1100",
+            ],
+            CliContext::new(Vec::new()),
+        );
+        assert!(json_status_output.stdout.contains(r#""no_data""#));
+        assert!(
+            !json_status_output
+                .stdout
+                .contains(r#""unknown_fallback_only""#)
+        );
+        assert!(!json_status_output.stdout.contains("partial-quota-token"));
+        assert!(json_status_output.stderr.is_empty());
     }
 
     #[test]
@@ -4629,8 +4647,32 @@ exit 42
                     "unexpected quota mock request: {request}"
                 );
                 assert!(request.contains("authorization: Bearer quota-http-access-token\r\n"));
+                assert!(!request.to_ascii_lowercase().contains("openai-beta:"));
+                assert!(!request.to_ascii_lowercase().contains("originator:"));
                 let body = if is_usage_request {
-                    r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":2000,"limit_window_seconds":18000},"secondary_window":{"used_percent":80,"reset_at":9000,"limit_window_seconds":604800}},"reset_credits":{"available":1}}"#
+                    r#"{
+                        "rate_limit": {
+                            "primary_window": null,
+                            "secondary_window": {
+                                "used_percent": 80,
+                                "reset_at": 9000,
+                                "limit_window_seconds": 604800
+                            }
+                        },
+                        "additional_rate_limits": [{
+                            "limit_name": "codex_other",
+                            "metered_feature": "codex_other",
+                            "rate_limit": {
+                                "primary_window": {
+                                    "used_percent": 25,
+                                    "reset_at": 2000,
+                                    "limit_window_seconds": 18000
+                                },
+                                "secondary_window": null
+                            }
+                        }],
+                        "reset_credits": {"available": 1}
+                    }"#
                 } else {
                     r#"{"reset_credits":{"available":1}}"#
                 };
@@ -4664,8 +4706,8 @@ exit 42
                 route_band,
             ))
             .unwrap_or_else(|| panic!("{route_band} quota snapshot should be persisted"));
-            assert_eq!(snapshot.remaining_headroom(), 75);
-            assert_eq!(snapshot.reset_unix_seconds(), Some(2_000));
+            assert_eq!(snapshot.remaining_headroom(), 20);
+            assert_eq!(snapshot.reset_unix_seconds(), Some(9_000));
             assert_eq!(snapshot.reset_credits_available(), Some(1));
             assert_eq!(snapshot.source(), QuotaSnapshotSource::OpenAiEndpoint);
         }
@@ -4676,15 +4718,11 @@ exit 42
         ));
         assert_eq!(selector_inputs.len(), 1);
         let windows = selector_inputs[0].windows();
-        assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0].limit_window_seconds(), 18_000);
-        assert_eq!(windows[0].remaining_headroom(), 75);
-        assert_eq!(windows[0].reset_unix_seconds(), Some(2_000));
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].limit_window_seconds(), 604_800);
+        assert_eq!(windows[0].remaining_headroom(), 20);
+        assert_eq!(windows[0].reset_unix_seconds(), Some(9_000));
         assert!(windows[0].effective());
-        assert_eq!(windows[1].limit_window_seconds(), 604_800);
-        assert_eq!(windows[1].remaining_headroom(), 20);
-        assert_eq!(windows[1].reset_unix_seconds(), Some(9_000));
-        assert!(!windows[1].effective());
         assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 2\n");
 
         match server_thread.join() {

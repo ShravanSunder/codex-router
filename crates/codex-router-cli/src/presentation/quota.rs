@@ -843,8 +843,8 @@ fn render_selected_details(
             Text(content: fit_line(&format!("{}    {}    {}", selected.account, selected.status, selected.reason), detail_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             #(quota_gap())
             Text(content: "Quota windows", color: Color::Cyan, weight: Weight::Bold)
-            #(detail_line("5h", &selected.short_window, detail_width, Color::White))
             #(detail_line("weekly", &selected.weekly_window, detail_width, Color::White))
+            #(detail_line("5h", &selected.short_window, detail_width, Color::White))
             #(quota_gap())
             Text(content: "Reset pace", color: Color::Cyan, weight: Weight::Bold)
             #(reset_pace_detail_line("weekly", &selected.reset_pace, detail_width))
@@ -1502,6 +1502,30 @@ mod tests {
             !text.contains("5h pace"),
             "5h reset pace should not render a separate section header:\n{text}"
         );
+    }
+
+    #[test]
+    fn quota_status_selected_panel_renders_weekly_before_five_hour_window() {
+        let text = render_quota_static_capture(quota_view_model(), 160, false);
+        let lines = text.lines().collect::<Vec<_>>();
+        let quota_windows_index = lines
+            .iter()
+            .position(|line| line.contains("Quota windows"))
+            .unwrap_or_else(|| panic!("selected panel should render quota windows:\n{text}"));
+        let weekly_index = lines
+            .iter()
+            .enumerate()
+            .skip(quota_windows_index + 1)
+            .find_map(|(index, line)| line.contains("weekly").then_some(index))
+            .unwrap_or_else(|| panic!("selected panel should render weekly quota:\n{text}"));
+        let five_hour_index = lines
+            .iter()
+            .enumerate()
+            .skip(quota_windows_index + 1)
+            .find_map(|(index, line)| line.contains("5h").then_some(index))
+            .unwrap_or_else(|| panic!("selected panel should render 5h quota:\n{text}"));
+
+        assert!(weekly_index < five_hour_index, "{text}");
     }
 
     #[test]
