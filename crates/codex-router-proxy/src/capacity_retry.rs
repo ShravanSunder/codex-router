@@ -6,7 +6,9 @@ use std::time::Instant;
 
 pub(crate) const MODEL_CAPACITY_MAX_RETRIES: usize = 10;
 pub(crate) const MODEL_CAPACITY_RETRY_DELAY_SECONDS: u64 = 300;
+#[cfg(debug_assertions)]
 const TEST_CAPACITY_RETRY_DELAY_ENV: &str = "CODEX_ROUTER_TEST_CAPACITY_RETRY_DELAY_SECONDS";
+#[cfg(debug_assertions)]
 const MAX_TEST_CAPACITY_RETRY_DELAY_SECONDS: u64 = 300;
 const ENTRY_TTL: Duration = Duration::from_secs(60 * 60);
 const MAX_TRACKED_THREADS: usize = 1024;
@@ -99,6 +101,7 @@ fn model_capacity_retry_delay_seconds() -> u64 {
     MODEL_CAPACITY_RETRY_DELAY_SECONDS
 }
 
+#[cfg(debug_assertions)]
 fn bounded_positive_test_delay(value: Option<&str>, default: u64, maximum: u64) -> u64 {
     value
         .and_then(|value| value.parse::<u64>().ok())

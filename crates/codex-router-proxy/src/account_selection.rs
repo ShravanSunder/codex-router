@@ -135,6 +135,7 @@ const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
 const SHORT_QUOTA_WAIT_MIN_JITTER_SECONDS: u64 = 60;
 const SHORT_QUOTA_WAIT_MAX_JITTER_SECONDS: u64 = 120;
+#[cfg(debug_assertions)]
 const TEST_SHORT_QUOTA_WAIT_JITTER_ENV: &str = "CODEX_ROUTER_TEST_SHORT_QUOTA_WAIT_JITTER_SECONDS";
 
 type UnixClock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -1465,6 +1466,7 @@ fn short_quota_wait_jitter_seconds() -> u64 {
     SHORT_QUOTA_WAIT_MIN_JITTER_SECONDS.saturating_add(subsecond_nanos % jitter_range)
 }
 
+#[cfg(debug_assertions)]
 fn bounded_positive_test_jitter(value: Option<&str>) -> Option<u64> {
     value
         .and_then(|value| value.parse::<u64>().ok())
