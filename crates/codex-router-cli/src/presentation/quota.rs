@@ -1507,16 +1507,22 @@ mod tests {
     #[test]
     fn quota_status_selected_panel_renders_weekly_before_five_hour_window() {
         let text = render_quota_static_capture(quota_view_model(), 160, false);
-        let quota_windows_index = text
-            .find("Quota windows")
+        let lines = text.lines().collect::<Vec<_>>();
+        let quota_windows_index = lines
+            .iter()
+            .position(|line| line.contains("Quota windows"))
             .unwrap_or_else(|| panic!("selected panel should render quota windows:\n{text}"));
-        let weekly_index = text[quota_windows_index..]
-            .find("weekly")
-            .map(|index| quota_windows_index + index)
+        let weekly_index = lines
+            .iter()
+            .enumerate()
+            .skip(quota_windows_index + 1)
+            .find_map(|(index, line)| line.contains("weekly").then_some(index))
             .unwrap_or_else(|| panic!("selected panel should render weekly quota:\n{text}"));
-        let five_hour_index = text[quota_windows_index..]
-            .find("5h")
-            .map(|index| quota_windows_index + index)
+        let five_hour_index = lines
+            .iter()
+            .enumerate()
+            .skip(quota_windows_index + 1)
+            .find_map(|(index, line)| line.contains("5h").then_some(index))
             .unwrap_or_else(|| panic!("selected panel should render 5h quota:\n{text}"));
 
         assert!(weekly_index < five_hour_index, "{text}");
