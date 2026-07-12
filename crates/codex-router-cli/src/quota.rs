@@ -1589,14 +1589,18 @@ fn quota_status_view_model(
                 active_clients: active_clients_label(row),
                 reset_credits: reset_credits_account_list_label(row.reset_credits_available_value),
                 reason: reason_summary(row),
-                weekly_window: quota_window_visual_summary(
+                weekly_window: quota_account_list_window_summary(
                     &row.windows,
                     V1_WEEKLY_WINDOW_SECONDS,
-                    "",
+                    "weekly",
                     report.now_unix_seconds,
-                )
-                .trim()
-                .to_owned(),
+                ),
+                short_window: quota_account_list_window_summary(
+                    &row.windows,
+                    V1_SHORT_WINDOW_SECONDS,
+                    "5h",
+                    report.now_unix_seconds,
+                ),
                 burn_meter: quota_safe_pace_meter(row.weekly_pace, report.now_unix_seconds),
                 sample_metadata: sample_metadata_from_display_window(
                     &row.windows,
@@ -1859,6 +1863,27 @@ fn quota_window_visual_summary(
         "{label} {} {} left, {note}",
         quota_bar(window.remaining_headroom, true),
         format_percent(window.remaining_headroom)
+    )
+}
+
+fn quota_account_list_window_summary(
+    windows: &[DisplayQuotaWindow],
+    window_seconds: u64,
+    label: &'static str,
+    now_unix_seconds: u64,
+) -> String {
+    let Some(window) = windows
+        .iter()
+        .find(|window| window.window_seconds == window_seconds)
+    else {
+        return format!("{} no data {label}", quota_bar(0, true));
+    };
+    let reset_note = window_display_note(window, now_unix_seconds).replace("resets in ", "resets ");
+    format!(
+        "{} {} {label} · {}",
+        quota_bar(window.remaining_headroom, true),
+        format_percent(window.remaining_headroom),
+        reset_note
     )
 }
 
@@ -4489,40 +4514,31 @@ mod tests {
         let text = must_ok(String::from_utf8(output));
 
         assert!(
-            text.contains("Weekly pace"),
-            "quota table should make weekly pace the main-list quota column:\n{text}"
-        );
-        assert!(
-            text.contains("  Account"),
-            "account header should reserve selector-marker space:\n{text}"
+            !text.contains("  Account") && !text.contains("Status") && !text.contains("Pace"),
+            "account list should not render table headers:\n{text}"
         );
         assert!(
             text.contains("Quota windows") && text.contains("Reset pace"),
             "selected account details should separate quota windows from reset pace:\n{text}"
         );
         assert!(
-            text.contains("0 clients") || text.contains("1 client"),
-            "main account rows should expose active clients under Status:\n{text}"
-        );
-        assert!(
-            text.contains("2 resets"),
-            "main account rows should expose reset credits under active clients:\n{text}"
-        );
-        assert!(
             text.contains("%/h") && text.contains("%/h/conn"),
             "quota table should expose total and per-connection rate units:\n{text}"
         );
         assert!(
-            text.contains("█") && text.contains("% left, reset"),
-            "quota table should show weekly quota remaining with the quota bar glyph:\n{text}"
+            text.contains("weekly · resets")
+                && text.contains("5h · resets")
+                && text.contains("█")
+                && text.contains("%"),
+            "main account rows should show weekly and 5h quota lines after connection/reset metadata:\n{text}"
         );
         assert!(
-            text.contains("weekly") && text.contains("5h") && text.contains("reset pace"),
-            "quota table should show the selected reset pace as an explicit block meter:\n{text}"
+            text.contains("weekly pace") || text.contains("weekly · runs out"),
+            "account list should end with weekly burndown:\n{text}"
         );
         assert!(
-            text.contains("reset pace") && text.contains("sample fresh"),
-            "main account rows should show reset pace and sample metadata in Weekly pace:\n{text}"
+            text.contains("Reset pace"),
+            "selected details should retain reset pace diagnostics:\n{text}"
         );
         assert!(
             !text.contains("current [")
@@ -4598,8 +4614,8 @@ mod tests {
             "quota table should emit ANSI styling:\n{text:?}"
         );
         assert!(
-            text.contains("\x1b[38;5;11m") && text.contains("reset pace under"),
-            "quota reset pace should emit state color:\n{text:?}"
+            text.contains("\x1b[38;5;11m") && text.contains("pace under"),
+            "quota pace should emit state color:\n{text:?}"
         );
         assert!(
             !text.contains("\x1b[32m"),
@@ -4978,7 +4994,7 @@ mod tests {
             "quota capture width {width} overflowed:\n{text}"
         );
         assert!(
-            text.contains('╭') && text.contains('╰') && text.contains("  Account"),
+            text.contains('╭') && text.contains('╰') && !text.contains("  Account"),
             "quota capture should render boxed quota blocks:\n{text}"
         );
         if width == 72 {
@@ -4992,7 +5008,7 @@ mod tests {
                     "quota capture should include {account_label}:\n{text}"
                 );
                 assert!(
-                    text.contains("weekly") && text.contains("left, reset"),
+                    text.contains("weekly · resets") && text.contains("5h · resets"),
                     "quota capture width 72 should preserve weekly reset facts for {account_label}:\n{text}"
                 );
             }
