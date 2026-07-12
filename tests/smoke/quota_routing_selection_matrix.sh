@@ -33,11 +33,8 @@ router_root="${smoke_root}/router"
 mkdir -p "${router_root}"
 
 "${cargo_command[@]}" run -q -p codex-router-cli -- \
-  quota \
-  --no-refresh \
+  account list \
   --router-root "${router_root}" \
-  --format plain \
-  --now-unix-seconds 10000 \
   >/dev/null
 
 sqlite3 "${router_root}/state.sqlite" <<'SQL'
