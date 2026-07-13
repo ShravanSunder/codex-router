@@ -32,6 +32,7 @@ mod live;
 mod presentation;
 pub mod profile;
 pub mod quota;
+mod quota_reset;
 mod secret_store_factory;
 pub mod sessions;
 mod telemetry;
@@ -76,6 +77,70 @@ pub fn run() -> i32 {
         return 2;
     }
     0
+}
+
+/// Runs the process CLI with native async command support.
+pub async fn run_async() -> i32 {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    if !matches!(
+        CliCommand::parse(args.clone()),
+        Ok(CliCommand::Quota(QuotaCommand::Reset { .. }))
+    ) {
+        return std::thread::spawn(move || run_sync_process_args(args))
+            .join()
+            .unwrap_or(2);
+    }
+    let _telemetry_guard = telemetry::init_from_env();
+    let run_span = telemetry::run_span();
+    let _run_span_guard = run_span.enter();
+    let context = CliContext::from_process();
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    if let Err(error) = run_with_io_async(args, &context, &mut stdout, &mut stderr).await {
+        let _ = writeln!(stderr, "{error}");
+        return 2;
+    }
+    0
+}
+
+fn run_sync_process_args(args: Vec<OsString>) -> i32 {
+    let _telemetry_guard = telemetry::init_from_env();
+    let run_span = telemetry::run_span();
+    let _run_span_guard = run_span.enter();
+    let context = CliContext::from_process();
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    if let Err(error) = run_with_io(args, &context, &mut stdout, &mut stderr) {
+        let _ = writeln!(stderr, "{error}");
+        return 2;
+    }
+    0
+}
+
+/// Executes CLI args while allowing selected commands to remain natively async.
+pub async fn run_with_io_async<W, E>(
+    args: Vec<OsString>,
+    context: &CliContext,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> Result<(), CliError>
+where
+    W: std::io::Write,
+    E: std::io::Write,
+{
+    match CliCommand::parse(args.clone())? {
+        CliCommand::Quota(QuotaCommand::Reset { router_root }) => {
+            quota_reset::run_interactive_quota_reset(
+                stdout,
+                router_root,
+                context.stdin_is_terminal(),
+                context.stdout_is_terminal(),
+            )
+            .await?;
+            stderr.flush().map_err(CliError::Stderr)
+        }
+        _ => run_with_io(args, context, stdout, stderr),
+    }
 }
 
 /// Executes CLI args with process-independent IO.
@@ -525,6 +590,16 @@ impl CliContext {
             return false;
         }
         std::io::stdout().is_terminal()
+    }
+
+    fn stdin_is_terminal(&self) -> bool {
+        if self.env_var("CODEX_ROUTER_FORCE_TTY").is_some() {
+            return true;
+        }
+        if self.env_var("CODEX_ROUTER_FORCE_NON_TTY").is_some() {
+            return false;
+        }
+        std::io::stdin().is_terminal()
     }
 
     fn stdout_terminal_width(&self) -> Option<usize> {
@@ -1166,6 +1241,9 @@ pub enum CliError {
     /// Quota command failed.
     #[error(transparent)]
     Quota(#[from] QuotaCommandError),
+    /// Interactive guarded quota reset failed.
+    #[error(transparent)]
+    QuotaReset(#[from] quota_reset::QuotaResetError),
     /// Live quota command needs exactly one source.
     #[error("live quota requires exactly one of --auth-json or --profiles-root")]
     LiveQuotaSourceRequired,
@@ -1325,6 +1403,7 @@ mod tests {
     use super::TokenCommand;
     use super::package_name;
     use super::run_with_io;
+    use super::run_with_io_async;
     use super::websocket_registry_report_value;
     use crate::account::AccountCommand;
     use crate::account::AccountImportRequest;
@@ -1663,6 +1742,14 @@ mod tests {
                 &[
                     "codex-router quota refresh",
                     "Refreshes persisted quota data from configured OAuth accounts.",
+                ][..],
+            ),
+            (
+                &["codex-router", "quota", "reset", "--help"][..],
+                &[
+                    "codex-router quota reset",
+                    "checks live weekly usage",
+                    "strictly below 1%",
                 ][..],
             ),
         ] {
@@ -6316,6 +6403,34 @@ exit 42
             terminal_ui_sources.contains("iocraft"),
             "iocraft usage should be isolated inside the CLI presentation layer"
         );
+    }
+
+    #[tokio::test]
+    async fn quota_reset_async_dispatch_fails_before_state_or_network_without_terminal() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = run_with_io_async(
+            vec![
+                OsString::from("codex-router"),
+                OsString::from("quota"),
+                OsString::from("reset"),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        let error = match result {
+            Ok(()) => panic!("non-terminal quota reset should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "quota reset requires an interactive terminal"
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
     }
 
     #[test]

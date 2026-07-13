@@ -119,6 +119,11 @@ pub enum QuotaCommand {
         /// Provider base URL.
         base_url: String,
     },
+    /// Interactively consumes one guarded live quota reset.
+    Reset {
+        /// Router-owned root used only for read-only lookup.
+        router_root: PathBuf,
+    },
 }
 
 impl QuotaCommand {
@@ -140,6 +145,20 @@ impl QuotaCommand {
                 Ok(Self::Refresh {
                     router_root: options.router_root()?,
                     base_url: options.base_url,
+                })
+            }
+            Some("reset") => {
+                arguments.remove(0);
+                if matches!(
+                    arguments.first().and_then(|argument| argument.to_str()),
+                    Some("--help" | "-h" | "help")
+                ) {
+                    return Ok(Self::Help(QUOTA_RESET_HELP_TEXT));
+                }
+                let mut parser = ArgumentParser::new(arguments);
+                parser.reject_remaining()?;
+                Ok(Self::Reset {
+                    router_root: router_root_or_default(None)?,
                 })
             }
             Some("status") => {
@@ -232,6 +251,9 @@ pub enum QuotaCommandError {
     /// Stdout write failed.
     #[error("failed to write stdout: {0}")]
     Stdout(std::io::Error),
+    /// Reset is dispatched only by the native async CLI entrypoint.
+    #[error("quota reset requires the async CLI dispatcher")]
+    AsyncResetDispatchRequired,
 }
 
 /// Runs a quota command.
@@ -263,6 +285,7 @@ pub fn run_quota_command(
             router_root,
             base_url,
         } => refresh_quota(stdout, router_root, base_url),
+        QuotaCommand::Reset { .. } => Err(QuotaCommandError::AsyncResetDispatchRequired),
     }
 }
 
@@ -272,12 +295,27 @@ codex-router quota
 commands:
   quota          Show persisted quota status and next account
   quota refresh  Refresh quota data now
+  quota reset    Interactively use an eligible usage-limit reset
 ";
 
 const QUOTA_REFRESH_HELP_TEXT: &str = "\
 codex-router quota refresh
 
 Refreshes persisted quota data from configured OAuth accounts.
+";
+
+const QUOTA_RESET_HELP_TEXT: &str = "\
+codex-router quota reset
+
+Interactively selects one account, checks live weekly usage, and offers the earliest-expiring
+available usage-limit reset only when live weekly remaining is strictly below 1%.
+
+shortcuts:
+  up/down  select
+  enter    check or confirm
+  esc      cancel
+  ctrl-c   cancel
+  ctrl-r   cancel
 ";
 
 fn refresh_quota(
@@ -1090,7 +1128,8 @@ fn quota_refresh_error_class(error: &QuotaCommandError) -> QuotaRefreshErrorClas
         | QuotaCommandError::CredentialResolverOpen(_)
         | QuotaCommandError::StateStore(_)
         | QuotaCommandError::Runtime(_)
-        | QuotaCommandError::Stdout(_) => QuotaRefreshErrorClass::ProviderError,
+        | QuotaCommandError::Stdout(_)
+        | QuotaCommandError::AsyncResetDispatchRequired => QuotaRefreshErrorClass::ProviderError,
     }
 }
 
