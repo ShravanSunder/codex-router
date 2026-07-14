@@ -3,6 +3,7 @@
 use iocraft::prelude::*;
 
 pub(crate) mod quota;
+pub(crate) mod quota_reset;
 pub(crate) mod session_picker;
 
 /// Marker type for the CLI presentation layer's iocraft boundary.

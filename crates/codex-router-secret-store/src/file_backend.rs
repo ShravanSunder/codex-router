@@ -35,6 +35,25 @@ impl FileSecretStore {
         Ok(Self { root })
     }
 
+    /// Opens an existing file-backed secret store without creating or modifying its root.
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self, SecretStoreError> {
+        let root = root.as_ref().to_path_buf();
+        reject_codex_home_path(&root)?;
+        reject_symlink_path(&root)?;
+        validate_existing_parent(&root)?;
+        if !root.is_dir() {
+            return Err(SecretStoreError::Filesystem {
+                path: root,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "read-only secret store root does not exist",
+                ),
+            });
+        }
+
+        Ok(Self { root })
+    }
+
     fn secret_path(&self, key: &SecretKey) -> PathBuf {
         self.root.join(format!("{}.secret", key.as_str()))
     }

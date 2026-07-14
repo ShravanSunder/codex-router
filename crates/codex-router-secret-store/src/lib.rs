@@ -99,6 +99,22 @@ mod tests {
     }
 
     #[test]
+    fn file_backend_read_only_open_requires_existing_root_and_preserves_mode() {
+        let missing_root = TestRoot::new("read-only-missing");
+        let error = must_err(FileSecretStore::open_read_only(missing_root.path()));
+        assert!(error.to_string().contains("does not exist"));
+        assert!(!missing_root.path().exists());
+
+        let existing_root = TestRoot::new("read-only-existing");
+        must_ok(fs::create_dir_all(existing_root.path()));
+        set_mode(existing_root.path(), 0o750);
+
+        let _store = must_ok(FileSecretStore::open_read_only(existing_root.path()));
+
+        assert_eq!(mode(existing_root.path()), 0o750);
+    }
+
+    #[test]
     fn file_backend_rejects_codex_home_and_symlink_paths() {
         let codex_root = TestRoot::new("codex-home");
         let codex_path = codex_root.path().join(".codex").join("router");
@@ -302,6 +318,13 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         must_ok(fs::metadata(path)).permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        must_ok(fs::set_permissions(path, fs::Permissions::from_mode(mode)));
     }
 
     #[cfg(unix)]
