@@ -1552,6 +1552,7 @@ async fn quota_status_report(
             account_label: account.label().to_owned(),
             account_status: account.status().as_str().to_owned(),
             account_id: account.account_id().clone(),
+            active_credential_generation: account.active_credential_generation(),
             reset_credits_available,
             updated: format_refresh_status(
                 refresh_statuses.get(account.account_id()),
@@ -1684,6 +1685,8 @@ fn quota_status_view_model(
         rows: rows
             .iter()
             .map(|row| QuotaStatusAccountViewModel {
+                account_id: row.account_id.clone(),
+                active_credential_generation: row.active_credential_generation,
                 selected: row.preferred_next,
                 account: row.account_label.clone(),
                 status: quota_state_text(row).to_owned(),
@@ -2088,6 +2091,7 @@ struct QuotaStatusAccountInput {
     account_label: String,
     account_status: String,
     account_id: AccountId,
+    active_credential_generation: Option<u64>,
     reset_credits_available: Option<u32>,
     updated: String,
     active_clients: ActiveClientMirrorStatus,
@@ -2098,6 +2102,7 @@ struct QuotaStatusAccountInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QuotaStatusRow {
     account_id: AccountId,
+    active_credential_generation: Option<u64>,
     account_label: String,
     account_status: String,
     short_window: String,
@@ -2139,6 +2144,7 @@ impl QuotaStatusRow {
     ) -> Self {
         Self {
             account_id: input.account_id.clone(),
+            active_credential_generation: input.active_credential_generation,
             account_label: assessment.account_label().to_owned(),
             account_status: input.account_status.clone(),
             short_window: format_window_cell(
@@ -4563,6 +4569,8 @@ mod tests {
             .first()
             .unwrap_or_else(|| panic!("quota view model should include an account row"));
 
+        assert_eq!(row.account_id, report.rows()[0].account_id);
+        assert_eq!(row.active_credential_generation, Some(1));
         assert_eq!(row.sample_metadata.confidence, SampleConfidence::Fresh);
         assert_eq!(row.sample_metadata.semantic_label, "sample fresh");
         assert_ne!(row.reset_pace.state, ResetPaceState::Unavailable);
@@ -4970,6 +4978,7 @@ mod tests {
 
         QuotaStatusRow {
             account_id: account_id(fixture.account_id_value),
+            active_credential_generation: Some(1),
             account_label: fixture.account_label.to_owned(),
             account_status: "enabled".to_owned(),
             short_window: format_window_cell(&windows, V1_SHORT_WINDOW_SECONDS, NOW, false),

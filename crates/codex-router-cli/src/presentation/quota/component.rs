@@ -100,13 +100,15 @@ pub(super) fn QuotaStatusComponent(
     let live_terminal_width = props.width == 0;
     let live_terminal_height = props.height == 0 && live_terminal_width;
     let view_model = hooks.use_state(|| props.view_model.clone());
-    let row_count = view_model.read().rows.len();
-    let initial_focused_row_index = props
+    let rows_for_navigation = view_model.read().rows.clone();
+    let row_count = rows_for_navigation.len();
+    let initial_focused_account_id = props
         .view_model
         .rows
         .iter()
-        .position(|row| row.selected)
-        .unwrap_or(0);
+        .find(|row| row.selected)
+        .or_else(|| props.view_model.rows.first())
+        .map(|row| row.account_id.clone());
     let observed_width = hooks.use_state(|| {
         if live_terminal_width {
             current_terminal_width()
@@ -126,13 +128,13 @@ pub(super) fn QuotaStatusComponent(
             props.height.max(1)
         }
     });
-    let focused_row_index = hooks.use_state(|| initial_focused_row_index);
+    let focused_account_id = hooks.use_state(|| initial_focused_account_id);
     let spinner_tick = hooks.use_state(|| 0usize);
     let mut should_exit = hooks.use_state(|| false);
     hooks.use_terminal_events({
         let mut observed_width = observed_width;
         let mut observed_height = observed_height;
-        let mut focused_row_index = focused_row_index;
+        let mut focused_account_id = focused_account_id;
         move |event| match event {
             TerminalEvent::Resize(width, height) => {
                 if live_terminal_width {
@@ -157,15 +159,30 @@ pub(super) fn QuotaStatusComponent(
                 }
                 match code {
                     KeyCode::Up => {
-                        let mut index = focused_row_index.get();
-                        if move_quota_focus(&mut index, row_count, QuotaFocusMove::Previous) {
-                            focused_row_index.set(index);
+                        let current_index = focused_row_index_for_account(
+                            &rows_for_navigation,
+                            focused_account_id.read().as_ref(),
+                        );
+                        if let Some(row) = moved_quota_focus_index(
+                            current_index,
+                            row_count,
+                            QuotaFocusMove::Previous,
+                        )
+                        .and_then(|index| rows_for_navigation.get(index))
+                        {
+                            focused_account_id.set(Some(row.account_id.clone()));
                         }
                     }
                     KeyCode::Down => {
-                        let mut index = focused_row_index.get();
-                        if move_quota_focus(&mut index, row_count, QuotaFocusMove::Next) {
-                            focused_row_index.set(index);
+                        let current_index = focused_row_index_for_account(
+                            &rows_for_navigation,
+                            focused_account_id.read().as_ref(),
+                        );
+                        if let Some(row) =
+                            moved_quota_focus_index(current_index, row_count, QuotaFocusMove::Next)
+                                .and_then(|index| rows_for_navigation.get(index))
+                        {
+                            focused_account_id.set(Some(row.account_id.clone()));
                         }
                     }
                     KeyCode::Esc | KeyCode::Char('q') => should_exit.set(true),
@@ -252,10 +269,10 @@ pub(super) fn QuotaStatusComponent(
     };
     let content_width = width.saturating_sub(4).max(44);
     let view_model = view_model.read();
-    let focused_row_index_value = focused_row_index_value(focused_row_index.get(), row_count);
+    let focused_row_index_value =
+        focused_row_index_for_account(&view_model.rows, focused_account_id.read().as_ref());
     let focused_details = focused_row_index_value
-        .and_then(|index| view_model.rows.get(index).map(|row| &row.details))
-        .or(view_model.selected.as_ref());
+        .and_then(|index| view_model.rows.get(index).map(|row| &row.details));
     let body_budget = quota_body_budget(height);
     let details_content_height = selected_detail_height(focused_details.is_some());
     let sidecar = width >= SIDECAR_QUOTA_WIDTH;
@@ -466,32 +483,42 @@ fn selected_detail_height(has_selected_details: bool) -> usize {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum QuotaFocusMove {
+pub(super) enum QuotaFocusMove {
     Previous,
     Next,
 }
 
-fn focused_row_index_value(index: usize, row_count: usize) -> Option<usize> {
-    if row_count == 0 {
-        None
-    } else {
-        Some(index.min(row_count - 1))
-    }
+pub(super) fn focused_row_index_for_account(
+    rows: &[QuotaStatusAccountViewModel],
+    focused_account_id: Option<&codex_router_core::ids::AccountId>,
+) -> Option<usize> {
+    let focused_account_id = focused_account_id?;
+    rows.iter()
+        .position(|row| &row.account_id == focused_account_id)
 }
 
-fn move_quota_focus(index: &mut usize, row_count: usize, movement: QuotaFocusMove) -> bool {
-    let Some(current_index) = focused_row_index_value(*index, row_count) else {
-        return false;
+pub(super) fn moved_quota_focus_index(
+    current_index: Option<usize>,
+    row_count: usize,
+    movement: QuotaFocusMove,
+) -> Option<usize> {
+    if row_count == 0 {
+        return None;
+    }
+    let Some(current_index) = current_index else {
+        return Some(match movement {
+            QuotaFocusMove::Previous => row_count - 1,
+            QuotaFocusMove::Next => 0,
+        });
     };
     let next_index = match movement {
         QuotaFocusMove::Previous => current_index.saturating_sub(1),
         QuotaFocusMove::Next => (current_index + 1).min(row_count - 1),
     };
     if next_index == current_index {
-        return false;
+        return None;
     }
-    *index = next_index;
-    true
+    Some(next_index)
 }
 
 fn quota_visible_account_budget(

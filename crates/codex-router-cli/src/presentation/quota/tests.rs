@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use codex_router_core::ids::AccountId;
 use futures_util::StreamExt;
 use iocraft::prelude::*;
 
@@ -24,6 +25,57 @@ async fn quota_status_uses_sidecar_only_at_160_columns() {
         has_quota_sidecar_details(&sidecar_text),
         "quota status should place details on the right at 160 columns:\n{sidecar_text}"
     );
+}
+
+#[test]
+fn quota_focus_identity_survives_duplicate_labels_reorder_and_insertion() {
+    let mut view_model = quota_two_account_view_model();
+    view_model.rows[0].account = "duplicate".to_owned();
+    view_model.rows[1].account = "duplicate".to_owned();
+    let focused_account_id = view_model.rows[1].account_id.clone();
+
+    view_model.rows.swap(0, 1);
+    view_model.rows.insert(0, quota_view_model().rows.remove(0));
+
+    assert_eq!(
+        focused_row_index_for_account(&view_model.rows, Some(&focused_account_id)),
+        Some(1)
+    );
+}
+
+#[test]
+fn quota_focus_identity_has_no_render_index_when_account_is_removed() {
+    let mut view_model = quota_two_account_view_model();
+    let focused_account_id = view_model.rows[1].account_id.clone();
+    view_model
+        .rows
+        .retain(|row| row.account_id != focused_account_id);
+
+    assert_eq!(
+        focused_row_index_for_account(&view_model.rows, Some(&focused_account_id)),
+        None
+    );
+    assert_eq!(
+        moved_quota_focus_index(None, view_model.rows.len(), QuotaFocusMove::Next),
+        Some(0)
+    );
+    assert_eq!(
+        moved_quota_focus_index(None, view_model.rows.len(), QuotaFocusMove::Previous),
+        Some(view_model.rows.len() - 1)
+    );
+}
+
+#[test]
+fn quota_focus_identity_does_not_change_when_credential_generation_changes() {
+    let mut view_model = quota_two_account_view_model();
+    let focused_account_id = view_model.rows[1].account_id.clone();
+    view_model.rows[1].active_credential_generation = Some(42);
+
+    assert_eq!(
+        focused_row_index_for_account(&view_model.rows, Some(&focused_account_id)),
+        Some(1)
+    );
+    assert_eq!(view_model.rows[1].active_credential_generation, Some(42));
 }
 
 #[tokio::test]
@@ -729,6 +781,8 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
         why_line: "why: safest quota".to_owned(),
         serving_clients: None,
         rows: vec![QuotaStatusAccountViewModel {
+            account_id: test_account_id("ssdev"),
+            active_credential_generation: Some(1),
             selected: true,
             account: "ssdev".to_owned(),
             status: "[usable]".to_owned(),
@@ -1042,6 +1096,8 @@ fn quota_view_model() -> QuotaStatusViewModel {
         why_line: "why: safest quota".to_owned(),
         serving_clients: None,
         rows: vec![QuotaStatusAccountViewModel {
+            account_id: test_account_id("ssdev"),
+            active_credential_generation: Some(1),
             selected: true,
             account: "ssdev".to_owned(),
             status: "[usable]".to_owned(),
@@ -1112,6 +1168,8 @@ fn quota_two_account_view_model() -> QuotaStatusViewModel {
         serving_clients: None,
         rows: vec![
             QuotaStatusAccountViewModel {
+                account_id: test_account_id("alpha"),
+                active_credential_generation: Some(1),
                 selected: true,
                 account: "alpha".to_owned(),
                 status: "[usable]".to_owned(),
@@ -1127,6 +1185,8 @@ fn quota_two_account_view_model() -> QuotaStatusViewModel {
                 details: alpha_details.clone(),
             },
             QuotaStatusAccountViewModel {
+                account_id: test_account_id("beta"),
+                active_credential_generation: Some(1),
                 selected: false,
                 account: "beta".to_owned(),
                 status: "[usable]".to_owned(),
@@ -1153,6 +1213,8 @@ fn quota_many_account_view_model() -> QuotaStatusViewModel {
         let account = format!("acct{index:02}");
         let details = selected_account_details(&account, &format!("account {index:02} detail"));
         rows.push(QuotaStatusAccountViewModel {
+            account_id: test_account_id(&account),
+            active_credential_generation: Some(1),
             selected: index == 0,
             account,
             status: "[usable]".to_owned(),
@@ -1332,6 +1394,8 @@ fn quota_state_color_row(
         unavailable_reason: None,
     };
     QuotaStatusAccountViewModel {
+        account_id: test_account_id(account),
+        active_credential_generation: Some(1),
         selected,
         account: account.to_owned(),
         status: "[usable]".to_owned(),
@@ -1354,4 +1418,9 @@ fn quota_state_color_row(
             ..selected_account_details(account, semantic_label)
         },
     }
+}
+
+fn test_account_id(value: &str) -> AccountId {
+    AccountId::new(format!("test-{value}"))
+        .unwrap_or_else(|error| panic!("test account id should be valid: {error}"))
 }

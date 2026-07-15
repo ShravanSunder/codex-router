@@ -2,6 +2,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_router_core::ids::AccountId;
+
 pub(crate) type QuotaStatusViewModelLoader =
     Arc<dyn Fn() -> QuotaStatusViewModelLoadFuture + Send + Sync>;
 pub(crate) type QuotaStatusViewModelLoadFuture =
@@ -17,8 +19,10 @@ pub(crate) struct QuotaStatusViewModel {
     pub(crate) selected: Option<QuotaSelectedAccountViewModel>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaStatusAccountViewModel {
+    pub(crate) account_id: AccountId,
+    pub(crate) active_credential_generation: Option<u64>,
     pub(crate) selected: bool,
     pub(crate) account: String,
     pub(crate) status: String,
