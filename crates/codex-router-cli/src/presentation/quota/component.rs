@@ -61,27 +61,23 @@ pub(super) fn quota_static_render_height(view_model: &QuotaStatusViewModel, widt
     root_border_height + title_and_summary_height + body_height
 }
 
-pub(crate) fn run_quota_status_view(
+pub(crate) async fn run_quota_status_view(
     view_model: QuotaStatusViewModel,
     reload_view_model: Option<QuotaStatusViewModelLoader>,
 ) -> io::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(
-        element! {
-            QuotaStatusComponent(
-                view_model: view_model,
-                width: 0usize,
-                height: 0usize,
-                reload_view_model,
-                reload_interval: LIVE_QUOTA_STATUS_RELOAD_INTERVAL,
-                spinner_interval: LIVE_QUOTA_STATUS_SPINNER_INTERVAL,
-            )
-        }
-        .render_loop()
-        .ignore_ctrl_c(),
-    )
+    element! {
+        QuotaStatusComponent(
+            view_model: view_model,
+            width: 0usize,
+            height: 0usize,
+            reload_view_model,
+            reload_interval: LIVE_QUOTA_STATUS_RELOAD_INTERVAL,
+            spinner_interval: LIVE_QUOTA_STATUS_SPINNER_INTERVAL,
+        )
+    }
+    .render_loop()
+    .ignore_ctrl_c()
+    .await
 }
 
 #[derive(Default, Props)]
@@ -199,10 +195,7 @@ pub(super) fn QuotaStatusComponent(
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let reload_view_model = reload_view_model.clone();
-                if let Ok(Some(next_view_model)) =
-                    tokio::task::spawn_blocking(move || reload_view_model()).await
-                {
+                if let Some(next_view_model) = reload_view_model().await {
                     view_model.set(next_view_model);
                 }
             }

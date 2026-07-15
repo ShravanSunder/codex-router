@@ -582,21 +582,25 @@ async fn quota_status_reloads_view_model_on_timer() {
     let reload_view_model: QuotaStatusViewModelLoader = {
         let reload_count = Arc::clone(&reload_count);
         Arc::new(move || {
-            reload_count.fetch_add(1, Ordering::SeqCst);
-            let mut view_model = quota_view_model();
-            view_model.route_line = "responses -> beta    [preferred]".to_owned();
-            let stale_sample = SampleMetadata {
-                confidence: SampleConfidence::Stale,
-                age_label: "15m 1s".to_owned(),
-                age_seconds: Some(901),
-                semantic_label: "sample stale",
-            };
-            view_model.rows[0].account = "beta".to_owned();
-            view_model.rows[0].sample_metadata = stale_sample.clone();
-            view_model.rows[0].details.account = "beta".to_owned();
-            view_model.rows[0].details.sample_metadata = stale_sample;
-            view_model.selected = Some(view_model.rows[0].details.clone());
-            Some(view_model)
+            let reload_count = Arc::clone(&reload_count);
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                reload_count.fetch_add(1, Ordering::SeqCst);
+                let mut view_model = quota_view_model();
+                view_model.route_line = "responses -> beta    [preferred]".to_owned();
+                let stale_sample = SampleMetadata {
+                    confidence: SampleConfidence::Stale,
+                    age_label: "15m 1s".to_owned(),
+                    age_seconds: Some(901),
+                    semantic_label: "sample stale",
+                };
+                view_model.rows[0].account = "beta".to_owned();
+                view_model.rows[0].sample_metadata = stale_sample.clone();
+                view_model.rows[0].details.account = "beta".to_owned();
+                view_model.rows[0].details.sample_metadata = stale_sample;
+                view_model.selected = Some(view_model.rows[0].details.clone());
+                Some(view_model)
+            })
         })
     };
     let exit_events = futures_util::stream::unfold(false, |sent| async move {

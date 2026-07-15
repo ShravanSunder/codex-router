@@ -1,7 +1,6 @@
 //! Quota command glue for persisted router-owned quota state.
 
 use std::collections::HashMap;
-use std::io::IsTerminal;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -287,6 +286,46 @@ pub fn run_quota_command(
         } => refresh_quota(stdout, router_root, base_url),
         QuotaCommand::Reset { .. } => Err(QuotaCommandError::AsyncResetDispatchRequired),
     }
+}
+
+/// Returns whether quota status should use the interactive terminal presentation.
+pub(crate) fn should_run_interactive_quota(
+    format: QuotaStatusFormat,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    effective_human_quota_format(format, stdout_is_terminal) == QuotaStatusFormat::Table
+        && stdin_is_terminal
+        && stdout_is_terminal
+}
+
+pub(crate) async fn run_interactive_quota_status(
+    command: QuotaCommand,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    stdout_terminal_width: Option<usize>,
+) -> Result<(), QuotaCommandError> {
+    let QuotaCommand::Status {
+        router_root,
+        format,
+        all_limits,
+        now_unix_seconds,
+    } = command
+    else {
+        return Err(QuotaCommandError::AsyncResetDispatchRequired);
+    };
+    debug_assert!(should_run_interactive_quota(
+        format,
+        stdin_is_terminal,
+        stdout_is_terminal
+    ));
+    render_interactive_quota_status(
+        router_root,
+        stdout_terminal_width,
+        all_limits,
+        now_unix_seconds,
+    )
+    .await
 }
 
 const QUOTA_HELP_TEXT: &str = "\
@@ -1296,19 +1335,6 @@ fn render_quota_status_once(
     let unicode_bars = effective_format != QuotaStatusFormat::Plain;
     let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
     match effective_format {
-        QuotaStatusFormat::Table if std::io::stdout().is_terminal() => {
-            let rows = report.rows();
-            let width = stdout_terminal_width.unwrap_or(100).max(40);
-            let view_model = quota_status_view_model(&report, rows, width);
-            let reload_view_model = quota_status_view_model_loader(
-                router_root.to_path_buf(),
-                all_limits,
-                unicode_bars,
-                width,
-            );
-            run_quota_status_view(view_model, Some(reload_view_model))
-                .map_err(QuotaCommandError::Stdout)
-        }
         QuotaStatusFormat::Table => write_quota_table_with_style(
             stdout,
             &report,
@@ -1320,6 +1346,22 @@ fn render_quota_status_once(
     }
 }
 
+async fn render_interactive_quota_status(
+    router_root: PathBuf,
+    stdout_terminal_width: Option<usize>,
+    all_limits: bool,
+    now_unix_seconds: u64,
+) -> Result<(), QuotaCommandError> {
+    let width = stdout_terminal_width.unwrap_or(100).max(40);
+    let report =
+        load_quota_status_report_async(&router_root, all_limits, now_unix_seconds, true).await?;
+    let view_model = quota_status_view_model(&report, report.rows(), width);
+    let reload_view_model = quota_status_view_model_loader(router_root, all_limits, true, width);
+    run_quota_status_view(view_model, Some(reload_view_model))
+        .await
+        .map_err(QuotaCommandError::Stdout)
+}
+
 fn quota_status_view_model_loader(
     router_root: PathBuf,
     all_limits: bool,
@@ -1327,14 +1369,18 @@ fn quota_status_view_model_loader(
     width: usize,
 ) -> QuotaStatusViewModelLoader {
     Arc::new(move || {
-        let report = load_quota_status_report(
-            &router_root,
-            all_limits,
-            current_unix_seconds(),
-            unicode_bars,
-        )
-        .ok()?;
-        Some(quota_status_view_model(&report, report.rows(), width))
+        let router_root = router_root.clone();
+        Box::pin(async move {
+            let report = load_quota_status_report_async(
+                &router_root,
+                all_limits,
+                current_unix_seconds(),
+                unicode_bars,
+            )
+            .await
+            .ok()?;
+            Some(quota_status_view_model(&report, report.rows(), width))
+        })
     })
 }
 
@@ -1355,51 +1401,63 @@ fn load_quota_status_report(
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
-    let state_db_path = router_root.join("state.sqlite");
     let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(QuotaCommandError::Runtime)?;
+    quota_history_runtime.block_on(load_quota_status_report_async(
+        router_root,
+        all_limits,
+        now_unix_seconds,
+        unicode_bars,
+    ))
+}
+
+async fn load_quota_status_report_async(
+    router_root: &Path,
+    all_limits: bool,
+    now_unix_seconds: u64,
+    unicode_bars: bool,
+) -> Result<QuotaStatusReport, QuotaCommandError> {
     let quota_history_state =
-        quota_history_runtime.block_on(AsyncSqliteStateStore::open_read_only(&state_db_path))?;
-    let accounts = quota_history_runtime.block_on(quota_history_state.list_accounts())?;
+        AsyncSqliteStateStore::open_read_only(&router_root.join("state.sqlite")).await?;
+    let accounts = quota_history_state.list_accounts().await?;
     let report = quota_status_report(
-        &quota_history_runtime,
         &quota_history_state,
         &accounts,
         all_limits,
         now_unix_seconds,
         unicode_bars,
-    )?;
-    quota_history_runtime.block_on(quota_history_state.close())?;
+    )
+    .await?;
+    quota_history_state.close().await?;
     Ok(report)
 }
 
-fn quota_status_report(
-    quota_history_runtime: &tokio::runtime::Runtime,
+async fn quota_status_report(
     quota_history_state: &AsyncSqliteStateStore,
     accounts: &[AccountRecord],
     _all_limits: bool,
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
-    let selector_inputs = quota_history_runtime.block_on(
-        quota_history_state.selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds),
-    )?;
-    let refresh_statuses = quota_history_runtime.block_on(
-        quota_history_state.quota_refresh_statuses_for_route_band(USER_QUOTA_ROUTE_BAND),
-    )?;
+    let selector_inputs = quota_history_state
+        .selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds)
+        .await?;
+    let refresh_statuses = quota_history_state
+        .quota_refresh_statuses_for_route_band(USER_QUOTA_ROUTE_BAND)
+        .await?;
     let refresh_statuses = refresh_statuses
         .into_iter()
         .map(|status| (status.account_id().clone(), status))
         .collect::<HashMap<_, _>>();
-    let active_client_counts_result = quota_history_runtime.block_on(
-        quota_history_state.active_client_counts_for_route_band_read_only(
+    let active_client_counts_result = quota_history_state
+        .active_client_counts_for_route_band_read_only(
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
             ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
-        ),
-    );
+        )
+        .await;
     let active_client_mirror_source = if active_client_counts_result.is_ok() {
         "sqlx_mirror"
     } else {
@@ -1419,13 +1477,13 @@ fn quota_status_report(
             })
             .collect::<HashMap<_, _>>()
     });
-    let selection_projection_result =
-        quota_history_runtime.block_on(project_route_band_selection_inputs_read_only(
-            quota_history_state,
-            USER_QUOTA_ROUTE_BAND,
-            now_unix_seconds,
-            ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
-        ));
+    let selection_projection_result = project_route_band_selection_inputs_read_only(
+        quota_history_state,
+        USER_QUOTA_ROUTE_BAND,
+        now_unix_seconds,
+        ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
+    )
+    .await;
     let selection_projection_source = if selection_projection_result.is_ok() {
         SelectionProjectionSource::SqlxProjection
     } else {
@@ -1438,10 +1496,9 @@ fn quota_status_report(
         let selector_input = selector_inputs
             .iter()
             .find(|input| input.account_id() == account.account_id());
-        let snapshot = quota_history_runtime.block_on(
-            quota_history_state
-                .load_quota_snapshot_for_route_band(account.account_id(), USER_QUOTA_ROUTE_BAND),
-        )?;
+        let snapshot = quota_history_state
+            .load_quota_snapshot_for_route_band(account.account_id(), USER_QUOTA_ROUTE_BAND)
+            .await?;
         let reset_credits_available = snapshot
             .as_ref()
             .and_then(PersistedQuotaSnapshot::reset_credits_available);
@@ -1453,13 +1510,13 @@ fn quota_status_report(
             })
         };
         attach_history_estimates_to_display_windows(
-            quota_history_runtime,
             quota_history_state,
             account.account_id(),
             USER_QUOTA_ROUTE_BAND,
             now_unix_seconds,
             &mut display_windows,
-        )?;
+        )
+        .await?;
         let projection_account = selection_projection.and_then(|projection| {
             projection
                 .accounts()
@@ -2196,8 +2253,7 @@ fn display_windows_from_selector_input(input: &SelectorQuotaInput) -> Vec<Displa
         .collect()
 }
 
-fn attach_history_estimates_to_display_windows(
-    quota_history_runtime: &tokio::runtime::Runtime,
+async fn attach_history_estimates_to_display_windows(
     quota_history_state: &AsyncSqliteStateStore,
     account_id: &AccountId,
     route_band: &str,
@@ -2211,15 +2267,15 @@ fn attach_history_estimates_to_display_windows(
         let observed_from_unix_seconds = now_unix_seconds.saturating_sub(
             quota_status_display_burn_lookback_seconds(window.window_seconds),
         );
-        let observations = quota_history_runtime.block_on(
-            quota_history_state.quota_history_observations_for_window(
+        let observations = quota_history_state
+            .quota_history_observations_for_window(
                 account_id,
                 route_band,
                 window.window_seconds,
                 observed_from_unix_seconds,
                 now_unix_seconds,
-            ),
-        )?;
+            )
+            .await?;
         let observations = observations
             .iter()
             .filter_map(quota_run_rate_observation_from_history)
@@ -3902,6 +3958,40 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn interactive_quota_requires_effective_table_format_and_both_terminals() {
+        for format in [
+            QuotaStatusFormat::Table,
+            QuotaStatusFormat::Plain,
+            QuotaStatusFormat::Json,
+        ] {
+            for stdin_is_terminal in [false, true] {
+                for stdout_is_terminal in [false, true] {
+                    let expected = format == QuotaStatusFormat::Table
+                        && stdin_is_terminal
+                        && stdout_is_terminal;
+                    assert_eq!(
+                        should_run_interactive_quota(format, stdin_is_terminal, stdout_is_terminal,),
+                        expected,
+                        "format={format:?}, stdin={stdin_is_terminal}, stdout={stdout_is_terminal}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interactive_quota_component_uses_the_process_async_runtime() {
+        let component_source = include_str!("presentation/quota/component.rs");
+
+        for forbidden_runtime_owner in ["tokio::runtime::Builder", ".block_on(", "spawn_blocking"] {
+            assert!(
+                !component_source.contains(forbidden_runtime_owner),
+                "interactive quota component must not own {forbidden_runtime_owner}"
+            );
+        }
+    }
 
     #[test]
     fn quota_refresh_selector_window_stale_after_uses_plan_freshness_ceiling() {

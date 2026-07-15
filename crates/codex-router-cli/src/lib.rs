@@ -82,10 +82,19 @@ pub fn run() -> i32 {
 /// Runs the process CLI with native async command support.
 pub async fn run_async() -> i32 {
     let args = std::env::args_os().collect::<Vec<_>>();
-    if !matches!(
-        CliCommand::parse(args.clone()),
-        Ok(CliCommand::Quota(QuotaCommand::Reset { .. }))
-    ) {
+    let context = CliContext::from_process();
+    let uses_async_dispatch = match CliCommand::parse(args.clone()) {
+        Ok(CliCommand::Quota(QuotaCommand::Reset { .. })) => true,
+        Ok(CliCommand::Quota(QuotaCommand::Status { format, .. })) => {
+            quota::should_run_interactive_quota(
+                format,
+                context.stdin_is_terminal(),
+                context.stdout_is_terminal(),
+            )
+        }
+        _ => false,
+    };
+    if !uses_async_dispatch {
         return std::thread::spawn(move || run_sync_process_args(args))
             .join()
             .unwrap_or(2);
@@ -93,7 +102,6 @@ pub async fn run_async() -> i32 {
     let _telemetry_guard = telemetry::init_from_env();
     let run_span = telemetry::run_span();
     let _run_span_guard = run_span.enter();
-    let context = CliContext::from_process();
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     if let Err(error) = run_with_io_async(args, &context, &mut stdout, &mut stderr).await {
@@ -147,6 +155,22 @@ where
                 router_root,
                 context.stdin_is_terminal(),
                 context.stdout_is_terminal(),
+            )
+            .await?;
+            stderr.flush().map_err(CliError::Stderr)
+        }
+        CliCommand::Quota(command @ QuotaCommand::Status { format, .. })
+            if quota::should_run_interactive_quota(
+                format,
+                context.stdin_is_terminal(),
+                context.stdout_is_terminal(),
+            ) =>
+        {
+            quota::run_interactive_quota_status(
+                command,
+                context.stdin_is_terminal(),
+                context.stdout_is_terminal(),
+                context.stdout_terminal_width(),
             )
             .await?;
             stderr.flush().map_err(CliError::Stderr)

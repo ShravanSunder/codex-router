@@ -1,7 +1,11 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 pub(crate) type QuotaStatusViewModelLoader =
-    Arc<dyn Fn() -> Option<QuotaStatusViewModel> + Send + Sync>;
+    Arc<dyn Fn() -> QuotaStatusViewModelLoadFuture + Send + Sync>;
+pub(crate) type QuotaStatusViewModelLoadFuture =
+    Pin<Box<dyn Future<Output = Option<QuotaStatusViewModel>> + Send>>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct QuotaStatusViewModel {
