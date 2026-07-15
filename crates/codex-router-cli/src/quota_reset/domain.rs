@@ -1,4 +1,161 @@
 //! Pure eligibility and reset-credit selection rules.
+#![allow(
+    dead_code,
+    reason = "shared reset contracts are integrated by later reviewed slices"
+)]
+
+/// Active credential version expected by one workflow attempt.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::quota_reset) struct ActiveCredentialGeneration(u64);
+
+impl ActiveCredentialGeneration {
+    pub(in crate::quota_reset) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// UI attempt identity used to reject stale completions.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::quota_reset) struct AttemptGeneration(u64);
+
+impl AttemptGeneration {
+    pub(in crate::quota_reset) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Unique identity for one operation within an attempt.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::quota_reset) struct OperationGeneration(u64);
+
+impl OperationGeneration {
+    pub(in crate::quota_reset) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Provider redemption identity minted only with commit authority.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(in crate::quota_reset) struct RedeemRequestId(String);
+
+/// The five provider operations surfaced independently in reset detail.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::quota_reset) enum OperationKind {
+    InspectionLiveUsage,
+    InspectionCreditInventory,
+    RevalidationLiveUsage,
+    RevalidationCreditInventory,
+    ConsumeCredit,
+}
+
+impl OperationKind {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::InspectionLiveUsage,
+        Self::InspectionCreditInventory,
+        Self::RevalidationLiveUsage,
+        Self::RevalidationCreditInventory,
+        Self::ConsumeCredit,
+    ];
+}
+
+/// Sanitized failure classes safe for presentation and diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RenderSafeFailure {
+    AccountUnavailable,
+    CredentialGenerationChanged,
+    CredentialUnavailable,
+    CredentialExpired,
+    Transport,
+    TimedOut,
+    ProviderStatus,
+    InvalidResponse,
+    EligibilityRefused,
+    SelectedCreditChanged,
+    Cancelled,
+}
+
+impl RenderSafeFailure {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::AccountUnavailable => "account unavailable",
+            Self::CredentialGenerationChanged => "credential generation changed",
+            Self::CredentialUnavailable => "credential unavailable",
+            Self::CredentialExpired => "credential expired",
+            Self::Transport => "provider transport unavailable",
+            Self::TimedOut => "provider operation timed out",
+            Self::ProviderStatus => "provider returned an unsuccessful status",
+            Self::InvalidResponse => "provider response was invalid",
+            Self::EligibilityRefused => "reset eligibility refused",
+            Self::SelectedCreditChanged => "selected reset credit changed",
+            Self::Cancelled => "operation cancelled",
+        }
+    }
+}
+
+/// Validated live weekly usage safe to render.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LiveWeeklyUsage {
+    remaining_percent: u32,
+}
+
+impl LiveWeeklyUsage {
+    pub(crate) const fn new(remaining_percent: u32) -> Self {
+        Self { remaining_percent }
+    }
+
+    pub(crate) const fn remaining_percent(self) -> u32 {
+        self.remaining_percent
+    }
+}
+
+/// Result category returned by a live-usage provider port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LiveUsagePortResult {
+    Known(LiveWeeklyUsage),
+    Failed(RenderSafeFailure),
+}
+
+/// Render-safe summary of a validated complete credit inventory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreditInventorySummary {
+    pub(crate) credit_count: usize,
+    pub(crate) usable_credit_count: usize,
+}
+
+/// Result category returned by a credit-inventory provider port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CreditInventoryPortResult {
+    Validated(CreditInventorySummary),
+    Failed(RenderSafeFailure),
+}
+
+/// Validated known provider outcome after consume invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum KnownConsumeOutcome {
+    Reset { windows_reset: u32 },
+    NothingToReset,
+    NoCredit,
+    AlreadyRedeemed,
+}
+
+/// Conservative provider-port classification after the irreversible boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ConsumePortResult {
+    Known(KnownConsumeOutcome),
+    OutcomeUnknown(RenderSafeFailure),
+}
 
 /// Provider-reported reset credit used by the guarded reset workflow.
 #[derive(Clone, Debug, Eq, PartialEq)]

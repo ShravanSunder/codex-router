@@ -28,6 +28,7 @@ pub(crate) mod credentials;
 pub(crate) mod domain;
 pub(crate) mod orchestration;
 pub(crate) mod provider;
+pub(crate) mod workflow;
 
 /// Interactive quota-reset failure.
 #[derive(Debug, Error)]
