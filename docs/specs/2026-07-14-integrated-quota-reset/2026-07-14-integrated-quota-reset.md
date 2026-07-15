@@ -449,16 +449,17 @@ workflow dependencies.
 
 ### Legacy `quota reset` compatibility
 
-`codex-router quota reset` remains parseable, including its existing `--router-root` option for CLI
-compatibility, but ignores that option and performs no filesystem access. It writes exactly the
-following line plus a trailing newline to stdout and exits zero regardless of TTY state:
+`codex-router quota reset` remains parseable with no reset-specific options and performs no
+filesystem access. It writes exactly the following line plus a trailing newline to stdout and exits
+zero regardless of TTY state:
 
 ```text
 Quota reset moved to codex-router quota: focus an account and press Ctrl-R.
 ```
 
-It writes nothing to stderr. Unknown arguments retain the ordinary parser error contract and exit
-status 2. Command help labels the subcommand as migration guidance, not an interactive reset API.
+It writes nothing to stderr. `quota reset --help` exits zero through the existing help path and
+labels the subcommand as migration guidance, not an interactive reset API. All other arguments
+retain the ordinary parser error contract and exit status 2.
 
 ### Provider composition and bounds
 
