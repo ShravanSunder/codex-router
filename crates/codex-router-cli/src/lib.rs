@@ -103,6 +103,18 @@ pub async fn run_async() -> i32 {
     0
 }
 
+/// Runs the compiled quota-reset PTY harness entry.
+///
+/// The harness composition is feature-gated and fail-closed until an isolated loopback transport
+/// and fixture roots are supplied by the permanent PTY test. The installed `codex-router` binary
+/// does not reference this entry point.
+#[cfg(feature = "quota-reset-test-harness")]
+#[doc(hidden)]
+pub async fn run_quota_reset_test_harness() -> i32 {
+    eprintln!("quota-reset test harness composition is not configured");
+    2
+}
+
 fn run_sync_process_args(args: Vec<OsString>) -> i32 {
     let _telemetry_guard = telemetry::init_from_env();
     let run_span = telemetry::run_span();
@@ -6403,6 +6415,25 @@ exit 42
             terminal_ui_sources.contains("iocraft"),
             "iocraft usage should be isolated inside the CLI presentation layer"
         );
+    }
+
+    #[test]
+    fn quota_reset_test_harness_is_a_distinct_feature_gated_binary() {
+        let manifest = must_ok(fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+        ));
+        let installed_main = must_ok(fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        ));
+        let quota_source = must_ok(fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/quota.rs"),
+        ));
+
+        assert!(manifest.contains("name = \"codex-router-quota-reset-test-harness\""));
+        assert!(manifest.contains("required-features = [\"quota-reset-test-harness\"]"));
+        assert!(manifest.contains("quota-reset-test-harness = []"));
+        assert!(!installed_main.contains("run_quota_reset_test_harness"));
+        assert!(!quota_source.contains("quota-reset-test-harness"));
     }
 
     #[tokio::test]

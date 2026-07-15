@@ -1145,6 +1145,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quota_browse_matches_normalized_goldens() {
+        let ordinary_exit = vec![TerminalEvent::Key(KeyEvent::new(
+            KeyEventKind::Press,
+            KeyCode::Esc,
+        ))];
+        let cases = [
+            (
+                "width-48",
+                render_quota_capture_model_at(quota_view_model(), 48, 48, ordinary_exit.clone())
+                    .await,
+            ),
+            (
+                "width-100-height-24",
+                render_quota_capture_model_at(
+                    quota_many_account_view_model(),
+                    100,
+                    24,
+                    ordinary_exit.clone(),
+                )
+                .await,
+            ),
+            (
+                "width-159",
+                render_quota_capture_model_at(quota_view_model(), 159, 24, ordinary_exit.clone())
+                    .await,
+            ),
+            (
+                "width-160",
+                render_quota_capture_model_at(quota_view_model(), 160, 24, ordinary_exit.clone())
+                    .await,
+            ),
+            (
+                "clipped-short-height",
+                render_quota_capture_model_at(
+                    quota_many_account_view_model(),
+                    160,
+                    12,
+                    ordinary_exit.clone(),
+                )
+                .await,
+            ),
+            (
+                "empty",
+                render_quota_capture_model_at(
+                    quota_empty_view_model(),
+                    100,
+                    24,
+                    ordinary_exit.clone(),
+                )
+                .await,
+            ),
+            (
+                "error",
+                render_quota_capture_model_at(
+                    quota_error_view_model(),
+                    100,
+                    24,
+                    ordinary_exit.clone(),
+                )
+                .await,
+            ),
+            (
+                "ordinary-exit",
+                render_quota_capture_model_at(quota_view_model(), 120, 24, ordinary_exit).await,
+            ),
+        ];
+
+        for (name, actual) in cases {
+            assert_quota_golden(name, &actual);
+        }
+
+        let resize_frames = render_quota_capture_frames(
+            quota_view_model(),
+            0,
+            0,
+            vec![
+                TerminalEvent::Resize(159, 24),
+                TerminalEvent::Resize(160, 24),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )
+        .await;
+        let resize_transcript = resize_frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| format!("=== frame {index} ===\n{frame}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_quota_golden("resize", &resize_transcript);
+    }
+
+    #[tokio::test]
     async fn quota_status_reflows_when_terminal_width_changes() {
         let frames = element! {
             QuotaStatusComponent(
@@ -1906,7 +1998,20 @@ mod tests {
         height: usize,
         events: Vec<TerminalEvent>,
     ) -> String {
-        let frames = element! {
+        let frames = render_quota_capture_frames(view_model, width, height, events).await;
+        frames
+            .last()
+            .cloned()
+            .unwrap_or_else(|| panic!("quota status should render at least one frame"))
+    }
+
+    async fn render_quota_capture_frames(
+        view_model: QuotaStatusViewModel,
+        width: usize,
+        height: usize,
+        events: Vec<TerminalEvent>,
+    ) -> Vec<String> {
+        element! {
             QuotaStatusComponent(
                 view_model,
                 width,
@@ -1918,11 +2023,59 @@ mod tests {
         )))
         .map(|canvas| canvas.to_string())
         .collect::<Vec<_>>()
-        .await;
-        frames
-            .last()
-            .cloned()
-            .unwrap_or_else(|| panic!("quota status should render at least one frame"))
+        .await
+    }
+
+    fn assert_quota_golden(name: &str, actual: &str) {
+        let normalized = normalize_quota_golden(actual);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/quota")
+            .join(format!("{name}.txt"));
+        if std::env::var_os("UPDATE_QUOTA_GOLDENS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            std::fs::create_dir_all(path.parent().expect("golden path should have a parent"))
+                .unwrap_or_else(|error| {
+                    panic!("quota golden directory should be writable: {error}")
+                });
+            std::fs::write(&path, &normalized)
+                .unwrap_or_else(|error| panic!("quota golden should be writable: {error}"));
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "missing quota golden {} ({error}); run with UPDATE_QUOTA_GOLDENS=1",
+                path.display()
+            )
+        });
+        assert_eq!(
+            normalized,
+            expected,
+            "quota golden drift: {}",
+            path.display()
+        );
+    }
+
+    fn normalize_quota_golden(actual: &str) -> String {
+        let mut normalized = String::with_capacity(actual.len());
+        let mut characters = actual.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\u{1b}' && characters.peek() == Some(&'[') {
+                characters.next();
+                for sequence_character in characters.by_ref() {
+                    if ('@'..='~').contains(&sequence_character) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if matches!(
+                character,
+                '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏'
+            ) {
+                normalized.push('◌');
+            } else {
+                normalized.push(character);
+            }
+        }
+        normalized
     }
 
     fn meaningful_line_count(text: &str) -> usize {
@@ -2054,6 +2207,28 @@ mod tests {
                 details: selected_details.clone(),
             }],
             selected: Some(selected_details),
+        }
+    }
+
+    fn quota_empty_view_model() -> QuotaStatusViewModel {
+        QuotaStatusViewModel {
+            width: 100,
+            route_line: "responses -> none    [empty]".to_owned(),
+            why_line: "why: no accounts configured".to_owned(),
+            serving_clients: None,
+            rows: Vec::new(),
+            selected: None,
+        }
+    }
+
+    fn quota_error_view_model() -> QuotaStatusViewModel {
+        QuotaStatusViewModel {
+            width: 100,
+            route_line: "responses -> unavailable    [error]".to_owned(),
+            why_line: "why: quota status unavailable".to_owned(),
+            serving_clients: None,
+            rows: Vec::new(),
+            selected: None,
         }
     }
 

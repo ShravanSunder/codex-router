@@ -9,6 +9,15 @@ publish.workspace = true
 name = "codex-router"
 path = "src/main.rs"
 
+[[bin]]
+name = "codex-router-quota-reset-test-harness"
+path = "src/bin/quota_reset_test_harness.rs"
+required-features = ["quota-reset-test-harness"]
+
+[features]
+default = []
+quota-reset-test-harness = []
+
 [lints]
 workspace = true
 
