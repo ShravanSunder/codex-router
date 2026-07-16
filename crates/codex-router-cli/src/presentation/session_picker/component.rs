@@ -341,23 +341,14 @@ fn render_picker_view(
         let detail_width = content_width.saturating_sub(list_width + 2).max(28);
         let visible_row_budget =
             session_visible_row_budget(visible_len, model.selected_index, body_budget);
-        let list_height =
-            session_list_height(visible_len, model.selected_index, visible_row_budget);
-        let details_panel_height = selected_record
-            .map(|record| {
-                detail_height(Some(selected_conversation.unwrap_or(&record.conversation)))
-            })
-            .unwrap_or(START_NEW_DETAILS_HEIGHT);
-        let details_panel_height = details_panel_height.min(body_budget);
-        let main_height = list_height.max(details_panel_height);
         children.push(
             element! {
-                View(width: 100pct, height: main_height as u32) {
-                    #(render_session_list(model, list_width, visible_row_budget))
+                View(width: 100pct, height: body_budget as u32) {
+                    #(render_session_list(model, list_width, visible_row_budget, body_budget))
                     View(width: 2) { Text(content: "") }
                     #(selected_record
-                        .map(|record| render_details(record, detail_width, selected_conversation, details_panel_height))
-                        .unwrap_or_else(|| render_start_new_details(model, detail_width)))
+                        .map(|record| render_details(record, detail_width, selected_conversation, body_budget))
+                        .unwrap_or_else(|| render_start_new_details(model, detail_width, body_budget)))
                 }
             }
             .into_any(),
@@ -385,6 +376,7 @@ fn render_picker_view(
             model,
             content_width,
             visible_row_budget,
+            session_list_height(visible_len, model.selected_index, visible_row_budget),
         ));
         if show_stacked_details && let Some(record) = selected_record {
             children.push(render_details(
@@ -398,7 +390,6 @@ fn render_picker_view(
 
     children.push(render_footer(content_width));
     let picker_height = height.max(minimum_render_height);
-
     element! {
         View(
             width: model.width as u32,
@@ -540,12 +531,16 @@ fn control_line(parts: Vec<String>) -> AnyElement<'static> {
     .into_any()
 }
 
-fn render_start_new_details(model: &SessionsPickerModel, width: usize) -> AnyElement<'static> {
+fn render_start_new_details(
+    model: &SessionsPickerModel,
+    width: usize,
+    height: usize,
+) -> AnyElement<'static> {
     let detail_width = width.saturating_sub(4);
     element! {
         View(
             width: width as u32,
-            height: START_NEW_DETAILS_HEIGHT as u32,
+            height: height.max(START_NEW_DETAILS_HEIGHT) as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
@@ -569,6 +564,7 @@ fn render_session_list(
     model: &SessionsPickerModel,
     width: usize,
     visible_rows: usize,
+    panel_height: usize,
 ) -> AnyElement<'static> {
     let row_width = width.saturating_sub(6).max(24);
     let mut rows = vec![render_session_header(row_width)];
@@ -626,7 +622,7 @@ fn render_session_list(
     element! {
         View(
             width: width as u32,
-            height: session_list_height(visible_len, selected_index, visible_rows) as u32,
+            height: panel_height as u32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
@@ -891,17 +887,24 @@ fn render_footer(width: usize) -> AnyElement<'static> {
     element! {
         View(
             width: 100pct,
-            border_style: BorderStyle::Single,
-            border_edges: Edges::Top,
-            border_color: Color::DarkGrey,
-            padding_top: 0,
+            flex_grow: 1.0,
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::FlexEnd,
         ) {
-            Text(
-                content: fit_line(content, width),
-                color: Color::Grey,
-                weight: Weight::Light,
-                wrap: TextWrap::NoWrap,
-            )
+            View(
+                width: 100pct,
+                border_style: BorderStyle::Single,
+                border_edges: Edges::Top,
+                border_color: Color::DarkGrey,
+                padding_top: 0,
+            ) {
+                Text(
+                    content: fit_line(content, width),
+                    color: Color::Grey,
+                    weight: Weight::Light,
+                    wrap: TextWrap::NoWrap,
+                )
+            }
         }
     }
     .into_any()
@@ -1412,9 +1415,10 @@ mod tests {
                 .iter()
                 .rposition(|line| line.contains('╰'))
                 .unwrap_or_else(|| panic!("capture should render bottom border:\n{text}"));
-            assert!(
-                bottom_border_index <= footer_index + 3,
-                "picker outer border should stop after footer at width {width}:\n{text}"
+            assert_eq!(
+                bottom_border_index,
+                footer_index + 1,
+                "picker outer border should sit directly below footer at width {width}:\n{text}"
             );
         }
 
@@ -1584,6 +1588,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessions_picker_sidecar_panels_reach_footer_without_unframed_gap() {
+        let text = render_picker_capture_at(
+            capture_picker_request(),
+            160,
+            32,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+        let lines = text.lines().collect::<Vec<_>>();
+        let footer_index = lines
+            .iter()
+            .position(|line| line.contains("type search"))
+            .unwrap_or_else(|| panic!("sidecar footer should render:\n{text}"));
+        let panel_bottom_index = lines[..footer_index]
+            .iter()
+            .rposition(|line| line.matches('└').count() >= 2)
+            .unwrap_or_else(|| panic!("both sidecar panel bottoms should render:\n{text}"));
+
+        assert_eq!(
+            panel_bottom_index + 2,
+            footer_index,
+            "sidecar panels should meet the footer divider without an unframed gap:\n{text}"
+        );
+    }
+
+    #[tokio::test]
     async fn sessions_picker_renders_one_line_controls_when_width_allows() {
         let text = render_picker_capture_at(
             capture_picker_request(),
@@ -1641,10 +1674,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_picker_removes_top_padding_and_dead_list_tail() {
+    async fn sessions_picker_stacked_layout_removes_top_padding_and_dead_list_tail() {
         let text = render_picker_capture_at(
             capture_picker_request(),
-            160,
+            120,
             24,
             vec![TerminalEvent::Key(KeyEvent::new(
                 KeyEventKind::Press,
