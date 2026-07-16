@@ -60,8 +60,24 @@ lib.rs
   owns: process dispatch and injected terminal predicate
           |
           v
-quota.rs + quota/interactive.rs
-  owns: persisted projection, async reload, static/interactive composition
+quota/
+  command.rs              owns async QuotaCommand dispatch only
+  options.rs              owns quota status/refresh option parsing
+  status_command.rs       owns interactive/static status coordination
+  status_loader.rs        owns async query-only persisted reads
+  status_model.rs         owns status/report/view data types
+  status_projection.rs    owns typed display projection
+  status_formatting.rs    owns plain/table/JSON formatting
+  status_pace.rs          owns burn/run-rate/reset-pace calculations
+  status_json.rs          owns JSON DTO projection/serialization
+  status_metrics.rs       owns quota status telemetry emission
+  refresh_command.rs      owns explicit async refresh coordination
+  refresh_service.rs      owns refresh workflow/account decisions
+  refresh_provider.rs     owns refresh HTTP protocol
+  refresh_history.rs      owns burn-history observation/retention
+  background_refresh_worker.rs owns the unchanged serve-owned worker/runtime
+  selection_projection.rs owns route-band/runtime-selection projection
+  tests/                  owns tests grouped by the same responsibilities
           |
           v
 presentation/quota/
@@ -108,10 +124,14 @@ and all reset task handles.
 handles. Structural proof enforces no `spawn`/`JoinHandle` in service modules and no reset task
 future in presentation.
 
-Exact filenames may be consolidated when a module stays below 600 lines and retains one reason to
-change. Do not add more behavior to the current 2,314-line `presentation/quota.rs`; split it by the
-responsibilities above during the first owning slice. Do not move unrelated quota-report logic out
-of the 5,342-line `quota.rs` merely to clean it up.
+Exact filenames may be consolidated only when a module stays below 600 lines and retains one reason
+to change. Do not add more behavior to the current 2,314-line `presentation/quota.rs`; split it by
+the responsibilities above during the first owning slice. Hard-cut the 5,342-line `quota.rs` into
+the named `quota/` responsibilities before reset integration. Avoid generic names such as
+`utils.rs`, `helpers.rs`, `common.rs`, `data.rs`, or `process.rs`. Every named responsibility remains
+identifiable; consolidation is allowed only when the resulting file is below 600 lines. No finished
+quota source file may be 900 lines or larger. The finished quota command family has no blanket
+dead-code or lint allowance.
 
 ## Execution DAG
 
@@ -155,7 +175,8 @@ Slice 2a: freeze shared request/outcome/authority contracts
 ```
 
 Only Slice 2b, Slice 3, and Slice 4 are parallel, and only after Slice 2a freezes their shared
-contracts. Slice 1a owns `lib.rs`, `quota.rs`, and quota presentation exclusively. Module exports,
+contracts. Slice 1a owns `lib.rs`, the `quota.rs` to `quota/` cutover, and quota presentation
+exclusively. Module exports,
 manifests, and shared integration files are parent-owned. Slices 5a–7b are serialized.
 
 ## Gate 0 — preflight, harness feasibility, and browse baseline
@@ -163,7 +184,17 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
 1. Verify the Worktrunk branch, current HEAD, goal pointers, spec commit, and absence of unrelated
    staged files. Preserve the default-main checkout and its unrelated untracked file.
 2. Record current file owners and test commands. Do not read home router state or secrets.
-3. Freeze the hermetic harness contract before feature work:
+3. Adopt or reject the existing in-progress Slice 2–4 diff before further hotspot work:
+   - map every changed hunk/symbol to Slice 2a, 2b, 3a, 3b, or 4;
+   - reject obsolete immutable-SQLite and superseded contract code;
+   - remove temporary blanket lint allowances and split any finished source file at or above 900
+     lines by named responsibility;
+   - restore parent ownership of `quota_reset/mod.rs` integration;
+   - run the intended slice-local tests, format, clippy, and diff checks;
+   - commit accepted scoped foundations as explicit adoption checkpoints before Slice 1a3 work.
+   The adoption ledger is parent-owned and must distinguish inherited worker reports from current
+   parent verification. No current diff is accepted merely because it compiles.
+4. Freeze the hermetic harness contract before feature work:
    - Cargo feature: `quota-reset-test-harness`.
    - Dedicated binary: `codex-router-quota-reset-test-harness` at
      `crates/codex-router-cli/src/bin/quota_reset_test_harness.rs`, with
@@ -178,7 +209,7 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
      without its feature, the harness builds with it, and default/all-feature dependency graphs keep
      loopback unreachable from installed parser/production factory. No provider or credential is
      accessed in this spike.
-4. Add deterministic normalized browse baselines before changing presentation behavior:
+5. Add deterministic normalized browse baselines before changing presentation behavior:
    narrow/48, representative 100x24, 159 stacked, 160 sidecar, clipped short height, resize, empty,
    error, and ordinary exit. Extend fixtures until every case exists; inability to produce one stops
    Slice 1a0.
@@ -190,9 +221,9 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
      `UPDATE_QUOTA_GOLDENS=1 cargo test -p codex-router-cli quota_golden -- --nocapture`.
      Review the tracked diff, then prove it without the variable using the same test filter.
    - A deliberate semantic/geometry drift test must fail before accepting the harness.
-5. Run and record the baseline relevant CLI test set. A baseline pass is not the red phase for new
+6. Run and record the baseline relevant CLI test set. A baseline pass is not the red phase for new
    behavior.
-6. For each slice, add the smallest failing test first and capture the expected failure before
+7. For each slice, add the smallest failing test first and capture the expected failure before
    implementation. Do not approve new goldens blindly.
 
 Gate evidence: branch/status/HEAD, baseline commands with exit codes/counts, normalized browse
@@ -205,10 +236,13 @@ Source: R1–R8, R22–R23 and the interactive dispatch matrix.
 Behavior:
 
 - Only effective table status with both stdin and stdout TTY enters interactive quota.
-- The existing top-level Tokio runtime directly awaits one iocraft loop; remove nested runtime and
-  `block_on` from the interactive quota call graph.
-- Persisted load/reload is awaitable. Static/plain/JSON/non-TTY/help/refresh paths remain existing
-  noninteractive writers and construct no reset dependencies.
+- The existing top-level Tokio runtime owns the complete quota CLI command family. Status in every
+  format, refresh, integrated reset, and legacy guidance dispatch through the async quota entry.
+  Remove nested runtimes, `block_on`, and OS-thread wrappers from every `QuotaCommand` call graph.
+  The serve-owned background refresh worker remains behaviorally unchanged and unreachable from
+  quota CLI dispatch.
+- All quota-command persisted and provider operations are awaitable. Static/plain/JSON/non-TTY/help paths remain
+  noninteractive and construct no reset dependencies; their pure formatting stays synchronous.
 - Presentation rows carry hidden `AccountId` and active generation. Focus is stored by `AccountId`;
   index is derived after reload.
 - Duplicate labels, reorder, insertion, removal, or generation change cannot retarget focus or an
@@ -217,13 +251,13 @@ Behavior:
 Write owner and internal checkpoints:
 
 - `crates/codex-router-cli/src/lib.rs` dispatch predicate/composition only.
-- `crates/codex-router-cli/src/quota.rs` async interactive source/projection only; optional
-  `crates/codex-router-cli/src/quota/interactive.rs`.
+- `crates/codex-router-cli/src/quota/` named command/status/refresh/projection modules above; the
+  old monolithic `quota.rs` is removed after the hard cutover.
 - Split `crates/codex-router-cli/src/presentation/quota.rs` into the target quota module structure;
   this slice changes identity/focus and async entry but adds no reset-mode rendering.
 - Adjacent/integration tests for dispatch, identity, reload, and browse baselines.
 
-Execute as three separately proven checkpoints:
+Execute as seven separately proven checkpoints:
 
 - Slice 1a0: behavior-preserving presentation module extraction only. Move code/tests by
   responsibility without changing symbols/logic/output. The complete browse corpus must remain
@@ -231,21 +265,32 @@ Execute as three separately proven checkpoints:
 - Slice 1a1: introduce one injected effective-format × stdin-TTY × stdout-TTY predicate, native
   async entry, and awaitable persisted loader/reload. Prove static paths remain dependency-free.
 - Slice 1a2: add hidden AccountId/generation DTOs and semantic focus/reload behavior.
+- Slice 1a3a: extraction-only status model/projection/formatting/JSON/pace/metrics/options and their
+  responsibility-grouped tests. Preserve output and behavior.
+- Slice 1a3b: extraction-only explicit refresh provider/service/history plus the separately named,
+  unchanged serve-owned background worker. Preserve refresh and worker behavior.
+- Slice 1a3c: convert every remaining `QuotaCommand` path to the single async entry; remove sync
+  runtime/thread wrappers from the quota CLI call graph while leaving pure formatting synchronous.
+- Slice 1a3d: delete the old monolith/export shim and enforce final module ownership and line limits.
 
 Red/green proof:
 
 - Injected format × stdin TTY × stdout TTY matrix initially fails because ordinary quota is sync.
 - Runtime-ownership test initially fails on nested `Runtime`/`block_on`.
 - Duplicate-label/reorder/removal focus tests initially fail on row-index focus.
-- Green: targeted unit/component tests, scoped structural check, and unchanged normalized browse
-  captures at all baseline boundaries.
+- Green: targeted unit/component tests, scoped call-graph check proving no `QuotaCommand`
+  `Runtime`/`block_on`/thread wrapper, strict format/clippy, unchanged normalized browse captures,
+  unchanged plain/table/JSON output, refresh/history/provider tests, and unchanged background-worker
+  behavior at the owning checkpoints.
 
 Checkpoint after each sub-slice: parent first proves extraction-only browse equality, then one TTY
-predicate/loop/runtime, then stable focus/reload. Freeze the identity-bearing presentation/
-async-loader interfaces before reset integration.
+predicate/loop/runtime, stable focus/reload, status-family extraction, refresh/worker extraction,
+quota-command async ownership, and final monolith removal/module limits. Freeze each boundary before
+the next; do not mix extraction-only moves with the async cutover.
 
 Split trigger: if async loading requires changes outside quota command ownership, add a narrow
 quota-only async source port. Do not introduce a generic event bus or convert unrelated commands.
+Quota refresh behavior remains unchanged while its execution and I/O ownership become native async.
 
 ## Slice 2 — shared contracts, pure correlated reducer, and validated inventory
 
@@ -342,8 +387,12 @@ Source: R5, R8, R17–R20, R23, R25 and the consume authority chain.
 
 Behavior:
 
-- Read one account by stable ID through async query-only SQLite; require Enabled and exact active
-  generation.
+- Read one account by stable ID through ordinary async read-only/query-only SQLite with
+  `busy_timeout(0)`; require Enabled and exact active generation. Request no write transaction or
+  RESERVED/PENDING/EXCLUSIVE lock and perform no busy-handler retry. If a coherent read transaction
+  cannot begin immediately, return a typed refusal. Each fresh transaction observes the latest
+  committed state visible when it begins. Normal SQLite WAL/SHM reader coordination is allowed;
+  immutable/nolock modes are forbidden against the live database.
 - Load exact generation secret through bounded `spawn_blocking` and non-creating read-only secret
   store; no refresh, repair, write, or persistent lease.
 - Build an opaque domain-separated/length-framed in-memory provider-effective binding over account,
@@ -362,17 +411,21 @@ Red/green proof:
 - Enabled/disabled/missing account, generation change, expired credential, missing routing ID,
   exact account selection, same-generation token/routing/expiry replacement, excluded refresh/
   source-only change, framed-digest ambiguity cases, and redacted Debug.
-- Before/after recursive manifests for the complete isolated state and secret roots after all pools/
-  stores close: relative path, type, bytes/hash, mode, and symlink target where applicable. Explicitly
-  prove no creation/change of `state.sqlite-wal`, `state.sqlite-shm`, journals, or any sibling while
-  main DB bytes remain unchanged. Missing roots/database stay absent.
+- An event-driven concurrent-WAL fixture proves: generation A is visible; a writer holds a change
+  to B while a reset read promptly returns committed A or a typed busy refusal without retry; the
+  writer can commit; and a fresh post-commit read observes B and refuses stale authority. Use bounded
+  channel/protocol events, not sleeps or zero-elapsed-time assertions. Inspect connection composition
+  for read-only, create-if-missing false, `busy_timeout(0)`, query-only, and absence of immutable.
+  Assert no SQL data/schema/application-state mutation by reset. SQLite-owned WAL/SHM coordination
+  may change. Preserve a strict recursive secret-root manifest: relative path, type, bytes/hash,
+  mode, and symlink target. Missing roots/database stay absent.
 - Unique per-run roots, neutral ambient configuration, and parallel-safe fixtures.
 
-Checkpoint: parent verifies read-only byte evidence and that no presentation module can import the
-authority/fingerprint types.
+Checkpoint: parent verifies current query-only authority, zero busy-handler retry/write transaction,
+secret-root byte evidence, and that no presentation module can import authority/fingerprint types.
 
-Split trigger: if existing read-only APIs create metadata or cannot target one account, stop and
-propose a narrow read-only port change; do not open writable state or relax byte proof.
+Split trigger: if query-only SQLite cannot observe current WAL state without waiting on the writer,
+stop and propose a narrow read port; never use SQLite immutable mode against the live database.
 
 ## Slice 5 — inspection, revalidation, and single-use commit service
 
@@ -458,7 +511,7 @@ Source: Product decisions 1–7, 9, 11–13; R1–R18 and R24–R25.
 Write owner:
 
 - `presentation/quota/{component,model,render,reset,test_support,tests}.rs` after Slice 1a split.
-- Parent-owned `quota.rs`/`lib.rs` composition touchpoints only at integration checkpoints.
+- Parent-owned `quota/`/`lib.rs` composition touchpoints only at integration checkpoints.
 - Presentation imports only render-safe workflow state, intents, and effect handles—never secrets,
   fingerprints, commit capabilities, provider clients, reqwest, or raw payloads.
 
@@ -527,7 +580,7 @@ Source: Product decisions 1, 8, 10; R2–R4 and legacy compatibility.
   constructor and no string/URL/origin parameter reaches it. Preserve existing configurable quota
   refresh behavior and its tests unchanged.
 
-Write owner: serialized edits to `lib.rs`, `quota.rs`, `presentation/mod.rs`, deletion of standalone
+Write owner: serialized edits to `lib.rs`, `quota/`, `presentation/mod.rs`, deletion of standalone
 presentation, reset composition/module exports, exact CLI/architecture tests.
 
 Red/green: exact parser/process-independent IO matrix and bomb factories/sentinel paths prove zero
@@ -553,11 +606,11 @@ unreachability in default and all-feature target graphs.
 Use a permanent Rust PTY integration driver (prefer a narrowly scoped dev dependency such as
 `portable-pty` only after license/deny/API validation). The driver:
 
-1. Creates unique temporary state/secret roots with fixture-only canary credentials and snapshots
-   recursive manifests for both roots: relative entry set, file type, bytes/hash, mode, and symlink
-   target where permitted. State proof explicitly covers the main DB plus absence/unchanged state of
-   `-wal`, `-shm`, journal, and every sibling after the pool closes; missing roots/database remain
-   absent.
+1. Creates unique temporary state/secret roots with fixture-only canary credentials. It snapshots a
+   strict recursive secret-root manifest: relative entry set, file type, bytes/hash, mode, and
+   symlink target where permitted. The state fixture proves current committed WAL visibility, zero
+   busy waiting/writer locks, and no SQL data/schema/application-state mutation; SQLite-owned
+   WAL/SHM coordination may change. Missing roots/database remain absent.
 2. Binds port 0 on loopback and passes the already-bound test transport; an egress guard rejects all
    other destinations before credential lookup/request construction.
 3. Starts the dedicated compiled executable in a PTY with ambient HOME/router/provider variables
@@ -621,8 +674,8 @@ GitHub.
 | R19 | 2a,5b | type/structural + integration | non-Clone/non-Serialize, by-value one POST | final API/unique attempt | split capability type from consume |
 | R20 | 3b,5b | unit + fake ledger + loopback + visual | prep zero POST; post-invoke unknown/no retry | fault recorded after invocation | split request preparation from adapter |
 | R21 | 3b,6b | parser/loopback + visual | four known codes vs every unknown class | final enum/1 MiB bound | split protocol from outcome render |
-| R22 | 1a,7b | structural + integration + PTY | top runtime, no block_on/nested panic | final compiled executable | mandatory async substrate slice |
-| R23 | 1a,4 | integration + structural/lints | awaitable reload/spawn_blocking/no held authority | final task graph; await-holding lints | split loader from secret boundary |
+| R22 | 1a,7b | structural + integration + PTY | all QuotaCommand variants under top runtime; no command block_on/thread wrapper; background worker unreachable | final compiled executable + rooted call graph | mandatory async substrate slice |
+| R23 | 1a,4 | integration + structural/lints | awaitable command I/O; read-only/query-only busy_timeout(0); no immutable; no held authority | final task graph + event-driven WAL fixture | split loader from secret boundary |
 | R24 | 5a,1b,6c,7b | held-future component/integration/PTy | keys/resize/reload/cancel/stale while held | bounded notifications, no sleeps | split precommit cancel/postcommit supervision |
 | R24a | 2b,6b–c | state table + normalized visual | five operations/all semantic states | frozen animation/final text | split semantic model from capture matrix |
 | R25 | 1b,5b,6c,7b | task probes + structural + PTY | teardown cancels GET, not committed POST | bounded outcome/final command owner | replan supervisor if component owns commit |
@@ -644,7 +697,7 @@ GitHub.
 | Product 16 single-use capability | 2a,5b | type/structural + ledger | non-Clone by-value exactly one POST | final API | split type/consume |
 | CLI contract | 1a,7a | parser/IO/process tests | exact bare/help/error/stdout/stderr/exit/dependency ledger | final binary/parser | split parsing from dependency-free run |
 | Provider/security | 3a–b | loopback + structural + canary | origin, redirect, timeout, size ±1, diagnostics | loopback-only test composition/final provider | split transport, diagnostics, production composition |
-| Read-only/no-real-provider | 4,7b | fixture bytes + egress architecture + PTY | unique roots/ports, neutral env, zero ambient path | each run fresh/fail closed | stop immediately if ambient/non-loopback reachable |
+| Read-only/no-real-provider | 4,7b | concurrent WAL + secret bytes + egress architecture + PTY | latest committed state per transaction, no write transaction/busy retry/immutable mode, unique roots/ports, neutral env, zero ambient path | each run fresh/fail closed | stop immediately if ambient/non-loopback reachable |
 | Architecture/cutover | 7a | structural + clippy | owner/import/call-graph assertions | final source graph | split module cutover from enforcement |
 | Terminal end-to-end | 7b | compiled process PTY + visual/protocol | focus/Ctrl-R/activity/resize/back/zero POST/restore | final built target/bounded waits | split driver/server but recombine terminal proof |
 | Quality/CI | terminal | fmt, clippy, nextest, build, deny, audit, actionlint | command receipts + GitHub checks | after final remediation commit | scope guard on unrelated failure |
@@ -711,6 +764,6 @@ at Gate 0 rather than exposing a production override or weakening terminal proof
 ## Phase footer
 
 phase_result: complete
-evidence: this plan; accepted spec; tmp/plan-workflows/2026-07-15-integrated-quota-reset/reviews/plan-review-and-remediation.md
+evidence: this plan; accepted spec; tmp/plan-workflows/2026-07-15-integrated-quota-reset/reviews/combined-delta-review-and-remediation.md
 recommended_next_workflow: shravan-dev-workflow:implementation-execute-plan
-recommended_transition_reason: The one plan-review cycle and one remediation pass are parent-verified; every requirement has executable ownership, proof, commands, and a final PR-ready gate.
+recommended_transition_reason: The single authorized combined spec/plan delta review and one remediation pass are parent-verified; every requirement has executable ownership, proof, commands, and a final PR-ready gate.

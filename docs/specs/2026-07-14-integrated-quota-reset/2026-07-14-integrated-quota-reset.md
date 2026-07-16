@@ -322,12 +322,24 @@ unknown` with sanitized bounded diagnostics.
 
 ### Async and lifecycle ownership
 
-R22. The top-level Tokio runtime natively owns interactive quota. The interactive path awaits one
-iocraft render loop; no callback or component creates a nested Tokio runtime or calls `block_on`.
+R22. The top-level Tokio runtime natively owns the complete quota CLI command entry. Status in every
+format, explicit refresh, interactive reset, and legacy migration guidance dispatch through async
+quota command composition. The interactive path awaits one iocraft render loop. No production
+`QuotaCommand` call graph creates a nested Tokio runtime, calls `block_on`, or spawns an OS thread
+merely to wrap async quota work. Pure parsing, projection, formatting, reducer, and render
+calculations remain synchronous functions called from the async entry. The serve-owned background
+quota-refresh worker is not a `QuotaCommand` path; its runtime ownership and behavior remain
+unchanged and unreachable from quota CLI dispatch.
 
-R23. Interactive persisted quota loading/reloading is awaitable. Bounded blocking secret-store work
+R23. All quota-command SQLite and provider operations are awaitable. Bounded blocking secret-store work
 uses `spawn_blocking`; no database connection, transaction, mutex, credential lease, or blocking
-task spans terminal confirmation or provider I/O.
+task spans terminal confirmation or provider I/O. Account-authority reads open SQLite read-only and
+query-only with `busy_timeout(0)`, request no write transaction or RESERVED/PENDING/EXCLUSIVE lock,
+and perform no busy-handler retry. If a coherent read transaction cannot begin immediately, they
+return a typed refusal. Each fresh transaction observes the latest committed state visible when it
+begins. Normal SQLite WAL/SHM reader coordination is allowed; reset performs no SQL mutation,
+migration, checkpoint, refresh, or application-owned persistence. Immutable/nolock modes are
+forbidden against the live database.
 
 R24. Terminal input, resize, spinner, and persisted reload remain responsive during live requests.
 Cancelling pre-POST invalidates the attempt generation; late or out-of-order completions are ignored.
@@ -438,14 +450,15 @@ runtime awaits that loop directly.
 | --- | --- | --- |
 | `quota` table | stdin TTY and stdout TTY | one async interactive quota loop; reset available |
 | `quota` table | either stream non-TTY | existing static table fallback; no reset dependencies |
-| `quota --plain` | any | existing synchronous/plain writer; no reset dependencies |
-| `quota --json` | any | existing synchronous/JSON writer; no reset dependencies |
-| quota refresh/help | any | existing command behavior; no reset workflow construction |
-| `quota reset` | any | synchronous migration guidance only; no state, secret, or network access |
+| `quota --plain` | any | async quota entry invokes pure plain writer; no reset dependencies |
+| `quota --json` | any | async quota entry invokes pure JSON writer; no reset dependencies |
+| quota refresh/help | any | async quota entry preserves behavior; no reset workflow construction |
+| `quota reset` | any | async quota entry invokes pure migration guidance; no state, secret, or network access |
 
 Process-independent dispatch tests inject both terminal booleans; production dispatch uses the same
-predicate. Static/plain/JSON/help/guidance paths do not construct provider, credential, or reset
-workflow dependencies.
+predicate. Here `pure`/synchronous describes calculation or output functions, never top-level quota
+command ownership. Static/plain/JSON/help/guidance paths do not construct provider, credential, or
+reset workflow dependencies.
 
 ### Legacy `quota reset` compatibility
 
@@ -509,7 +522,7 @@ response body size, validates response status/shape, and never retries a consume
 - No non-interactive, forced, threshold-overridden, scripted, or multi-account redemption.
 - No eager live inspection of all accounts.
 - No automatic reconciliation/retry after an unknown POST outcome.
-- No background quota-refresh redesign or general async rewrite of unrelated commands.
+- No background quota-refresh behavior redesign or async rewrite outside the quota command family.
 - No reusable application-wide TUI router, event bus, or global workflow store.
 - No production-router restart/replacement or change to writer ownership.
 - No real-provider automated proof and no real reset consumption during implementation or review.
@@ -540,13 +553,20 @@ The implementation plan must operationalize these proof modalities without using
    data, all typed consume codes, and conservative ambiguous failure after provider invocation.
    Boundary cases cover under/over 1,048,576 bytes, non-2xx, unknown code, connection refusal after
    invocation, close after request bytes, body-read failure, timeout, and malformed response.
-6. Unique per-run temporary state/secret roots proving read-only SQLite bytes, non-creating secret
-   access, expiry/generation/status changes, same-generation secret replacement, exact account
-   routing, and no credential refresh/write. Automated runs neutralize ambient home/router
-   configuration, use fixture-only credentials, allocate unique loopback ports, and are safe across
-   parallel tests and Worktrunk checkouts.
-7. Async ownership proof that interactive quota runs under the existing top-level runtime with one
-   render loop, no nested runtime, no blocking provider work, and no stale task authority after exit.
+6. Unique per-run temporary state/secret roots proving each fresh query-only SQLite transaction
+   observes the latest committed WAL state visible when it begins, performs no busy-handler retry or
+   write transaction/lock request, and returns a typed refusal when a coherent read cannot begin;
+   plus non-creating secret access, strict secret-root
+   byte immutability, expiry/generation/status changes, same-generation secret replacement, exact
+   account routing, and no credential refresh/write. SQLite-owned WAL/SHM reader coordination is
+   permitted; logical tables, schema, and application-owned state remain unchanged. Automated runs
+   neutralize ambient home/router configuration, use fixture-only credentials, allocate unique
+   loopback ports, and are safe across parallel tests and Worktrunk checkouts.
+7. Async ownership proof that the complete quota CLI command family runs under the existing top-level
+   runtime, with one interactive render loop, no nested runtime or `block_on`, no thread wrapper for
+   `QuotaCommand` async work, no blocking provider work, and no stale task authority after exit. The
+   serve-owned background quota-refresh worker is structurally unreachable from this assertion and
+   retains its existing behavior.
 8. Structural/cutover proof that the standalone picker/render loops are unreachable and
    `quota reset` guidance performs no state, credential, or network access. Import/dependency checks
    keep secrets/raw HTTP out of presentation and keep production-origin composition out of tests.
