@@ -17,6 +17,7 @@ pub(super) fn quota_status_view_model(
                 account_id: row.account_id.clone(),
                 account_tag: account_display_tag(&row.account_id),
                 active_credential_generation: row.active_credential_generation,
+                enabled: row.account_status == "enabled",
                 selected: row.preferred_next,
                 account: row.account_label.clone(),
                 status: quota_state_text(row).to_owned(),

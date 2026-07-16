@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::account_credential_bundle_key;
@@ -14,6 +14,117 @@ use codex_router_state::sqlite::AsyncSqliteStateStore;
 use super::*;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_blocking_credential_read_holds_capacity_until_supervised_drain() {
+    let read_permits = Arc::new(Semaphore::new(1));
+    let active_reads = Arc::new(AtomicUsize::new(0));
+    let maximum_active_reads = Arc::new(AtomicUsize::new(0));
+    let (first_started_sender, first_started_receiver) = tokio::sync::oneshot::channel();
+    let (release_first_sender, release_first_receiver) = std::sync::mpsc::channel();
+    let (first_dropped_sender, mut first_dropped_receiver) = tokio::sync::oneshot::channel();
+    let first_permit = Arc::clone(&read_permits)
+        .acquire_owned()
+        .await
+        .unwrap_or_else(|error| panic!("first read permit should acquire: {error}"));
+    let first_active_reads = Arc::clone(&active_reads);
+    let first_maximum_active_reads = Arc::clone(&maximum_active_reads);
+    let mut first_read = start_bounded_blocking_read(first_permit, move || {
+        let _active_read = HeldRead::start(
+            first_active_reads,
+            first_maximum_active_reads,
+            first_dropped_sender,
+        );
+        first_started_sender
+            .send(())
+            .unwrap_or_else(|()| panic!("test should await the first read start"));
+        release_first_receiver
+            .recv()
+            .unwrap_or_else(|error| panic!("first held read should be released: {error}"));
+        1_u8
+    });
+    first_started_receiver
+        .await
+        .unwrap_or_else(|error| panic!("first read should announce start: {error}"));
+    let (cancel_sender, cancel_receiver) = tokio::sync::oneshot::channel();
+    cancel_sender
+        .send(())
+        .unwrap_or_else(|()| panic!("cancellation receiver should remain live"));
+    tokio::select! {
+        biased;
+        cancellation = cancel_receiver => {
+            cancellation.unwrap_or_else(|error| panic!("cancellation should arrive: {error}"));
+        }
+        completed = first_read.drain() => {
+            panic!("held read completed before cancellation: {completed:?}");
+        }
+    }
+    let (cleanup_sender, mut cleanup_receiver) = tokio::sync::oneshot::channel();
+    let cleanup_task = tokio::spawn(async move {
+        let _result = first_read
+            .drain()
+            .await
+            .unwrap_or_else(|error| panic!("cancelled read should drain: {error}"));
+        cleanup_sender
+            .send(())
+            .unwrap_or_else(|()| panic!("test should await cleanup completion"));
+    });
+    assert_eq!(read_permits.available_permits(), 0);
+    assert_eq!(active_reads.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        first_dropped_receiver.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        cleanup_receiver.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(Arc::clone(&read_permits).try_acquire_owned().is_err());
+    assert_eq!(maximum_active_reads.load(Ordering::SeqCst), 1);
+    release_first_sender
+        .send(())
+        .unwrap_or_else(|error| panic!("first held read should accept release: {error}"));
+    first_dropped_receiver
+        .await
+        .unwrap_or_else(|error| panic!("first held read should drop: {error}"));
+    cleanup_receiver
+        .await
+        .unwrap_or_else(|error| panic!("cleanup should follow first read drop: {error}"));
+    cleanup_task
+        .await
+        .unwrap_or_else(|error| panic!("cleanup task should finish: {error}"));
+    assert_eq!(maximum_active_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(active_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(read_permits.available_permits(), 1);
+}
+
+struct HeldRead {
+    active_reads: Arc<AtomicUsize>,
+    dropped_sender: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl HeldRead {
+    fn start(
+        active_reads: Arc<AtomicUsize>,
+        maximum_active_reads: Arc<AtomicUsize>,
+        dropped_sender: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
+        let active = active_reads.fetch_add(1, Ordering::SeqCst) + 1;
+        maximum_active_reads.fetch_max(active, Ordering::SeqCst);
+        Self {
+            active_reads,
+            dropped_sender: Some(dropped_sender),
+        }
+    }
+}
+
+impl Drop for HeldRead {
+    fn drop(&mut self) {
+        self.active_reads.fetch_sub(1, Ordering::SeqCst);
+        self.dropped_sender
+            .take()
+            .and_then(|sender| sender.send(()).ok());
+    }
+}
 
 #[test]
 fn credential_fingerprint_uses_unambiguous_length_framing() {

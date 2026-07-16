@@ -11,12 +11,13 @@ use super::provider::HttpLiveQuotaResetProvider;
 use super::service::LiveResetAuthorityReader;
 use super::service::ResetWorkflowService;
 use super::supervisor::ProductionRedeemRequestIdFactory;
+use super::supervisor::ProductionResetClock;
 use super::supervisor::QuotaInteractiveSession;
+use super::supervisor::ResetSessionOutcome;
 use super::supervisor::ResetSessionPorts;
 
-const RESET_INTENT_PORT_CAPACITY: usize = 8;
-
-pub(crate) type ResetSessionRunner = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub(crate) type ResetSessionRunner =
+    Pin<Box<dyn Future<Output = ResetSessionOutcome> + Send + 'static>>;
 
 pub(crate) struct InteractiveResetSession {
     pub(crate) ports: ResetSessionPorts,
@@ -71,12 +72,10 @@ fn compose_http_reset_session(
     let (session, ports) = QuotaInteractiveSession::new(
         service,
         ProductionRedeemRequestIdFactory,
-        RESET_INTENT_PORT_CAPACITY,
+        std::sync::Arc::new(ProductionResetClock),
     );
     Ok(InteractiveResetSession {
         ports,
-        runner: Box::pin(async move {
-            let _ = session.run().await;
-        }),
+        runner: Box::pin(session.run()),
     })
 }

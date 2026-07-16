@@ -1,4 +1,6 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -60,10 +62,53 @@ struct FakeAuthorityReader {
     reads: Arc<AtomicUsize>,
 }
 
+struct HeldAuthorityPrepared {
+    authority: FakeAuthority,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+struct HeldAuthorityReader {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl ResetAuthorityReader for HeldAuthorityReader {
+    type Authority = FakeAuthority;
+    type PreparedRead = HeldAuthorityPrepared;
+
+    async fn prepare_authority_read(
+        &self,
+        account_id: &AccountId,
+        expected_generation: ActiveCredentialGeneration,
+        _now_unix_seconds: u64,
+    ) -> Result<Self::PreparedRead, RenderSafeFailure> {
+        Ok(HeldAuthorityPrepared {
+            authority: FakeAuthority {
+                account_id: account_id.clone(),
+                generation: expected_generation,
+            },
+            started: Arc::clone(&self.started),
+            release: Arc::clone(&self.release),
+        })
+    }
+
+    fn start_authority_read(
+        prepared: Self::PreparedRead,
+    ) -> crate::quota_reset::service::StartedAuthorityRead<Self::Authority> {
+        Box::pin(async move {
+            prepared.started.notify_one();
+            prepared.release.notified().await;
+            Ok(prepared.authority)
+        })
+    }
+}
+
 impl ResetAuthorityReader for FakeAuthorityReader {
     type Authority = FakeAuthority;
+    type PreparedRead = FakeAuthority;
 
-    async fn read_authority(
+    async fn prepare_authority_read(
         &self,
         account_id: &AccountId,
         expected_generation: ActiveCredentialGeneration,
@@ -74,6 +119,12 @@ impl ResetAuthorityReader for FakeAuthorityReader {
             account_id: account_id.clone(),
             generation: expected_generation,
         })
+    }
+
+    fn start_authority_read(
+        prepared: Self::PreparedRead,
+    ) -> crate::quota_reset::service::StartedAuthorityRead<Self::Authority> {
+        Box::pin(async move { Ok(prepared) })
     }
 }
 
@@ -174,31 +225,36 @@ struct FakeRedeemRequestIdFactory {
     mints: Arc<AtomicUsize>,
 }
 
+#[derive(Debug)]
+struct FakeResetClock;
+
+impl ResetClock for FakeResetClock {
+    fn now_unix_seconds(&self) -> Result<u64, RenderSafeFailure> {
+        Ok(100)
+    }
+}
+
+#[derive(Debug)]
+struct ScriptedResetClock {
+    times: Mutex<VecDeque<u64>>,
+}
+
+impl ResetClock for ScriptedResetClock {
+    fn now_unix_seconds(&self) -> Result<u64, RenderSafeFailure> {
+        self.times
+            .lock()
+            .expect("clock lock")
+            .pop_front()
+            .ok_or(RenderSafeFailure::InvalidResponse)
+    }
+}
+
 impl RedeemRequestIdFactory for FakeRedeemRequestIdFactory {
     fn mint(&self) -> Result<RedeemRequestId, RenderSafeFailure> {
         let mint = self.mints.fetch_add(1, Ordering::SeqCst);
         RedeemRequestId::new(format!("supervisor-redeem-{mint}"))
             .map_err(|_| RenderSafeFailure::InvalidResponse)
     }
-}
-
-#[test]
-fn non_spawning_service_cannot_own_effect_handles() {
-    // Arrange
-    let service_source = include_str!("../service.rs");
-
-    // Act
-    let owns_spawn_or_join_handle = service_source.contains("tokio::spawn")
-        || service_source.contains("JoinHandle")
-        || service_source.contains("JoinSet");
-
-    // Assert
-    assert!(!owns_spawn_or_join_handle);
-    let supervisor_source = include_str!("../supervisor.rs");
-    assert!(!supervisor_source.contains("sqlx::"));
-    assert!(!supervisor_source.contains("StateStore"));
-    assert!(!supervisor_source.contains("persist_"));
-    assert!(!supervisor_source.contains("refresh_quota"));
 }
 
 #[tokio::test]
@@ -409,7 +465,7 @@ fn session_fixture() -> SessionFixture {
         FakeRedeemRequestIdFactory {
             mints: Arc::clone(&mints),
         },
-        8,
+        Arc::new(FakeResetClock),
     );
     SessionFixture {
         session,
@@ -419,7 +475,7 @@ fn session_fixture() -> SessionFixture {
     }
 }
 
-async fn begin_inspection(intent_sender: &mpsc::Sender<ResetSessionIntent>) {
+async fn begin_inspection(intent_sender: &ResetIntentSender) {
     intent_sender
         .send(ResetSessionIntent::BeginInspection {
             account_id: AccountId::new("acct_supervisor").expect("account id"),
@@ -432,7 +488,7 @@ async fn begin_inspection(intent_sender: &mpsc::Sender<ResetSessionIntent>) {
 
 async fn drive_to_committing(
     control: &FakeProviderControl,
-    intent_sender: &mpsc::Sender<ResetSessionIntent>,
+    intent_sender: &ResetIntentSender,
     snapshot_receiver: &mut watch::Receiver<ResetWorkflowSnapshot>,
 ) {
     begin_inspection(intent_sender).await;

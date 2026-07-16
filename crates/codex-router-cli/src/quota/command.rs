@@ -105,6 +105,9 @@ pub enum QuotaCommandError {
     /// Integrated reset session composition failed before terminal entry.
     #[error(transparent)]
     ResetComposition(#[from] crate::quota_reset::QuotaResetError),
+    /// The command-owned reset session panicked or was cancelled unexpectedly.
+    #[error("integrated quota reset session task failed")]
+    ResetSessionTaskFailed,
     /// A quota command was passed to the synchronous CLI dispatcher.
     #[error("quota commands require the async CLI dispatcher")]
     AsyncDispatchRequired,

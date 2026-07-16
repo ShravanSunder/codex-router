@@ -32,6 +32,9 @@ pub enum CliCredentialResolverOpenError {
     /// Tokio runtime failed to initialize.
     #[error(transparent)]
     Runtime(#[from] std::io::Error),
+    /// Async secret-store construction task failed.
+    #[error("credential secret-store construction task failed: {0}")]
+    SecretStoreTask(#[from] tokio::task::JoinError),
 }
 
 /// CLI-owned credential resolver adapter.
@@ -124,6 +127,59 @@ where
         );
         self.runtime
             .block_on(resolver.resolve_provider_credentials(account_id))
+    }
+}
+
+/// CLI credential resolver owned by the process Tokio runtime.
+#[derive(Debug)]
+pub(crate) struct AsyncCliCredentialResolver<C = OpenAiOAuthRefreshClient>
+where
+    C: CredentialRefreshClient + Clone,
+{
+    state_store: AsyncSqliteStateStore,
+    secret_store: CliRuntimeSecretStore,
+    fallback_now_unix_seconds: u64,
+    refresh_client: C,
+    refresh_leases: AsyncRefreshLeaseRegistry,
+}
+
+impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
+    /// Opens credential resolver dependencies without creating a nested runtime.
+    pub(crate) async fn open(
+        state_db_path: &Path,
+        secret_root: &Path,
+        now_unix_seconds: u64,
+    ) -> Result<Self, CliCredentialResolverOpenError> {
+        let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
+        let secret_root = secret_root.to_path_buf();
+        let secret_store =
+            tokio::task::spawn_blocking(move || open_cli_secret_store(&secret_root)).await??;
+        Ok(Self {
+            state_store,
+            secret_store,
+            fallback_now_unix_seconds: now_unix_seconds,
+            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_leases: AsyncRefreshLeaseRegistry::new(),
+        })
+    }
+}
+
+impl<C> AsyncProviderCredentialResolver for AsyncCliCredentialResolver<C>
+where
+    C: CredentialRefreshClient + Clone + Send + 'static,
+{
+    async fn resolve_provider_credentials_async(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+        let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
+            self.state_store.clone(),
+            self.secret_store.clone(),
+            self.refresh_client.clone(),
+            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            self.refresh_leases.clone(),
+        );
+        resolver.resolve_provider_credentials(account_id).await
     }
 }
 

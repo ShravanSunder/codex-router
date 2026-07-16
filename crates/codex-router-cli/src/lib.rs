@@ -6477,9 +6477,15 @@ exit 42
     }
 
     #[test]
-    fn quota_reset_test_harness_is_a_distinct_feature_gated_binary() {
-        let manifest = must_ok(fs::read_to_string(
+    fn quota_reset_test_harness_is_a_distinct_non_installable_package() {
+        let cli_manifest = must_ok(fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+        ));
+        let harness_manifest = must_ok(fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap_or_else(|| panic!("CLI crate should have workspace crates parent"))
+                .join("codex-router-quota-reset-test-harness/Cargo.toml"),
         ));
         let installed_main = must_ok(fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
@@ -6488,9 +6494,12 @@ exit 42
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/quota/mod.rs"),
         ));
 
-        assert!(manifest.contains("name = \"codex-router-quota-reset-test-harness\""));
-        assert!(manifest.contains("required-features = [\"quota-reset-test-harness\"]"));
-        assert!(manifest.contains("quota-reset-test-harness = []"));
+        assert!(!cli_manifest.contains("name = \"codex-router-quota-reset-test-harness\""));
+        assert!(!cli_manifest.contains("portable-pty"));
+        assert!(cli_manifest.contains("quota-reset-test-harness = []"));
+        assert!(harness_manifest.contains("name = \"codex-router-quota-reset-test-harness\""));
+        assert!(harness_manifest.contains("publish = false"));
+        assert!(harness_manifest.contains("portable-pty"));
         assert!(!installed_main.contains("run_quota_reset_test_harness"));
         assert!(!quota_source.contains("quota-reset-test-harness"));
     }

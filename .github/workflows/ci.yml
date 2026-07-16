@@ -52,9 +52,13 @@ jobs:
         run: |
           cargo build -p codex-router-cli --bin codex-router
           cargo build -p codex-router-cli --all-features --bin codex-router
-          cargo build -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness
-          cargo clippy -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness --test quota_reset_pty -- -D warnings
-          cargo nextest run -p codex-router-cli --features quota-reset-test-harness --test quota_reset_pty
+          install_root="${RUNNER_TEMP}/codex-router-cli-all-features-install"
+          cargo install --path crates/codex-router-cli --all-features --root "${install_root}"
+          test -x "${install_root}/bin/codex-router"
+          test "$(find "${install_root}/bin" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "1"
+          cargo build -p codex-router-quota-reset-test-harness --bin codex-router-quota-reset-test-harness
+          cargo clippy -p codex-router-quota-reset-test-harness --all-targets -- -D warnings
+          cargo nextest run -p codex-router-quota-reset-test-harness
 
       - name: Test
         run: cargo nextest run --workspace

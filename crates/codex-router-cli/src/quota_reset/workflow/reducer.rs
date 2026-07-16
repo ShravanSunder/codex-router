@@ -65,7 +65,22 @@ impl ResetWorkflow {
     }
 
     pub(in crate::quota_reset) fn yes_enabled(&self) -> bool {
-        self.authority_failure.is_none()
+        let current_authority_operations_succeeded = match self.phase {
+            WorkflowPhase::Inspected | WorkflowPhase::Confirming => {
+                activity_succeeded(&self.activities.inspection_live_usage)
+                    && activity_succeeded(&self.activities.inspection_credit_inventory)
+            }
+            WorkflowPhase::Revalidating => {
+                activity_succeeded(&self.activities.revalidation_live_usage)
+                    && activity_succeeded(&self.activities.revalidation_credit_inventory)
+            }
+            WorkflowPhase::Browse
+            | WorkflowPhase::Inspecting
+            | WorkflowPhase::Committing
+            | WorkflowPhase::Result => false,
+        };
+        current_authority_operations_succeeded
+            && self.authority_failure.is_none()
             && self.live_usage.as_ref().is_some_and(|usage| {
                 usage.provenance == RenderValueProvenance::CurrentLive
                     && usage.value.remaining_percent() < 1
@@ -115,6 +130,18 @@ impl ResetWorkflow {
             WorkflowIntent::CommitAuthorized {
                 consume_operation_generation,
             } => self.commit_authorized(consume_operation_generation),
+            WorkflowIntent::RevalidationRefused {
+                live_usage_correlation,
+                credit_inventory_correlation,
+                failure,
+            } => {
+                self.revalidation_refused(
+                    live_usage_correlation,
+                    credit_inventory_correlation,
+                    failure,
+                );
+                Vec::new()
+            }
             WorkflowIntent::AuthorityLost(failure) => {
                 self.authority_failure = Some(failure);
                 self.confirmation_selection = ConfirmationSelection::No;
@@ -140,6 +167,11 @@ impl ResetWorkflow {
             return Vec::new();
         }
         if let Some(previous) = &mut self.live_usage
+            && previous.provenance == RenderValueProvenance::CurrentLive
+        {
+            previous.provenance = RenderValueProvenance::PreviousLiveRefreshing;
+        }
+        if let Some(previous) = &mut self.inventory
             && previous.provenance == RenderValueProvenance::CurrentLive
         {
             previous.provenance = RenderValueProvenance::PreviousLiveRefreshing;
@@ -244,6 +276,24 @@ impl ResetWorkflow {
         self.consume = Some(correlation.clone());
         self.activities.consume_credit = OperationActivity::RequestDispatchedAwaitingOutcome;
         vec![CorrelatedRequest::consume_credit(correlation)]
+    }
+
+    fn revalidation_refused(
+        &mut self,
+        live_usage_correlation: OperationCorrelation,
+        credit_inventory_correlation: OperationCorrelation,
+        failure: RenderSafeFailure,
+    ) {
+        if self.phase != WorkflowPhase::Revalidating
+            || self.revalidation_usage.as_ref() != Some(&live_usage_correlation)
+            || self.revalidation_inventory.as_ref() != Some(&credit_inventory_correlation)
+        {
+            return;
+        }
+        self.phase = WorkflowPhase::Result;
+        self.confirmation_selection = ConfirmationSelection::No;
+        self.authority_failure = Some(failure);
+        self.result = Some(WorkflowResult::Refused(failure));
     }
 
     fn apply_operation_outcome(&mut self, outcome: CorrelatedOutcome) {
@@ -411,6 +461,7 @@ impl ResetWorkflow {
         self.revalidation_inventory = None;
         self.authority_failure = None;
         self.confirmed_credit = None;
+        self.result = None;
     }
 }
 

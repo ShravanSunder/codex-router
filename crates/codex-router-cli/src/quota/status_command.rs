@@ -52,8 +52,20 @@ pub(super) async fn render_interactive_quota_status(
         .send(crate::quota_reset::supervisor::ResetSessionIntent::Shutdown)
         .await;
     drop(shutdown_sender);
-    let _ = session_task.await;
+    let session_outcome = await_reset_session_task(session_task).await?;
+    match session_outcome {
+        crate::quota_reset::supervisor::ResetSessionOutcome::Cancelled
+        | crate::quota_reset::supervisor::ResetSessionOutcome::Finished(_) => {}
+    }
     render_result.map_err(QuotaCommandError::Stdout)
+}
+
+pub(super) async fn await_reset_session_task(
+    session_task: tokio::task::JoinHandle<crate::quota_reset::supervisor::ResetSessionOutcome>,
+) -> Result<crate::quota_reset::supervisor::ResetSessionOutcome, QuotaCommandError> {
+    session_task
+        .await
+        .map_err(|_join_error| QuotaCommandError::ResetSessionTaskFailed)
 }
 
 pub(super) fn quota_status_view_model_loader(

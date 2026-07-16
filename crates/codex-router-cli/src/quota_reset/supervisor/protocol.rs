@@ -40,6 +40,7 @@ pub(crate) enum ResetSessionIntent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PinnedTargetInvalidationReason {
     AccountRemoved,
+    AccountDisabled,
     CredentialGenerationChanged,
 }
 
@@ -269,13 +270,38 @@ fn disabled_yes_reason(
 
 /// Render-safe terminal value returned by the command-owned session.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::quota_reset) enum ResetSessionOutcome {
+pub(crate) enum ResetSessionOutcome {
     Cancelled,
     Finished(WorkflowResult),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ResetIntentSender {
+    sender: mpsc::UnboundedSender<ResetSessionIntent>,
+}
+
+impl ResetIntentSender {
+    pub(super) const fn new(sender: mpsc::UnboundedSender<ResetSessionIntent>) -> Self {
+        Self { sender }
+    }
+
+    pub(crate) fn send(
+        &self,
+        intent: ResetSessionIntent,
+    ) -> std::future::Ready<Result<(), mpsc::error::SendError<ResetSessionIntent>>> {
+        std::future::ready(self.sender.send(intent))
+    }
+
+    pub(crate) fn send_now(
+        &self,
+        intent: ResetSessionIntent,
+    ) -> Result<(), mpsc::error::SendError<ResetSessionIntent>> {
+        self.sender.send(intent)
+    }
+}
+
 pub(crate) struct ResetSessionPorts {
-    pub(crate) intent_sender: mpsc::Sender<ResetSessionIntent>,
+    pub(crate) intent_sender: ResetIntentSender,
     pub(crate) snapshot_receiver: watch::Receiver<ResetWorkflowSnapshot>,
 }
 
@@ -285,14 +311,14 @@ impl ResetSessionPorts {
         initial_snapshot: ResetWorkflowSnapshot,
     ) -> (
         Self,
-        mpsc::Receiver<ResetSessionIntent>,
+        mpsc::UnboundedReceiver<ResetSessionIntent>,
         watch::Sender<ResetWorkflowSnapshot>,
     ) {
-        let (intent_sender, intent_receiver) = mpsc::channel(16);
+        let (intent_sender, intent_receiver) = mpsc::unbounded_channel();
         let (snapshot_sender, snapshot_receiver) = watch::channel(initial_snapshot);
         (
             Self {
-                intent_sender,
+                intent_sender: ResetIntentSender::new(intent_sender),
                 snapshot_receiver,
             },
             intent_receiver,

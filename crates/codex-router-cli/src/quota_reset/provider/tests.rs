@@ -12,6 +12,8 @@ use super::*;
 use crate::quota_reset::domain::ConsumePortResult;
 use crate::quota_reset::domain::KnownConsumeOutcome;
 
+mod consume;
+
 #[test]
 fn used_percentage_conversion_is_strict() {
     assert_eq!(remaining_percent_from_used(100).ok(), Some(0));

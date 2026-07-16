@@ -2,6 +2,8 @@
 
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use codex_router_core::ids::AccountId;
@@ -18,13 +20,16 @@ use sqlx::Row;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use thiserror::Error;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 
 use super::domain::ActiveCredentialGeneration;
 
 const CREDENTIAL_FINGERPRINT_DOMAIN: &[u8] = b"codex-router/quota-reset/provider-authority/v1";
 const MAX_CONCURRENT_CREDENTIAL_READS: usize = 4;
-static CREDENTIAL_READ_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_CREDENTIAL_READS);
+static CREDENTIAL_READ_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_CREDENTIAL_READS)));
 
 /// Fail-closed errors while resolving provider-effective reset authority.
 #[derive(Debug, Error)]
@@ -107,14 +112,99 @@ impl fmt::Debug for PinnedResetAuthority {
     }
 }
 
+/// A validated credential read that has not started blocking secret-store work.
+///
+/// Dropping this value is cancellation-safe: it only releases reserved capacity.
+#[must_use = "prepared credential reads must be started or explicitly dropped"]
+pub(in crate::quota_reset) struct PreparedCredentialAuthorityRead {
+    secret_root: std::path::PathBuf,
+    account_id: AccountId,
+    expected_generation: ActiveCredentialGeneration,
+    now_unix_seconds: u64,
+    permit: OwnedSemaphorePermit,
+}
+
+impl PreparedCredentialAuthorityRead {
+    /// Starts the blocking secret read and transfers its capacity permit into that operation.
+    pub(in crate::quota_reset) fn start(self) -> StartedCredentialAuthorityRead {
+        let Self {
+            secret_root,
+            account_id,
+            expected_generation,
+            now_unix_seconds,
+            permit,
+        } = self;
+        StartedCredentialAuthorityRead {
+            operation: start_bounded_blocking_read(permit, move || {
+                load_exact_credential_authority(
+                    &secret_root,
+                    account_id,
+                    expected_generation,
+                    now_unix_seconds,
+                )
+            }),
+        }
+    }
+}
+
+/// A started blocking credential read retained for command-supervisor drainage.
+#[must_use = "started credential reads must be drained before session cleanup"]
+pub(in crate::quota_reset) struct StartedCredentialAuthorityRead {
+    operation: BlockingReadOperation<Result<PinnedResetAuthority, CredentialAuthorityError>>,
+}
+
+impl StartedCredentialAuthorityRead {
+    /// Waits for the real blocking read without consuming this owner while pending.
+    ///
+    /// The mutable-borrowed join is cancellation-safe in `select!`: if another branch wins, the
+    /// supervisor still owns this operation and can call `drain` again during cleanup.
+    pub(in crate::quota_reset) async fn drain(
+        &mut self,
+    ) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
+        self.operation
+            .drain()
+            .await
+            .map_err(|_error| CredentialAuthorityError::CredentialTaskFailed)?
+    }
+}
+
+struct BlockingReadOperation<TResult> {
+    task: JoinHandle<TResult>,
+}
+
+impl<TResult> BlockingReadOperation<TResult>
+where
+    TResult: Send + 'static,
+{
+    async fn drain(&mut self) -> Result<TResult, tokio::task::JoinError> {
+        (&mut self.task).await
+    }
+}
+
+fn start_bounded_blocking_read<TRead, TResult>(
+    permit: OwnedSemaphorePermit,
+    read: TRead,
+) -> BlockingReadOperation<TResult>
+where
+    TRead: FnOnce() -> TResult + Send + 'static,
+    TResult: Send + 'static,
+{
+    BlockingReadOperation {
+        task: tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            read()
+        }),
+    }
+}
+
 /// Resolves one exact account and credential generation without refresh or persistence.
-pub(in crate::quota_reset) async fn load_reset_credential_authority(
+pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
     state_database_path: &Path,
     secret_root: &Path,
     account_id: &AccountId,
     expected_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
-) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
+) -> Result<PreparedCredentialAuthorityRead, CredentialAuthorityError> {
     let options = SqliteConnectOptions::new()
         .filename(state_database_path)
         .read_only(true)
@@ -152,24 +242,38 @@ pub(in crate::quota_reset) async fn load_reset_credential_authority(
         return Err(CredentialAuthorityError::GenerationChanged);
     }
 
-    let permit = CREDENTIAL_READ_PERMITS
-        .acquire()
+    let permit = Arc::clone(&CREDENTIAL_READ_PERMITS)
+        .acquire_owned()
         .await
         .map_err(|_error| CredentialAuthorityError::CredentialTaskFailed)?;
-    let secret_root = secret_root.to_path_buf();
-    let account_id = account_id.clone();
-    let authority = tokio::task::spawn_blocking(move || {
-        load_exact_credential_authority(
-            &secret_root,
-            account_id,
-            expected_generation,
-            now_unix_seconds,
-        )
+    Ok(PreparedCredentialAuthorityRead {
+        secret_root: secret_root.to_path_buf(),
+        account_id: account_id.clone(),
+        expected_generation,
+        now_unix_seconds,
+        permit,
     })
-    .await
-    .map_err(|_error| CredentialAuthorityError::CredentialTaskFailed)?;
-    drop(permit);
-    authority
+}
+
+/// Convenience adapter for callers that do not yet supervise the two-phase read directly.
+#[cfg(test)]
+pub(in crate::quota_reset) async fn load_reset_credential_authority(
+    state_database_path: &Path,
+    secret_root: &Path,
+    account_id: &AccountId,
+    expected_generation: ActiveCredentialGeneration,
+    now_unix_seconds: u64,
+) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
+    let mut read = prepare_reset_credential_authority_read(
+        state_database_path,
+        secret_root,
+        account_id,
+        expected_generation,
+        now_unix_seconds,
+    )
+    .await?
+    .start();
+    read.drain().await
 }
 
 fn load_exact_credential_authority(

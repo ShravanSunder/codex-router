@@ -253,7 +253,6 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
- "portable-pty",
  "reqwest",
  "serde",
  "serde_json",
@@ -318,6 +317,19 @@ version = "0.1.2"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "codex-router-quota-reset-test-harness"
+version = "0.1.2"
+dependencies = [
+ "codex-router-cli",
+ "codex-router-core",
+ "codex-router-secret-store",
+ "codex-router-state",
+ "portable-pty",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

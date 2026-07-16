@@ -12,10 +12,8 @@ use crate::quota_reset::domain::LiveUsagePortResult;
 use crate::quota_reset::domain::OperationGeneration;
 use crate::quota_reset::domain::RedeemRequestId;
 use crate::quota_reset::domain::RenderSafeFailure;
-use crate::quota_reset::service::InspectionAuthority;
+use crate::quota_reset::service::ConfirmationAuthority;
 use crate::quota_reset::service::ResetAuthorityReader;
-use crate::quota_reset::service::ResetServiceProvider;
-use crate::quota_reset::service::RevalidationReceipt;
 use crate::quota_reset::workflow::InspectionStart;
 use crate::quota_reset::workflow::OperationCorrelation;
 
@@ -44,6 +42,22 @@ impl RedeemRequestIdFactory for ProductionRedeemRequestIdFactory {
     }
 }
 
+pub(in crate::quota_reset) trait ResetClock: Send + Sync + 'static {
+    fn now_unix_seconds(&self) -> Result<u64, RenderSafeFailure>;
+}
+
+#[derive(Debug, Default)]
+pub(in crate::quota_reset) struct ProductionResetClock;
+
+impl ResetClock for ProductionResetClock {
+    fn now_unix_seconds(&self) -> Result<u64, RenderSafeFailure> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .map_err(|_| RenderSafeFailure::InvalidResponse)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct GenerationAllocator {
     next_attempt: u64,
@@ -68,15 +82,14 @@ impl GenerationAllocator {
     }
 }
 
-pub(super) enum SessionTaskOutput<TAuthorityReader, TProvider>
+pub(super) enum SessionTaskOutput<TAuthorityReader>
 where
     TAuthorityReader: ResetAuthorityReader,
-    TProvider: ResetServiceProvider,
 {
-    InspectionAuthorityResolved {
+    InspectionAuthorityPrepared {
         start: InspectionStart,
         now_unix_seconds: u64,
-        authority: Result<InspectionAuthority<TAuthorityReader::Authority>, RenderSafeFailure>,
+        prepared: Result<TAuthorityReader::PreparedRead, RenderSafeFailure>,
     },
     InspectionUsageCompleted {
         correlation: OperationCorrelation,
@@ -86,10 +99,20 @@ where
         correlation: OperationCorrelation,
         terminal: CreditInventoryPortResult,
     },
-    RevalidationCompleted {
+    RevalidationAuthorityPrepared {
         usage_correlation: OperationCorrelation,
         inventory_correlation: OperationCorrelation,
-        receipt: RevalidationReceipt<TAuthorityReader::Authority, TProvider::PreparedConsume>,
+        now_unix_seconds: u64,
+        confirmation: ConfirmationAuthority<TAuthorityReader::Authority>,
+        prepared: Result<TAuthorityReader::PreparedRead, RenderSafeFailure>,
+    },
+    RevalidationUsageCompleted {
+        correlation: OperationCorrelation,
+        terminal: LiveUsagePortResult,
+    },
+    RevalidationInventoryCompleted {
+        correlation: OperationCorrelation,
+        terminal: CreditInventoryPortResult,
     },
     ConsumeCompleted {
         correlation: OperationCorrelation,

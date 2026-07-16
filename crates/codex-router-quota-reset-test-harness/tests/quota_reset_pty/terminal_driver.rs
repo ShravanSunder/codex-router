@@ -49,6 +49,7 @@ impl TerminalDriver {
         command.env_clear();
         command.env("TERM", "xterm-256color");
         command.env("LANG", "C.UTF-8");
+        command.env("TMPDIR", std::env::temp_dir());
         command.cwd(current_directory);
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
@@ -131,6 +132,15 @@ impl TerminalDriver {
         Ok(())
     }
 
+    pub(super) fn child_is_running(&mut self) -> TestResult<bool> {
+        Ok(self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("PTY child is unavailable"))?
+            .try_wait()?
+            .is_none())
+    }
+
     pub(super) fn finish(mut self, timeout: Duration) -> TestResult<Vec<u8>> {
         self.wait_for_eof(timeout)?;
         let status = self
@@ -152,6 +162,40 @@ impl TerminalDriver {
             reader_thread
                 .join()
                 .map_err(|_panic| std::io::Error::other("PTY reader thread panicked"))?;
+        }
+        Ok(std::mem::take(&mut self.transcript))
+    }
+
+    pub(super) fn terminate_and_reap(mut self, timeout: Duration) -> TestResult<Vec<u8>> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("PTY child is unavailable"))?;
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::other("PTY child termination exceeded timeout").into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        self.child.take();
+        self.writer.take();
+        self.master.take();
+        if let Some(reader_thread) = self.reader_thread.take() {
+            reader_thread
+                .join()
+                .map_err(|_panic| std::io::Error::other("PTY reader thread panicked"))?;
+        }
+        while let Ok(event) = self.output_receiver.try_recv() {
+            if let ReaderEvent::Bytes(bytes) = event {
+                self.transcript.extend(bytes);
+            }
         }
         Ok(std::mem::take(&mut self.transcript))
     }

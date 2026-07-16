@@ -237,6 +237,81 @@ fn previous_and_current_live_provenance_never_share_authority() {
 }
 
 #[test]
+fn new_inspection_failure_keeps_both_previous_observations_without_authority() {
+    let mut workflow = ResetWorkflow::default();
+    let first = inspection_start("account-a", 1, 10, 100, 101);
+    workflow.reduce(WorkflowIntent::BeginInspection(first.clone()));
+    workflow.reduce(WorkflowIntent::OperationCompleted(
+        CorrelatedOutcome::inspection_live_usage(
+            first.live_usage_correlation(),
+            LiveUsagePortResult::Known(LiveWeeklyUsage::new(0)),
+        ),
+    ));
+    workflow.reduce(WorkflowIntent::OperationCompleted(
+        CorrelatedOutcome::inspection_credit_inventory(
+            first.credit_inventory_correlation(),
+            eligible_inventory_result(),
+        ),
+    ));
+    assert!(workflow.yes_enabled());
+    workflow.reduce(WorkflowIntent::Cancel);
+
+    let second = inspection_start("account-a", 1, 11, 110, 111);
+    workflow.reduce(WorkflowIntent::BeginInspection(second.clone()));
+    assert_eq!(
+        workflow
+            .live_usage_observation()
+            .map(|(_, provenance)| provenance),
+        Some(RenderValueProvenance::PreviousLiveRefreshing)
+    );
+    assert_eq!(
+        workflow
+            .inventory_observation()
+            .map(|(_, provenance)| provenance),
+        Some(RenderValueProvenance::PreviousLiveRefreshing)
+    );
+
+    workflow.reduce(WorkflowIntent::OperationCompleted(
+        CorrelatedOutcome::inspection_live_usage(
+            second.live_usage_correlation(),
+            LiveUsagePortResult::Known(LiveWeeklyUsage::new(0)),
+        ),
+    ));
+    workflow.reduce(WorkflowIntent::OperationCompleted(
+        CorrelatedOutcome::inspection_credit_inventory(
+            second.credit_inventory_correlation(),
+            CreditInventoryPortResult::Failed(RenderSafeFailure::Transport),
+        ),
+    ));
+
+    assert_eq!(workflow.phase(), WorkflowPhase::Inspected);
+    assert_eq!(
+        workflow
+            .inventory_observation()
+            .map(|(_, provenance)| provenance),
+        Some(RenderValueProvenance::PreviousLiveRefreshing)
+    );
+    assert!(!workflow.yes_enabled());
+}
+
+#[test]
+fn yes_enabled_requires_current_successful_operation_state() {
+    let mut workflow = eligible_confirming_workflow();
+    assert_eq!(
+        workflow
+            .inventory_observation()
+            .map(|(_, provenance)| provenance),
+        Some(RenderValueProvenance::CurrentLive)
+    );
+    workflow.activities.inspection_credit_inventory = OperationActivity::Failed {
+        failure: RenderSafeFailure::Transport,
+        previous: None,
+    };
+
+    assert!(!workflow.yes_enabled());
+}
+
+#[test]
 fn authority_loss_returns_confirmation_to_no_and_consume_is_conservative() {
     let mut workflow = eligible_confirming_workflow();
     workflow.reduce(WorkflowIntent::SelectYes);
@@ -265,6 +340,51 @@ fn authority_loss_returns_confirmation_to_no_and_consume_is_conservative() {
             ConsumeUnknownReason::TimedOut
         ))
     );
+}
+
+#[test]
+fn correlated_revalidation_refusal_enters_dismissible_result() {
+    let mut workflow = eligible_confirming_workflow();
+    workflow.reduce(WorkflowIntent::SelectYes);
+    workflow.reduce(WorkflowIntent::Confirm {
+        live_usage_operation_generation: OperationGeneration::new(200),
+        credit_inventory_operation_generation: OperationGeneration::new(201),
+    });
+    let usage_correlation = workflow
+        .revalidation_usage
+        .clone()
+        .unwrap_or_else(|| panic!("revalidation usage correlation"));
+    let inventory_correlation = workflow
+        .revalidation_inventory
+        .clone()
+        .unwrap_or_else(|| panic!("revalidation inventory correlation"));
+    let stale_usage_correlation =
+        inspection_start("account-a", 1, 9, 90, 91).live_usage_correlation();
+
+    workflow.reduce(WorkflowIntent::RevalidationRefused {
+        live_usage_correlation: stale_usage_correlation,
+        credit_inventory_correlation: inventory_correlation.clone(),
+        failure: RenderSafeFailure::EligibilityRefused,
+    });
+    assert_eq!(workflow.phase(), WorkflowPhase::Revalidating);
+    assert_eq!(workflow.result(), None);
+
+    workflow.reduce(WorkflowIntent::RevalidationRefused {
+        live_usage_correlation: usage_correlation,
+        credit_inventory_correlation: inventory_correlation,
+        failure: RenderSafeFailure::EligibilityRefused,
+    });
+    assert_eq!(workflow.phase(), WorkflowPhase::Result);
+    assert_eq!(
+        workflow.result(),
+        Some(&WorkflowResult::Refused(
+            RenderSafeFailure::EligibilityRefused
+        ))
+    );
+
+    workflow.reduce(WorkflowIntent::Cancel);
+    assert_eq!(workflow.phase(), WorkflowPhase::Browse);
+    assert_eq!(workflow.result(), None);
 }
 
 fn inspection_start(

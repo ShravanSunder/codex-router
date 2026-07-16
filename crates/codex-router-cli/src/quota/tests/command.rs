@@ -1,7 +1,44 @@
 use std::ffi::OsString;
+use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use super::*;
+
+static ASYNC_REFRESH_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct IsolatedAsyncRefreshRoot {
+    path: PathBuf,
+}
+
+impl IsolatedAsyncRefreshRoot {
+    fn new() -> Self {
+        let sequence = ASYNC_REFRESH_ROOT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "codex-router-async-refresh-{}-{sequence}",
+            std::process::id()
+        ));
+        if path.exists() {
+            fs::remove_dir_all(&path).expect("remove stale async refresh fixture root");
+        }
+        fs::create_dir_all(&path).expect("create isolated async refresh fixture root");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for IsolatedAsyncRefreshRoot {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            fs::remove_dir_all(&self.path).expect("remove isolated async refresh fixture root");
+        }
+    }
+}
 
 #[test]
 fn interactive_quota_requires_effective_table_format_and_both_terminals() {
@@ -56,6 +93,40 @@ fn quota_command_modules_keep_runtime_wrappers_in_background_worker_only() {
         assert!(
             !quota_command_sources.contains(forbidden_runtime_owner),
             "quota command call graph must not own {forbidden_runtime_owner}"
+        );
+    }
+}
+
+#[test]
+fn quota_refresh_composition_uses_only_the_async_credential_resolver() {
+    let refresh_command_source = include_str!("../refresh_command.rs");
+    assert!(
+        refresh_command_source
+            .contains("crate::credential_runtime::AsyncCliCredentialResolver::open("),
+        "production quota refresh must construct the native-async credential resolver"
+    );
+    assert!(
+        !refresh_command_source.contains("let resolver = CliCredentialResolver::open("),
+        "production quota refresh must not regress to the sync resolver"
+    );
+
+    let credential_runtime_source = include_str!("../../credential_runtime.rs");
+    let async_resolver_source = credential_runtime_source
+        .split_once("pub(crate) struct AsyncCliCredentialResolver")
+        .and_then(|(_before, source)| {
+            source
+                .split_once("impl<C> AsyncProviderCredentialResolver for CliCredentialResolver")
+                .map(|(async_resolver, _after)| async_resolver)
+        })
+        .expect("native-async resolver source boundary");
+    for forbidden_runtime_owner in [
+        "tokio::runtime::Builder",
+        "tokio::runtime::Runtime",
+        ".block_on(",
+    ] {
+        assert!(
+            !async_resolver_source.contains(forbidden_runtime_owner),
+            "native-async resolver must not own {forbidden_runtime_owner}"
         );
     }
 }
@@ -117,6 +188,22 @@ async fn quota_async_entry_owns_help_and_reset_migration_guidance() {
             b"Quota reset moved to codex-router quota: focus an account and press Ctrl-R.\n"
         );
     }
+}
+
+#[tokio::test]
+async fn production_quota_refresh_composition_runs_inside_the_process_runtime() {
+    let router_root = IsolatedAsyncRefreshRoot::new();
+    let mut stdout = Vec::new();
+
+    refresh_quota(
+        &mut stdout,
+        router_root.path().to_path_buf(),
+        DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+    )
+    .await
+    .expect("empty isolated refresh should complete without provider egress");
+
+    assert_eq!(stdout, b"refreshed: 0\n");
 }
 
 #[test]
@@ -184,4 +271,25 @@ async fn non_interactive_dispatch_never_constructs_an_injected_reset_session() {
         .await
         .expect("non-interactive dispatch");
     }
+}
+
+#[tokio::test]
+async fn reset_session_join_failure_is_a_sanitized_command_error() {
+    // Arrange
+    let session_task = tokio::spawn(std::future::pending::<
+        crate::quota_reset::supervisor::ResetSessionOutcome,
+    >());
+    session_task.abort();
+
+    // Act
+    let error = await_reset_session_task(session_task)
+        .await
+        .expect_err("session panic must fail the command");
+
+    // Assert
+    assert!(matches!(error, QuotaCommandError::ResetSessionTaskFailed));
+    assert_eq!(
+        error.to_string(),
+        "integrated quota reset session task failed"
+    );
 }

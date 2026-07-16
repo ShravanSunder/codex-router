@@ -25,7 +25,8 @@ pub(super) struct SafeRequestRecord {
 pub(super) struct HeldLoopbackProvider {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
-    response_gate: Arc<(Mutex<bool>, Condvar)>,
+    get_response_gate: Arc<(Mutex<bool>, Condvar)>,
+    post_response_gate: Arc<(Mutex<bool>, Condvar)>,
     request_receiver: mpsc::Receiver<SafeRequestRecord>,
     records: Vec<SafeRequestRecord>,
     accept_thread: Option<thread::JoinHandle<TestResult<()>>>,
@@ -36,10 +37,12 @@ impl HeldLoopbackProvider {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let response_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let get_response_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let post_response_gate = Arc::new((Mutex::new(false), Condvar::new()));
         let (request_sender, request_receiver) = mpsc::channel();
         let thread_stop = Arc::clone(&stop);
-        let thread_gate = Arc::clone(&response_gate);
+        let thread_get_gate = Arc::clone(&get_response_gate);
+        let thread_post_gate = Arc::clone(&post_response_gate);
         let accept_thread = thread::spawn(move || {
             let mut handlers = Vec::new();
             while let Ok((stream, _peer)) = listener.accept() {
@@ -47,12 +50,19 @@ impl HeldLoopbackProvider {
                     break;
                 }
                 let handler_sender = request_sender.clone();
-                let handler_gate = Arc::clone(&thread_gate);
+                let handler_get_gate = Arc::clone(&thread_get_gate);
+                let handler_post_gate = Arc::clone(&thread_post_gate);
                 handlers.push(thread::spawn(move || {
-                    handle_provider_connection(stream, handler_sender, handler_gate)
+                    handle_provider_connection(
+                        stream,
+                        handler_sender,
+                        handler_get_gate,
+                        handler_post_gate,
+                    )
                 }));
             }
-            release_response_gate(&thread_gate)?;
+            release_response_gate(&thread_get_gate)?;
+            release_response_gate(&thread_post_gate)?;
             for handler in handlers {
                 handler.join().map_err(|_panic| {
                     std::io::Error::other("loopback connection handler panicked")
@@ -63,7 +73,8 @@ impl HeldLoopbackProvider {
         Ok(Self {
             address,
             stop,
-            response_gate,
+            get_response_gate,
+            post_response_gate,
             request_receiver,
             records: Vec::new(),
             accept_thread: Some(accept_thread),
@@ -88,6 +99,14 @@ impl HeldLoopbackProvider {
         Ok(&self.records)
     }
 
+    pub(super) fn release_get_responses(&self) -> TestResult<()> {
+        release_response_gate(&self.get_response_gate)
+    }
+
+    pub(super) fn release_post_response(&self) -> TestResult<()> {
+        release_response_gate(&self.post_response_gate)
+    }
+
     pub(super) fn finish(mut self) -> TestResult<Vec<SafeRequestRecord>> {
         self.shutdown()?;
         self.records.extend(self.request_receiver.try_iter());
@@ -99,7 +118,8 @@ impl HeldLoopbackProvider {
             return Ok(());
         }
         self.stop.store(true, Ordering::Release);
-        release_response_gate(&self.response_gate)?;
+        release_response_gate(&self.get_response_gate)?;
+        release_response_gate(&self.post_response_gate)?;
         let _ = TcpStream::connect(self.address);
         if let Some(accept_thread) = self.accept_thread.take() {
             accept_thread
@@ -128,13 +148,20 @@ fn release_response_gate(response_gate: &(Mutex<bool>, Condvar)) -> TestResult<(
 fn handle_provider_connection(
     mut stream: TcpStream,
     request_sender: mpsc::Sender<SafeRequestRecord>,
-    response_gate: Arc<(Mutex<bool>, Condvar)>,
+    get_response_gate: Arc<(Mutex<bool>, Condvar)>,
+    post_response_gate: Arc<(Mutex<bool>, Condvar)>,
 ) -> TestResult<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let request = read_bounded_request_head(&mut stream)?;
     let record = safe_request_record(&request);
+    let method = record.method.clone();
     let path = record.path.clone();
     request_sender.send(record)?;
+    let response_gate = if method == "POST" {
+        post_response_gate
+    } else {
+        get_response_gate
+    };
     let (gate, wake) = &*response_gate;
     let mut released = gate
         .lock()
@@ -145,7 +172,9 @@ fn handle_provider_connection(
             .map_err(|_poisoned| std::io::Error::other("response gate wait poisoned"))?;
     }
     drop(released);
-    let body = if path.ends_with("/usage") {
+    let body = if method == "POST" {
+        r#"{"code":"reset","windows_reset":2}"#
+    } else if path.ends_with("/usage") {
         r#"{"rate_limit":{"primary_window":{"used_percent":10,"reset_at":2000000000,"limit_window_seconds":18000},"secondary_window":{"used_percent":100,"reset_at":2000000000,"limit_window_seconds":604800}},"additional_rate_limits":[]}"#
     } else {
         r#"{"credits":[{"id":"pty-credit-earliest","status":"available","expires_at":"2030-01-01T00:00:00Z","title":"PTY weekly reset"}],"available_count":1}"#

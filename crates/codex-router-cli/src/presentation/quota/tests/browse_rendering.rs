@@ -265,6 +265,7 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
             account_id: test_account_id("ssdev"),
             account_tag: "test-tag".to_owned(),
             active_credential_generation: Some(1),
+            enabled: true,
             selected: true,
             account: "ssdev".to_owned(),
             status: "[usable]".to_owned(),

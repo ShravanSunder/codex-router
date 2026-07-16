@@ -33,21 +33,39 @@ pub(super) fn ensure(condition: bool, message: &'static str) -> TestResult<()> {
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(super) const ACCESS_TOKEN_CANARY: &str = "pty-access-token-canary";
+const REFRESH_TOKEN_CANARY: &str = "pty-refresh-token-canary";
+const FIXTURE_ROOT_MARKER_NAME: &str = ".codex-router-quota-reset-test-fixture";
+const FIXTURE_ROOT_MARKER_PREFIX: &str = "codex-router-quota-reset-test-fixture:v1:";
+pub(super) const FORBIDDEN_TERMINAL_CANARIES: &[&str] = &[
+    ACCESS_TOKEN_CANARY,
+    REFRESH_TOKEN_CANARY,
+    "authorization: bearer",
+    "chatgpt-account-id: routing-pty-alpha",
+    "chatgpt-account-id: routing-pty-beta",
+    "pty-credit-earliest",
+];
 
 pub(super) struct QuotaResetFixture {
     root: PathBuf,
+    capability: String,
     state_bytes_before: Vec<u8>,
     secret_manifest_before: BTreeMap<String, String>,
 }
 
 impl QuotaResetFixture {
     pub(super) async fn create() -> TestResult<Self> {
+        let sequence = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "codex-router-quota-reset-pty-{}-{}",
             std::process::id(),
-            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+            sequence
         ));
         fs::create_dir(&root)?;
+        let capability = format!("pty-fixture-{}-{sequence}", std::process::id());
+        fs::write(
+            root.join(FIXTURE_ROOT_MARKER_NAME),
+            format!("{FIXTURE_ROOT_MARKER_PREFIX}{capability}\n"),
+        )?;
         let state_path = root.join("state.sqlite");
         let state = AsyncSqliteStateStore::open(&state_path).await?;
         let now = current_unix_seconds();
@@ -82,6 +100,7 @@ impl QuotaResetFixture {
         let secret_manifest_before = recursive_manifest(&root.join("secrets"))?;
         Ok(Self {
             root,
+            capability,
             state_bytes_before,
             secret_manifest_before,
         })
@@ -89,6 +108,10 @@ impl QuotaResetFixture {
 
     pub(super) fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(super) fn capability(&self) -> &str {
+        &self.capability
     }
 
     pub(super) fn assert_read_only(&self) -> TestResult<()> {
@@ -120,7 +143,7 @@ fn write_fixture_credential(
 ) -> TestResult<()> {
     let bundle = AccountCredentialBundle::imported_codex_auth(
         ACCESS_TOKEN_CANARY,
-        Some("pty-refresh-token-canary".to_owned()),
+        Some(REFRESH_TOKEN_CANARY.to_owned()),
     )
     .with_expires_unix_seconds(current_unix_seconds().saturating_add(86_400))
     .with_chatgpt_account_id(routing_id)

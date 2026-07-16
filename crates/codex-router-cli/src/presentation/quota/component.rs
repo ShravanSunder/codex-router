@@ -3,11 +3,11 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use iocraft::prelude::*;
-use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::quota_reset::supervisor::ConfirmationSelection;
 use crate::quota_reset::supervisor::PinnedTargetInvalidationReason;
+use crate::quota_reset::supervisor::ResetIntentSender;
 use crate::quota_reset::supervisor::ResetSessionIntent;
 use crate::quota_reset::supervisor::ResetWorkflowSnapshot;
 use crate::quota_reset::supervisor::WorkflowPhase;
@@ -37,7 +37,7 @@ pub(super) struct QuotaStatusComponentProps {
     pub(super) reload_view_model: Option<QuotaStatusViewModelLoader>,
     pub(super) reload_interval: Duration,
     pub(super) spinner_interval: Duration,
-    pub(super) reset_intent_sender: Option<mpsc::Sender<ResetSessionIntent>>,
+    pub(super) reset_intent_sender: Option<ResetIntentSender>,
     pub(super) reset_snapshot_receiver: Option<watch::Receiver<ResetWorkflowSnapshot>>,
 }
 
@@ -138,40 +138,48 @@ pub(super) fn QuotaStatusComponent(
                         .is_some_and(ResetWorkflowSnapshot::yes_enabled);
                     match reset_key_action(phase, selection, yes_enabled, code, modifiers) {
                         ResetKeyAction::Cancel => {
-                            try_send_reset_intent(
+                            if try_send_reset_intent(
                                 reset_intent_sender.as_ref(),
                                 ResetSessionIntent::Cancel,
-                            );
-                            reset_target.set(None);
-                            inventory_page_start.set(0);
+                            ) {
+                                reset_target.set(None);
+                                inventory_page_start.set(0);
+                            }
                         }
                         ResetKeyAction::OpenConfirmation => {
-                            try_send_reset_intent(
+                            let _ = try_send_reset_intent(
                                 reset_intent_sender.as_ref(),
                                 ResetSessionIntent::OpenConfirmation,
                             );
                         }
-                        ResetKeyAction::SelectNo => try_send_reset_intent(
-                            reset_intent_sender.as_ref(),
-                            ResetSessionIntent::SelectNo,
-                        ),
-                        ResetKeyAction::SelectYes => try_send_reset_intent(
-                            reset_intent_sender.as_ref(),
-                            ResetSessionIntent::SelectYes,
-                        ),
-                        ResetKeyAction::Confirm => try_send_reset_intent(
-                            reset_intent_sender.as_ref(),
-                            ResetSessionIntent::Confirm {
-                                now_unix_seconds: current_unix_seconds(),
-                            },
-                        ),
+                        ResetKeyAction::SelectNo => {
+                            let _ = try_send_reset_intent(
+                                reset_intent_sender.as_ref(),
+                                ResetSessionIntent::SelectNo,
+                            );
+                        }
+                        ResetKeyAction::SelectYes => {
+                            let _ = try_send_reset_intent(
+                                reset_intent_sender.as_ref(),
+                                ResetSessionIntent::SelectYes,
+                            );
+                        }
+                        ResetKeyAction::Confirm => {
+                            let _ = try_send_reset_intent(
+                                reset_intent_sender.as_ref(),
+                                ResetSessionIntent::Confirm {
+                                    now_unix_seconds: current_unix_seconds(),
+                                },
+                            );
+                        }
                         ResetKeyAction::DismissResult => {
-                            try_send_reset_intent(
+                            if try_send_reset_intent(
                                 reset_intent_sender.as_ref(),
                                 ResetSessionIntent::DismissResult,
-                            );
-                            reset_target.set(None);
-                            inventory_page_start.set(0);
+                            ) {
+                                reset_target.set(None);
+                                inventory_page_start.set(0);
+                            }
                         }
                         ResetKeyAction::PreviousInventoryPage
                         | ResetKeyAction::NextInventoryPage => {
@@ -179,7 +187,22 @@ pub(super) fn QuotaStatusComponent(
                                 reset_key_action(phase, selection, yes_enabled, code, modifiers),
                                 ResetKeyAction::NextInventoryPage
                             );
-                            let page_size = reset_inventory_page_size(usize::from(terminal_height));
+                            let width = observed_width.get();
+                            let focused_index = focused_row_index_for_account(
+                                &rows_for_navigation,
+                                focused_account_id.read().as_ref(),
+                            );
+                            let sidecar = width >= SIDECAR_QUOTA_WIDTH;
+                            let layout = quota_body_layout(
+                                quota_body_budget(observed_height.get()),
+                                sidecar,
+                                !sidecar && width >= NARROW_QUOTA_WIDTH && focused_index.is_some(),
+                                row_count,
+                                focused_index,
+                                selected_detail_height(focused_index.is_some()),
+                            );
+                            let page_size =
+                                reset_inventory_page_size(layout.detail_viewport_height(sidecar));
                             inventory_page_start.set(credit_page_start(
                                 inventory_page_start.get(),
                                 current_reset_snapshot
@@ -190,11 +213,12 @@ pub(super) fn QuotaStatusComponent(
                             ));
                         }
                         ResetKeyAction::ExitPrecommit => {
-                            try_send_reset_intent(
+                            if try_send_reset_intent(
                                 reset_intent_sender.as_ref(),
                                 ResetSessionIntent::Shutdown,
-                            );
-                            should_exit.set(true);
+                            ) {
+                                should_exit.set(true);
+                            }
                         }
                         ResetKeyAction::None => {}
                     }
@@ -238,23 +262,27 @@ pub(super) fn QuotaStatusComponent(
                             && let Some(active_credential_generation) =
                                 row.active_credential_generation
                         {
-                            reset_target.set(Some(ResetPaneTarget {
+                            let target = ResetPaneTarget {
                                 account_id: row.account_id.clone(),
                                 active_credential_generation,
                                 account_label: row.account.clone(),
                                 account_tag: row.account_tag.clone(),
                                 saved_reset_credits: row.reset_credits.clone(),
                                 saved_weekly_window: row.weekly_window.clone(),
-                            }));
-                            inventory_page_start.set(0);
-                            try_send_reset_intent(
-                                reset_intent_sender.as_ref(),
-                                ResetSessionIntent::BeginInspection {
-                                    account_id: row.account_id.clone(),
-                                    active_credential_generation,
-                                    now_unix_seconds: current_unix_seconds(),
-                                },
-                            );
+                            };
+                            if row.enabled
+                                && try_send_reset_intent(
+                                    reset_intent_sender.as_ref(),
+                                    ResetSessionIntent::BeginInspection {
+                                        account_id: row.account_id.clone(),
+                                        active_credential_generation,
+                                        now_unix_seconds: current_unix_seconds(),
+                                    },
+                                )
+                            {
+                                reset_target.set(Some(target));
+                                inventory_page_start.set(0);
+                            }
                         }
                     }
                     KeyCode::Esc | KeyCode::Char('q') => should_exit.set(true),
@@ -378,8 +406,13 @@ pub(super) fn QuotaStatusComponent(
             .map_or(
                 Some(PinnedTargetInvalidationReason::AccountRemoved),
                 |row| {
-                    (row.active_credential_generation != Some(target.active_credential_generation))
+                    if !row.enabled {
+                        Some(PinnedTargetInvalidationReason::AccountDisabled)
+                    } else {
+                        (row.active_credential_generation
+                            != Some(target.active_credential_generation))
                         .then_some(PinnedTargetInvalidationReason::CredentialGenerationChanged)
+                    }
                 },
             );
         if let Some(reason) = invalidation {
@@ -394,52 +427,25 @@ pub(super) fn QuotaStatusComponent(
         }
     }
     let body_budget = quota_body_budget(height);
-    let reset_detail_active =
-        reset_mode(current_reset_snapshot.as_ref()) && current_reset_target.is_some();
-    let details_content_height = if reset_detail_active {
-        body_budget
-    } else {
-        selected_detail_height(focused_details.is_some())
-    };
+    let details_content_height = selected_detail_height(focused_details.is_some());
     let sidecar = width >= SIDECAR_QUOTA_WIDTH;
     let stacked_details = !sidecar
         && width >= NARROW_QUOTA_WIDTH
         && (focused_details.is_some() || props.view_model.selected.is_none());
-    let details_height = details_content_height.min(body_budget);
-    let list_budget = if sidecar {
-        body_budget
-    } else if stacked_details {
-        let minimum_list_height = if row_count == 0 {
-            quota_account_list_height(row_count, None, 0)
-        } else {
-            quota_account_list_height(row_count, focused_row_index_value, 1)
-        };
-        if minimum_list_height + details_content_height <= body_budget {
-            body_budget.saturating_sub(details_content_height)
-        } else {
-            minimum_list_height.min(body_budget)
-        }
-    } else {
-        body_budget
-    };
-    let visible_account_budget =
-        quota_visible_account_budget(row_count, focused_row_index_value, list_budget);
-    let list_height =
-        quota_account_list_height(row_count, focused_row_index_value, visible_account_budget)
-            .min(body_budget);
-    let stacked_details_height = if stacked_details {
-        body_budget.saturating_sub(list_height)
-    } else {
-        0
-    };
-    let show_stacked_details = stacked_details && stacked_details_height > 0;
-    let body_height = if sidecar {
-        list_height.max(details_height)
-    } else if show_stacked_details {
-        list_height + stacked_details_height
-    } else {
-        list_height
-    };
+    let layout = quota_body_layout(
+        body_budget,
+        sidecar,
+        stacked_details,
+        row_count,
+        focused_row_index_value,
+        details_content_height,
+    );
+    let details_height = layout.details_height;
+    let visible_account_budget = layout.visible_account_budget;
+    let list_height = layout.list_height;
+    let stacked_details_height = layout.stacked_details_height;
+    let show_stacked_details = layout.show_stacked_details;
+    let body_height = layout.body_height;
     let component_height = quota_status_height(height);
     let body = if sidecar {
         let list_width = (content_width.saturating_sub(2) * 3 / 5)
@@ -530,13 +536,11 @@ fn render_detail_panel(
     render_selected_panel(focused_details, width, height)
 }
 
-fn try_send_reset_intent(
-    sender: Option<&mpsc::Sender<ResetSessionIntent>>,
-    intent: ResetSessionIntent,
-) {
+fn try_send_reset_intent(sender: Option<&ResetIntentSender>, intent: ResetSessionIntent) -> bool {
     if let Some(sender) = sender {
-        let _ = sender.try_send(intent);
+        return sender.send_now(intent).is_ok();
     }
+    false
 }
 
 fn current_unix_seconds() -> u64 {

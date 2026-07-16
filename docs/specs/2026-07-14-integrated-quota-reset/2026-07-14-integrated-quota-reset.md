@@ -332,8 +332,12 @@ quota-refresh worker is not a `QuotaCommand` path; its runtime ownership and beh
 unchanged and unreachable from quota CLI dispatch.
 
 R23. All quota-command SQLite and provider operations are awaitable. Bounded blocking secret-store work
-uses `spawn_blocking`; no database connection, transaction, mutex, credential lease, or blocking
-task spans terminal confirmation or provider I/O. Account-authority reads open SQLite read-only and
+uses `spawn_blocking` through an explicit prepare/start/drain operation. Preparation performs the
+async SQLite read and reserves bounded capacity; the command supervisor starts and retains the
+blocking secret read outside abortable task sets. Cancellation invalidates the attempt but drains
+any started read before session cleanup and before its capacity permit is released. No database
+connection, transaction, mutex, credential lease, or blocking task spans terminal confirmation or
+provider I/O. Account-authority reads open SQLite read-only and
 query-only with `busy_timeout(0)`, request no write transaction or RESERVED/PENDING/EXCLUSIVE lock,
 and perform no busy-handler retry. If a coherent read transaction cannot begin immediately, they
 return a typed refusal. Each fresh transaction observes the latest committed state visible when it
@@ -343,6 +347,8 @@ forbidden against the live database.
 
 R24. Terminal input, resize, spinner, and persisted reload remain responsive during live requests.
 Cancelling pre-POST invalidates the attempt generation; late or out-of-order completions are ignored.
+The session intent port is lossless while connected, and the supervisor polls queued intents before
+ready effect completions so an accepted pre-POST Cancel cannot lose an arbitration race to commit.
 
 R24a. The reset detail pane renders a distinct, continuously visible activity row for each provider
 operation: inspection live-usage GET, inspection credit-inventory GET, revalidation live-usage GET,
@@ -364,6 +370,8 @@ changes, resize, component teardown, and ordinary cancel keys neither abort nor 
 supervisor awaits a known result, bounded-time unknown outcome, or forced process termination, then
 drops authentication and authority values without persistence. Forced process or terminal loss is
 outside application control and cannot create retry or `not consumed` claims.
+The composed session runner returns a typed lifecycle outcome. The quota command awaits it and maps
+an unexpected task panic/cancellation to command failure instead of discarding the join result.
 
 ## Technical contract
 
@@ -500,16 +508,24 @@ loopback listener. A test egress guard rejects every non-loopback destination. P
 constants and ambient home credentials are structurally unavailable to the automated workflow
 composition.
 
-The dedicated feature-gated PTY executable has its own sealed harness argument contract. It accepts
-only an explicit absolute isolated fixture root and the numeric `SocketAddr` of a listener that the
-parent test already bound and retains on a loopback address. It does not accept a URL, hostname,
-path, userinfo, query, fragment, environment override, or home-directory fallback. After validating
-those harness-only inputs, it synthesizes ordinary `codex-router quota --router-root <fixture>`
-arguments and passes them through the real CLI parser and composition-parameterized async quota
-dispatcher. The harness-only arguments and loopback factory are absent from the installed
-`codex-router` parser, main entry, and production reset factory, including all-feature builds. Both
-wrappers converge on the same status loader, async quota session, supervisor, reducer, presentation
-component, and iocraft render loop.
+The dedicated PTY executable lives in a separate non-publish workspace test package. The production
+`codex-router-cli` package has no harness binary/test target or PTY dependency; its all-feature
+install produces only `codex-router`. The CLI library retains only the feature-gated shared harness
+entry and sealed loopback composition seam used by the test package.
+
+The executable has its own sealed harness argument contract. It accepts only an explicit absolute
+fixture root, a per-run fixture capability matching a regular-file marker in that root, and the
+numeric `SocketAddr` of a listener that the parent test already bound and retains on a loopback
+address. Before state or secret factory construction, the isolation guard canonicalizes the root,
+requires it to be a strict child of the process temporary directory, verifies the capability
+marker, and therefore rejects home, default, debug, and ordinary unmarked roots. It does not accept
+a URL, hostname, userinfo, query, fragment, provider environment override, or home-directory
+fallback. After validating those harness-only inputs, it synthesizes ordinary
+`codex-router quota --router-root <fixture>` arguments and passes them through the real CLI parser
+and composition-parameterized async quota dispatcher. The harness-only arguments and loopback
+factory are absent from the installed `codex-router` parser, main entry, and production reset
+factory, including all-feature builds. Both wrappers converge on the same status loader, async quota
+session, supervisor, reducer, presentation component, and iocraft render loop.
 
 ## Security context
 
@@ -563,6 +579,9 @@ The implementation plan must operationalize these proof modalities without using
    success, provider no-reset outcomes, pre-POST failure, and outcome unknown at existing narrow/
    stacked/sidecar boundaries. Captures cover each of the five provider operations in flight and
    prove that state meaning does not rely on spinner animation or color.
+   Navigation and rendering consume one computed detail viewport height; paging visits every credit
+   exactly once without gaps or duplicates, and reset detail substitution preserves the ordinary
+   browse list/detail height partition at stacked and sidecar widths.
 4. Fake-provider ledgers proving inspection calls both GETs regardless of eligibility, every
    refusal/cancel/error before commit has zero POSTs, confirmed revalidation uses current account and
    exact credit, activity transitions follow request start/completion order, one logical
@@ -588,11 +607,17 @@ The implementation plan must operationalize these proof modalities without using
 8. Structural/cutover proof that the standalone picker/render loops are unreachable and
    `quota reset` guidance performs no state, credential, or network access. Import/dependency checks
    keep secrets/raw HTTP out of presentation and keep production-origin composition out of tests.
-9. A compiled-binary PTY smoke under the top-level runtime enters interactive quota from isolated
-   fixtures, focuses an account, sends `Ctrl-R`, observes live reset activity through loopback-only
-   composition, returns to browse with zero POST, exits cleanly, and proves terminal restoration.
+9. Compiled-binary PTY smoke under the top-level runtime enters interactive quota from isolated
+   fixtures and proves both terminal paths. The precommit path focuses an account, sends `Ctrl-R`,
+   observes live reset activity through loopback-only composition, and returns to browse with zero
+   POST. The committed path performs two inspection GETs, two independently observable revalidation
+   GETs, and exactly one consume POST; while the POST response is held, the command remains alive,
+   then renders a typed result and returns to browse. Both paths exit cleanly and prove terminal
+   restoration with no printable output after the final restoration sequence.
    It uses bounded event/protocol waits and fails on nested-runtime panic, output below the TUI,
-   duplicate render loops, ambient credential lookup, or non-loopback egress.
+   duplicate render loops, any fixture credential/protocol canary, ambient credential lookup, or
+   non-loopback egress. Injected failure proof bounds child termination/reaping, listener and handler
+   shutdown, port reuse, and fixture-root cleanup.
 10. A requirements/proof matrix in the implementation plan maps every R1–R25 obligation and each
     product/CLI/security contract to unit, component, integration, PTY smoke, structural, quality,
     and PR gates. Any not-applicable layer requires an explicit reason.

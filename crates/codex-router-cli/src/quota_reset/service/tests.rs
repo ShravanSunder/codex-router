@@ -46,8 +46,9 @@ struct FakeAuthorityReader {
 
 impl ResetAuthorityReader for FakeAuthorityReader {
     type Authority = FakeAuthority;
+    type PreparedRead = FakeAuthority;
 
-    async fn read_authority(
+    async fn prepare_authority_read(
         &self,
         _account_id: &AccountId,
         _expected_generation: ActiveCredentialGeneration,
@@ -58,6 +59,10 @@ impl ResetAuthorityReader for FakeAuthorityReader {
             .expect("reader lock")
             .pop_front()
             .expect("scripted authority")
+    }
+
+    fn start_authority_read(prepared: Self::PreparedRead) -> StartedAuthorityRead<Self::Authority> {
+        Box::pin(async move { Ok(prepared) })
     }
 }
 

@@ -96,6 +96,11 @@ pub(in crate::quota_reset) enum WorkflowIntent {
     CommitAuthorized {
         consume_operation_generation: OperationGeneration,
     },
+    RevalidationRefused {
+        live_usage_correlation: OperationCorrelation,
+        credit_inventory_correlation: OperationCorrelation,
+        failure: RenderSafeFailure,
+    },
     AuthorityLost(RenderSafeFailure),
     PinnedTargetInvalidated(RenderSafeFailure),
     Cancel,

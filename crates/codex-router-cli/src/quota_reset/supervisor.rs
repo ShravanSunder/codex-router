@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -19,7 +18,8 @@ use super::service::InspectionAuthority;
 use super::service::ResetAuthorityReader;
 use super::service::ResetServiceProvider;
 use super::service::ResetWorkflowService;
-use super::service::RevalidationReceipt;
+use super::service::RevalidationContext;
+use super::service::StartedAuthorityRead;
 use super::workflow::CorrelatedOutcome;
 use super::workflow::InspectionStart;
 use super::workflow::OperationCorrelation;
@@ -27,7 +27,9 @@ use super::workflow::ResetWorkflow;
 use super::workflow::WorkflowIntent;
 
 mod effects;
+mod inspection;
 mod protocol;
+mod revalidation;
 mod session_state;
 
 #[cfg(test)]
@@ -42,7 +44,9 @@ pub(crate) use super::workflow::WorkflowPhase;
 pub(crate) use super::workflow::WorkflowResult;
 use effects::GenerationAllocator;
 pub(in crate::quota_reset) use effects::ProductionRedeemRequestIdFactory;
+pub(in crate::quota_reset) use effects::ProductionResetClock;
 use effects::RedeemRequestIdFactory;
+use effects::ResetClock;
 use effects::SessionTaskOutput;
 #[cfg(test)]
 pub(crate) use protocol::LiveWeeklyDisplayFacts;
@@ -52,17 +56,30 @@ pub(crate) use protocol::PinnedTargetInvalidationReason;
 pub(crate) use protocol::ResetCreditDisplayRecord;
 pub(crate) use protocol::ResetCreditDisplayStatusDto;
 pub(crate) use protocol::ResetEligibilityDisabledReason;
+pub(crate) use protocol::ResetIntentSender;
 pub(crate) use protocol::ResetSessionIntent;
-pub(in crate::quota_reset) use protocol::ResetSessionOutcome;
+pub(crate) use protocol::ResetSessionOutcome;
 pub(crate) use protocol::ResetSessionPorts;
 pub(crate) use protocol::ResetValueProvenance;
 pub(crate) use protocol::ResetWorkflowSnapshot;
 
-const MINIMUM_PORT_CAPACITY: usize = 1;
-
 #[cfg(test)]
 pub(crate) fn test_live_usage_success(remaining_percent: u32) -> OperationSuccess {
     OperationSuccess::LiveUsage(LiveWeeklyUsage::new(remaining_percent))
+}
+
+struct PendingInspectionAuthorityRead<TAuthority: super::service::ResetAuthority> {
+    start: InspectionStart,
+    now_unix_seconds: u64,
+    operation: StartedAuthorityRead<TAuthority>,
+}
+
+struct PendingRevalidationAuthorityRead<TAuthority: super::service::ResetAuthority> {
+    usage_correlation: OperationCorrelation,
+    inventory_correlation: OperationCorrelation,
+    now_unix_seconds: u64,
+    confirmation: ConfirmationAuthority<TAuthority>,
+    operation: StartedAuthorityRead<TAuthority>,
 }
 
 /// Sole reducer, authority, and reset-effect task owner for one quota command.
@@ -77,15 +94,22 @@ pub(in crate::quota_reset) struct QuotaInteractiveSession<
 {
     service: Arc<ResetWorkflowService<TAuthorityReader, TProvider>>,
     redeem_request_id_factory: TRedeemRequestIdFactory,
+    clock: Arc<dyn ResetClock>,
     workflow: ResetWorkflow,
-    intent_receiver: mpsc::Receiver<ResetSessionIntent>,
+    intent_receiver: tokio::sync::mpsc::UnboundedReceiver<ResetSessionIntent>,
     snapshot_sender: watch::Sender<ResetWorkflowSnapshot>,
-    tasks: JoinSet<SessionTaskOutput<TAuthorityReader, TProvider>>,
+    tasks: JoinSet<SessionTaskOutput<TAuthorityReader>>,
+    inspection_authority_read: Option<PendingInspectionAuthorityRead<TAuthorityReader::Authority>>,
+    revalidation_authority_read:
+        Option<PendingRevalidationAuthorityRead<TAuthorityReader::Authority>>,
     generations: GenerationAllocator,
     inspection_authority: Option<InspectionAuthority<TAuthorityReader::Authority>>,
     confirmation_authority: Option<ConfirmationAuthority<TAuthorityReader::Authority>>,
     inspection_usage: Option<LiveWeeklyUsage>,
     inspection_inventory: Option<ValidatedCreditInventory>,
+    revalidation_context: Option<RevalidationContext<TAuthorityReader::Authority>>,
+    revalidation_usage: Option<(OperationCorrelation, LiveUsagePortResult)>,
+    revalidation_inventory: Option<(OperationCorrelation, CreditInventoryPortResult)>,
     current_target: Option<PinnedResetTarget>,
     invalidation_reason: Option<PinnedTargetInvalidationReason>,
     terminal_outcome: Option<WorkflowResult>,
@@ -102,10 +126,9 @@ where
     pub(in crate::quota_reset) fn new(
         service: ResetWorkflowService<TAuthorityReader, TProvider>,
         redeem_request_id_factory: TRedeemRequestIdFactory,
-        port_capacity: usize,
+        clock: Arc<dyn ResetClock>,
     ) -> (Self, ResetSessionPorts) {
-        let capacity = port_capacity.max(MINIMUM_PORT_CAPACITY);
-        let (intent_sender, intent_receiver) = mpsc::channel(capacity);
+        let (intent_sender, intent_receiver) = tokio::sync::mpsc::unbounded_channel();
         let initial_snapshot =
             ResetWorkflowSnapshot::from_workflow(&ResetWorkflow::default(), None, None);
         let (snapshot_sender, snapshot_receiver) = watch::channel(initial_snapshot);
@@ -113,22 +136,28 @@ where
             Self {
                 service: Arc::new(service),
                 redeem_request_id_factory,
+                clock,
                 workflow: ResetWorkflow::default(),
                 intent_receiver,
                 snapshot_sender,
                 tasks: JoinSet::new(),
+                inspection_authority_read: None,
+                revalidation_authority_read: None,
                 generations: GenerationAllocator::default(),
                 inspection_authority: None,
                 confirmation_authority: None,
                 inspection_usage: None,
                 inspection_inventory: None,
+                revalidation_context: None,
+                revalidation_usage: None,
+                revalidation_inventory: None,
                 current_target: None,
                 invalidation_reason: None,
                 terminal_outcome: None,
                 presentation_connected: true,
             },
             ResetSessionPorts {
-                intent_sender,
+                intent_sender: ResetIntentSender::new(intent_sender),
                 snapshot_receiver,
             },
         )
@@ -137,6 +166,7 @@ where
     pub(in crate::quota_reset) async fn run(mut self) -> ResetSessionOutcome {
         loop {
             tokio::select! {
+                biased;
                 intent = self.intent_receiver.recv(), if self.presentation_connected => {
                     let Some(intent) = intent else {
                         if self.workflow.phase() == WorkflowPhase::Committing {
@@ -157,6 +187,32 @@ where
                     if let Some(outcome) = self.apply_task_completion(completed).await {
                         return outcome;
                     }
+                }
+                authority = async {
+                    match self.inspection_authority_read.as_mut() {
+                        Some(pending) => (&mut pending.operation).await,
+                        None => std::future::pending::<Result<
+                            TAuthorityReader::Authority,
+                            RenderSafeFailure,
+                        >>()
+                        .await,
+                    }
+                }, if self.inspection_authority_read.is_some() => {
+                    self.finish_inspection_authority_read(authority);
+                    self.publish_snapshot();
+                }
+                authority = async {
+                    match self.revalidation_authority_read.as_mut() {
+                        Some(pending) => (&mut pending.operation).await,
+                        None => std::future::pending::<Result<
+                            TAuthorityReader::Authority,
+                            RenderSafeFailure,
+                        >>()
+                        .await,
+                    }
+                }, if self.revalidation_authority_read.is_some() => {
+                    self.finish_revalidation_authority_read(authority);
+                    self.publish_snapshot();
                 }
             }
         }
@@ -189,8 +245,8 @@ where
                 if requests.len() == 2 {
                     let service = Arc::clone(&self.service);
                     self.tasks.spawn(async move {
-                        let authority = service
-                            .resolve_inspection_authority(
+                        let prepared = service
+                            .prepare_authority_read(
                                 start.live_usage_correlation().account_id(),
                                 start
                                     .live_usage_correlation()
@@ -198,10 +254,10 @@ where
                                 now_unix_seconds,
                             )
                             .await;
-                        SessionTaskOutput::InspectionAuthorityResolved {
+                        SessionTaskOutput::InspectionAuthorityPrepared {
                             start,
                             now_unix_seconds,
-                            authority,
+                            prepared,
                         }
                     });
                 }
@@ -213,8 +269,8 @@ where
             ResetSessionIntent::SelectYes => {
                 self.workflow.reduce(WorkflowIntent::SelectYes);
             }
-            ResetSessionIntent::Confirm { now_unix_seconds } => {
-                self.begin_revalidation(now_unix_seconds);
+            ResetSessionIntent::Confirm { .. } => {
+                self.begin_revalidation();
             }
             ResetSessionIntent::Cancel if self.workflow.phase() != WorkflowPhase::Committing => {
                 self.cancel_precommit().await;
@@ -247,85 +303,9 @@ where
         None
     }
 
-    fn open_confirmation(&mut self) {
-        self.workflow.reduce(WorkflowIntent::OpenConfirmation);
-        if self.workflow.phase() != WorkflowPhase::Confirming {
-            return;
-        }
-        let Some(inspection_authority) = self.inspection_authority.take() else {
-            self.workflow.reduce(WorkflowIntent::AuthorityLost(
-                RenderSafeFailure::CredentialUnavailable,
-            ));
-            return;
-        };
-        let (Some(usage), Some(inventory)) =
-            (self.inspection_usage, self.inspection_inventory.as_ref())
-        else {
-            self.workflow.reduce(WorkflowIntent::AuthorityLost(
-                RenderSafeFailure::InvalidResponse,
-            ));
-            return;
-        };
-        let Some(attempt_generation) = self.current_attempt_generation() else {
-            self.workflow.reduce(WorkflowIntent::AuthorityLost(
-                RenderSafeFailure::InvalidResponse,
-            ));
-            return;
-        };
-        match ResetWorkflowService::<TAuthorityReader, TProvider>::bind_confirmation(
-            inspection_authority,
-            attempt_generation,
-            usage,
-            inventory,
-        ) {
-            Ok(authority) => self.confirmation_authority = Some(authority),
-            Err(failure) => {
-                self.workflow.reduce(WorkflowIntent::AuthorityLost(failure));
-            }
-        }
-    }
-
-    fn begin_revalidation(&mut self, now_unix_seconds: u64) {
-        let usage_generation = self.generations.allocate_operation();
-        let inventory_generation = self.generations.allocate_operation();
-        let requests = self.workflow.reduce(WorkflowIntent::Confirm {
-            live_usage_operation_generation: usage_generation,
-            credit_inventory_operation_generation: inventory_generation,
-        });
-        let [usage_request, inventory_request] = requests.as_slice() else {
-            return;
-        };
-        let Some(confirmation_authority) = self.confirmation_authority.take() else {
-            self.workflow.reduce(WorkflowIntent::AuthorityLost(
-                RenderSafeFailure::CredentialUnavailable,
-            ));
-            return;
-        };
-        let redeem_request_id = match self.redeem_request_id_factory.mint() {
-            Ok(identity) => identity,
-            Err(failure) => {
-                self.workflow.reduce(WorkflowIntent::AuthorityLost(failure));
-                return;
-            }
-        };
-        let usage_correlation = usage_request.correlation().clone();
-        let inventory_correlation = inventory_request.correlation().clone();
-        let service = Arc::clone(&self.service);
-        self.tasks.spawn(async move {
-            let receipt = service
-                .revalidate(confirmation_authority, now_unix_seconds, redeem_request_id)
-                .await;
-            SessionTaskOutput::RevalidationCompleted {
-                usage_correlation,
-                inventory_correlation,
-                receipt,
-            }
-        });
-    }
-
     async fn apply_task_completion(
         &mut self,
-        completed: Result<SessionTaskOutput<TAuthorityReader, TProvider>, tokio::task::JoinError>,
+        completed: Result<SessionTaskOutput<TAuthorityReader>, tokio::task::JoinError>,
     ) -> Option<ResetSessionOutcome> {
         let task_output = match completed {
             Ok(task_output) => task_output,
@@ -347,12 +327,12 @@ where
             }
         };
         match task_output {
-            SessionTaskOutput::InspectionAuthorityResolved {
+            SessionTaskOutput::InspectionAuthorityPrepared {
                 start,
                 now_unix_seconds,
-                authority,
+                prepared,
             } => {
-                self.handle_inspection_authority(start, now_unix_seconds, authority);
+                self.start_inspection_authority_read(start, now_unix_seconds, prepared);
             }
             SessionTaskOutput::InspectionUsageCompleted {
                 correlation,
@@ -394,11 +374,55 @@ where
                     }
                 }
             }
-            SessionTaskOutput::RevalidationCompleted {
+            SessionTaskOutput::RevalidationAuthorityPrepared {
                 usage_correlation,
                 inventory_correlation,
-                receipt,
-            } => self.finish_revalidation(usage_correlation, inventory_correlation, receipt),
+                now_unix_seconds,
+                confirmation,
+                prepared,
+            } => self.start_revalidation_authority_read(
+                usage_correlation,
+                inventory_correlation,
+                now_unix_seconds,
+                confirmation,
+                prepared,
+            ),
+            SessionTaskOutput::RevalidationUsageCompleted {
+                correlation,
+                terminal,
+            } => {
+                if self.workflow.phase() != WorkflowPhase::Revalidating
+                    || !self.correlation_is_current(&correlation)
+                {
+                    return None;
+                }
+                self.workflow.reduce(WorkflowIntent::OperationCompleted(
+                    CorrelatedOutcome::revalidation_live_usage(
+                        correlation.clone(),
+                        terminal.clone(),
+                    ),
+                ));
+                self.revalidation_usage = Some((correlation, terminal));
+                self.finish_revalidation_if_ready();
+            }
+            SessionTaskOutput::RevalidationInventoryCompleted {
+                correlation,
+                terminal,
+            } => {
+                if self.workflow.phase() != WorkflowPhase::Revalidating
+                    || !self.correlation_is_current(&correlation)
+                {
+                    return None;
+                }
+                self.workflow.reduce(WorkflowIntent::OperationCompleted(
+                    CorrelatedOutcome::revalidation_credit_inventory(
+                        correlation.clone(),
+                        terminal.clone(),
+                    ),
+                ));
+                self.revalidation_inventory = Some((correlation, terminal));
+                self.finish_revalidation_if_ready();
+            }
             SessionTaskOutput::ConsumeCompleted {
                 correlation,
                 terminal,
@@ -423,119 +447,6 @@ where
         None
     }
 
-    fn handle_inspection_authority(
-        &mut self,
-        start: InspectionStart,
-        now_unix_seconds: u64,
-        authority: Result<InspectionAuthority<TAuthorityReader::Authority>, RenderSafeFailure>,
-    ) {
-        if self.workflow.phase() != WorkflowPhase::Inspecting {
-            return;
-        }
-        let authority = match authority {
-            Ok(authority) => authority,
-            Err(failure) => {
-                self.workflow.reduce(WorkflowIntent::AuthorityLost(failure));
-                self.workflow.reduce(WorkflowIntent::OperationCompleted(
-                    CorrelatedOutcome::inspection_live_usage(
-                        start.live_usage_correlation(),
-                        LiveUsagePortResult::Failed(failure),
-                    ),
-                ));
-                self.workflow.reduce(WorkflowIntent::OperationCompleted(
-                    CorrelatedOutcome::inspection_credit_inventory(
-                        start.credit_inventory_correlation(),
-                        CreditInventoryPortResult::Failed(failure),
-                    ),
-                ));
-                return;
-            }
-        };
-        self.inspection_authority = Some(authority.clone());
-        let usage_service = Arc::clone(&self.service);
-        let usage_authority = authority.clone();
-        let usage_correlation = start.live_usage_correlation();
-        self.tasks.spawn(async move {
-            let terminal = usage_service.inspect_usage(usage_authority).await;
-            SessionTaskOutput::InspectionUsageCompleted {
-                correlation: usage_correlation,
-                terminal,
-            }
-        });
-        let inventory_service = Arc::clone(&self.service);
-        let inventory_correlation = start.credit_inventory_correlation();
-        self.tasks.spawn(async move {
-            let terminal = match i64::try_from(now_unix_seconds) {
-                Ok(now_unix_seconds) => {
-                    inventory_service
-                        .inspect_inventory(authority, now_unix_seconds)
-                        .await
-                }
-                Err(_) => CreditInventoryPortResult::Failed(RenderSafeFailure::InvalidResponse),
-            };
-            SessionTaskOutput::InspectionInventoryCompleted {
-                correlation: inventory_correlation,
-                terminal,
-            }
-        });
-    }
-
-    fn finish_revalidation(
-        &mut self,
-        usage_correlation: OperationCorrelation,
-        inventory_correlation: OperationCorrelation,
-        receipt: RevalidationReceipt<TAuthorityReader::Authority, TProvider::PreparedConsume>,
-    ) {
-        if self.workflow.phase() != WorkflowPhase::Revalidating {
-            return;
-        }
-        let RevalidationReceipt {
-            live_usage,
-            credit_inventory,
-            authorization,
-        } = receipt;
-        let refusal = authorization.as_ref().err().copied();
-        let usage = live_usage.unwrap_or_else(|| {
-            LiveUsagePortResult::Failed(refusal.unwrap_or(RenderSafeFailure::InvalidResponse))
-        });
-        let inventory = credit_inventory.unwrap_or_else(|| {
-            CreditInventoryPortResult::Failed(refusal.unwrap_or(RenderSafeFailure::InvalidResponse))
-        });
-        if let LiveUsagePortResult::Known(fresh_usage) = &usage {
-            self.inspection_usage = Some(*fresh_usage);
-        }
-        if let CreditInventoryPortResult::Validated(fresh_inventory) = &inventory {
-            self.inspection_inventory = Some(fresh_inventory.clone());
-        }
-        self.workflow.reduce(WorkflowIntent::OperationCompleted(
-            CorrelatedOutcome::revalidation_live_usage(usage_correlation, usage),
-        ));
-        self.workflow.reduce(WorkflowIntent::OperationCompleted(
-            CorrelatedOutcome::revalidation_credit_inventory(inventory_correlation, inventory),
-        ));
-        let Ok(capability) = authorization else {
-            return;
-        };
-        let consume_generation = self.generations.allocate_operation();
-        let requests = self.workflow.reduce(WorkflowIntent::CommitAuthorized {
-            consume_operation_generation: consume_generation,
-        });
-        let Some(correlation) = requests
-            .first()
-            .map(|request| request.correlation().clone())
-        else {
-            return;
-        };
-        let service = Arc::clone(&self.service);
-        self.tasks.spawn(async move {
-            let terminal = service.consume(capability).await;
-            SessionTaskOutput::ConsumeCompleted {
-                correlation,
-                terminal,
-            }
-        });
-    }
-
     async fn cancel_precommit(&mut self) {
         self.workflow.reduce(WorkflowIntent::Cancel);
         self.generations.allocate_attempt();
@@ -545,6 +456,9 @@ where
         self.confirmation_authority = None;
         self.inspection_usage = None;
         self.inspection_inventory = None;
+        self.revalidation_context = None;
+        self.revalidation_usage = None;
+        self.revalidation_inventory = None;
         self.invalidation_reason = None;
         self.terminal_outcome = None;
         self.publish_snapshot();
@@ -553,6 +467,9 @@ where
     async fn invalidate_pinned_target(&mut self, reason: PinnedTargetInvalidationReason) {
         let failure = match reason {
             PinnedTargetInvalidationReason::AccountRemoved => RenderSafeFailure::AccountUnavailable,
+            PinnedTargetInvalidationReason::AccountDisabled => {
+                RenderSafeFailure::AccountUnavailable
+            }
             PinnedTargetInvalidationReason::CredentialGenerationChanged => {
                 RenderSafeFailure::CredentialGenerationChanged
             }
@@ -563,6 +480,9 @@ where
         self.confirmation_authority = None;
         self.inspection_usage = None;
         self.inspection_inventory = None;
+        self.revalidation_context = None;
+        self.revalidation_usage = None;
+        self.revalidation_inventory = None;
         self.invalidation_reason = Some(reason);
         self.terminal_outcome = None;
         self.workflow
@@ -581,6 +501,12 @@ where
 
     async fn reap_all_tasks(&mut self) {
         while self.tasks.join_next().await.is_some() {}
+        if let Some(mut pending) = self.inspection_authority_read.take() {
+            let _ = (&mut pending.operation).await;
+        }
+        if let Some(mut pending) = self.revalidation_authority_read.take() {
+            let _ = (&mut pending.operation).await;
+        }
     }
 }
 

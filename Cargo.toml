@@ -4,6 +4,7 @@ members = [
     "crates/codex-router-auth",
     "crates/codex-router-cli",
     "crates/codex-router-core",
+    "crates/codex-router-quota-reset-test-harness",
     "crates/codex-router-proxy",
     "crates/codex-router-quota",
     "crates/codex-router-secret-store",

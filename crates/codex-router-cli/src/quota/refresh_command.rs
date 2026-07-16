@@ -9,11 +9,12 @@ pub(super) async fn refresh_quota(
         return Err(QuotaCommandError::DisallowedBaseUrl { base_url });
     }
 
-    let resolver = CliCredentialResolver::open(
+    let resolver = crate::credential_runtime::AsyncCliCredentialResolver::open(
         &router_root.join("state.sqlite"),
         &router_root.join("secrets"),
         0,
-    )?;
+    )
+    .await?;
     refresh_quota_with_dependencies(
         stdout,
         router_root,

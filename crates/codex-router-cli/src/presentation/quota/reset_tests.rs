@@ -114,6 +114,49 @@ async fn disabled_yes_cannot_receive_focus_and_enter_cancels_from_default_no() {
 }
 
 #[tokio::test]
+async fn precommit_cancel_is_not_lost_behind_queued_intents() {
+    let snapshot = test_snapshot(WorkflowPhase::Confirming);
+    let (ports, mut intent_receiver, _snapshot_sender) = ResetSessionPorts::test_channels(snapshot);
+    for _ in 0..16 {
+        ports
+            .intent_sender
+            .send_now(ResetSessionIntent::SelectNo)
+            .expect("test queue should accept queued intents");
+    }
+    let events = vec![
+        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+        TerminalEvent::Key(control_key('c')),
+    ];
+
+    let _frames = element! {
+        QuotaStatusComponent(
+            view_model: quota_two_account_view_model(),
+            width: 120usize,
+            height: 48usize,
+            reset_intent_sender: Some(ports.intent_sender),
+            reset_snapshot_receiver: Some(ports.snapshot_receiver),
+        )
+    }
+    .mock_terminal_render_loop(MockTerminalConfig::with_events(
+        futures_util::stream::iter(events).then(|event| async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            event
+        }),
+    ))
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut observed_cancel = false;
+    while let Ok(intent) = intent_receiver.try_recv() {
+        observed_cancel |= intent == ResetSessionIntent::Cancel;
+    }
+    assert!(
+        observed_cancel,
+        "visible Esc must never be dropped by backpressure"
+    );
+}
+
+#[tokio::test]
 async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
     for width in [159usize, 160] {
         let browse_snapshot = test_snapshot(WorkflowPhase::Browse);
@@ -233,6 +276,43 @@ fn inventory_paging_is_bounded_and_deterministic() {
     assert_eq!(super::reset_model::credit_page_start(4, 9, 4, true), 8);
     assert_eq!(super::reset_model::credit_page_start(8, 9, 4, true), 8);
     assert_eq!(super::reset_model::credit_page_start(8, 9, 4, false), 4);
+}
+
+#[test]
+fn shared_detail_viewport_pages_every_credit_once_without_corrupting_stacked_geometry() {
+    // Arrange
+    let body_budget = super::layout::quota_body_budget(24);
+    let stacked_layout = super::layout::quota_body_layout(
+        body_budget,
+        false,
+        true,
+        2,
+        Some(0),
+        super::layout::selected_detail_height(true),
+    );
+    let detail_height = stacked_layout.detail_viewport_height(false);
+    let page_size = super::reset_model::reset_inventory_page_size(detail_height);
+
+    // Act
+    let mut page_start = 0usize;
+    let mut visited = Vec::new();
+    loop {
+        visited.extend(page_start..page_start.saturating_add(page_size).min(9));
+        let next = super::reset_model::credit_page_start(page_start, 9, page_size, true);
+        if next == page_start {
+            break;
+        }
+        page_start = next;
+    }
+
+    // Assert
+    assert_eq!(visited, (0..9).collect::<Vec<_>>());
+    assert!(stacked_layout.list_height > 0);
+    assert!(stacked_layout.show_stacked_details);
+    assert_eq!(
+        stacked_layout.list_height + stacked_layout.stacked_details_height,
+        body_budget
+    );
 }
 
 #[test]

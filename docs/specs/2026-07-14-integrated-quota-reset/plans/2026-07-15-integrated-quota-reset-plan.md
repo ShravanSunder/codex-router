@@ -95,6 +95,8 @@ quota_reset/
   provider.rs   fixed production HTTP and test-only loopback transport
   service.rs    effect execution, revalidation, single-use capability
   supervisor.rs command-level task ownership and result reduction
+  supervisor/inspection.rs inspection authority and independent initial reads
+  supervisor/revalidation.rs fresh-fact arbitration and commit authorization
   supervisor/effects.rs task outputs, generation allocation, redeem identity minting
   supervisor/protocol.rs render-safe intents, snapshots, and pinned-target protocol
   supervisor/session_state.rs session bookkeeping and snapshot projection
@@ -198,24 +200,27 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
    The adoption ledger is parent-owned and must distinguish inherited worker reports from current
    parent verification. No current diff is accepted merely because it compiles.
 4. Freeze the hermetic harness contract before feature work:
-   - Cargo feature: `quota-reset-test-harness`.
-   - Dedicated binary: `codex-router-quota-reset-test-harness` at
-     `crates/codex-router-cli/src/bin/quota_reset_test_harness.rs`, with
-     `required-features = ["quota-reset-test-harness"]`.
-   - Integration test: `crates/codex-router-cli/tests/quota_reset_pty.rs`, declared as a Cargo test
-     target with `required-features = ["quota-reset-test-harness"]` so default workspace proof
-     cannot run it against a stale or absent harness executable.
+   - The production CLI library keeps the Cargo feature `quota-reset-test-harness` solely as the
+     shared library/composition seam. `crates/codex-router-cli` has no harness binary/test target or
+     `portable-pty` dependency, and `cargo install --path crates/codex-router-cli --all-features`
+     installs only `codex-router`.
+   - Dedicated binary: `codex-router-quota-reset-test-harness` in the explicit `publish = false`
+     workspace package `crates/codex-router-quota-reset-test-harness`.
+   - Integration test:
+     `crates/codex-router-quota-reset-test-harness/tests/quota_reset_pty.rs`; the PTY dependency and
+     compiled executable are owned only by this test package.
    - Shared entry: a composition-parameterized internal quota-command dispatcher used by production
-     and harness wrappers. The feature-only harness parser validates an absolute fixture root and a
-     numeric loopback `SocketAddr`, then synthesizes ordinary `codex-router quota --router-root`
-     arguments for the real `CliCommand` parser. Generic sealed composition types may compile with the package feature;
-     the installed `codex-router` main and production factory must have no reference or runtime route
-     to loopback construction. Production behavior always constructs the zero-argument fixed reset
-     provider. The harness wrapper can construct only a loopback transport plus isolated roots.
-   - Compile-only red/green spike proves default `codex-router` builds, the harness is unavailable
-     without its feature, the harness builds with it, and default/all-feature dependency graphs keep
-     loopback unreachable from installed parser/production factory. No provider or credential is
-     accessed in this spike.
+     and harness wrappers. The feature-only harness parser validates a canonical temp-child fixture
+     root plus its matching per-run marker capability and a numeric loopback `SocketAddr`, then
+     synthesizes ordinary `codex-router quota --router-root` arguments for the real `CliCommand`
+     parser. Generic sealed composition types may compile with the CLI library feature; the installed
+     `codex-router` main and production factory must have no reference or runtime route to loopback
+     construction. Production behavior always constructs the zero-argument fixed reset provider.
+     The harness wrapper can construct only a loopback transport plus an authorized isolated root.
+   - Compile/install red/green proof shows default and all-feature `codex-router` build, the
+     all-feature production package installs only `codex-router`, the separate non-publish harness
+     package builds, and both default/all-feature production target graphs keep loopback unreachable
+     from the installed parser/factory. No provider or credential is accessed in this spike.
 5. Add deterministic normalized browse baselines before changing presentation behavior:
    narrow/48, representative 100x24, 159 stacked, 160 sidecar, clipped short height, resize, empty,
    error, and ordinary exit. Extend fixtures until every case exists; inability to produce one stops
@@ -401,7 +406,10 @@ Behavior:
   committed state visible when it begins. Normal SQLite WAL/SHM reader coordination is allowed;
   immutable/nolock modes are forbidden against the live database.
 - Load exact generation secret through bounded `spawn_blocking` and non-creating read-only secret
-  store; no refresh, repair, write, or persistent lease.
+  store through a prepare/start/drain contract; no refresh, repair, write, or persistent lease.
+  The supervisor starts and retains each blocking operation outside abortable task sets. Cancellation
+  drains a started operation before cleanup and keeps its semaphore permit for the real blocking
+  lifetime.
 - Build an opaque domain-separated/length-framed in-memory provider-effective binding over account,
   generation, token bytes, exact ChatGPT routing ID, and credential expiry.
 - Revalidation can compare the full confirmation fingerprint without exposing fingerprint/auth to
@@ -488,10 +496,15 @@ Behavior:
 - Implement the `QuotaInteractiveSession` protocol frozen above: it owns the sole reducer, interprets
   effects, owns task handles and authority, receives intents, and publishes redacted snapshots.
 - Read-only/precommit handles are cancellable and invalidated on mode teardown.
+- The intent channel is lossless while connected. The supervisor uses deterministic intent-first
+  selection so an already-accepted Cancel/Shutdown cannot lose to a simultaneously ready
+  revalidation completion before the POST boundary.
 - Once a capability is consumed, ownership transfers to the supervisor; resize, mode changes,
   component teardown, and ordinary cancel keys neither abort nor detach it.
 - Await a typed known result or bounded unknown outcome, reduce only correlated results, then drop
   auth/fingerprint/full IDs without persistence.
+- Preserve the typed session lifecycle outcome through composition and inspect the task join result;
+  an unexpected supervisor panic/cancellation is a command error, never silent success.
 - No DB connection, transaction, mutex, credential lease, or blocking task spans terminal
   confirmation or provider IO.
 
@@ -541,6 +554,9 @@ browse-reset-browse frames. Browse differential must remain green before proceed
 - Render current/previous/saved provenance and count disagreement without confusing authority.
 - Render complete validated inventory, earliest highlight, finite/non-expiring expiry, PgUp/PgDn
   range/remaining count, and no silent clipping.
+- Derive one detail viewport from the ordinary quota shell layout and use it for both paging and
+  rendering. Reset detail replaces selected-detail content only; it never receives the whole body
+  budget or changes the stacked account-list geometry.
 - Implement inspected Enter, default No, disabled Yes non-focus/revert-to-No, explicit enabled Yes,
   revalidating, committing, known results, refusal, and outcome unknown.
 - Every result/refusal/unknown state states that persisted browse data may remain stale until normal
@@ -603,8 +619,9 @@ Source: Proof expectations 6, 8, and 9; R1–R4, R22, R24–R25.
 
 Do not add a loopback override to the installed `codex-router` CLI. Complete the Gate-0 scaffold and
 implement its contract:
-feature `quota-reset-test-harness`, binary `codex-router-quota-reset-test-harness`, and integration
-test `quota_reset_pty`. The harness calls the same composition-parameterized async interactive quota
+CLI-library feature `quota-reset-test-harness`, non-publish test package
+`codex-router-quota-reset-test-harness`, its same-named binary, and integration test
+`quota_reset_pty`. The harness calls the same composition-parameterized async interactive quota
 dispatcher, session, reducer, supervisor, presentation component, and iocraft entry while receiving
 an already-bound loopback transport and isolated roots through a sealed test composition. Generic
 composition types may compile in an all-feature library build, but
@@ -613,10 +630,13 @@ environment path, or runtime route to loopback construction. Architecture/call-g
 unreachability in default and all-feature target graphs.
 
 The dedicated harness binary owns a small parser separate from the installed CLI parser. Its only
-authority-bearing inputs are an explicit absolute isolated fixture root and the numeric
+authority-bearing inputs are an explicit absolute isolated fixture root, a per-run capability
+matching a regular-file marker inside that root, and the numeric
 `SocketAddr` of the listener already bound and retained by the parent test on `127.0.0.1:0` or
-`[::1]:0`. It rejects missing, relative, non-loopback, and port-zero inputs before opening state or
-credentials. It never consults environment for roots or provider routing. After validation it
+`[::1]:0`. A canonical isolation guard requires the marked root to be a strict child of the process
+temporary directory, rejecting home, default, debug, ordinary unmarked, missing, relative,
+non-loopback, and port-zero inputs before state/secret factory construction. It never consults
+ambient home/router/provider configuration. After validation it
 synthesizes ordinary `codex-router quota --router-root <fixture>` arguments and sends them through
 the real `CliCommand` parser and one composition-parameterized async quota dispatcher. The harness
 supplies the loopback factory while the installed wrapper supplies the zero-argument fixed factory.
@@ -645,6 +665,11 @@ Inject timeout, semantic-wait failure, early listener failure, and assertion/ear
 Each cleanup test proves bounded child termination and wait/reap, listener closure and port reuse,
 task abort/join, temporary-root cleanup, and no leaked canary output.
 
+The committed-POST PTY path observes exactly four GETs and one POST, keeps the child alive while the
+POST response is held, releases to a known or unknown result, and proves the same bounded cleanup,
+terminal-tail, and canary guarantees as the precommit path. The precommit cancellation smoke is not
+a substitute for committed-path proof.
+
 The red phase proves the PTY harness boots and then fails because integrated Ctrl-R behavior is
 absent. Green proof uses these literal commands:
 
@@ -652,15 +677,19 @@ absent. Green proof uses these literal commands:
 cargo metadata --no-deps --format-version 1
 cargo build -p codex-router-cli --bin codex-router
 cargo build -p codex-router-cli --all-features --bin codex-router
-cargo build -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness
-cargo clippy -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness --test quota_reset_pty -- -D warnings
-cargo nextest run -p codex-router-cli --features quota-reset-test-harness --test quota_reset_pty
+install_root="$(mktemp -d /tmp/codex-router-cli-all-features.XXXXXX)"
+cargo install --path crates/codex-router-cli --all-features --root "${install_root}"
+test -x "${install_root}/bin/codex-router" && test "$(find "${install_root}/bin" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "1"
+cargo build -p codex-router-quota-reset-test-harness --bin codex-router-quota-reset-test-harness
+cargo clippy -p codex-router-quota-reset-test-harness --all-targets -- -D warnings
+cargo nextest run -p codex-router-quota-reset-test-harness
 ```
 
-The parent owns `crates/codex-router-cli/Cargo.toml`, `Cargo.lock`, and `.github/workflows/ci.yml` for
-this integration. Add a named CI step that executes the feature-specific build, clippy, and nextest
-commands above; actionlint and final-SHA GitHub logs must prove the step ran. Default workspace CI
-remaining green does not satisfy the PTY gate. Shell static smoke is not a substitute.
+The parent owns the workspace/package manifests, `Cargo.lock`, and `.github/workflows/ci.yml` for
+this integration. Add a named CI step that executes the isolated production install proof and the
+dedicated-package build, clippy, and nextest commands above; actionlint and final-SHA GitHub logs
+must prove the step ran. Default workspace CI remaining green does not satisfy the PTY gate. Shell
+static smoke is not a substitute.
 
 Split trigger: if test-only loopback selection becomes reachable from the installed binary or the
 harness requires ambient home/provider state, stop and rework composition; do not weaken the gate.
@@ -734,8 +763,9 @@ authoritative gate selectors are fixed here:
    replace only the filter with the recorded permanent test name. The expected red reason is
    captured before code.
 2. Targeted CLI package: `cargo nextest run -p codex-router-cli`.
-3. Harness metadata/build/clippy/test: the five literal Slice 7b commands, including
-   `cargo nextest run -p codex-router-cli --features quota-reset-test-harness --test quota_reset_pty`.
+3. Harness metadata/install/build/clippy/test: the literal Slice 7b commands, including the isolated
+   all-feature CLI install/count assertion and
+   `cargo nextest run -p codex-router-quota-reset-test-harness`.
 4. Format: `cargo fmt --all -- --check`.
 5. Clippy: `cargo clippy --workspace --all-targets -- -D warnings` plus the literal harness clippy.
 6. Full tests: `cargo nextest run --workspace` plus the literal harness nextest command.

@@ -120,6 +120,81 @@ pub(super) fn selected_detail_height(has_selected_details: bool) -> usize {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct QuotaBodyLayout {
+    pub(super) details_height: usize,
+    pub(super) visible_account_budget: usize,
+    pub(super) list_height: usize,
+    pub(super) stacked_details_height: usize,
+    pub(super) show_stacked_details: bool,
+    pub(super) body_height: usize,
+}
+
+impl QuotaBodyLayout {
+    pub(super) const fn detail_viewport_height(self, sidecar: bool) -> usize {
+        if sidecar {
+            self.details_height
+        } else if self.show_stacked_details {
+            self.stacked_details_height
+        } else {
+            0
+        }
+    }
+}
+
+pub(super) fn quota_body_layout(
+    body_budget: usize,
+    sidecar: bool,
+    stacked_details: bool,
+    row_count: usize,
+    focused_row_index: Option<usize>,
+    details_content_height: usize,
+) -> QuotaBodyLayout {
+    let details_height = details_content_height.min(body_budget);
+    let list_budget = if sidecar {
+        body_budget
+    } else if stacked_details {
+        let minimum_list_height = if row_count == 0 {
+            quota_account_list_height(row_count, None, 0)
+        } else {
+            quota_account_list_height(row_count, focused_row_index, 1)
+        };
+        if minimum_list_height + details_content_height <= body_budget {
+            body_budget.saturating_sub(details_content_height)
+        } else {
+            minimum_list_height.min(body_budget)
+        }
+    } else {
+        body_budget
+    };
+    let visible_account_budget =
+        quota_visible_account_budget(row_count, focused_row_index, list_budget);
+    let list_height =
+        quota_account_list_height(row_count, focused_row_index, visible_account_budget)
+            .min(body_budget);
+    let stacked_details_height = if stacked_details {
+        body_budget.saturating_sub(list_height)
+    } else {
+        0
+    };
+    let show_stacked_details = stacked_details && stacked_details_height > 0;
+    let body_height = if sidecar {
+        list_height.max(details_height)
+    } else if show_stacked_details {
+        list_height + stacked_details_height
+    } else {
+        list_height
+    };
+    QuotaBodyLayout {
+        details_height,
+        visible_account_budget,
+        list_height,
+        stacked_details_height,
+        show_stacked_details,
+        body_height,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum QuotaFocusMove {
     Previous,
     Next,
