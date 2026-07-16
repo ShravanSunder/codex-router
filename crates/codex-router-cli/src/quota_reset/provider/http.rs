@@ -9,7 +9,6 @@ use serde::Serialize;
 
 use super::ConsumeResetCreditResponse;
 use super::HttpLiveQuotaResetProvider;
-use super::LiveQuotaResetProvider;
 use super::LiveResetAccountAuth;
 use super::LiveResetCredit;
 use super::PreparedConsumeRequest;
@@ -87,7 +86,7 @@ impl HttpLiveQuotaResetProvider {
     ) -> Result<Vec<u8>, QuotaResetError> {
         let status = response.status();
         if !status.is_success() {
-            return Err(QuotaResetError::ProviderStatus {
+            return Err(QuotaResetError::Status {
                 status: status.as_u16(),
             });
         }
@@ -165,10 +164,10 @@ impl HttpLiveQuotaResetProvider {
         };
         let body = match Self::successful_response_body(response).await {
             Ok(body) => body,
-            Err(QuotaResetError::ProviderStatus { .. }) => {
+            Err(QuotaResetError::Status { .. }) => {
                 return ConsumePortResult::OutcomeUnknown(ConsumeUnknownReason::ProviderStatus);
             }
-            Err(QuotaResetError::ProviderRequest { .. }) => {
+            Err(QuotaResetError::Request { .. }) => {
                 return ConsumePortResult::OutcomeUnknown(ConsumeUnknownReason::Transport);
             }
             Err(_) => {
@@ -198,8 +197,8 @@ impl HttpLiveQuotaResetProvider {
     }
 }
 
-impl LiveQuotaResetProvider for HttpLiveQuotaResetProvider {
-    async fn fetch_weekly_remaining_percent(
+impl HttpLiveQuotaResetProvider {
+    pub(in crate::quota_reset) async fn fetch_weekly_remaining_percent(
         &self,
         auth: &LiveResetAccountAuth,
     ) -> Result<Option<u32>, QuotaResetError> {
@@ -220,7 +219,7 @@ impl LiveQuotaResetProvider for HttpLiveQuotaResetProvider {
             .transpose()
     }
 
-    async fn fetch_reset_credits(
+    pub(in crate::quota_reset) async fn fetch_reset_credits(
         &self,
         auth: &LiveResetAccountAuth,
     ) -> Result<Vec<LiveResetCredit>, QuotaResetError> {
@@ -228,44 +227,6 @@ impl LiveQuotaResetProvider for HttpLiveQuotaResetProvider {
             self.authenticated_request(self.client.get(reset_credits_url(&self.base_url)), auth);
         let body = Self::successful_body(request).await?;
         reset_credits_from_response_body(&body)
-    }
-
-    async fn consume_reset_credit(
-        &self,
-        auth: &LiveResetAccountAuth,
-        credit_id: &str,
-        redeem_request_id: &str,
-    ) -> Result<ConsumeResetCreditResponse, QuotaResetError> {
-        let prepared = self.prepare_consume_reset_credit(auth, credit_id, redeem_request_id)?;
-        match self.invoke_prepared_consume(prepared).await {
-            ConsumePortResult::Known(KnownConsumeOutcome::Reset { windows_reset }) => {
-                Ok(ConsumeResetCreditResponse {
-                    code: super::ConsumeResetCreditCode::Reset,
-                    windows_reset: i64::from(windows_reset),
-                })
-            }
-            ConsumePortResult::Known(KnownConsumeOutcome::NothingToReset) => {
-                Ok(ConsumeResetCreditResponse {
-                    code: super::ConsumeResetCreditCode::NothingToReset,
-                    windows_reset: 0,
-                })
-            }
-            ConsumePortResult::Known(KnownConsumeOutcome::NoCredit) => {
-                Ok(ConsumeResetCreditResponse {
-                    code: super::ConsumeResetCreditCode::NoCredit,
-                    windows_reset: 0,
-                })
-            }
-            ConsumePortResult::Known(KnownConsumeOutcome::AlreadyRedeemed) => {
-                Ok(ConsumeResetCreditResponse {
-                    code: super::ConsumeResetCreditCode::AlreadyRedeemed,
-                    windows_reset: 0,
-                })
-            }
-            ConsumePortResult::OutcomeUnknown(reason) => {
-                Err(provider_response_failure(reason.message()))
-            }
-        }
     }
 }
 
@@ -277,14 +238,14 @@ struct ConsumeResetCreditRequest<'a> {
 
 pub(super) fn provider_request_error(error: impl std::fmt::Display) -> QuotaResetError {
     let _ = error;
-    QuotaResetError::ProviderRequest {
+    QuotaResetError::Request {
         message: "provider transport failed".to_owned(),
     }
 }
 
 pub(super) fn provider_response_error(error: impl std::fmt::Display) -> QuotaResetError {
     let _ = error;
-    QuotaResetError::ProviderResponse {
+    QuotaResetError::Response {
         message: "provider response was malformed".to_owned(),
     }
 }
@@ -295,7 +256,7 @@ fn provider_body_read_error(error: impl std::fmt::Display) -> QuotaResetError {
 }
 
 pub(super) fn provider_response_failure(message: &'static str) -> QuotaResetError {
-    QuotaResetError::ProviderResponse {
+    QuotaResetError::Response {
         message: message.to_owned(),
     }
 }

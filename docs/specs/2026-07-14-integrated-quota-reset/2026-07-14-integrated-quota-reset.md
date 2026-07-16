@@ -377,13 +377,19 @@ quota command / persisted projection
                      v
 QuotaStatusComponent
   owns: one TUI, AccountId focus, responsive shell, key routing
-  holds: renderable ResetWorkflowState for one correlated attempt
+  holds: the latest immutable render-safe reset snapshot
                      |
-            typed requests/outcomes
+          typed intents / snapshots
+                     v
+QuotaInteractiveSession
+  owns: sole reducer, attempt correlation, authority, and effect task handles
+  exposes: bounded intent sender + immutable redacted snapshot receiver
+                     |
+          non-spawning operation futures
                      v
 ResetWorkflowService
-  owns: inspection, eligibility, selection, revalidation, commit classification
-  exposes: inspect(request), revalidate(request), consume(commit token)
+  owns: inspection/revalidation validation and single-use commit execution
+  exposes: non-spawning operation futures; owns no task handles or presentation state
                      |
           read-only state/secrets + provider port
                      v
@@ -423,11 +429,12 @@ They are never substituted for one another.
 ### State and effect separation
 
 The reset workflow domain module owns a pure typed reducer/state machine, not presentation and not a
-collection of hook-local booleans. Presentation converts keys into intents and renders the reducer's
-redacted state. The workflow service interprets emitted effects, owns authority-bearing values and
-task handles, and returns correlated outcomes. The session picker's `use_async_handler` plus
-identity check is the nearby repository pattern; this design does not introduce a generic event bus
-or global store.
+collection of hook-local booleans. Presentation converts keys into intents and renders immutable
+redacted snapshots. One command-owned `QuotaInteractiveSession` owns the reducer instance,
+authority-bearing values, attempt correlation, and all reset task handles. It asks the non-spawning
+workflow service for operation futures and reduces their correlated outcomes. The session picker's
+`use_async_handler` plus identity check is the nearby repository pattern; this design does not
+introduce a generic event bus or global store.
 
 Inspection, revalidation, and consume are distinct effects so cancellation and the POST commit point
 remain observable. Provider/auth objects do not enter the reducer's renderable state.
@@ -492,6 +499,14 @@ request construction unless it receives an isolated fixture state/secret root an
 loopback listener. A test egress guard rejects every non-loopback destination. Production origin
 constants and ambient home credentials are structurally unavailable to the automated workflow
 composition.
+
+The dedicated feature-gated PTY executable has its own sealed harness argument contract. It accepts
+only explicit isolated fixture paths and the bare HTTP origin of a listener that the test already
+bound on a loopback address. It does not read provider or router-root overrides from environment or
+fall back to home directories. Those arguments and the loopback constructor are absent from the
+installed `codex-router` parser, main entry, and production reset factory, including all-feature
+builds. Both wrappers converge below composition on the same async quota session, supervisor,
+reducer, presentation component, and iocraft render loop.
 
 ## Security context
 

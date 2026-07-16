@@ -31,7 +31,7 @@ use super::tests::quota_two_account_view_model;
 
 #[tokio::test]
 async fn ctrl_r_inspects_the_focused_stable_account_and_generation() {
-    let snapshot = test_snapshot(WorkflowPhase::Browse, false);
+    let snapshot = test_snapshot(WorkflowPhase::Browse);
     let (ports, mut intent_receiver, _snapshot_sender) = ResetSessionPorts::test_channels(snapshot);
     let mut view_model = quota_two_account_view_model();
     view_model.rows[0].account = "duplicate".to_owned();
@@ -80,7 +80,7 @@ async fn ctrl_r_inspects_the_focused_stable_account_and_generation() {
 
 #[tokio::test]
 async fn disabled_yes_cannot_receive_focus_and_enter_cancels_from_default_no() {
-    let snapshot = test_snapshot(WorkflowPhase::Confirming, false);
+    let snapshot = test_snapshot(WorkflowPhase::Confirming);
     let (ports, mut intent_receiver, _snapshot_sender) = ResetSessionPorts::test_channels(snapshot);
     let events = vec![
         TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Right)),
@@ -116,7 +116,7 @@ async fn disabled_yes_cannot_receive_focus_and_enter_cancels_from_default_no() {
 #[tokio::test]
 async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
     for width in [159usize, 160] {
-        let browse_snapshot = test_snapshot(WorkflowPhase::Browse, false);
+        let browse_snapshot = test_snapshot(WorkflowPhase::Browse);
         let (ports, mut intent_receiver, snapshot_sender) =
             ResetSessionPorts::test_channels(browse_snapshot.clone());
         let session_driver = tokio::spawn(async move {
@@ -125,7 +125,7 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
                 Some(ResetSessionIntent::BeginInspection { .. })
             ));
             snapshot_sender
-                .send(test_snapshot(WorkflowPhase::Inspecting, false))
+                .send(test_snapshot(WorkflowPhase::Inspecting))
                 .expect("presentation watch should remain connected");
             assert_eq!(
                 intent_receiver.recv().await,
@@ -182,19 +182,19 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
 
 #[test]
 fn reset_detail_renders_all_five_semantic_operation_rows_and_safe_target_tag() {
-    let mut activities = WorkflowActivities::default();
-    activities.inspection_live_usage = crate::quota_reset::supervisor::OperationActivity::Loading;
-    activities.inspection_credit_inventory =
-        crate::quota_reset::supervisor::OperationActivity::Failed {
+    let activities = WorkflowActivities {
+        inspection_live_usage: crate::quota_reset::supervisor::OperationActivity::Loading,
+        inspection_credit_inventory: crate::quota_reset::supervisor::OperationActivity::Failed {
             failure: RenderSafeFailure::Transport,
             previous: None,
-        };
-    activities.consume_credit =
-        crate::quota_reset::supervisor::OperationActivity::RequestDispatchedAwaitingOutcome;
+        },
+        consume_credit:
+            crate::quota_reset::supervisor::OperationActivity::RequestDispatchedAwaitingOutcome,
+        ..WorkflowActivities::default()
+    };
     let snapshot = ResetWorkflowSnapshot::test_snapshot(
         WorkflowPhase::Committing,
         ConfirmationSelection::No,
-        false,
         activities,
         None,
         None,
@@ -241,7 +241,6 @@ fn reset_semantic_frames_render_at_narrow_stacked_boundary_and_wide_widths() {
     let confirmation = ResetWorkflowSnapshot::test_snapshot(
         WorkflowPhase::Confirming,
         ConfirmationSelection::No,
-        true,
         completed_inspection_activities(),
         None,
         Some(LiveWeeklyDisplayFacts {
@@ -254,7 +253,6 @@ fn reset_semantic_frames_render_at_narrow_stacked_boundary_and_wide_widths() {
     let unknown = ResetWorkflowSnapshot::test_snapshot(
         WorkflowPhase::Result,
         ConfirmationSelection::No,
-        false,
         unknown_result_activities(),
         Some(WorkflowResult::OutcomeUnknown(
             ConsumeUnknownReason::Transport,
@@ -391,11 +389,10 @@ fn reset_mode_key_contract_is_fail_closed_and_committing_disables_exit() {
     );
 }
 
-fn test_snapshot(phase: WorkflowPhase, yes_enabled: bool) -> ResetWorkflowSnapshot {
+fn test_snapshot(phase: WorkflowPhase) -> ResetWorkflowSnapshot {
     ResetWorkflowSnapshot::test_snapshot(
         phase,
         ConfirmationSelection::No,
-        yes_enabled,
         WorkflowActivities::default(),
         None,
         None,

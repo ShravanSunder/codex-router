@@ -83,9 +83,9 @@ fn top_level_async_dispatch_routes_every_quota_variant_before_sync_fallback() {
 }
 
 #[tokio::test]
-async fn quota_async_entry_owns_help_and_legacy_reset_dispatch() {
+async fn quota_async_entry_owns_help_and_reset_migration_guidance() {
     let mut stdout = Vec::new();
-    let help_dispatch = run_quota_command(
+    run_quota_command(
         &mut stdout,
         QuotaCommand::Help("quota help\n"),
         false,
@@ -94,23 +94,49 @@ async fn quota_async_entry_owns_help_and_legacy_reset_dispatch() {
     )
     .await
     .expect("help dispatch");
-    assert_eq!(help_dispatch, QuotaCommandDispatch::Complete);
     assert_eq!(stdout, b"quota help\n");
 
-    let router_root = PathBuf::from("/unused-reset-dispatch-root");
-    let reset_dispatch = run_quota_command(
-        &mut stdout,
-        QuotaCommand::Reset {
-            router_root: router_root.clone(),
-        },
-        false,
-        false,
-        None,
-    )
-    .await
-    .expect("reset dispatch");
-    assert_eq!(
-        reset_dispatch,
-        QuotaCommandDispatch::LegacyReset { router_root }
-    );
+    for (stdin_is_terminal, stdout_is_terminal) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let mut reset_stdout = Vec::new();
+        run_quota_command(
+            &mut reset_stdout,
+            QuotaCommand::Reset,
+            stdin_is_terminal,
+            stdout_is_terminal,
+            None,
+        )
+        .await
+        .expect("reset migration guidance");
+        assert_eq!(
+            reset_stdout,
+            b"Quota reset moved to codex-router quota: focus an account and press Ctrl-R.\n"
+        );
+    }
+}
+
+#[test]
+fn quota_reset_parser_accepts_only_migration_guidance_and_help_aliases() {
+    for help_alias in ["--help", "-h", "help"] {
+        let mut parser = ArgumentParser::new(vec!["reset".into(), help_alias.into()]);
+        let QuotaCommand::Help(help_text) =
+            QuotaCommand::parse(&mut parser).expect("reset help alias")
+        else {
+            panic!("reset help alias must use the ordinary help path");
+        };
+        assert!(help_text.contains("focus an account and press Ctrl-R"));
+    }
+
+    for rejected_arguments in [
+        vec!["reset".into(), "--router-root".into(), "/tmp/router".into()],
+        vec!["reset".into(), "--unknown".into()],
+        vec!["reset".into(), "extra".into()],
+    ] {
+        let mut parser = ArgumentParser::new(rejected_arguments);
+        assert!(matches!(
+            QuotaCommand::parse(&mut parser),
+            Err(CliError::UnknownOption { .. })
+        ));
+    }
 }

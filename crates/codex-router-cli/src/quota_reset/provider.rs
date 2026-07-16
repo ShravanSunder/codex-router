@@ -34,41 +34,11 @@ pub(crate) enum ConsumeResetCreditCode {
     AlreadyRedeemed,
 }
 
-impl ConsumeResetCreditCode {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Reset => "reset",
-            Self::NothingToReset => "nothing_to_reset",
-            Self::NoCredit => "no_credit",
-            Self::AlreadyRedeemed => "already_redeemed",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct ConsumeResetCreditResponse {
     pub(crate) code: ConsumeResetCreditCode,
     #[serde(default)]
     pub(crate) windows_reset: i64,
-}
-
-pub(crate) trait LiveQuotaResetProvider {
-    async fn fetch_weekly_remaining_percent(
-        &self,
-        auth: &LiveResetAccountAuth,
-    ) -> Result<Option<u32>, QuotaResetError>;
-
-    async fn fetch_reset_credits(
-        &self,
-        auth: &LiveResetAccountAuth,
-    ) -> Result<Vec<LiveResetCredit>, QuotaResetError>;
-
-    async fn consume_reset_credit(
-        &self,
-        auth: &LiveResetAccountAuth,
-        credit_id: &str,
-        redeem_request_id: &str,
-    ) -> Result<ConsumeResetCreditResponse, QuotaResetError>;
 }
 
 #[derive(Clone, Debug)]

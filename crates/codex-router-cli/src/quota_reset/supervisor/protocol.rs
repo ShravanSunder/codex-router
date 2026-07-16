@@ -53,7 +53,6 @@ pub(crate) struct PinnedResetTarget {
 pub(crate) enum ResetValueProvenance {
     CurrentLive,
     PreviousLiveRefreshing,
-    Saved,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,6 +180,7 @@ impl ResetWorkflowSnapshot {
         self.result.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) const fn target(&self) -> Option<&PinnedResetTarget> {
         self.target.as_ref()
     }
@@ -228,7 +228,6 @@ fn map_provenance(provenance: RenderValueProvenance) -> ResetValueProvenance {
         RenderValueProvenance::PreviousLiveRefreshing => {
             ResetValueProvenance::PreviousLiveRefreshing
         }
-        RenderValueProvenance::Saved => ResetValueProvenance::Saved,
     }
 }
 
@@ -307,7 +306,6 @@ impl ResetWorkflowSnapshot {
     pub(crate) fn test_snapshot(
         phase: WorkflowPhase,
         confirmation_selection: ConfirmationSelection,
-        yes_enabled: bool,
         activities: WorkflowActivities,
         result: Option<WorkflowResult>,
         live_weekly: Option<LiveWeeklyDisplayFacts>,
@@ -322,6 +320,7 @@ impl ResetWorkflowSnapshot {
                 title: credit.title.clone(),
                 expires_unix_seconds: credit.expires_unix_seconds,
             });
+        let yes_enabled = phase == WorkflowPhase::Confirming && disabled_yes_reason.is_none();
         Self {
             phase,
             confirmation_selection,

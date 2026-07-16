@@ -1,5 +1,10 @@
 //! Correlated effect completions and monotonic session generations.
 
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
 use crate::quota_reset::domain::AttemptGeneration;
 use crate::quota_reset::domain::ConsumePortResult;
 use crate::quota_reset::domain::CreditInventoryPortResult;
@@ -18,6 +23,25 @@ pub(in crate::quota_reset) trait RedeemRequestIdFactory:
     Send + Sync + 'static
 {
     fn mint(&self) -> Result<RedeemRequestId, RenderSafeFailure>;
+}
+
+static REDEEM_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub(in crate::quota_reset) struct ProductionRedeemRequestIdFactory;
+
+impl RedeemRequestIdFactory for ProductionRedeemRequestIdFactory {
+    fn mint(&self) -> Result<RedeemRequestId, RenderSafeFailure> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RenderSafeFailure::CredentialUnavailable)?
+            .as_nanos();
+        let counter = REDEEM_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        RedeemRequestId::new(format!(
+            "codex-router-{}-{nanos}-{counter}",
+            std::process::id()
+        ))
+        .map_err(|_| RenderSafeFailure::InvalidResponse)
+    }
 }
 
 #[derive(Default)]

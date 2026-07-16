@@ -1,13 +1,18 @@
 fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'static [&'static str])>
 {
-    let mut inspecting = WorkflowActivities::default();
-    inspecting.inspection_live_usage = OperationActivity::Loading;
-    inspecting.inspection_credit_inventory = OperationActivity::Loading;
+    let inspecting = WorkflowActivities {
+        inspection_live_usage: OperationActivity::Loading,
+        inspection_credit_inventory: OperationActivity::Loading,
+        ..WorkflowActivities::default()
+    };
 
-    let mut inspection_partial = WorkflowActivities::default();
-    inspection_partial.inspection_live_usage =
-        OperationActivity::Succeeded(crate::quota_reset::supervisor::test_live_usage_success(0));
-    inspection_partial.inspection_credit_inventory = OperationActivity::Loading;
+    let inspection_partial = WorkflowActivities {
+        inspection_live_usage: OperationActivity::Succeeded(
+            crate::quota_reset::supervisor::test_live_usage_success(0),
+        ),
+        inspection_credit_inventory: OperationActivity::Loading,
+        ..WorkflowActivities::default()
+    };
 
     let mut revalidating = completed_inspection_activities();
     revalidating.revalidation_live_usage = OperationActivity::Loading;
@@ -51,7 +56,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Inspecting,
                 ConfirmationSelection::No,
-                false,
                 inspecting,
                 None,
                 None,
@@ -65,7 +69,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Inspecting,
                 ConfirmationSelection::No,
-                false,
                 inspection_partial,
                 None,
                 Some(test_live_weekly(0)),
@@ -79,7 +82,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Confirming,
                 ConfirmationSelection::No,
-                false,
                 completed_inspection_activities(),
                 None,
                 Some(test_live_weekly(4)),
@@ -97,7 +99,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Confirming,
                 ConfirmationSelection::No,
-                true,
                 completed_inspection_activities(),
                 None,
                 Some(test_live_weekly(0)),
@@ -111,7 +112,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Revalidating,
                 ConfirmationSelection::Yes,
-                false,
                 revalidating,
                 None,
                 Some(test_live_weekly(0)),
@@ -129,7 +129,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Committing,
                 ConfirmationSelection::Yes,
-                false,
                 committing,
                 None,
                 Some(test_live_weekly(0)),
@@ -146,7 +145,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Result,
                 ConfirmationSelection::No,
-                false,
                 known,
                 Some(WorkflowResult::Known(KnownConsumeOutcome::Reset {
                     windows_reset: 2,
@@ -165,7 +163,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Result,
                 ConfirmationSelection::No,
-                false,
                 refused,
                 Some(WorkflowResult::Refused(
                     RenderSafeFailure::EligibilityRefused,
@@ -188,7 +185,6 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Result,
                 ConfirmationSelection::No,
-                false,
                 unknown_result_activities(),
                 Some(WorkflowResult::OutcomeUnknown(
                     ConsumeUnknownReason::Transport,
@@ -206,15 +202,18 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
     ]
 }
 fn completed_inspection_activities() -> WorkflowActivities {
-    let mut activities = WorkflowActivities::default();
-    activities.inspection_live_usage =
-        OperationActivity::Succeeded(crate::quota_reset::supervisor::test_live_usage_success(0));
-    activities.inspection_credit_inventory =
-        OperationActivity::Succeeded(OperationSuccess::CreditInventory {
+    WorkflowActivities {
+        inspection_live_usage: OperationActivity::Succeeded(
+            crate::quota_reset::supervisor::test_live_usage_success(0),
+        ),
+        inspection_credit_inventory: OperationActivity::Succeeded(
+            OperationSuccess::CreditInventory {
             credit_count: 1,
             usable_credit_count: 1,
-        });
-    activities
+        },
+        ),
+        ..WorkflowActivities::default()
+    }
 }
 
 fn unknown_result_activities() -> WorkflowActivities {

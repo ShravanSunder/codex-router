@@ -140,7 +140,7 @@ where
 {
     match CliCommand::parse(args.clone())? {
         CliCommand::Quota(command) => {
-            let dispatch = quota::run_quota_command(
+            quota::run_quota_command(
                 stdout,
                 command,
                 context.stdin_is_terminal(),
@@ -148,15 +148,6 @@ where
                 context.stdout_terminal_width(),
             )
             .await?;
-            if let quota::QuotaCommandDispatch::LegacyReset { router_root } = dispatch {
-                quota_reset::run_interactive_quota_reset(
-                    stdout,
-                    router_root,
-                    context.stdin_is_terminal(),
-                    context.stdout_is_terminal(),
-                )
-                .await?;
-            }
             stderr.flush().map_err(CliError::Stderr)
         }
         _ => run_with_io(args, context, stdout, stderr),
@@ -1254,9 +1245,6 @@ pub enum CliError {
     /// Quota command failed.
     #[error(transparent)]
     Quota(#[from] QuotaCommandError),
-    /// Interactive guarded quota reset failed.
-    #[error(transparent)]
-    QuotaReset(#[from] quota_reset::QuotaResetError),
     /// Live quota command needs exactly one source.
     #[error("live quota requires exactly one of --auth-json or --profiles-root")]
     LiveQuotaSourceRequired,
@@ -1830,8 +1818,8 @@ mod tests {
                 &["codex-router", "quota", "reset", "--help"][..],
                 &[
                     "codex-router quota reset",
-                    "checks live weekly usage",
-                    "strictly below 1%",
+                    "Quota reset moved to codex-router quota",
+                    "focus an account and press Ctrl-R",
                 ][..],
             ),
         ] {
@@ -6498,7 +6486,7 @@ exit 42
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
         ));
         let quota_source = must_ok(fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/quota.rs"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/quota/mod.rs"),
         ));
 
         assert!(manifest.contains("name = \"codex-router-quota-reset-test-harness\""));
@@ -6509,7 +6497,7 @@ exit 42
     }
 
     #[tokio::test]
-    async fn quota_reset_async_dispatch_fails_before_state_or_network_without_terminal() {
+    async fn quota_reset_async_dispatch_prints_migration_without_state_or_network() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_with_io_async(
@@ -6523,16 +6511,11 @@ exit 42
             &mut stderr,
         )
         .await;
-        let error = match result {
-            Ok(()) => panic!("non-terminal quota reset should fail"),
-            Err(error) => error,
-        };
-
+        assert!(result.is_ok());
         assert_eq!(
-            error.to_string(),
-            "quota reset requires an interactive terminal"
+            String::from_utf8(stdout).expect("migration output should be utf-8"),
+            "Quota reset moved to codex-router quota: focus an account and press Ctrl-R.\n"
         );
-        assert!(stdout.is_empty());
         assert!(stderr.is_empty());
     }
 

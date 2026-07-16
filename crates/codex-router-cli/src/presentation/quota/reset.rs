@@ -347,7 +347,6 @@ fn provenance_label(provenance: ResetValueProvenance) -> &'static str {
     match provenance {
         ResetValueProvenance::CurrentLive => "current live",
         ResetValueProvenance::PreviousLiveRefreshing => "previous live · refreshing",
-        ResetValueProvenance::Saved => "saved",
     }
 }
 

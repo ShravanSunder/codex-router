@@ -23,7 +23,7 @@ pub(super) fn reset_credits_from_response(
         .map(|credit| {
             validate_credit_status(&credit.status)?;
             if credit.id.trim().is_empty() || credit.id.chars().any(char::is_control) {
-                return Err(QuotaResetError::ProviderResponse {
+                return Err(QuotaResetError::Response {
                     message: "reset credit id is invalid".to_owned(),
                 });
             }
@@ -32,7 +32,7 @@ pub(super) fn reset_credits_from_response(
                 .as_deref()
                 .is_some_and(|title| title.chars().any(char::is_control))
             {
-                return Err(QuotaResetError::ProviderResponse {
+                return Err(QuotaResetError::Response {
                     message: "reset credit title contains control characters".to_owned(),
                 });
             }
@@ -67,7 +67,7 @@ struct ResetCreditPayload {
 
 pub(super) fn remaining_percent_from_used(used_percent: i64) -> Result<u32, QuotaResetError> {
     if !(0..=100).contains(&used_percent) {
-        return Err(QuotaResetError::ProviderResponse {
+        return Err(QuotaResetError::Response {
             message: "weekly used_percent must be between 0 and 100".to_owned(),
         });
     }
@@ -78,7 +78,7 @@ pub(super) fn validate_credit_status(status: &str) -> Result<(), QuotaResetError
     if matches!(status, "available" | "redeeming" | "redeemed") {
         return Ok(());
     }
-    Err(QuotaResetError::ProviderResponse {
+    Err(QuotaResetError::Response {
         message: "unknown reset credit status".to_owned(),
     })
 }
@@ -86,12 +86,12 @@ pub(super) fn validate_credit_status(status: &str) -> Result<(), QuotaResetError
 pub(super) fn parse_utc_rfc3339_unix_seconds(value: &str) -> Result<i64, QuotaResetError> {
     let value = value
         .strip_suffix('Z')
-        .ok_or_else(|| QuotaResetError::ProviderResponse {
+        .ok_or_else(|| QuotaResetError::Response {
             message: "reset-credit expiration must be a UTC RFC 3339 timestamp".to_owned(),
         })?;
     let (date, time) = value
         .split_once('T')
-        .ok_or_else(|| QuotaResetError::ProviderResponse {
+        .ok_or_else(|| QuotaResetError::Response {
             message: "reset-credit expiration must contain T".to_owned(),
         })?;
     let mut date_parts = date.split('-');
@@ -179,7 +179,7 @@ const fn days_since_unix_epoch(year: i64, month: i64, day: i64) -> i64 {
 }
 
 fn invalid_timestamp(part: &str) -> QuotaResetError {
-    QuotaResetError::ProviderResponse {
+    QuotaResetError::Response {
         message: format!("invalid reset-credit expiration {part}"),
     }
 }

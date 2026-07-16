@@ -23,11 +23,8 @@ pub enum QuotaCommand {
         /// Provider base URL.
         base_url: String,
     },
-    /// Interactively consumes one guarded live quota reset.
-    Reset {
-        /// Router-owned root used only for read-only lookup.
-        router_root: PathBuf,
-    },
+    /// Prints migration guidance for the integrated reset workflow.
+    Reset,
 }
 
 impl QuotaCommand {
@@ -61,9 +58,7 @@ impl QuotaCommand {
                 }
                 let mut parser = ArgumentParser::new(arguments);
                 parser.reject_remaining()?;
-                Ok(Self::Reset {
-                    router_root: router_root_or_default(None)?,
-                })
+                Ok(Self::Reset)
             }
             Some("status") => {
                 arguments.remove(0);
@@ -164,14 +159,6 @@ pub enum QuotaCommandError {
 }
 
 /// Follow-up composition requested by a quota command.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum QuotaCommandDispatch {
-    /// Command completed entirely inside the quota command family.
-    Complete,
-    /// The legacy standalone reset composition must run at the CLI boundary.
-    LegacyReset { router_root: PathBuf },
-}
-
 /// Runs every quota command under the process-owned async runtime.
 pub(crate) async fn run_quota_command(
     stdout: &mut impl Write,
@@ -179,13 +166,13 @@ pub(crate) async fn run_quota_command(
     stdin_is_terminal: bool,
     stdout_is_terminal: bool,
     stdout_terminal_width: Option<usize>,
-) -> Result<QuotaCommandDispatch, QuotaCommandError> {
+) -> Result<(), QuotaCommandError> {
     match command {
         QuotaCommand::Help(help_text) => {
             stdout
                 .write_all(help_text.as_bytes())
                 .map_err(QuotaCommandError::Stdout)?;
-            Ok(QuotaCommandDispatch::Complete)
+            Ok(())
         }
         QuotaCommand::Status {
             router_root,
@@ -213,18 +200,18 @@ pub(crate) async fn run_quota_command(
                 )
                 .await?;
             }
-            Ok(QuotaCommandDispatch::Complete)
+            Ok(())
         }
         QuotaCommand::Refresh {
             router_root,
             base_url,
         } => {
             refresh_quota(stdout, router_root, base_url).await?;
-            Ok(QuotaCommandDispatch::Complete)
+            Ok(())
         }
-        QuotaCommand::Reset { router_root } => {
-            Ok(QuotaCommandDispatch::LegacyReset { router_root })
-        }
+        QuotaCommand::Reset => stdout
+            .write_all(QUOTA_RESET_MIGRATION_GUIDANCE.as_bytes())
+            .map_err(QuotaCommandError::Stdout),
     }
 }
 
@@ -245,7 +232,7 @@ codex-router quota
 commands:
   quota          Show persisted quota status and next account
   quota refresh  Refresh quota data now
-  quota reset    Interactively use an eligible usage-limit reset
+  quota reset    Show migration guidance for the integrated reset workflow
 ";
 
 const QUOTA_REFRESH_HELP_TEXT: &str = "\
@@ -257,13 +244,8 @@ Refreshes persisted quota data from configured OAuth accounts.
 const QUOTA_RESET_HELP_TEXT: &str = "\
 codex-router quota reset
 
-Interactively selects one account, checks live weekly usage, and offers the earliest-expiring
-available usage-limit reset only when live weekly remaining is strictly below 1%.
-
-shortcuts:
-  up/down  select
-  enter    check or confirm
-  esc      cancel
-  ctrl-c   cancel
-  ctrl-r   cancel
+Quota reset moved to codex-router quota: focus an account and press Ctrl-R.
 ";
+
+const QUOTA_RESET_MIGRATION_GUIDANCE: &str =
+    "Quota reset moved to codex-router quota: focus an account and press Ctrl-R.\n";

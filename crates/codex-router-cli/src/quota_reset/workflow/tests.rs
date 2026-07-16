@@ -10,7 +10,6 @@ use crate::quota_reset::domain::LiveResetCredit;
 use crate::quota_reset::domain::LiveUsagePortResult;
 use crate::quota_reset::domain::LiveWeeklyUsage;
 use crate::quota_reset::domain::OperationGeneration;
-use crate::quota_reset::domain::OperationKind;
 use crate::quota_reset::domain::RenderSafeFailure;
 use crate::quota_reset::domain::validate_credit_inventory;
 
@@ -18,21 +17,7 @@ use super::contracts::*;
 use super::model::*;
 
 #[test]
-fn operation_kinds_are_the_five_visible_provider_operations() {
-    assert_eq!(
-        OperationKind::ALL,
-        [
-            OperationKind::InspectionLiveUsage,
-            OperationKind::InspectionCreditInventory,
-            OperationKind::RevalidationLiveUsage,
-            OperationKind::RevalidationCreditInventory,
-            OperationKind::ConsumeCredit,
-        ]
-    );
-}
-
-#[test]
-fn request_and_outcome_repeat_all_correlation_fields() {
+fn requests_preserve_correlation_identity() {
     let correlation = OperationCorrelation::new(
         AccountId::new("account-a")
             .unwrap_or_else(|error| panic!("account id should be valid: {error}")),
@@ -47,44 +32,14 @@ fn request_and_outcome_repeat_all_correlation_fields() {
         CorrelatedRequest::revalidation_credit_inventory(correlation.clone()),
         CorrelatedRequest::consume_credit(correlation.clone()),
     ];
-    let outcomes = [
-        CorrelatedOutcome::inspection_live_usage(
-            correlation.clone(),
-            LiveUsagePortResult::Known(LiveWeeklyUsage::new(0)),
-        ),
-        CorrelatedOutcome::inspection_credit_inventory(
-            correlation.clone(),
-            eligible_inventory_result(),
-        ),
-        CorrelatedOutcome::revalidation_live_usage(
-            correlation.clone(),
-            LiveUsagePortResult::Known(LiveWeeklyUsage::new(0)),
-        ),
-        CorrelatedOutcome::revalidation_credit_inventory(
-            correlation.clone(),
-            eligible_inventory_result(),
-        ),
-        CorrelatedOutcome::consume_credit(
-            correlation.clone(),
-            ConsumePortResult::Known(KnownConsumeOutcome::AlreadyRedeemed),
-        ),
-    ];
-
-    for ((request, outcome), expected_kind) in
-        requests.iter().zip(outcomes.iter()).zip(OperationKind::ALL)
-    {
-        assert_eq!(request.operation_kind(), expected_kind);
-        assert_eq!(outcome.operation_kind(), expected_kind);
+    for request in requests {
         assert_eq!(request.correlation(), &correlation);
-        assert_eq!(outcome.correlation(), &correlation);
     }
-    assert_eq!(correlation.active_credential_generation().get(), 7);
-    assert_eq!(correlation.attempt_generation().get(), 11);
-    assert_eq!(correlation.operation_generation().get(), 13);
     assert_eq!(
-        outcomes[0].live_usage_terminal(),
-        Some(&LiveUsagePortResult::Known(LiveWeeklyUsage::new(0)))
+        correlation.active_credential_generation(),
+        ActiveCredentialGeneration::new(7)
     );
+    assert_eq!(correlation.attempt_generation(), AttemptGeneration::new(11));
 }
 
 #[test]
@@ -108,7 +63,7 @@ fn activity_and_consume_results_have_only_render_safe_categories() {
     assert_eq!(activities.len(), 7);
     assert_eq!(WorkflowPhase::default(), WorkflowPhase::Browse);
     assert_ne!(
-        RenderValueProvenance::Saved,
+        RenderValueProvenance::PreviousLiveRefreshing,
         RenderValueProvenance::CurrentLive
     );
     assert_eq!(eligible_inventory_result(), eligible_inventory_result());
@@ -251,15 +206,8 @@ fn reducer_disables_yes_and_suppresses_repeated_or_stale_completions() {
 }
 
 #[test]
-fn saved_previous_and_current_provenance_never_share_authority() {
+fn previous_and_current_live_provenance_never_share_authority() {
     let mut workflow = ResetWorkflow::default();
-    workflow.set_saved_usage(LiveWeeklyUsage::new(0));
-    assert_eq!(
-        workflow.live_usage.as_ref().map(|usage| usage.provenance),
-        Some(RenderValueProvenance::Saved)
-    );
-    assert!(!workflow.yes_enabled());
-
     let first = inspection_start("account-a", 1, 10, 100, 101);
     workflow.reduce(WorkflowIntent::BeginInspection(first.clone()));
     workflow.reduce(WorkflowIntent::OperationCompleted(

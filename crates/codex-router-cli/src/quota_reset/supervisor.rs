@@ -1,24 +1,17 @@
 //! Command-level ownership for reset workflow effects and authority.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
-use codex_router_core::ids::AccountId;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::domain::ActiveCredentialGeneration;
-use super::domain::AttemptGeneration;
 use super::domain::ConsumePortResult;
 use super::domain::ConsumeUnknownReason;
 use super::domain::CreditInventoryPortResult;
 use super::domain::LiveUsagePortResult;
 use super::domain::LiveWeeklyUsage;
-use super::domain::RedeemRequestId;
 use super::domain::RenderSafeFailure;
 use super::domain::ValidatedCreditInventory;
 use super::service::ConfirmationAuthority;
@@ -35,6 +28,7 @@ use super::workflow::WorkflowIntent;
 
 mod effects;
 mod protocol;
+mod session_state;
 
 #[cfg(test)]
 pub(crate) use super::domain::ConsumeUnknownReason as TestConsumeUnknownReason;
@@ -47,6 +41,7 @@ pub(crate) use super::workflow::OperationSuccess;
 pub(crate) use super::workflow::WorkflowPhase;
 pub(crate) use super::workflow::WorkflowResult;
 use effects::GenerationAllocator;
+pub(in crate::quota_reset) use effects::ProductionRedeemRequestIdFactory;
 use effects::RedeemRequestIdFactory;
 use effects::SessionTaskOutput;
 #[cfg(test)]
@@ -68,25 +63,6 @@ const MINIMUM_PORT_CAPACITY: usize = 1;
 #[cfg(test)]
 pub(crate) fn test_live_usage_success(remaining_percent: u32) -> OperationSuccess {
     OperationSuccess::LiveUsage(LiveWeeklyUsage::new(remaining_percent))
-}
-
-static REDEEM_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-pub(in crate::quota_reset) struct ProductionRedeemRequestIdFactory;
-
-impl RedeemRequestIdFactory for ProductionRedeemRequestIdFactory {
-    fn mint(&self) -> Result<RedeemRequestId, RenderSafeFailure> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RenderSafeFailure::CredentialUnavailable)?
-            .as_nanos();
-        let counter = REDEEM_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        RedeemRequestId::new(format!(
-            "codex-router-{}-{nanos}-{counter}",
-            std::process::id()
-        ))
-        .map_err(|_| RenderSafeFailure::InvalidResponse)
-    }
 }
 
 /// Sole reducer, authority, and reset-effect task owner for one quota command.
@@ -605,37 +581,6 @@ where
 
     async fn reap_all_tasks(&mut self) {
         while self.tasks.join_next().await.is_some() {}
-    }
-
-    fn publish_snapshot(&self) {
-        self.snapshot_sender
-            .send_replace(ResetWorkflowSnapshot::from_workflow(
-                &self.workflow,
-                self.current_target.clone(),
-                self.invalidation_reason,
-            ));
-    }
-
-    fn target_matches(&self, account_id: &AccountId, generation: u64) -> bool {
-        self.current_target.as_ref().is_some_and(|target| {
-            target.account_id == *account_id && target.active_credential_generation == generation
-        })
-    }
-
-    fn sanitized_outcome(&self) -> ResetSessionOutcome {
-        self.terminal_outcome.clone().map_or(
-            ResetSessionOutcome::Cancelled,
-            ResetSessionOutcome::Finished,
-        )
-    }
-
-    fn correlation_is_current(&self, correlation: &OperationCorrelation) -> bool {
-        self.current_attempt_generation()
-            .is_some_and(|generation| generation == correlation.attempt_generation())
-    }
-
-    fn current_attempt_generation(&self) -> Option<AttemptGeneration> {
-        self.generations.current_attempt()
     }
 }
 

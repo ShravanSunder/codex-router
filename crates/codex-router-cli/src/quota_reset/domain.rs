@@ -21,10 +21,6 @@ impl AttemptGeneration {
     pub(in crate::quota_reset) const fn new(value: u64) -> Self {
         Self(value)
     }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
 }
 
 /// Unique identity for one operation within an attempt.
@@ -34,10 +30,6 @@ pub(in crate::quota_reset) struct OperationGeneration(u64);
 impl OperationGeneration {
     pub(in crate::quota_reset) const fn new(value: u64) -> Self {
         Self(value)
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
     }
 }
 
@@ -66,26 +58,6 @@ impl RedeemRequestId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::quota_reset) struct RedeemRequestIdError;
 
-/// The five provider operations surfaced independently in reset detail.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(in crate::quota_reset) enum OperationKind {
-    InspectionLiveUsage,
-    InspectionCreditInventory,
-    RevalidationLiveUsage,
-    RevalidationCreditInventory,
-    ConsumeCredit,
-}
-
-impl OperationKind {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::InspectionLiveUsage,
-        Self::InspectionCreditInventory,
-        Self::RevalidationLiveUsage,
-        Self::RevalidationCreditInventory,
-        Self::ConsumeCredit,
-    ];
-}
-
 /// Sanitized failure classes safe for presentation and diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RenderSafeFailure {
@@ -99,7 +71,6 @@ pub(crate) enum RenderSafeFailure {
     InvalidResponse,
     EligibilityRefused,
     SelectedCreditChanged,
-    Cancelled,
 }
 
 impl RenderSafeFailure {
@@ -115,7 +86,6 @@ impl RenderSafeFailure {
             Self::InvalidResponse => "provider response was invalid",
             Self::EligibilityRefused => "reset eligibility refused",
             Self::SelectedCreditChanged => "selected reset credit changed",
-            Self::Cancelled => "operation cancelled",
         }
     }
 }
@@ -196,35 +166,6 @@ pub(crate) struct LiveResetCredit {
     pub(crate) title: Option<String>,
 }
 
-/// Why a selected account cannot consume a reset credit.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ResetEligibilityRefusal {
-    WeeklyWindowMissing,
-    WeeklyRemainingNotBelowOnePercent { remaining_percent: u32 },
-    NoAvailableResetCredit,
-    SelectedCreditChanged,
-}
-
-/// Returns the earliest-expiring available credit after enforcing the live weekly guard.
-pub(crate) fn select_guarded_reset_credit(
-    weekly_remaining_percent: Option<u32>,
-    credits: &[LiveResetCredit],
-) -> Result<&LiveResetCredit, ResetEligibilityRefusal> {
-    let weekly_remaining_percent =
-        weekly_remaining_percent.ok_or(ResetEligibilityRefusal::WeeklyWindowMissing)?;
-    if weekly_remaining_percent >= 1 {
-        return Err(ResetEligibilityRefusal::WeeklyRemainingNotBelowOnePercent {
-            remaining_percent: weekly_remaining_percent,
-        });
-    }
-
-    credits
-        .iter()
-        .filter(|credit| credit.status == "available")
-        .min_by_key(|credit| (credit.expires_unix_seconds.unwrap_or(i64::MAX), &credit.id))
-        .ok_or(ResetEligibilityRefusal::NoAvailableResetCredit)
-}
-
 /// Complete validated reset-credit inventory in deterministic display order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatedCreditInventory {
@@ -238,17 +179,6 @@ impl ValidatedCreditInventory {
         self.credits.len()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.credits.is_empty()
-    }
-
-    pub(crate) fn credit_ids(&self) -> Vec<&str> {
-        self.credits
-            .iter()
-            .map(|credit| credit.identity.0.as_str())
-            .collect()
-    }
-
     pub(crate) fn earliest_usable_credit_id(&self) -> Option<&str> {
         self.earliest_usable_index
             .and_then(|index| self.credits.get(index))
@@ -257,12 +187,6 @@ impl ValidatedCreditInventory {
 
     pub(crate) const fn usable_credit_count(&self) -> usize {
         self.usable_credit_count
-    }
-
-    pub(crate) fn earliest_usable_expiration(&self) -> Option<Option<i64>> {
-        self.earliest_usable_index
-            .and_then(|index| self.credits.get(index))
-            .map(|credit| credit.expires_unix_seconds)
     }
 
     pub(in crate::quota_reset) fn earliest_usable_identity(&self) -> Option<ResetCreditIdentity> {
@@ -460,38 +384,6 @@ fn credit_is_usable(credit: &ValidatedResetCredit, now_unix_seconds: i64) -> boo
         && credit
             .expires_unix_seconds
             .is_none_or(|expiration| expiration > now_unix_seconds)
-}
-
-/// Visible half-open inventory range and total count.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct InventoryPage {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) total: usize,
-}
-
-impl InventoryPage {
-    pub(crate) const fn new(start: usize, end: usize, total: usize) -> Self {
-        Self { start, end, total }
-    }
-
-    pub(crate) const fn remaining(self) -> usize {
-        self.total.saturating_sub(self.end)
-    }
-}
-
-/// Returns a clamped deterministic page aligned to `page_size`.
-pub(crate) fn inventory_page(
-    total: usize,
-    requested_start: usize,
-    page_size: usize,
-) -> InventoryPage {
-    if total == 0 || page_size == 0 {
-        return InventoryPage::new(0, 0, total);
-    }
-    let last_page_start = ((total - 1) / page_size) * page_size;
-    let start = requested_start.min(last_page_start) / page_size * page_size;
-    InventoryPage::new(start, (start + page_size).min(total), total)
 }
 
 #[cfg(test)]

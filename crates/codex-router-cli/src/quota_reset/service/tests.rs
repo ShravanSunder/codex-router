@@ -174,7 +174,7 @@ async fn authority_and_selected_credit_changes_refuse_with_zero_posts() {
         let result = service
             .revalidate(confirmation, 100, redeem_id())
             .await
-            .into_capability();
+            .authorization;
 
         assert_eq!(result.expect_err("revalidation must refuse"), expected);
         assert!(
@@ -226,7 +226,7 @@ async fn every_authority_expiry_and_weekly_precommit_refusal_has_zero_posts() {
         let refusal = service
             .revalidate(confirmation, 100, redeem_id())
             .await
-            .into_capability()
+            .authorization
             .expect_err("precommit refusal");
 
         assert_eq!(refusal, expected);
@@ -255,7 +255,7 @@ async fn later_credit_only_change_allows_exactly_one_by_value_consume() {
     let capability = service
         .revalidate(confirmation, 100, redeem_id())
         .await
-        .into_capability()
+        .authorization
         .expect("capability");
 
     let outcome = service.consume(capability).await;
@@ -294,7 +294,7 @@ async fn local_preparation_failure_is_zero_post_and_ambiguous_invocation_is_unkn
         preparation_failure_service
             .revalidate(confirmation, 100, redeem_id())
             .await
-            .into_capability()
+            .authorization
             .expect_err("prep refusal"),
         RenderSafeFailure::InvalidResponse
     );
@@ -323,7 +323,7 @@ async fn local_preparation_failure_is_zero_post_and_ambiguous_invocation_is_unkn
     let capability = unknown_outcome_service
         .revalidate(confirmation, 100, redeem_id())
         .await
-        .into_capability()
+        .authorization
         .expect("capability");
     assert_eq!(
         unknown_outcome_service.consume(capability).await,

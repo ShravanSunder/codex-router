@@ -6,7 +6,6 @@ use crate::quota_reset::domain::ConsumePortResult;
 use crate::quota_reset::domain::CreditInventoryPortResult;
 use crate::quota_reset::domain::LiveUsagePortResult;
 use crate::quota_reset::domain::OperationGeneration;
-use crate::quota_reset::domain::OperationKind;
 use crate::quota_reset::domain::RenderSafeFailure;
 
 /// Correlation identity repeated by every request and completion.
@@ -45,10 +44,6 @@ impl OperationCorrelation {
 
     pub(in crate::quota_reset) const fn attempt_generation(&self) -> AttemptGeneration {
         self.attempt_generation
-    }
-
-    pub(in crate::quota_reset) const fn operation_generation(&self) -> OperationGeneration {
-        self.operation_generation
     }
 }
 
@@ -98,16 +93,6 @@ impl CorrelatedRequest {
             | Self::RevalidationLiveUsage(correlation)
             | Self::RevalidationCreditInventory(correlation)
             | Self::ConsumeCredit(correlation) => correlation,
-        }
-    }
-
-    pub(in crate::quota_reset) const fn operation_kind(&self) -> OperationKind {
-        match self {
-            Self::InspectionLiveUsage(_) => OperationKind::InspectionLiveUsage,
-            Self::InspectionCreditInventory(_) => OperationKind::InspectionCreditInventory,
-            Self::RevalidationLiveUsage(_) => OperationKind::RevalidationLiveUsage,
-            Self::RevalidationCreditInventory(_) => OperationKind::RevalidationCreditInventory,
-            Self::ConsumeCredit(_) => OperationKind::ConsumeCredit,
         }
     }
 }
@@ -187,36 +172,6 @@ impl CorrelatedOutcome {
             terminal,
         }
     }
-
-    pub(in crate::quota_reset) const fn correlation(&self) -> &OperationCorrelation {
-        match self {
-            Self::InspectionLiveUsage { correlation, .. }
-            | Self::InspectionCreditInventory { correlation, .. }
-            | Self::RevalidationLiveUsage { correlation, .. }
-            | Self::RevalidationCreditInventory { correlation, .. }
-            | Self::ConsumeCredit { correlation, .. } => correlation,
-        }
-    }
-
-    pub(in crate::quota_reset) const fn operation_kind(&self) -> OperationKind {
-        match self {
-            Self::InspectionLiveUsage { .. } => OperationKind::InspectionLiveUsage,
-            Self::InspectionCreditInventory { .. } => OperationKind::InspectionCreditInventory,
-            Self::RevalidationLiveUsage { .. } => OperationKind::RevalidationLiveUsage,
-            Self::RevalidationCreditInventory { .. } => OperationKind::RevalidationCreditInventory,
-            Self::ConsumeCredit { .. } => OperationKind::ConsumeCredit,
-        }
-    }
-
-    pub(in crate::quota_reset) const fn live_usage_terminal(&self) -> Option<&LiveUsagePortResult> {
-        match self {
-            Self::InspectionLiveUsage { terminal, .. }
-            | Self::RevalidationLiveUsage { terminal, .. } => Some(terminal),
-            Self::InspectionCreditInventory { .. }
-            | Self::RevalidationCreditInventory { .. }
-            | Self::ConsumeCredit { .. } => None,
-        }
-    }
 }
 
 /// Render-safe workflow phase without authority-bearing values.
@@ -237,7 +192,6 @@ pub(crate) enum WorkflowPhase {
 pub(crate) enum RenderValueProvenance {
     CurrentLive,
     PreviousLiveRefreshing,
-    Saved,
 }
 
 /// Render-safe semantic activity state for one provider operation.

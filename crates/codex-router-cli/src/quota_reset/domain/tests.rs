@@ -1,51 +1,6 @@
 use super::*;
 
 #[test]
-fn strict_weekly_guard_refuses_missing_one_and_higher_percentages() {
-    let credit = available_credit("credit-a", Some(100));
-    assert_eq!(
-        select_guarded_reset_credit(None, std::slice::from_ref(&credit)),
-        Err(ResetEligibilityRefusal::WeeklyWindowMissing)
-    );
-    assert_eq!(
-        select_guarded_reset_credit(Some(1), std::slice::from_ref(&credit)),
-        Err(ResetEligibilityRefusal::WeeklyRemainingNotBelowOnePercent {
-            remaining_percent: 1
-        })
-    );
-    assert_eq!(
-        select_guarded_reset_credit(Some(75), std::slice::from_ref(&credit)),
-        Err(ResetEligibilityRefusal::WeeklyRemainingNotBelowOnePercent {
-            remaining_percent: 75
-        })
-    );
-}
-
-#[test]
-fn zero_percent_selects_earliest_expiring_available_credit() {
-    let credits = vec![
-        available_credit("never", None),
-        available_credit("later", Some(200)),
-        redeemed_credit("redeemed", 50),
-        available_credit("earliest", Some(100)),
-    ];
-    assert_eq!(
-        select_guarded_reset_credit(Some(0), &credits)
-            .expect("eligible credit")
-            .id,
-        "earliest"
-    );
-}
-
-#[test]
-fn zero_percent_without_available_credit_fails_closed() {
-    assert_eq!(
-        select_guarded_reset_credit(Some(0), &[redeemed_credit("redeemed", 50)]),
-        Err(ResetEligibilityRefusal::NoAvailableResetCredit)
-    );
-}
-
-#[test]
 fn inventory_validation_orders_complete_inventory_and_selects_earliest_usable() {
     let inventory = validate_credit_inventory(
         vec![
@@ -60,8 +15,12 @@ fn inventory_validation_orders_complete_inventory_and_selects_earliest_usable() 
     .expect("valid inventory");
     assert_eq!(inventory.len(), 5);
     assert_eq!(
-        inventory.credit_ids(),
-        ["expired", "redeemed", "earliest", "later", "never"]
+        inventory
+            .display_projection()
+            .into_iter()
+            .map(|credit| credit.id_hint)
+            .collect::<Vec<_>>(),
+        ["…ired", "…emed", "…iest", "…ater", "…ever"]
     );
     assert_eq!(inventory.earliest_usable_credit_id(), Some("earliest"));
 }
@@ -117,15 +76,6 @@ fn inventory_validation_fails_closed_for_any_malformed_or_unknown_credit() {
     ] {
         assert!(validate_credit_inventory(vec![credit], 100).is_err());
     }
-}
-
-#[test]
-fn inventory_pages_are_deterministic_and_clamped() {
-    assert_eq!(inventory_page(9, 0, 4), InventoryPage::new(0, 4, 9));
-    assert_eq!(inventory_page(9, 4, 4), InventoryPage::new(4, 8, 9));
-    assert_eq!(inventory_page(9, 8, 4), InventoryPage::new(8, 9, 9));
-    assert_eq!(inventory_page(9, 99, 4), InventoryPage::new(8, 9, 9));
-    assert_eq!(inventory_page(0, 0, 4), InventoryPage::new(0, 0, 0));
 }
 
 #[test]

@@ -76,15 +76,6 @@ impl ResetWorkflow {
             })
     }
 
-    pub(in crate::quota_reset) fn set_saved_usage(&mut self, usage: LiveWeeklyUsage) {
-        if self.phase == WorkflowPhase::Browse {
-            self.live_usage = Some(AuthorityObservation {
-                value: usage,
-                provenance: RenderValueProvenance::Saved,
-            });
-        }
-    }
-
     pub(in crate::quota_reset) fn reduce(
         &mut self,
         intent: WorkflowIntent,
@@ -200,8 +191,29 @@ impl ResetWorkflow {
         self.phase = WorkflowPhase::Revalidating;
         self.revalidation_usage = Some(usage.clone());
         self.revalidation_inventory = Some(inventory.clone());
-        self.activities.revalidation_live_usage = OperationActivity::Loading;
-        self.activities.revalidation_credit_inventory = OperationActivity::Loading;
+        let previous_usage = self
+            .live_usage
+            .as_ref()
+            .map(|observation| OperationSuccess::LiveUsage(observation.value));
+        let previous_inventory =
+            self.inventory
+                .as_ref()
+                .map(|observation| OperationSuccess::CreditInventory {
+                    credit_count: observation.value.len(),
+                    usable_credit_count: observation.value.usable_credit_count(),
+                });
+        if let Some(observation) = self.live_usage.as_mut() {
+            observation.provenance = RenderValueProvenance::PreviousLiveRefreshing;
+        }
+        if let Some(observation) = self.inventory.as_mut() {
+            observation.provenance = RenderValueProvenance::PreviousLiveRefreshing;
+        }
+        self.activities.revalidation_live_usage = OperationActivity::Refreshing {
+            previous: previous_usage,
+        };
+        self.activities.revalidation_credit_inventory = OperationActivity::Refreshing {
+            previous: previous_inventory,
+        };
         vec![
             CorrelatedRequest::revalidation_live_usage(usage),
             CorrelatedRequest::revalidation_credit_inventory(inventory),
@@ -287,8 +299,30 @@ impl ResetWorkflow {
                 && self.consume.as_ref() == Some(&correlation) =>
             {
                 self.result = Some(match terminal {
-                    ConsumePortResult::Known(outcome) => WorkflowResult::Known(outcome),
+                    ConsumePortResult::Known(outcome) => {
+                        self.activities.consume_credit = OperationActivity::Succeeded(
+                            OperationSuccess::Consume(outcome.clone()),
+                        );
+                        WorkflowResult::Known(outcome)
+                    }
                     ConsumePortResult::OutcomeUnknown(reason) => {
+                        self.activities.consume_credit = OperationActivity::Failed {
+                            failure: match reason {
+                                crate::quota_reset::domain::ConsumeUnknownReason::Transport => {
+                                    RenderSafeFailure::Transport
+                                }
+                                crate::quota_reset::domain::ConsumeUnknownReason::TimedOut => {
+                                    RenderSafeFailure::TimedOut
+                                }
+                                crate::quota_reset::domain::ConsumeUnknownReason::ProviderStatus => {
+                                    RenderSafeFailure::ProviderStatus
+                                }
+                                crate::quota_reset::domain::ConsumeUnknownReason::InvalidResponse => {
+                                    RenderSafeFailure::InvalidResponse
+                                }
+                            },
+                            previous: None,
+                        };
                         WorkflowResult::OutcomeUnknown(reason)
                     }
                 });
@@ -366,6 +400,10 @@ impl ResetWorkflow {
     }
 
     fn cancel_precommit(&mut self) {
+        cancel_nonterminal_activity(&mut self.activities.inspection_live_usage);
+        cancel_nonterminal_activity(&mut self.activities.inspection_credit_inventory);
+        cancel_nonterminal_activity(&mut self.activities.revalidation_live_usage);
+        cancel_nonterminal_activity(&mut self.activities.revalidation_credit_inventory);
         self.phase = WorkflowPhase::Browse;
         self.confirmation_selection = ConfirmationSelection::No;
         self.inspection = None;
@@ -373,6 +411,15 @@ impl ResetWorkflow {
         self.revalidation_inventory = None;
         self.authority_failure = None;
         self.confirmed_credit = None;
+    }
+}
+
+fn cancel_nonterminal_activity(activity: &mut OperationActivity<OperationSuccess>) {
+    if matches!(
+        activity,
+        OperationActivity::Loading | OperationActivity::Refreshing { .. }
+    ) {
+        *activity = OperationActivity::Cancelled;
     }
 }
 

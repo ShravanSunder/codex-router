@@ -22,7 +22,6 @@ use super::domain::SelectedResetCreditSnapshot;
 use super::domain::ValidatedCreditInventory;
 use super::domain::validate_credit_inventory;
 use super::provider::HttpLiveQuotaResetProvider;
-use super::provider::LiveQuotaResetProvider;
 use super::provider::LiveResetAccountAuth;
 use super::provider::PreparedConsumeRequest;
 
@@ -140,8 +139,8 @@ impl ResetServiceProvider for HttpLiveQuotaResetProvider {
 
 fn render_safe_provider_failure(error: &QuotaResetError) -> RenderSafeFailure {
     match error {
-        QuotaResetError::ProviderRequest { .. } => RenderSafeFailure::Transport,
-        QuotaResetError::ProviderStatus { .. } => RenderSafeFailure::ProviderStatus,
+        QuotaResetError::Request { .. } => RenderSafeFailure::Transport,
+        QuotaResetError::Status { .. } => RenderSafeFailure::ProviderStatus,
         _ => RenderSafeFailure::InvalidResponse,
     }
 }
@@ -233,17 +232,6 @@ where
     pub(in crate::quota_reset) credit_inventory: Option<CreditInventoryPortResult>,
     pub(in crate::quota_reset) authorization:
         Result<CommitCapability<TAuthority, TPreparedConsume>, RenderSafeFailure>,
-}
-
-impl<TAuthority, TPreparedConsume> RevalidationReceipt<TAuthority, TPreparedConsume>
-where
-    TAuthority: ResetAuthority,
-{
-    pub(in crate::quota_reset) fn into_capability(
-        self,
-    ) -> Result<CommitCapability<TAuthority, TPreparedConsume>, RenderSafeFailure> {
-        self.authorization
-    }
 }
 
 impl<TAuthority, TPreparedConsume> std::fmt::Debug

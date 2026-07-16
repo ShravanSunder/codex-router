@@ -95,6 +95,9 @@ quota_reset/
   provider.rs   fixed production HTTP and test-only loopback transport
   service.rs    effect execution, revalidation, single-use capability
   supervisor.rs command-level task ownership and result reduction
+  supervisor/effects.rs task outputs, generation allocation, redeem identity minting
+  supervisor/protocol.rs render-safe intents, snapshots, and pinned-target protocol
+  supervisor/session_state.rs session bookkeeping and snapshot projection
   test_support.rs fake ledgers/held effects behind test composition
 ```
 
@@ -594,14 +597,27 @@ network/state/credential ledger.
 
 Source: Proof expectations 6, 8, and 9; R1–R4, R22, R24–R25.
 
-Do not add a loopback override to the installed `codex-router` CLI. Implement the Gate-0 contract:
+Do not add a loopback override to the installed `codex-router` CLI. Complete the Gate-0 scaffold and
+implement its contract:
 feature `quota-reset-test-harness`, binary `codex-router-quota-reset-test-harness`, and integration
-test `quota_reset_pty`. The harness calls the same parser, async quota session, reducer, supervisor,
-and iocraft entry while receiving an already-bound loopback transport and isolated roots through a
-sealed test composition. Generic composition types may compile in an all-feature library build, but
+test `quota_reset_pty`. The harness calls the same composition-parameterized async interactive quota
+dispatcher, session, reducer, supervisor, presentation component, and iocraft entry while receiving
+an already-bound loopback transport and isolated roots through a sealed test composition. Generic
+composition types may compile in an all-feature library build, but
 the installed `codex-router` main, parser, and production factory have no reference, option,
 environment path, or runtime route to loopback construction. Architecture/call-graph tests prove
 unreachability in default and all-feature target graphs.
+
+The dedicated harness binary owns a small parser separate from the installed CLI parser. Its only
+authority-bearing inputs are explicit isolated fixture paths and the bare HTTP origin derived from
+the listener already bound by the parent test on `127.0.0.1:0` or `[::1]:0`. It rejects missing,
+relative, ambient-home, non-loopback, userinfo, path, query, fragment, and unassigned-port inputs
+before opening state or credentials. It never consults environment for roots or provider routing.
+After validation, production and harness wrappers converge on one composition-parameterized async
+interactive quota dispatcher; the harness supplies the loopback provider and isolated authority
+reader while the installed wrapper supplies the zero-argument fixed provider and normal explicit
+router root. Neither wrapper duplicates parser-to-session, session-to-supervisor, or iocraft-loop
+behavior.
 
 Use a permanent Rust PTY integration driver (prefer a narrowly scoped dev dependency such as
 `portable-pty` only after license/deny/API validation). The driver:
@@ -611,7 +627,8 @@ Use a permanent Rust PTY integration driver (prefer a narrowly scoped dev depend
    symlink target where permitted. The state fixture proves current committed WAL visibility, zero
    busy waiting/writer locks, and no SQL data/schema/application-state mutation; SQLite-owned
    WAL/SHM coordination may change. Missing roots/database remain absent.
-2. Binds port 0 on loopback and passes the already-bound test transport; an egress guard rejects all
+2. Binds port 0 on loopback and passes only that already-bound listener's bare origin to the sealed
+   harness parser; the provider constructor revalidates loopback and an egress guard rejects all
    other destinations before credential lookup/request construction.
 3. Starts the dedicated compiled executable in a PTY with ambient HOME/router/provider variables
    neutralized.

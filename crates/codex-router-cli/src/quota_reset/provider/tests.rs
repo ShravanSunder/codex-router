@@ -259,7 +259,7 @@ async fn async_provider_refuses_redirects_without_replaying_account_requests() {
 
     assert!(matches!(
         result,
-        Err(QuotaResetError::ProviderStatus { status: 307 })
+        Err(QuotaResetError::Status { status: 307 })
     ));
     assert!(matches!(
         redirect_target.accept(),
@@ -339,7 +339,7 @@ async fn lying_declared_lengths_fail_closed_without_exposing_response_data() {
         };
         assert!(matches!(
             result,
-            Err(QuotaResetError::ProviderResponse { message })
+            Err(QuotaResetError::Response { message })
                 if message == expected_message
         ));
     }
@@ -351,7 +351,7 @@ async fn lying_declared_lengths_fail_closed_without_exposing_response_data() {
     .await;
     assert!(matches!(
         result,
-        Err(QuotaResetError::ProviderResponse { message })
+        Err(QuotaResetError::Response { message })
             if message == "provider response was malformed"
                 && !message.contains("provider-secret-body")
     ));
@@ -366,7 +366,7 @@ async fn truncation_and_transport_failures_have_only_sanitized_classes() {
     .await;
     assert!(matches!(
         truncated,
-        Err(QuotaResetError::ProviderResponse { message })
+        Err(QuotaResetError::Response { message })
             if message == "provider response body could not be read"
     ));
 
@@ -395,7 +395,7 @@ async fn truncation_and_transport_failures_have_only_sanitized_classes() {
 
     assert!(matches!(
         transport,
-        Err(QuotaResetError::ProviderRequest { message })
+        Err(QuotaResetError::Request { message })
             if message == "provider transport failed"
                 && !message.contains("must-not-appear")
                 && !message.contains(&address.to_string())
