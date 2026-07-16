@@ -28,6 +28,7 @@ pub(crate) mod domain;
 pub(crate) mod orchestration;
 pub(crate) mod provider;
 pub(crate) mod service;
+pub(crate) mod supervisor;
 pub(crate) mod workflow;
 
 /// Interactive quota-reset failure.
