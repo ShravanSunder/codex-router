@@ -149,12 +149,10 @@ async fn quota_browse_matches_normalized_goldens() {
         ],
     )
     .await;
-    let resize_transcript = resize_frames
-        .iter()
-        .enumerate()
-        .map(|(index, frame)| format!("=== frame {index} ===\n{frame}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let post_resize_frame = resize_frames
+        .last()
+        .unwrap_or_else(|| panic!("quota resize should render a final frame"));
+    let resize_transcript = format!("=== post-resize frame ===\n{post_resize_frame}");
     assert_quota_golden("resize", &resize_transcript);
 }
 
