@@ -31,6 +31,7 @@ pub(super) async fn render_interactive_quota_status(
     stdout_terminal_width: Option<usize>,
     all_limits: bool,
     now_unix_seconds: u64,
+    reset_session_factory: &dyn crate::quota_reset::InteractiveResetSessionFactory,
 ) -> Result<(), QuotaCommandError> {
     let width = stdout_terminal_width.unwrap_or(100).max(40);
     let report =
@@ -38,7 +39,7 @@ pub(super) async fn render_interactive_quota_status(
     let view_model = quota_status_view_model(&report, report.rows(), width);
     let reload_view_model =
         quota_status_view_model_loader(router_root.clone(), all_limits, true, width);
-    let reset_session = crate::quota_reset::compose_production_reset_session(&router_root)?;
+    let reset_session = reset_session_factory.create(&router_root)?;
     let shutdown_sender = reset_session.ports.intent_sender.clone();
     let session_task = tokio::spawn(reset_session.runner);
     let render_result = run_quota_status_view(

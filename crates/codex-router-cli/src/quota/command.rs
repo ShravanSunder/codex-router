@@ -167,6 +167,26 @@ pub(crate) async fn run_quota_command(
     stdout_is_terminal: bool,
     stdout_terminal_width: Option<usize>,
 ) -> Result<(), QuotaCommandError> {
+    let reset_session_factory = crate::quota_reset::FixedOriginInteractiveResetSessionFactory;
+    run_quota_command_with_reset_session_factory(
+        stdout,
+        command,
+        stdin_is_terminal,
+        stdout_is_terminal,
+        stdout_terminal_width,
+        &reset_session_factory,
+    )
+    .await
+}
+
+pub(crate) async fn run_quota_command_with_reset_session_factory(
+    stdout: &mut impl Write,
+    command: QuotaCommand,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    stdout_terminal_width: Option<usize>,
+    reset_session_factory: &dyn crate::quota_reset::InteractiveResetSessionFactory,
+) -> Result<(), QuotaCommandError> {
     match command {
         QuotaCommand::Help(help_text) => {
             stdout
@@ -186,6 +206,7 @@ pub(crate) async fn run_quota_command(
                     stdout_terminal_width,
                     all_limits,
                     now_unix_seconds,
+                    reset_session_factory,
                 )
                 .await?;
             } else {

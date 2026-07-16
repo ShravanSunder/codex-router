@@ -8,9 +8,18 @@ pub(crate) mod domain;
 pub(crate) mod provider;
 pub(crate) mod service;
 pub(crate) mod supervisor;
+#[cfg(feature = "quota-reset-test-harness")]
+mod test_harness;
 pub(crate) mod workflow;
 
-pub(crate) use composition::compose_production_reset_session;
+pub(crate) use composition::FixedOriginInteractiveResetSessionFactory;
+#[cfg(test)]
+pub(crate) use composition::InteractiveResetSession;
+pub(crate) use composition::InteractiveResetSessionFactory;
+#[cfg(feature = "quota-reset-test-harness")]
+pub(crate) use composition::LoopbackInteractiveResetSessionFactory;
+#[cfg(feature = "quota-reset-test-harness")]
+pub(crate) use test_harness::run_quota_reset_test_harness_with_io;
 
 /// Sanitized reset-provider composition and protocol failure.
 #[derive(Debug, Error)]

@@ -202,9 +202,13 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
    - Dedicated binary: `codex-router-quota-reset-test-harness` at
      `crates/codex-router-cli/src/bin/quota_reset_test_harness.rs`, with
      `required-features = ["quota-reset-test-harness"]`.
-   - Integration test: `crates/codex-router-cli/tests/quota_reset_pty.rs`.
-   - Shared entry: a composition-parameterized internal quota-session dispatcher used by production
-     and harness wrappers. Generic sealed composition types may compile with the package feature;
+   - Integration test: `crates/codex-router-cli/tests/quota_reset_pty.rs`, declared as a Cargo test
+     target with `required-features = ["quota-reset-test-harness"]` so default workspace proof
+     cannot run it against a stale or absent harness executable.
+   - Shared entry: a composition-parameterized internal quota-command dispatcher used by production
+     and harness wrappers. The feature-only harness parser validates an absolute fixture root and a
+     numeric loopback `SocketAddr`, then synthesizes ordinary `codex-router quota --router-root`
+     arguments for the real `CliCommand` parser. Generic sealed composition types may compile with the package feature;
      the installed `codex-router` main and production factory must have no reference or runtime route
      to loopback construction. Production behavior always constructs the zero-argument fixed reset
      provider. The harness wrapper can construct only a loopback transport plus isolated roots.
@@ -345,7 +349,7 @@ Behavior:
 
 - Production construction has no origin parameter and uses only
   `https://chatgpt.com/backend-api`; no CLI/env/config/state override.
-- A compile-time test-harness seam accepts validated loopback only and cannot fall back to
+- A compile-time test-harness seam accepts a validated numeric loopback `SocketAddr` only and cannot fall back to
   production composition.
 - Redirects remain disabled; timeouts bounded; no automatic retry.
 - Fully fallible request validation/serialization occurs before consume invocation.
@@ -609,15 +613,14 @@ environment path, or runtime route to loopback construction. Architecture/call-g
 unreachability in default and all-feature target graphs.
 
 The dedicated harness binary owns a small parser separate from the installed CLI parser. Its only
-authority-bearing inputs are explicit isolated fixture paths and the bare HTTP origin derived from
-the listener already bound by the parent test on `127.0.0.1:0` or `[::1]:0`. It rejects missing,
-relative, ambient-home, non-loopback, userinfo, path, query, fragment, and unassigned-port inputs
-before opening state or credentials. It never consults environment for roots or provider routing.
-After validation, production and harness wrappers converge on one composition-parameterized async
-interactive quota dispatcher; the harness supplies the loopback provider and isolated authority
-reader while the installed wrapper supplies the zero-argument fixed provider and normal explicit
-router root. Neither wrapper duplicates parser-to-session, session-to-supervisor, or iocraft-loop
-behavior.
+authority-bearing inputs are an explicit absolute isolated fixture root and the numeric
+`SocketAddr` of the listener already bound and retained by the parent test on `127.0.0.1:0` or
+`[::1]:0`. It rejects missing, relative, non-loopback, and port-zero inputs before opening state or
+credentials. It never consults environment for roots or provider routing. After validation it
+synthesizes ordinary `codex-router quota --router-root <fixture>` arguments and sends them through
+the real `CliCommand` parser and one composition-parameterized async quota dispatcher. The harness
+supplies the loopback factory while the installed wrapper supplies the zero-argument fixed factory.
+Neither wrapper duplicates parser-to-session, session-to-supervisor, or iocraft-loop behavior.
 
 Use a permanent Rust PTY integration driver (prefer a narrowly scoped dev dependency such as
 `portable-pty` only after license/deny/API validation). The driver:
@@ -627,8 +630,8 @@ Use a permanent Rust PTY integration driver (prefer a narrowly scoped dev depend
    symlink target where permitted. The state fixture proves current committed WAL visibility, zero
    busy waiting/writer locks, and no SQL data/schema/application-state mutation; SQLite-owned
    WAL/SHM coordination may change. Missing roots/database remain absent.
-2. Binds port 0 on loopback and passes only that already-bound listener's bare origin to the sealed
-   harness parser; the provider constructor revalidates loopback and an egress guard rejects all
+2. Binds port 0 on loopback and passes only that already-bound listener's numeric local
+   `SocketAddr` to the sealed harness parser; the provider constructor revalidates loopback and an egress guard rejects all
    other destinations before credential lookup/request construction.
 3. Starts the dedicated compiled executable in a PTY with ambient HOME/router/provider variables
    neutralized.
@@ -648,6 +651,7 @@ absent. Green proof uses these literal commands:
 ```text
 cargo metadata --no-deps --format-version 1
 cargo build -p codex-router-cli --bin codex-router
+cargo build -p codex-router-cli --all-features --bin codex-router
 cargo build -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness
 cargo clippy -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness --test quota_reset_pty -- -D warnings
 cargo nextest run -p codex-router-cli --features quota-reset-test-harness --test quota_reset_pty

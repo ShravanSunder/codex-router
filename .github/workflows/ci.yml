@@ -48,6 +48,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Integrated quota reset PTY harness
+        run: |
+          cargo build -p codex-router-cli --bin codex-router
+          cargo build -p codex-router-cli --all-features --bin codex-router
+          cargo build -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness
+          cargo clippy -p codex-router-cli --features quota-reset-test-harness --bin codex-router-quota-reset-test-harness --test quota_reset_pty -- -D warnings
+          cargo nextest run -p codex-router-cli --features quota-reset-test-harness --test quota_reset_pty
+
       - name: Test
         run: cargo nextest run --workspace
 

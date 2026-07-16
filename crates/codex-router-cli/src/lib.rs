@@ -101,16 +101,24 @@ pub async fn run_async() -> i32 {
     0
 }
 
-/// Runs the compiled quota-reset PTY harness entry.
+/// Runs the compiled quota-reset PTY harness entry without environment telemetry.
 ///
-/// The harness composition is feature-gated and fail-closed until an isolated loopback transport
-/// and fixture roots are supplied by the permanent PTY test. The installed `codex-router` binary
-/// does not reference this entry point.
+/// The installed `codex-router` binary does not reference this feature-gated entry point.
 #[cfg(feature = "quota-reset-test-harness")]
 #[doc(hidden)]
 pub async fn run_quota_reset_test_harness() -> i32 {
-    eprintln!("quota-reset test harness composition is not configured");
-    2
+    let args = std::env::args_os();
+    let context = CliContext::new(Vec::new());
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    if let Err(error) =
+        quota_reset::run_quota_reset_test_harness_with_io(args, &context, &mut stdout, &mut stderr)
+            .await
+    {
+        let _ = writeln!(stderr, "{error}");
+        return 2;
+    }
+    0
 }
 
 fn run_sync_process_args(args: Vec<OsString>) -> i32 {
@@ -3139,22 +3147,19 @@ exit 42
         ensure_async_state_schema(&router_root);
         drop(state);
 
-        let output = run_cli(
-            [
-                "codex-router",
-                "quota",
-                "status",
-                "--router-root",
-                path_to_str(&router_root),
-                "--format",
-                "table",
-                "--all-limits",
-                "--no-refresh",
-                "--now-unix-seconds",
-                "11000",
-            ],
-            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
-        );
+        let output = run_static_quota_cli([
+            "codex-router",
+            "quota",
+            "status",
+            "--router-root",
+            path_to_str(&router_root),
+            "--format",
+            "table",
+            "--all-limits",
+            "--no-refresh",
+            "--now-unix-seconds",
+            "11000",
+        ]);
 
         let visible_stdout = strip_ansi_sequences(&output.stdout);
 
@@ -3215,20 +3220,17 @@ exit 42
         ensure_async_state_schema(&router_root);
         drop(state);
 
-        let output = run_cli(
-            [
-                "codex-router",
-                "quota",
-                "status",
-                "--router-root",
-                path_to_str(&router_root),
-                "--format",
-                "table",
-                "--now-unix-seconds",
-                "11000",
-            ],
-            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
-        );
+        let output = run_static_quota_cli([
+            "codex-router",
+            "quota",
+            "status",
+            "--router-root",
+            path_to_str(&router_root),
+            "--format",
+            "table",
+            "--now-unix-seconds",
+            "11000",
+        ]);
 
         assert_eq!(output.stdout.matches("Quota status").count(), 1);
         assert!(output.stdout.contains("responses -> primary"));
@@ -3268,20 +3270,17 @@ exit 42
         ensure_async_state_schema(&router_root);
         drop(state);
 
-        let output = run_cli(
-            [
-                "codex-router",
-                "quota",
-                "status",
-                "--router-root",
-                path_to_str(&router_root),
-                "--format",
-                "table",
-                "--now-unix-seconds",
-                "11000",
-            ],
-            CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
-        );
+        let output = run_static_quota_cli([
+            "codex-router",
+            "quota",
+            "status",
+            "--router-root",
+            path_to_str(&router_root),
+            "--format",
+            "table",
+            "--now-unix-seconds",
+            "11000",
+        ]);
 
         assert!(!output.stdout.contains("person@example.com"));
         assert!(output.stdout.contains("acct-"));
@@ -7688,16 +7687,47 @@ exit 42
     ) -> CliRunOutput {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        must_ok(test_async_runtime().block_on(run_with_io_async(
-            args.into_iter().map(Into::into).collect(),
-            &context,
-            &mut stdout,
-            &mut stderr,
-        )));
+        let arguments = args.into_iter().map(Into::into).collect::<Vec<_>>();
+        if matches!(
+            must_ok(CliCommand::parse(arguments.clone())),
+            CliCommand::Quota(_)
+        ) {
+            must_ok(test_async_runtime().block_on(run_with_io_async(
+                arguments,
+                &context,
+                &mut stdout,
+                &mut stderr,
+            )));
+        } else {
+            must_ok(run_with_io(arguments, &context, &mut stdout, &mut stderr));
+        }
 
         CliRunOutput {
             stdout: must_ok(String::from_utf8(stdout)),
             stderr: must_ok(String::from_utf8(stderr)),
+        }
+    }
+
+    fn run_static_quota_cli<const ARGUMENT_COUNT: usize>(
+        args: [&str; ARGUMENT_COUNT],
+    ) -> CliRunOutput {
+        let command = match must_ok(CliCommand::parse(args.into_iter().map(Into::into))) {
+            CliCommand::Quota(command) => command,
+            _ => panic!("static quota helper requires a quota command"),
+        };
+        let mut stdout = Vec::new();
+        must_ok(
+            test_async_runtime().block_on(crate::quota::run_quota_command(
+                &mut stdout,
+                command,
+                false,
+                true,
+                None,
+            )),
+        );
+        CliRunOutput {
+            stdout: must_ok(String::from_utf8(stdout)),
+            stderr: String::new(),
         }
     }
 

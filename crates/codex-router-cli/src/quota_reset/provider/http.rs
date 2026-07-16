@@ -6,6 +6,8 @@ use codex_router_auth::live_quota::reset_credits_url;
 use codex_router_auth::live_quota::usage_url;
 use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
+#[cfg(any(test, feature = "quota-reset-test-harness"))]
+use std::net::SocketAddr;
 
 use super::ConsumeResetCreditResponse;
 use super::HttpLiveQuotaResetProvider;
@@ -30,27 +32,13 @@ impl HttpLiveQuotaResetProvider {
     }
 
     #[cfg(any(test, feature = "quota-reset-test-harness"))]
-    pub(crate) fn new_loopback(base_url: impl AsRef<str>) -> Result<Self, QuotaResetError> {
-        let parsed = reqwest::Url::parse(base_url.as_ref()).map_err(|_| {
-            provider_response_failure("loopback provider origin is not a valid URL")
-        })?;
-        let is_loopback_http = parsed.scheme() == "http"
-            && parsed
-                .host_str()
-                .and_then(|host| host.parse::<std::net::IpAddr>().ok())
-                .is_some_and(|address| address.is_loopback());
-        let is_bare_origin = parsed.port().is_some()
-            && parsed.path() == "/"
-            && parsed.query().is_none()
-            && parsed.fragment().is_none()
-            && parsed.username().is_empty()
-            && parsed.password().is_none();
-        if !is_loopback_http || !is_bare_origin {
+    pub(crate) fn new_loopback(provider_listener: SocketAddr) -> Result<Self, QuotaResetError> {
+        if !provider_listener.ip().is_loopback() || provider_listener.port() == 0 {
             return Err(provider_response_failure(
-                "loopback provider origin must be a bare loopback HTTP origin with an explicit port",
+                "loopback provider listener must use a loopback address and a nonzero port",
             ));
         }
-        Self::from_validated_base_url(parsed.as_str().trim_end_matches('/').to_owned())
+        Self::from_validated_base_url(format!("http://{provider_listener}"))
     }
 
     fn from_validated_base_url(base_url: String) -> Result<Self, QuotaResetError> {

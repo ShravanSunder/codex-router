@@ -14,6 +14,11 @@ name = "codex-router-quota-reset-test-harness"
 path = "src/bin/quota_reset_test_harness.rs"
 required-features = ["quota-reset-test-harness"]
 
+[[test]]
+name = "quota_reset_pty"
+path = "tests/quota_reset_pty.rs"
+required-features = ["quota-reset-test-harness"]
+
 [features]
 default = []
 quota-reset-test-harness = []
@@ -53,4 +58,5 @@ unicode-width.workspace = true
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.2", features = ["sync-rusqlite-fixtures"] }
 futures-util.workspace = true
+portable-pty = "0.9.0"
 tungstenite = "0.28.0"

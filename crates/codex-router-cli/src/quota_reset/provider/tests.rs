@@ -96,7 +96,7 @@ async fn async_provider_uses_exact_get_paths_and_headers() {
         .local_addr()
         .unwrap_or_else(|error| panic!("loopback address should resolve: {error}"));
     let server = std::thread::spawn(move || serve_two_provider_requests(listener));
-    let provider = HttpLiveQuotaResetProvider::new_loopback(format!("http://{address}"))
+    let provider = HttpLiveQuotaResetProvider::new_loopback(address)
         .unwrap_or_else(|error| panic!("loopback provider should build: {error}"));
     let auth = LiveResetAccountAuth {
         access_token: SecretString::new("loopback-token"),
@@ -153,16 +153,12 @@ fn account_auth_debug_output_redacts_both_secret_and_routing_identity() {
 }
 
 #[test]
-fn loopback_test_constructor_rejects_non_loopback_origins() {
-    for origin in [
-        "https://chatgpt.com/backend-api",
-        "http://example.test",
-        "http://127.0.0.1:1234/path",
-        "http://user:password@127.0.0.1:1234",
-    ] {
+fn loopback_test_constructor_rejects_non_loopback_and_zero_port_addresses() {
+    for address in ["192.0.2.1:1234", "[2001:db8::1]:1234", "127.0.0.1:0"] {
+        let address = address.parse().expect("numeric socket address");
         assert!(
-            HttpLiveQuotaResetProvider::new_loopback(origin).is_err(),
-            "{origin}"
+            HttpLiveQuotaResetProvider::new_loopback(address).is_err(),
+            "{address}"
         );
     }
 }
@@ -172,8 +168,7 @@ async fn consume_preparation_sends_nothing_and_invocation_sends_once() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .unwrap_or_else(|error| panic!("loopback listener should bind: {error}"));
     let address = listener.local_addr().expect("loopback address");
-    let provider =
-        HttpLiveQuotaResetProvider::new_loopback(format!("http://{address}")).expect("provider");
+    let provider = HttpLiveQuotaResetProvider::new_loopback(address).expect("provider");
     let auth = LiveResetAccountAuth {
         access_token: SecretString::new("consume-token"),
         chatgpt_account_id: "consume-account".to_owned(),
@@ -242,7 +237,7 @@ async fn async_provider_refuses_redirects_without_replaying_account_requests() {
             .write_all(response.as_bytes())
             .unwrap_or_else(|error| panic!("redirect source should write: {error}"));
     });
-    let provider = HttpLiveQuotaResetProvider::new_loopback(format!("http://{source_address}"))
+    let provider = HttpLiveQuotaResetProvider::new_loopback(source_address)
         .unwrap_or_else(|error| panic!("redirect provider should build: {error}"));
     let auth = LiveResetAccountAuth {
         access_token: SecretString::new("redirect-token"),
@@ -381,7 +376,7 @@ async fn truncation_and_transport_failures_have_only_sanitized_classes() {
             .unwrap_or_else(|error| panic!("loopback request should connect: {error}"));
         drop(stream);
     });
-    let provider = HttpLiveQuotaResetProvider::new_loopback(format!("http://{address}"))
+    let provider = HttpLiveQuotaResetProvider::new_loopback(address)
         .unwrap_or_else(|error| panic!("loopback provider should build: {error}"));
     let transport = provider
         .fetch_weekly_remaining_percent(&LiveResetAccountAuth {
@@ -419,7 +414,7 @@ async fn fetch_usage_from_loopback_response(
         let _write_result = stream.write_all(&response_headers);
         let _write_result = stream.write_all(&response_body);
     });
-    let provider = HttpLiveQuotaResetProvider::new_loopback(format!("http://{address}"))
+    let provider = HttpLiveQuotaResetProvider::new_loopback(address)
         .unwrap_or_else(|error| panic!("loopback provider should build: {error}"));
     let result = provider
         .fetch_weekly_remaining_percent(&LiveResetAccountAuth {

@@ -1,3 +1,6 @@
+use std::ffi::OsString;
+use std::path::Path;
+
 use super::*;
 
 #[test]
@@ -138,5 +141,47 @@ fn quota_reset_parser_accepts_only_migration_guidance_and_help_aliases() {
             QuotaCommand::parse(&mut parser),
             Err(CliError::UnknownOption { .. })
         ));
+    }
+}
+
+#[test]
+fn installed_quota_parser_rejects_harness_listener_before_dispatch() {
+    let result = crate::CliCommand::parse([
+        OsString::from("codex-router"),
+        OsString::from("quota"),
+        OsString::from("--provider-listener"),
+        OsString::from("127.0.0.1:9"),
+        OsString::from("--router-root"),
+        OsString::from("/fixture-must-not-be-opened"),
+    ]);
+
+    assert!(matches!(result, Err(CliError::UnknownOption { .. })));
+}
+
+#[tokio::test]
+async fn non_interactive_dispatch_never_constructs_an_injected_reset_session() {
+    struct RejectingResetSessionFactory;
+
+    impl crate::quota_reset::InteractiveResetSessionFactory for RejectingResetSessionFactory {
+        fn create(
+            &self,
+            _router_root: &Path,
+        ) -> Result<crate::quota_reset::InteractiveResetSession, crate::quota_reset::QuotaResetError>
+        {
+            panic!("non-interactive quota dispatch must not construct a reset session");
+        }
+    }
+
+    for command in [QuotaCommand::Help("quota help\n"), QuotaCommand::Reset] {
+        run_quota_command_with_reset_session_factory(
+            &mut Vec::new(),
+            command,
+            false,
+            false,
+            None,
+            &RejectingResetSessionFactory,
+        )
+        .await
+        .expect("non-interactive dispatch");
     }
 }

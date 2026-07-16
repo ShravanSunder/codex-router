@@ -501,12 +501,15 @@ constants and ambient home credentials are structurally unavailable to the autom
 composition.
 
 The dedicated feature-gated PTY executable has its own sealed harness argument contract. It accepts
-only explicit isolated fixture paths and the bare HTTP origin of a listener that the test already
-bound on a loopback address. It does not read provider or router-root overrides from environment or
-fall back to home directories. Those arguments and the loopback constructor are absent from the
-installed `codex-router` parser, main entry, and production reset factory, including all-feature
-builds. Both wrappers converge below composition on the same async quota session, supervisor,
-reducer, presentation component, and iocraft render loop.
+only an explicit absolute isolated fixture root and the numeric `SocketAddr` of a listener that the
+parent test already bound and retains on a loopback address. It does not accept a URL, hostname,
+path, userinfo, query, fragment, environment override, or home-directory fallback. After validating
+those harness-only inputs, it synthesizes ordinary `codex-router quota --router-root <fixture>`
+arguments and passes them through the real CLI parser and composition-parameterized async quota
+dispatcher. The harness-only arguments and loopback factory are absent from the installed
+`codex-router` parser, main entry, and production reset factory, including all-feature builds. Both
+wrappers converge on the same status loader, async quota session, supervisor, reducer, presentation
+component, and iocraft render loop.
 
 ## Security context
 
