@@ -7,14 +7,20 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use tokio::sync::Notify;
 
+use super::protocol::PinnedTargetInvalidationReason;
+use super::protocol::ResetEligibilityDisabledReason;
+use super::protocol::ResetValueProvenance;
 use super::*;
 use crate::quota_reset::domain::ActiveCredentialGeneration;
 use crate::quota_reset::domain::KnownConsumeOutcome;
 use crate::quota_reset::domain::LiveResetCredit;
+use crate::quota_reset::domain::RedeemRequestId;
 use crate::quota_reset::domain::SelectedResetCreditSnapshot;
 use crate::quota_reset::domain::validate_credit_inventory;
 use crate::quota_reset::provider::LiveResetAccountAuth;
 use crate::quota_reset::service::ResetAuthority;
+
+mod lifecycle;
 
 #[derive(Clone)]
 struct FakeAuthority {
@@ -88,6 +94,7 @@ struct FakeProviderControl {
     consume_started: Notify,
     consume_release: Notify,
     inspection_inventory_dropped: AtomicBool,
+    revalidation_usage_percent: AtomicUsize,
 }
 
 struct FakeProvider {
@@ -109,7 +116,14 @@ impl ResetServiceProvider for FakeProvider {
             self.control.revalidation_usage_started.notify_one();
             self.control.revalidation_release.notified().await;
         }
-        LiveUsagePortResult::Known(LiveWeeklyUsage::new(0))
+        let remaining_percent = if call == 0 {
+            0
+        } else {
+            self.control
+                .revalidation_usage_percent
+                .load(Ordering::SeqCst) as u32
+        };
+        LiveUsagePortResult::Known(LiveWeeklyUsage::new(remaining_percent))
     }
 
     async fn fetch_inventory(
@@ -180,10 +194,15 @@ fn non_spawning_service_cannot_own_effect_handles() {
 
     // Assert
     assert!(!owns_spawn_or_join_handle);
+    let supervisor_source = include_str!("../supervisor.rs");
+    assert!(!supervisor_source.contains("sqlx::"));
+    assert!(!supervisor_source.contains("StateStore"));
+    assert!(!supervisor_source.contains("persist_"));
+    assert!(!supervisor_source.contains("refresh_quota"));
 }
 
 #[tokio::test]
-async fn independent_inspection_partially_completes_and_cancel_reaps_remaining_get() {
+async fn cancel_reaps_partial_get_and_allows_second_inspection() {
     // Arrange
     let fixture = session_fixture();
     let mut snapshot_receiver = fixture.ports.snapshot_receiver;
@@ -209,6 +228,20 @@ async fn independent_inspection_partially_completes_and_cancel_reaps_remaining_g
         .send(ResetSessionIntent::Cancel)
         .await
         .expect("cancel intent");
+    wait_for_phase(&mut snapshot_receiver, WorkflowPhase::Browse).await;
+    begin_inspection(&intent_sender).await;
+    fixture.control.revalidation_usage_started.notified().await;
+    fixture
+        .control
+        .revalidation_inventory_started
+        .notified()
+        .await;
+    fixture.control.revalidation_release.notify_waiters();
+    wait_for_phase(&mut snapshot_receiver, WorkflowPhase::Inspected).await;
+    intent_sender
+        .send(ResetSessionIntent::Shutdown)
+        .await
+        .expect("shutdown intent");
     let outcome = session_task.await.expect("session task");
 
     // Assert
@@ -253,6 +286,33 @@ async fn inventory_first_completion_remains_partial_until_usage_finishes() {
     );
     fixture.control.inspection_usage_release.notify_one();
     wait_for_phase(&mut snapshot_receiver, WorkflowPhase::Inspected).await;
+    let snapshot = snapshot_receiver.borrow().clone();
+    let rendered_snapshot = format!("{snapshot:?}");
+    assert_eq!(
+        snapshot
+            .target()
+            .expect("pinned target")
+            .active_credential_generation,
+        2
+    );
+    assert_eq!(
+        snapshot.live_weekly().expect("live weekly").provenance,
+        ResetValueProvenance::CurrentLive
+    );
+    assert_eq!(snapshot.credit_inventory().len(), 1);
+    assert_eq!(
+        snapshot.credit_inventory_provenance(),
+        Some(ResetValueProvenance::CurrentLive)
+    );
+    let displayed_credit = snapshot
+        .credit_inventory()
+        .first()
+        .expect("displayed credit");
+    assert!(displayed_credit.earliest_usable);
+    assert_eq!(displayed_credit.id_hint, "…8f42");
+    assert!(snapshot.selected_credit().is_some());
+    assert!(!rendered_snapshot.contains("credit-full-secret-canary-8f42"));
+    assert!(!rendered_snapshot.contains("fake-supervisor-token"));
     drop(intent_sender);
     assert_eq!(
         session_task.await.expect("session task"),
@@ -370,6 +430,38 @@ async fn begin_inspection(intent_sender: &mpsc::Sender<ResetSessionIntent>) {
         .expect("begin inspection");
 }
 
+async fn drive_to_committing(
+    control: &FakeProviderControl,
+    intent_sender: &mpsc::Sender<ResetSessionIntent>,
+    snapshot_receiver: &mut watch::Receiver<ResetWorkflowSnapshot>,
+) {
+    begin_inspection(intent_sender).await;
+    control.inspection_usage_started.notified().await;
+    control.inspection_inventory_started.notified().await;
+    control.inspection_usage_release.notify_one();
+    control.inspection_inventory_release.notify_one();
+    wait_for_phase(snapshot_receiver, WorkflowPhase::Inspected).await;
+    intent_sender
+        .send(ResetSessionIntent::OpenConfirmation)
+        .await
+        .expect("open confirmation");
+    intent_sender
+        .send(ResetSessionIntent::SelectYes)
+        .await
+        .expect("select yes");
+    intent_sender
+        .send(ResetSessionIntent::Confirm {
+            now_unix_seconds: 100,
+        })
+        .await
+        .expect("confirm");
+    control.revalidation_usage_started.notified().await;
+    control.revalidation_inventory_started.notified().await;
+    control.revalidation_release.notify_waiters();
+    control.consume_started.notified().await;
+    wait_for_phase(snapshot_receiver, WorkflowPhase::Committing).await;
+}
+
 async fn wait_for_phase(
     snapshot_receiver: &mut watch::Receiver<ResetWorkflowSnapshot>,
     expected_phase: WorkflowPhase,
@@ -382,11 +474,27 @@ async fn wait_for_phase(
     }
 }
 
+async fn wait_for_weekly_remaining(
+    snapshot_receiver: &mut watch::Receiver<ResetWorkflowSnapshot>,
+    expected_remaining: u32,
+) {
+    loop {
+        if snapshot_receiver
+            .borrow()
+            .live_weekly()
+            .is_some_and(|weekly| weekly.remaining_percent == expected_remaining)
+        {
+            return;
+        }
+        snapshot_receiver.changed().await.expect("snapshot update");
+    }
+}
+
 fn validated_inventory() -> CreditInventoryPortResult {
     CreditInventoryPortResult::Validated(
         validate_credit_inventory(
             vec![LiveResetCredit {
-                id: "credit-earliest".to_owned(),
+                id: "credit-full-secret-canary-8f42".to_owned(),
                 status: "available".to_owned(),
                 expires_unix_seconds: Some(200),
                 expires_at: Some("unix-200".to_owned()),

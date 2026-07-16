@@ -278,6 +278,49 @@ impl ValidatedCreditInventory {
             .and_then(|index| self.credits.get(index))
             .map(SelectedResetCreditSnapshot::from)
     }
+
+    pub(in crate::quota_reset) fn display_projection(&self) -> Vec<ResetCreditDisplayProjection> {
+        self.credits
+            .iter()
+            .enumerate()
+            .map(|(index, credit)| ResetCreditDisplayProjection {
+                id_hint: safe_credit_id_hint(&credit.identity.0),
+                status: match credit.status {
+                    ValidatedCreditStatus::Available => ResetCreditDisplayStatus::Available,
+                    ValidatedCreditStatus::Redeeming => ResetCreditDisplayStatus::Redeeming,
+                    ValidatedCreditStatus::Redeemed => ResetCreditDisplayStatus::Redeemed,
+                },
+                title: credit.title.clone(),
+                expires_unix_seconds: credit.expires_unix_seconds,
+                earliest_usable: self.earliest_usable_index == Some(index),
+            })
+            .collect()
+    }
+}
+
+/// Redacted inventory entry safe to copy into the presentation protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::quota_reset) struct ResetCreditDisplayProjection {
+    pub(in crate::quota_reset) id_hint: String,
+    pub(in crate::quota_reset) status: ResetCreditDisplayStatus,
+    pub(in crate::quota_reset) title: Option<String>,
+    pub(in crate::quota_reset) expires_unix_seconds: Option<i64>,
+    pub(in crate::quota_reset) earliest_usable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::quota_reset) enum ResetCreditDisplayStatus {
+    Available,
+    Redeeming,
+    Redeemed,
+}
+
+fn safe_credit_id_hint(identity: &str) -> String {
+    let suffix = identity.chars().rev().take(4).collect::<Vec<_>>();
+    if identity.chars().count() <= suffix.len() {
+        return "hidden".to_owned();
+    }
+    format!("…{}", suffix.into_iter().rev().collect::<String>())
 }
 
 /// Exact credit identity kept opaque outside reset authority.
@@ -452,155 +495,4 @@ pub(crate) fn inventory_page(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strict_weekly_guard_refuses_missing_one_and_higher_percentages() {
-        let credit = available_credit("credit-a", Some(100));
-
-        assert_eq!(
-            select_guarded_reset_credit(None, std::slice::from_ref(&credit)),
-            Err(ResetEligibilityRefusal::WeeklyWindowMissing)
-        );
-        assert_eq!(
-            select_guarded_reset_credit(Some(1), std::slice::from_ref(&credit)),
-            Err(ResetEligibilityRefusal::WeeklyRemainingNotBelowOnePercent {
-                remaining_percent: 1
-            })
-        );
-        assert_eq!(
-            select_guarded_reset_credit(Some(75), std::slice::from_ref(&credit)),
-            Err(ResetEligibilityRefusal::WeeklyRemainingNotBelowOnePercent {
-                remaining_percent: 75
-            })
-        );
-    }
-
-    #[test]
-    fn zero_percent_selects_earliest_expiring_available_credit() {
-        let credits = vec![
-            available_credit("never", None),
-            available_credit("later", Some(200)),
-            LiveResetCredit {
-                id: "redeemed".to_owned(),
-                status: "redeemed".to_owned(),
-                expires_unix_seconds: Some(50),
-                expires_at: Some("1970-01-01T00:00:50Z".to_owned()),
-                title: None,
-            },
-            available_credit("earliest", Some(100)),
-        ];
-
-        let selected = select_guarded_reset_credit(Some(0), &credits)
-            .unwrap_or_else(|error| panic!("zero percent should be eligible: {error:?}"));
-
-        assert_eq!(selected.id, "earliest");
-    }
-
-    #[test]
-    fn zero_percent_without_available_credit_fails_closed() {
-        let credits = vec![LiveResetCredit {
-            id: "redeemed".to_owned(),
-            status: "redeemed".to_owned(),
-            expires_unix_seconds: Some(50),
-            expires_at: Some("1970-01-01T00:00:50Z".to_owned()),
-            title: None,
-        }];
-
-        assert_eq!(
-            select_guarded_reset_credit(Some(0), &credits),
-            Err(ResetEligibilityRefusal::NoAvailableResetCredit)
-        );
-    }
-
-    #[test]
-    fn inventory_validation_orders_complete_inventory_and_selects_earliest_usable() {
-        let credits = vec![
-            available_credit("never", None),
-            available_credit("later", Some(300)),
-            available_credit("expired", Some(50)),
-            available_credit("earliest", Some(200)),
-            LiveResetCredit {
-                id: "redeemed".to_owned(),
-                status: "redeemed".to_owned(),
-                expires_unix_seconds: Some(100),
-                expires_at: Some("unix-100".to_owned()),
-                title: None,
-            },
-        ];
-
-        let inventory = validate_credit_inventory(credits, 100)
-            .unwrap_or_else(|error| panic!("inventory should validate: {error:?}"));
-
-        assert_eq!(inventory.len(), 5);
-        assert_eq!(
-            inventory.credit_ids(),
-            ["expired", "redeemed", "earliest", "later", "never"]
-        );
-        assert_eq!(inventory.earliest_usable_credit_id(), Some("earliest"));
-    }
-
-    #[test]
-    fn inventory_validation_fails_closed_for_any_malformed_or_unknown_credit() {
-        for credit in [
-            LiveResetCredit {
-                id: String::new(),
-                status: "available".to_owned(),
-                expires_unix_seconds: None,
-                expires_at: None,
-                title: None,
-            },
-            LiveResetCredit {
-                id: "unknown".to_owned(),
-                status: "future".to_owned(),
-                expires_unix_seconds: None,
-                expires_at: None,
-                title: None,
-            },
-            LiveResetCredit {
-                id: "bad-title".to_owned(),
-                status: "available".to_owned(),
-                expires_unix_seconds: None,
-                expires_at: None,
-                title: Some("unsafe\ntext".to_owned()),
-            },
-            LiveResetCredit {
-                id: "bad-expiry".to_owned(),
-                status: "available".to_owned(),
-                expires_unix_seconds: None,
-                expires_at: Some("malformed".to_owned()),
-                title: None,
-            },
-        ] {
-            assert!(validate_credit_inventory(vec![credit], 100).is_err());
-        }
-    }
-
-    #[test]
-    fn inventory_pages_are_deterministic_and_clamped() {
-        assert_eq!(inventory_page(9, 0, 4), InventoryPage::new(0, 4, 9));
-        assert_eq!(inventory_page(9, 4, 4), InventoryPage::new(4, 8, 9));
-        assert_eq!(inventory_page(9, 8, 4), InventoryPage::new(8, 9, 9));
-        assert_eq!(inventory_page(9, 99, 4), InventoryPage::new(8, 9, 9));
-        assert_eq!(inventory_page(0, 0, 4), InventoryPage::new(0, 0, 0));
-    }
-
-    #[test]
-    fn redeem_request_identity_is_bounded_and_control_character_free() {
-        assert!(RedeemRequestId::new("redeem-1".to_owned()).is_ok());
-        assert!(RedeemRequestId::new(String::new()).is_err());
-        assert!(RedeemRequestId::new("bad\nvalue".to_owned()).is_err());
-        assert!(RedeemRequestId::new("x".repeat(257)).is_err());
-    }
-
-    fn available_credit(id: &str, expires_unix_seconds: Option<i64>) -> LiveResetCredit {
-        LiveResetCredit {
-            id: id.to_owned(),
-            status: "available".to_owned(),
-            expires_unix_seconds,
-            expires_at: expires_unix_seconds.map(|value| format!("unix-{value}")),
-            title: None,
-        }
-    }
-}
+mod tests;

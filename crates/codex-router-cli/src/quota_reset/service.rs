@@ -225,6 +225,27 @@ where
     prepared_consume: TPreparedConsume,
 }
 
+pub(in crate::quota_reset) struct RevalidationReceipt<TAuthority, TPreparedConsume>
+where
+    TAuthority: ResetAuthority,
+{
+    pub(in crate::quota_reset) live_usage: Option<LiveUsagePortResult>,
+    pub(in crate::quota_reset) credit_inventory: Option<CreditInventoryPortResult>,
+    pub(in crate::quota_reset) authorization:
+        Result<CommitCapability<TAuthority, TPreparedConsume>, RenderSafeFailure>,
+}
+
+impl<TAuthority, TPreparedConsume> RevalidationReceipt<TAuthority, TPreparedConsume>
+where
+    TAuthority: ResetAuthority,
+{
+    pub(in crate::quota_reset) fn into_capability(
+        self,
+    ) -> Result<CommitCapability<TAuthority, TPreparedConsume>, RenderSafeFailure> {
+        self.authorization
+    }
+}
+
 impl<TAuthority, TPreparedConsume> std::fmt::Debug
     for CommitCapability<TAuthority, TPreparedConsume>
 where
@@ -308,27 +329,27 @@ where
         confirmation: ConfirmationAuthority<TAuthorityReader::Authority>,
         now_unix_seconds: u64,
         redeem_request_id: RedeemRequestId,
-    ) -> Result<
-        CommitCapability<TAuthorityReader::Authority, TProvider::PreparedConsume>,
-        RenderSafeFailure,
-    > {
-        let fresh_authority = Arc::new(
-            self.authority_reader
-                .read_authority(
-                    confirmation.authority.account_id(),
-                    confirmation.authority.active_credential_generation(),
-                    now_unix_seconds,
-                )
-                .await?,
-        );
+    ) -> RevalidationReceipt<TAuthorityReader::Authority, TProvider::PreparedConsume> {
+        let fresh_authority = match self
+            .authority_reader
+            .read_authority(
+                confirmation.authority.account_id(),
+                confirmation.authority.active_credential_generation(),
+                now_unix_seconds,
+            )
+            .await
+        {
+            Ok(authority) => Arc::new(authority),
+            Err(failure) => return refused_revalidation(failure, None, None),
+        };
         if fresh_authority.fingerprint() != confirmation.authority.fingerprint() {
-            return Err(RenderSafeFailure::CredentialUnavailable);
+            return refused_revalidation(RenderSafeFailure::CredentialUnavailable, None, None);
         }
         if fresh_authority
             .expires_unix_seconds()
             .is_some_and(|expires_at| expires_at <= now_unix_seconds)
         {
-            return Err(RenderSafeFailure::CredentialExpired);
+            return refused_revalidation(RenderSafeFailure::CredentialExpired, None, None);
         }
 
         let auth = fresh_authority.auth();
@@ -337,34 +358,66 @@ where
             self.provider
                 .fetch_inventory(auth.clone(), now_unix_seconds as i64),
         );
-        let LiveUsagePortResult::Known(usage) = usage else {
-            return Err(RenderSafeFailure::EligibilityRefused);
+        let LiveUsagePortResult::Known(live_usage) = &usage else {
+            return refused_revalidation(
+                RenderSafeFailure::EligibilityRefused,
+                Some(usage),
+                Some(inventory),
+            );
         };
-        let CreditInventoryPortResult::Validated(inventory) = inventory else {
-            return Err(RenderSafeFailure::SelectedCreditChanged);
+        let CreditInventoryPortResult::Validated(validated_inventory) = &inventory else {
+            return refused_revalidation(
+                RenderSafeFailure::SelectedCreditChanged,
+                Some(usage),
+                Some(inventory),
+            );
         };
-        if usage != confirmation.weekly_usage || usage.remaining_percent() >= 1 {
-            return Err(RenderSafeFailure::EligibilityRefused);
+        if *live_usage != confirmation.weekly_usage || live_usage.remaining_percent() >= 1 {
+            return refused_revalidation(
+                RenderSafeFailure::EligibilityRefused,
+                Some(usage),
+                Some(inventory),
+            );
         }
-        let selected_credit = inventory
-            .earliest_usable_snapshot()
-            .ok_or(RenderSafeFailure::SelectedCreditChanged)?;
+        let selected_credit = match validated_inventory.earliest_usable_snapshot() {
+            Some(selected_credit) => selected_credit,
+            None => {
+                return refused_revalidation(
+                    RenderSafeFailure::SelectedCreditChanged,
+                    Some(usage),
+                    Some(inventory),
+                );
+            }
+        };
         if selected_credit != confirmation.selected_credit
             || selected_credit
                 .expires_unix_seconds()
                 .is_some_and(|expires_at| expires_at <= now_unix_seconds as i64)
         {
-            return Err(RenderSafeFailure::SelectedCreditChanged);
+            return refused_revalidation(
+                RenderSafeFailure::SelectedCreditChanged,
+                Some(usage),
+                Some(inventory),
+            );
         }
         let prepared_consume =
-            self.provider
-                .prepare_consume(&auth, &selected_credit, &redeem_request_id)?;
-        Ok(CommitCapability {
-            _authority: fresh_authority,
-            _attempt_generation: confirmation.attempt_generation,
-            _redeem_request_id: redeem_request_id,
-            prepared_consume,
-        })
+            match self
+                .provider
+                .prepare_consume(&auth, &selected_credit, &redeem_request_id)
+            {
+                Ok(prepared_consume) => prepared_consume,
+                Err(failure) => return refused_revalidation(failure, Some(usage), Some(inventory)),
+            };
+        RevalidationReceipt {
+            live_usage: Some(usage),
+            credit_inventory: Some(inventory),
+            authorization: Ok(CommitCapability {
+                _authority: fresh_authority,
+                _attempt_generation: confirmation.attempt_generation,
+                _redeem_request_id: redeem_request_id,
+                prepared_consume,
+            }),
+        }
     }
 
     pub(in crate::quota_reset) async fn consume(
@@ -374,6 +427,21 @@ where
         self.provider
             .invoke_prepared(capability.prepared_consume)
             .await
+    }
+}
+
+fn refused_revalidation<TAuthority, TPreparedConsume>(
+    failure: RenderSafeFailure,
+    live_usage: Option<LiveUsagePortResult>,
+    credit_inventory: Option<CreditInventoryPortResult>,
+) -> RevalidationReceipt<TAuthority, TPreparedConsume>
+where
+    TAuthority: ResetAuthority,
+{
+    RevalidationReceipt {
+        live_usage,
+        credit_inventory,
+        authorization: Err(failure),
     }
 }
 

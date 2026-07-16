@@ -6,6 +6,7 @@ mod reducer;
 
 pub(in crate::quota_reset) use contracts::CorrelatedOutcome;
 pub(in crate::quota_reset) use contracts::OperationCorrelation;
+pub(in crate::quota_reset) use contracts::RenderValueProvenance;
 pub(in crate::quota_reset) use contracts::WorkflowPhase;
 pub(in crate::quota_reset) use model::ConfirmationSelection;
 pub(in crate::quota_reset) use model::InspectionStart;

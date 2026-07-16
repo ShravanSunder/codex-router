@@ -97,6 +97,7 @@ pub(in crate::quota_reset) enum WorkflowIntent {
         consume_operation_generation: OperationGeneration,
     },
     AuthorityLost(RenderSafeFailure),
+    PinnedTargetInvalidated(RenderSafeFailure),
     Cancel,
 }
 

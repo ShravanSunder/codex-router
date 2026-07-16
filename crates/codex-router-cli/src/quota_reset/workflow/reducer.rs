@@ -37,6 +37,29 @@ impl ResetWorkflow {
         &self.activities
     }
 
+    pub(in crate::quota_reset) fn live_usage_observation(
+        &self,
+    ) -> Option<(LiveWeeklyUsage, RenderValueProvenance)> {
+        self.live_usage
+            .as_ref()
+            .map(|observation| (observation.value, observation.provenance))
+    }
+
+    pub(in crate::quota_reset) fn inventory_observation(
+        &self,
+    ) -> Option<(
+        &crate::quota_reset::domain::ValidatedCreditInventory,
+        RenderValueProvenance,
+    )> {
+        self.inventory
+            .as_ref()
+            .map(|observation| (&observation.value, observation.provenance))
+    }
+
+    pub(in crate::quota_reset) const fn authority_failure(&self) -> Option<RenderSafeFailure> {
+        self.authority_failure
+    }
+
     pub(in crate::quota_reset) fn consume_correlation(&self) -> Option<OperationCorrelation> {
         self.consume.clone()
     }
@@ -104,6 +127,13 @@ impl ResetWorkflow {
             WorkflowIntent::AuthorityLost(failure) => {
                 self.authority_failure = Some(failure);
                 self.confirmation_selection = ConfirmationSelection::No;
+                Vec::new()
+            }
+            WorkflowIntent::PinnedTargetInvalidated(failure)
+                if self.phase != WorkflowPhase::Committing =>
+            {
+                self.cancel_precommit();
+                self.authority_failure = Some(failure);
                 Vec::new()
             }
             WorkflowIntent::Cancel if self.phase != WorkflowPhase::Committing => {

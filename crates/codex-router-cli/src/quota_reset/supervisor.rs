@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use codex_router_core::ids::AccountId;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -13,16 +14,14 @@ use super::domain::ConsumeUnknownReason;
 use super::domain::CreditInventoryPortResult;
 use super::domain::LiveUsagePortResult;
 use super::domain::LiveWeeklyUsage;
-use super::domain::OperationGeneration;
-use super::domain::RedeemRequestId;
 use super::domain::RenderSafeFailure;
 use super::domain::ValidatedCreditInventory;
-use super::service::CommitCapability;
 use super::service::ConfirmationAuthority;
 use super::service::InspectionAuthority;
 use super::service::ResetAuthorityReader;
 use super::service::ResetServiceProvider;
 use super::service::ResetWorkflowService;
+use super::service::RevalidationReceipt;
 use super::workflow::CorrelatedOutcome;
 use super::workflow::InspectionStart;
 use super::workflow::OperationCorrelation;
@@ -31,20 +30,20 @@ use super::workflow::WorkflowIntent;
 use super::workflow::WorkflowPhase;
 use super::workflow::WorkflowResult;
 
+mod effects;
 mod protocol;
 
+use effects::GenerationAllocator;
+use effects::RedeemRequestIdFactory;
+use effects::SessionTaskOutput;
+use protocol::PinnedResetTarget;
+use protocol::PinnedTargetInvalidationReason;
 pub(crate) use protocol::ResetSessionIntent;
 pub(in crate::quota_reset) use protocol::ResetSessionOutcome;
 pub(crate) use protocol::ResetSessionPorts;
 pub(crate) use protocol::ResetWorkflowSnapshot;
 
 const MINIMUM_PORT_CAPACITY: usize = 1;
-
-pub(in crate::quota_reset) trait RedeemRequestIdFactory:
-    Send + Sync + 'static
-{
-    fn mint(&self) -> Result<RedeemRequestId, RenderSafeFailure>;
-}
 
 /// Sole reducer, authority, and reset-effect task owner for one quota command.
 pub(in crate::quota_reset) struct QuotaInteractiveSession<
@@ -62,12 +61,15 @@ pub(in crate::quota_reset) struct QuotaInteractiveSession<
     intent_receiver: mpsc::Receiver<ResetSessionIntent>,
     snapshot_sender: watch::Sender<ResetWorkflowSnapshot>,
     tasks: JoinSet<SessionTaskOutput<TAuthorityReader, TProvider>>,
-    next_attempt_generation: u64,
-    next_operation_generation: u64,
+    generations: GenerationAllocator,
     inspection_authority: Option<InspectionAuthority<TAuthorityReader::Authority>>,
     confirmation_authority: Option<ConfirmationAuthority<TAuthorityReader::Authority>>,
     inspection_usage: Option<LiveWeeklyUsage>,
     inspection_inventory: Option<ValidatedCreditInventory>,
+    current_target: Option<PinnedResetTarget>,
+    invalidation_reason: Option<PinnedTargetInvalidationReason>,
+    terminal_outcome: Option<WorkflowResult>,
+    presentation_connected: bool,
 }
 
 impl<TAuthorityReader, TProvider, TRedeemRequestIdFactory>
@@ -84,7 +86,8 @@ where
     ) -> (Self, ResetSessionPorts) {
         let capacity = port_capacity.max(MINIMUM_PORT_CAPACITY);
         let (intent_sender, intent_receiver) = mpsc::channel(capacity);
-        let initial_snapshot = ResetWorkflowSnapshot::from_workflow(&ResetWorkflow::default());
+        let initial_snapshot =
+            ResetWorkflowSnapshot::from_workflow(&ResetWorkflow::default(), None, None);
         let (snapshot_sender, snapshot_receiver) = watch::channel(initial_snapshot);
         (
             Self {
@@ -94,12 +97,15 @@ where
                 intent_receiver,
                 snapshot_sender,
                 tasks: JoinSet::new(),
-                next_attempt_generation: 0,
-                next_operation_generation: 0,
+                generations: GenerationAllocator::default(),
                 inspection_authority: None,
                 confirmation_authority: None,
                 inspection_usage: None,
                 inspection_inventory: None,
+                current_target: None,
+                invalidation_reason: None,
+                terminal_outcome: None,
+                presentation_connected: true,
             },
             ResetSessionPorts {
                 intent_sender,
@@ -109,17 +115,16 @@ where
     }
 
     pub(in crate::quota_reset) async fn run(mut self) -> ResetSessionOutcome {
-        let mut presentation_connected = true;
         loop {
             tokio::select! {
-                intent = self.intent_receiver.recv(), if presentation_connected => {
+                intent = self.intent_receiver.recv(), if self.presentation_connected => {
                     let Some(intent) = intent else {
                         if self.workflow.phase() == WorkflowPhase::Committing {
-                            presentation_connected = false;
+                            self.presentation_connected = false;
                             continue;
                         }
-                        self.cancel_precommit().await;
-                        return ResetSessionOutcome::Cancelled;
+                        self.reap_precommit_for_shutdown().await;
+                        return self.sanitized_outcome();
                     };
                     if let Some(outcome) = self.apply_intent(intent).await {
                         return outcome;
@@ -144,13 +149,19 @@ where
                 active_credential_generation,
                 now_unix_seconds,
             } if self.workflow.phase() == WorkflowPhase::Browse => {
-                let attempt_generation = self.allocate_attempt_generation();
+                self.current_target = Some(PinnedResetTarget {
+                    account_id: account_id.clone(),
+                    active_credential_generation,
+                });
+                self.invalidation_reason = None;
+                self.terminal_outcome = None;
+                let attempt_generation = self.generations.allocate_attempt();
                 let start = InspectionStart::new(
                     account_id,
                     ActiveCredentialGeneration::new(active_credential_generation),
                     attempt_generation,
-                    self.allocate_operation_generation(),
-                    self.allocate_operation_generation(),
+                    self.generations.allocate_operation(),
+                    self.generations.allocate_operation(),
                 );
                 let requests = self
                     .workflow
@@ -187,9 +198,29 @@ where
             }
             ResetSessionIntent::Cancel if self.workflow.phase() != WorkflowPhase::Committing => {
                 self.cancel_precommit().await;
-                return Some(ResetSessionOutcome::Cancelled);
             }
-            ResetSessionIntent::Cancel => {}
+            ResetSessionIntent::DismissResult if self.workflow.phase() == WorkflowPhase::Result => {
+                self.cancel_precommit().await;
+            }
+            ResetSessionIntent::PinnedTargetInvalidated {
+                account_id,
+                active_credential_generation,
+                reason,
+            } if self.target_matches(&account_id, active_credential_generation)
+                && self.workflow.phase() != WorkflowPhase::Committing =>
+            {
+                self.invalidate_pinned_target(reason).await;
+            }
+            ResetSessionIntent::Shutdown if self.workflow.phase() == WorkflowPhase::Committing => {
+                self.presentation_connected = false;
+            }
+            ResetSessionIntent::Shutdown => {
+                self.reap_precommit_for_shutdown().await;
+                return Some(self.sanitized_outcome());
+            }
+            ResetSessionIntent::Cancel
+            | ResetSessionIntent::DismissResult
+            | ResetSessionIntent::PinnedTargetInvalidated { .. } => {}
             ResetSessionIntent::BeginInspection { .. } => {}
         }
         self.publish_snapshot();
@@ -215,9 +246,12 @@ where
             ));
             return;
         };
-        let attempt_generation = self
-            .current_attempt_generation()
-            .unwrap_or_else(|| AttemptGeneration::new(self.next_attempt_generation));
+        let Some(attempt_generation) = self.current_attempt_generation() else {
+            self.workflow.reduce(WorkflowIntent::AuthorityLost(
+                RenderSafeFailure::InvalidResponse,
+            ));
+            return;
+        };
         match ResetWorkflowService::<TAuthorityReader, TProvider>::bind_confirmation(
             inspection_authority,
             attempt_generation,
@@ -232,8 +266,8 @@ where
     }
 
     fn begin_revalidation(&mut self, now_unix_seconds: u64) {
-        let usage_generation = self.allocate_operation_generation();
-        let inventory_generation = self.allocate_operation_generation();
+        let usage_generation = self.generations.allocate_operation();
+        let inventory_generation = self.generations.allocate_operation();
         let requests = self.workflow.reduce(WorkflowIntent::Confirm {
             live_usage_operation_generation: usage_generation,
             credit_inventory_operation_generation: inventory_generation,
@@ -258,13 +292,13 @@ where
         let inventory_correlation = inventory_request.correlation().clone();
         let service = Arc::clone(&self.service);
         self.tasks.spawn(async move {
-            let capability = service
+            let receipt = service
                 .revalidate(confirmation_authority, now_unix_seconds, redeem_request_id)
                 .await;
             SessionTaskOutput::RevalidationCompleted {
                 usage_correlation,
                 inventory_correlation,
-                capability,
+                receipt,
             }
         });
     }
@@ -343,8 +377,8 @@ where
             SessionTaskOutput::RevalidationCompleted {
                 usage_correlation,
                 inventory_correlation,
-                capability,
-            } => self.finish_revalidation(usage_correlation, inventory_correlation, capability),
+                receipt,
+            } => self.finish_revalidation(usage_correlation, inventory_correlation, receipt),
             SessionTaskOutput::ConsumeCompleted {
                 correlation,
                 terminal,
@@ -358,8 +392,11 @@ where
                     .result()
                     .cloned()
                     .unwrap_or(WorkflowResult::Refused(RenderSafeFailure::InvalidResponse));
+                self.terminal_outcome = Some(result.clone());
                 self.reap_all_tasks().await;
-                return Some(ResetSessionOutcome::Finished(result));
+                if !self.presentation_connected {
+                    return Some(ResetSessionOutcome::Finished(result));
+                }
             }
         }
         self.publish_snapshot();
@@ -427,51 +464,39 @@ where
         &mut self,
         usage_correlation: OperationCorrelation,
         inventory_correlation: OperationCorrelation,
-        capability: Result<
-            CommitCapability<TAuthorityReader::Authority, TProvider::PreparedConsume>,
-            RenderSafeFailure,
-        >,
+        receipt: RevalidationReceipt<TAuthorityReader::Authority, TProvider::PreparedConsume>,
     ) {
         if self.workflow.phase() != WorkflowPhase::Revalidating {
             return;
         }
-        let capability = match capability {
-            Ok(capability) => capability,
-            Err(failure) => {
-                self.workflow.reduce(WorkflowIntent::OperationCompleted(
-                    CorrelatedOutcome::revalidation_live_usage(
-                        usage_correlation,
-                        LiveUsagePortResult::Failed(failure),
-                    ),
-                ));
-                self.workflow.reduce(WorkflowIntent::OperationCompleted(
-                    CorrelatedOutcome::revalidation_credit_inventory(
-                        inventory_correlation,
-                        CreditInventoryPortResult::Failed(failure),
-                    ),
-                ));
-                return;
-            }
-        };
-        let Some(usage) = self.inspection_usage else {
-            return;
-        };
-        let Some(inventory) = self.inspection_inventory.clone() else {
-            return;
-        };
+        let RevalidationReceipt {
+            live_usage,
+            credit_inventory,
+            authorization,
+        } = receipt;
+        let refusal = authorization.as_ref().err().copied();
+        let usage = live_usage.unwrap_or_else(|| {
+            LiveUsagePortResult::Failed(refusal.unwrap_or(RenderSafeFailure::InvalidResponse))
+        });
+        let inventory = credit_inventory.unwrap_or_else(|| {
+            CreditInventoryPortResult::Failed(refusal.unwrap_or(RenderSafeFailure::InvalidResponse))
+        });
+        if let LiveUsagePortResult::Known(fresh_usage) = &usage {
+            self.inspection_usage = Some(*fresh_usage);
+        }
+        if let CreditInventoryPortResult::Validated(fresh_inventory) = &inventory {
+            self.inspection_inventory = Some(fresh_inventory.clone());
+        }
         self.workflow.reduce(WorkflowIntent::OperationCompleted(
-            CorrelatedOutcome::revalidation_live_usage(
-                usage_correlation,
-                LiveUsagePortResult::Known(usage),
-            ),
+            CorrelatedOutcome::revalidation_live_usage(usage_correlation, usage),
         ));
         self.workflow.reduce(WorkflowIntent::OperationCompleted(
-            CorrelatedOutcome::revalidation_credit_inventory(
-                inventory_correlation,
-                CreditInventoryPortResult::Validated(inventory),
-            ),
+            CorrelatedOutcome::revalidation_credit_inventory(inventory_correlation, inventory),
         ));
-        let consume_generation = self.allocate_operation_generation();
+        let Ok(capability) = authorization else {
+            return;
+        };
+        let consume_generation = self.generations.allocate_operation();
         let requests = self.workflow.reduce(WorkflowIntent::CommitAuthorized {
             consume_operation_generation: consume_generation,
         });
@@ -493,13 +518,44 @@ where
 
     async fn cancel_precommit(&mut self) {
         self.workflow.reduce(WorkflowIntent::Cancel);
-        self.allocate_attempt_generation();
+        self.generations.allocate_attempt();
         self.tasks.abort_all();
         self.reap_all_tasks().await;
         self.inspection_authority = None;
         self.confirmation_authority = None;
         self.inspection_usage = None;
         self.inspection_inventory = None;
+        self.invalidation_reason = None;
+        self.terminal_outcome = None;
+        self.publish_snapshot();
+    }
+
+    async fn invalidate_pinned_target(&mut self, reason: PinnedTargetInvalidationReason) {
+        let failure = match reason {
+            PinnedTargetInvalidationReason::AccountRemoved => RenderSafeFailure::AccountUnavailable,
+            PinnedTargetInvalidationReason::CredentialGenerationChanged => {
+                RenderSafeFailure::CredentialGenerationChanged
+            }
+        };
+        self.tasks.abort_all();
+        self.reap_all_tasks().await;
+        self.inspection_authority = None;
+        self.confirmation_authority = None;
+        self.inspection_usage = None;
+        self.inspection_inventory = None;
+        self.invalidation_reason = Some(reason);
+        self.terminal_outcome = None;
+        self.workflow
+            .reduce(WorkflowIntent::PinnedTargetInvalidated(failure));
+        self.publish_snapshot();
+    }
+
+    async fn reap_precommit_for_shutdown(&mut self) {
+        if self.workflow.phase() != WorkflowPhase::Result {
+            self.workflow.reduce(WorkflowIntent::Cancel);
+        }
+        self.tasks.abort_all();
+        self.reap_all_tasks().await;
         self.publish_snapshot();
     }
 
@@ -509,7 +565,24 @@ where
 
     fn publish_snapshot(&self) {
         self.snapshot_sender
-            .send_replace(ResetWorkflowSnapshot::from_workflow(&self.workflow));
+            .send_replace(ResetWorkflowSnapshot::from_workflow(
+                &self.workflow,
+                self.current_target.clone(),
+                self.invalidation_reason,
+            ));
+    }
+
+    fn target_matches(&self, account_id: &AccountId, generation: u64) -> bool {
+        self.current_target.as_ref().is_some_and(|target| {
+            target.account_id == *account_id && target.active_credential_generation == generation
+        })
+    }
+
+    fn sanitized_outcome(&self) -> ResetSessionOutcome {
+        self.terminal_outcome.clone().map_or(
+            ResetSessionOutcome::Cancelled,
+            ResetSessionOutcome::Finished,
+        )
     }
 
     fn correlation_is_current(&self, correlation: &OperationCorrelation) -> bool {
@@ -518,54 +591,8 @@ where
     }
 
     fn current_attempt_generation(&self) -> Option<AttemptGeneration> {
-        self.next_attempt_generation
-            .checked_sub(1)
-            .map(AttemptGeneration::new)
+        self.generations.current_attempt()
     }
-
-    fn allocate_attempt_generation(&mut self) -> AttemptGeneration {
-        let generation = AttemptGeneration::new(self.next_attempt_generation);
-        self.next_attempt_generation = self.next_attempt_generation.wrapping_add(1);
-        generation
-    }
-
-    fn allocate_operation_generation(&mut self) -> OperationGeneration {
-        let generation = OperationGeneration::new(self.next_operation_generation);
-        self.next_operation_generation = self.next_operation_generation.wrapping_add(1);
-        generation
-    }
-}
-
-enum SessionTaskOutput<TAuthorityReader, TProvider>
-where
-    TAuthorityReader: ResetAuthorityReader,
-    TProvider: ResetServiceProvider,
-{
-    InspectionAuthorityResolved {
-        start: InspectionStart,
-        now_unix_seconds: u64,
-        authority: Result<InspectionAuthority<TAuthorityReader::Authority>, RenderSafeFailure>,
-    },
-    InspectionUsageCompleted {
-        correlation: OperationCorrelation,
-        terminal: LiveUsagePortResult,
-    },
-    InspectionInventoryCompleted {
-        correlation: OperationCorrelation,
-        terminal: CreditInventoryPortResult,
-    },
-    RevalidationCompleted {
-        usage_correlation: OperationCorrelation,
-        inventory_correlation: OperationCorrelation,
-        capability: Result<
-            CommitCapability<TAuthorityReader::Authority, TProvider::PreparedConsume>,
-            RenderSafeFailure,
-        >,
-    },
-    ConsumeCompleted {
-        correlation: OperationCorrelation,
-        terminal: ConsumePortResult,
-    },
 }
 
 #[cfg(test)]
