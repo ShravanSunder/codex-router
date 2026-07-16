@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::sqlite::StateStoreError;
 use thiserror::Error;
@@ -28,6 +27,7 @@ pub(crate) mod credentials;
 pub(crate) mod domain;
 pub(crate) mod orchestration;
 pub(crate) mod provider;
+pub(crate) mod service;
 pub(crate) mod workflow;
 
 /// Interactive quota-reset failure.
@@ -96,7 +96,7 @@ pub(crate) async fn run_interactive_quota_reset(
         access_token: credential.access_token,
         chatgpt_account_id: credential.chatgpt_account_id,
     };
-    let provider = HttpLiveQuotaResetProvider::new(DEFAULT_CHATGPT_BACKEND_BASE_URL)?;
+    let provider = HttpLiveQuotaResetProvider::new()?;
     let prepared = match prepare_guarded_reset(&provider, &auth).await? {
         PrepareResetOutcome::Eligible(prepared) => prepared,
         PrepareResetOutcome::Refused(refusal) => {

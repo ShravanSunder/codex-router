@@ -1,6 +1,8 @@
 //! Read-only account and credential loading for quota reset.
 
+use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
@@ -13,8 +15,236 @@ use codex_router_state::account::AccountStatus;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use sha2::Digest;
 use sha2::Sha256;
+use sqlx::ConnectOptions;
+use sqlx::Row;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqlitePoolOptions;
+use thiserror::Error;
+use tokio::sync::Semaphore;
 
 use super::QuotaResetError;
+use super::domain::ActiveCredentialGeneration;
+
+const CREDENTIAL_FINGERPRINT_DOMAIN: &[u8] = b"codex-router/quota-reset/provider-authority/v1";
+const MAX_CONCURRENT_CREDENTIAL_READS: usize = 4;
+static CREDENTIAL_READ_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_CREDENTIAL_READS);
+
+/// Fail-closed errors while resolving provider-effective reset authority.
+#[derive(Debug, Error)]
+pub(in crate::quota_reset) enum CredentialAuthorityError {
+    #[error(transparent)]
+    Secret(#[from] codex_router_secret_store::model::SecretStoreError),
+    #[error("read-only account state query failed")]
+    StateReadFailed,
+    #[error("selected account is unavailable")]
+    AccountUnavailable,
+    #[error("selected account credential generation changed")]
+    GenerationChanged,
+    #[error("selected account credential is expired")]
+    Expired,
+    #[error("selected account credential is missing provider routing")]
+    MissingRoutingId,
+    #[error("read-only credential task failed")]
+    CredentialTaskFailed,
+}
+
+/// Opaque comparison value binding every provider-effective credential field.
+#[derive(Eq, PartialEq)]
+pub(in crate::quota_reset) struct CredentialFingerprint([u8; 32]);
+
+impl fmt::Debug for CredentialFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CredentialFingerprint([REDACTED])")
+    }
+}
+
+/// Ephemeral provider authority. It is never serialized or persisted.
+pub(in crate::quota_reset) struct PinnedResetAuthority {
+    account_id: AccountId,
+    active_credential_generation: ActiveCredentialGeneration,
+    access_token: SecretString,
+    chatgpt_account_id: String,
+    expires_unix_seconds: Option<u64>,
+    fingerprint: CredentialFingerprint,
+}
+
+impl PinnedResetAuthority {
+    pub(in crate::quota_reset) const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    pub(in crate::quota_reset) const fn active_credential_generation(
+        &self,
+    ) -> ActiveCredentialGeneration {
+        self.active_credential_generation
+    }
+
+    pub(in crate::quota_reset) const fn access_token(&self) -> &SecretString {
+        &self.access_token
+    }
+
+    pub(in crate::quota_reset) fn chatgpt_account_id(&self) -> &str {
+        &self.chatgpt_account_id
+    }
+
+    pub(in crate::quota_reset) const fn expires_unix_seconds(&self) -> Option<u64> {
+        self.expires_unix_seconds
+    }
+
+    pub(in crate::quota_reset) const fn fingerprint(&self) -> &CredentialFingerprint {
+        &self.fingerprint
+    }
+}
+
+impl fmt::Debug for PinnedResetAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PinnedResetAuthority")
+            .field("account_id", &"[REDACTED]")
+            .field("active_credential_generation", &"[REDACTED]")
+            .field("access_token", &"[REDACTED]")
+            .field("chatgpt_account_id", &"[REDACTED]")
+            .field("expires_unix_seconds", &"[REDACTED]")
+            .field("fingerprint", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Resolves one exact account and credential generation without refresh or persistence.
+pub(in crate::quota_reset) async fn load_reset_credential_authority(
+    state_database_path: &Path,
+    secret_root: &Path,
+    account_id: &AccountId,
+    expected_generation: ActiveCredentialGeneration,
+    now_unix_seconds: u64,
+) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
+    let options = SqliteConnectOptions::new()
+        .filename(state_database_path)
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(Duration::ZERO)
+        .disable_statement_logging()
+        .pragma("query_only", "ON");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(|_error| CredentialAuthorityError::StateReadFailed)?;
+    let account_row = sqlx::query(
+        "SELECT status, active_credential_generation
+           FROM accounts
+          WHERE account_id = ?1",
+    )
+    .bind(account_id.as_str())
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_error| CredentialAuthorityError::StateReadFailed);
+    pool.close().await;
+    let account_row = account_row?.ok_or(CredentialAuthorityError::AccountUnavailable)?;
+    let status = AccountStatus::parse(account_row.get::<String, _>(0).as_str())
+        .ok_or(CredentialAuthorityError::StateReadFailed)?;
+    if status != AccountStatus::Enabled {
+        return Err(CredentialAuthorityError::AccountUnavailable);
+    }
+    let active_generation = account_row
+        .get::<Option<i64>, _>(1)
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_error| CredentialAuthorityError::StateReadFailed)?;
+    if active_generation != Some(expected_generation.get()) {
+        return Err(CredentialAuthorityError::GenerationChanged);
+    }
+
+    let permit = CREDENTIAL_READ_PERMITS
+        .acquire()
+        .await
+        .map_err(|_error| CredentialAuthorityError::CredentialTaskFailed)?;
+    let secret_root = secret_root.to_path_buf();
+    let account_id = account_id.clone();
+    let authority = tokio::task::spawn_blocking(move || {
+        load_exact_credential_authority(
+            &secret_root,
+            account_id,
+            expected_generation,
+            now_unix_seconds,
+        )
+    })
+    .await
+    .map_err(|_error| CredentialAuthorityError::CredentialTaskFailed)?;
+    drop(permit);
+    authority
+}
+
+fn load_exact_credential_authority(
+    secret_root: &Path,
+    account_id: AccountId,
+    active_credential_generation: ActiveCredentialGeneration,
+    now_unix_seconds: u64,
+) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
+    let store = FileSecretStore::open_read_only(secret_root)?;
+    let bundle_key =
+        account_credential_bundle_key(&account_id, active_credential_generation.get())?;
+    let bundle = AccountCredentialBundle::from_secret_string(store.read_secret(&bundle_key)?)?;
+    let expires_unix_seconds = bundle.expires_unix_seconds();
+    if expires_unix_seconds.is_some_and(|expires_at| expires_at <= now_unix_seconds) {
+        return Err(CredentialAuthorityError::Expired);
+    }
+    let chatgpt_account_id = bundle
+        .chatgpt_account_id()
+        .filter(|routing_id| !routing_id.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or(CredentialAuthorityError::MissingRoutingId)?;
+    let fingerprint = credential_fingerprint(
+        &account_id,
+        active_credential_generation,
+        bundle.access_token(),
+        &chatgpt_account_id,
+        expires_unix_seconds,
+    );
+    Ok(PinnedResetAuthority {
+        account_id,
+        active_credential_generation,
+        access_token: bundle.access_token().clone(),
+        chatgpt_account_id,
+        expires_unix_seconds,
+        fingerprint,
+    })
+}
+
+fn credential_fingerprint(
+    account_id: &AccountId,
+    active_credential_generation: ActiveCredentialGeneration,
+    access_token: &SecretString,
+    chatgpt_account_id: &str,
+    expires_unix_seconds: Option<u64>,
+) -> CredentialFingerprint {
+    let generation = active_credential_generation.get().to_be_bytes();
+    let expiry_marker = [u8::from(expires_unix_seconds.is_some())];
+    let expiry = expires_unix_seconds.unwrap_or_default().to_be_bytes();
+    credential_fingerprint_from_fields(&[
+        account_id.as_str().as_bytes(),
+        &generation,
+        access_token.expose_secret().as_bytes(),
+        chatgpt_account_id.as_bytes(),
+        &expiry_marker,
+        &expiry,
+    ])
+}
+
+fn credential_fingerprint_from_fields(fields: &[&[u8]]) -> CredentialFingerprint {
+    let mut digest = Sha256::new();
+    digest.update(CREDENTIAL_FINGERPRINT_DOMAIN);
+    for field in fields {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    CredentialFingerprint(digest.finalize().into())
+}
+
+#[cfg(test)]
+fn credential_fingerprint_for_test(fields: &[&[u8]]) -> CredentialFingerprint {
+    credential_fingerprint_from_fields(fields)
+}
 
 /// Non-secret account choice shown by the interactive reset picker.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,135 +348,4 @@ pub(crate) async fn load_read_only_reset_credential(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering;
-
-    use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-    use codex_router_secret_store::file_backend::FileSecretStore;
-    use codex_router_state::account::AccountRecord;
-    use codex_router_state::account::AccountStatus;
-
-    use super::*;
-
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    #[tokio::test]
-    async fn read_only_credential_loading_refuses_expired_bundle_without_refresh() {
-        let root = std::env::temp_dir().join(format!(
-            "codex-router-reset-credential-{}-{}",
-            std::process::id(),
-            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let store = FileSecretStore::open(&root)
-            .unwrap_or_else(|error| panic!("fixture secret store should open: {error}"));
-        let account = ResetAccountChoice::for_test(
-            AccountId::new("acct_expired")
-                .unwrap_or_else(|error| panic!("fixture account id should parse: {error}")),
-            "expired",
-            1,
-        );
-        let key = account_credential_bundle_key(&account.account_id, 1)
-            .unwrap_or_else(|error| panic!("fixture key should parse: {error}"));
-        let bundle = AccountCredentialBundle::imported_codex_auth("expired-token", None)
-            .with_expires_unix_seconds(100);
-        store
-            .write_secret(
-                &key,
-                &bundle
-                    .to_secret_string()
-                    .unwrap_or_else(|error| panic!("fixture bundle should serialize: {error}")),
-            )
-            .unwrap_or_else(|error| panic!("fixture bundle should write: {error}"));
-
-        let result = load_read_only_reset_credential(&root, &account, 101).await;
-
-        assert!(matches!(result, Err(QuotaResetError::ExpiredCredential)));
-        std::fs::remove_dir_all(&root)
-            .unwrap_or_else(|error| panic!("fixture root should clean up: {error}"));
-    }
-
-    #[tokio::test]
-    async fn read_only_credential_loading_requires_exact_chatgpt_account_routing() {
-        let root = std::env::temp_dir().join(format!(
-            "codex-router-reset-credential-account-id-{}-{}",
-            std::process::id(),
-            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let store = FileSecretStore::open(&root)
-            .unwrap_or_else(|error| panic!("fixture secret store should open: {error}"));
-        let account = ResetAccountChoice::for_test(
-            AccountId::new("acct_missing_header")
-                .unwrap_or_else(|error| panic!("fixture account id should parse: {error}")),
-            "missing-header",
-            1,
-        );
-        let key = account_credential_bundle_key(&account.account_id, 1)
-            .unwrap_or_else(|error| panic!("fixture key should parse: {error}"));
-        let bundle = AccountCredentialBundle::imported_codex_auth("current-token", None)
-            .with_expires_unix_seconds(1_000);
-        store
-            .write_secret(
-                &key,
-                &bundle
-                    .to_secret_string()
-                    .unwrap_or_else(|error| panic!("fixture bundle should serialize: {error}")),
-            )
-            .unwrap_or_else(|error| panic!("fixture bundle should write: {error}"));
-
-        let result = load_read_only_reset_credential(&root, &account, 100).await;
-
-        assert!(matches!(
-            result,
-            Err(QuotaResetError::MissingChatGptAccountId)
-        ));
-        std::fs::remove_dir_all(&root)
-            .unwrap_or_else(|error| panic!("fixture root should clean up: {error}"));
-    }
-
-    #[tokio::test]
-    async fn reset_account_choices_read_sqlite_without_mutating_database_bytes() {
-        let root = std::env::temp_dir().join(format!(
-            "codex-router-reset-accounts-{}-{}",
-            std::process::id(),
-            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&root)
-            .unwrap_or_else(|error| panic!("fixture root should create: {error}"));
-        let database_path = root.join("state.sqlite");
-        let state = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture database should open: {error}"));
-        let account_id = AccountId::new("acct_read_only")
-            .unwrap_or_else(|error| panic!("fixture account id should parse: {error}"));
-        state
-            .upsert_account(
-                &AccountRecord::new(account_id.clone(), "read-only", AccountStatus::Enabled)
-                    .with_active_credential_generation(7),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("fixture account should write: {error}"));
-        state
-            .close()
-            .await
-            .unwrap_or_else(|error| panic!("fixture database should close: {error}"));
-        let before = std::fs::read(&database_path)
-            .unwrap_or_else(|error| panic!("fixture database should read: {error}"));
-
-        let choices = load_reset_account_choices(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("read-only choices should load: {error}"));
-        let after = std::fs::read(&database_path)
-            .unwrap_or_else(|error| panic!("fixture database should reread: {error}"));
-
-        assert_eq!(choices.len(), 1);
-        assert_eq!(
-            choices.first().map(|choice| &choice.account_id),
-            Some(&account_id)
-        );
-        assert_eq!(before, after);
-        std::fs::remove_dir_all(&root)
-            .unwrap_or_else(|error| panic!("fixture root should clean up: {error}"));
-    }
-}
+mod tests;
