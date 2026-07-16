@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn render_quota_status(
+pub(super) async fn render_quota_status(
     stdout: &mut impl Write,
     router_root: PathBuf,
     format: QuotaStatusFormat,
@@ -9,29 +9,11 @@ pub(super) fn render_quota_status(
     all_limits: bool,
     now_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
-    render_quota_status_once(
-        stdout,
-        &router_root,
-        format,
-        stdout_is_terminal,
-        stdout_terminal_width,
-        all_limits,
-        now_unix_seconds,
-    )
-}
-
-pub(super) fn render_quota_status_once(
-    stdout: &mut impl Write,
-    router_root: &Path,
-    format: QuotaStatusFormat,
-    stdout_is_terminal: bool,
-    stdout_terminal_width: Option<usize>,
-    all_limits: bool,
-    now_unix_seconds: u64,
-) -> Result<(), QuotaCommandError> {
     let effective_format = effective_human_quota_format(format, stdout_is_terminal);
     let unicode_bars = effective_format != QuotaStatusFormat::Plain;
-    let report = load_quota_status_report(router_root, all_limits, now_unix_seconds, unicode_bars)?;
+    let report =
+        load_quota_status_report_async(&router_root, all_limits, now_unix_seconds, unicode_bars)
+            .await?;
     match effective_format {
         QuotaStatusFormat::Table => write_quota_table_with_style(
             stdout,

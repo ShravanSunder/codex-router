@@ -1,6 +1,7 @@
 //! CLI credential resolver runtime wiring.
 
 use std::path::Path;
+use std::path::PathBuf;
 
 use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
@@ -40,11 +41,20 @@ where
     C: CredentialRefreshClient + Clone,
 {
     runtime: tokio::runtime::Runtime,
+    state_db_path: PathBuf,
     state_store: AsyncSqliteStateStore,
     secret_store: CliRuntimeSecretStore,
     fallback_now_unix_seconds: u64,
     refresh_client: C,
     refresh_leases: AsyncRefreshLeaseRegistry,
+}
+
+/// Async credential resolution used by native-async quota commands.
+pub(crate) trait AsyncProviderCredentialResolver {
+    async fn resolve_provider_credentials_async(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<ResolvedProviderCredential, CredentialResolverError>;
 }
 
 impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
@@ -60,6 +70,7 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
         let state_store = runtime.block_on(AsyncSqliteStateStore::open(state_db_path))?;
         Ok(Self {
             runtime,
+            state_db_path: state_db_path.to_path_buf(),
             state_store,
             secret_store: open_cli_secret_store(secret_root)?,
             fallback_now_unix_seconds: now_unix_seconds,
@@ -86,6 +97,7 @@ where
         let state_store = runtime.block_on(AsyncSqliteStateStore::open(state_db_path))?;
         Ok(Self {
             runtime,
+            state_db_path: state_db_path.to_path_buf(),
             state_store,
             secret_store: open_cli_secret_store(secret_root)?,
             fallback_now_unix_seconds: now_unix_seconds,
@@ -112,5 +124,27 @@ where
         );
         self.runtime
             .block_on(resolver.resolve_provider_credentials(account_id))
+    }
+}
+
+impl<C> AsyncProviderCredentialResolver for CliCredentialResolver<C>
+where
+    C: CredentialRefreshClient + Clone + Send + 'static,
+{
+    async fn resolve_provider_credentials_async(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+        let state_store = AsyncSqliteStateStore::open(&self.state_db_path)
+            .await
+            .map_err(|_error| CredentialResolverError::AccountUnavailable)?;
+        let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
+            state_store,
+            self.secret_store.clone(),
+            self.refresh_client.clone(),
+            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            self.refresh_leases.clone(),
+        );
+        resolver.resolve_provider_credentials(account_id).await
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn refresh_quota(
+pub(super) async fn refresh_quota(
     stdout: &mut impl Write,
     router_root: PathBuf,
     base_url: String,
@@ -22,6 +22,7 @@ pub(super) fn refresh_quota(
         &HttpQuotaRefreshProvider::new()?,
         current_unix_seconds(),
     )
+    .await
 }
 
 pub(crate) fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {

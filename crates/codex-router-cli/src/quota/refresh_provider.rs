@@ -94,7 +94,7 @@ pub(crate) struct QuotaRefreshProviderWindow {
 /// Provider egress dependency for quota refresh.
 pub(crate) trait QuotaRefreshProvider {
     /// Fetches one route-band quota snapshot using resolved provider auth.
-    fn fetch_quota(
+    async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError>;
@@ -103,7 +103,7 @@ pub(crate) trait QuotaRefreshProvider {
 /// HTTP quota refresh provider for ChatGPT/Codex usage endpoints.
 #[derive(Debug)]
 pub(crate) struct HttpQuotaRefreshProvider {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl HttpQuotaRefreshProvider {
@@ -114,7 +114,7 @@ impl HttpQuotaRefreshProvider {
 
     /// Creates an HTTP quota refresh provider with a bounded request timeout.
     pub(crate) fn new_with_timeout(timeout: Duration) -> Result<Self, QuotaCommandError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .user_agent("codex-router-quota-refresh")
             .timeout(timeout)
             .build()
@@ -126,7 +126,7 @@ impl HttpQuotaRefreshProvider {
 }
 
 impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
-    fn fetch_quota(
+    async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
@@ -141,6 +141,7 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
         let response =
             usage_request
                 .send()
+                .await
                 .map_err(|error| QuotaCommandError::ProviderRequest {
                     message: error.to_string(),
                 })?;
@@ -152,6 +153,7 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
         }
         let body = response
             .text()
+            .await
             .map_err(|error| QuotaCommandError::ProviderRequest {
                 message: error.to_string(),
             })?;
@@ -165,7 +167,7 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
                 message: error.to_string(),
             }
         })?;
-        let reset_credits_available = self.fetch_reset_credits_available(&request)?;
+        let reset_credits_available = self.fetch_reset_credits_available(&request).await?;
         quota_response_for_route_band(&usage, request.route_band()).map(|mut response| {
             response.reset_credits_available = reset_credits_available;
             response
@@ -174,7 +176,7 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
 }
 
 impl HttpQuotaRefreshProvider {
-    fn fetch_reset_credits_available(
+    async fn fetch_reset_credits_available(
         &self,
         request: &QuotaRefreshProviderRequest,
     ) -> Result<Option<u32>, QuotaCommandError> {
@@ -188,6 +190,7 @@ impl HttpQuotaRefreshProvider {
         let response =
             reset_request
                 .send()
+                .await
                 .map_err(|error| QuotaCommandError::ProviderRequest {
                     message: error.to_string(),
                 })?;
@@ -199,6 +202,7 @@ impl HttpQuotaRefreshProvider {
         }
         let body = response
             .text()
+            .await
             .map_err(|error| QuotaCommandError::ProviderRequest {
                 message: error.to_string(),
             })?;

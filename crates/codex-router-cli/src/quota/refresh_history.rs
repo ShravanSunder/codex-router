@@ -1,7 +1,6 @@
 use super::*;
 
-pub(super) fn append_success_quota_history_observation(
-    runtime: &tokio::runtime::Runtime,
+pub(super) async fn append_success_quota_history_observation(
     state: &AsyncSqliteStateStore,
     account: &AccountRecord,
     route_band: &str,
@@ -32,13 +31,13 @@ pub(super) fn append_success_quota_history_observation(
     if let Some(reset_credits_available) = reset_credits_available {
         observation = observation.with_reset_credits_available(reset_credits_available);
     }
-    runtime
-        .block_on(state.append_quota_history_observation(&observation))
+    state
+        .append_quota_history_observation(&observation)
+        .await
         .map_err(QuotaCommandError::StateStore)
 }
 
-pub(super) fn append_failure_quota_history_observations(
-    runtime: &tokio::runtime::Runtime,
+pub(super) async fn append_failure_quota_history_observations(
     state: &AsyncSqliteStateStore,
     account: &AccountRecord,
     route_band: &str,
@@ -57,20 +56,21 @@ pub(super) fn append_failure_quota_history_observations(
         .with_window_status(SelectorQuotaWindowStatus::Unknown)
         .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
         .with_refresh_outcome(QuotaHistoryRefreshOutcome::Failure { error_class });
-        runtime
-            .block_on(state.append_quota_history_observation(&observation))
+        state
+            .append_quota_history_observation(&observation)
+            .await
             .map_err(QuotaCommandError::StateStore)?;
     }
     Ok(())
 }
 
-pub(super) fn purge_old_quota_history(
-    runtime: &tokio::runtime::Runtime,
+pub(super) async fn purge_old_quota_history(
     state: &AsyncSqliteStateStore,
     observed_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError> {
     let retention_floor = observed_unix_seconds.saturating_sub(V1_WEEKLY_WINDOW_SECONDS);
-    runtime
-        .block_on(state.purge_quota_history_before(retention_floor))
+    state
+        .purge_quota_history_before(retention_floor)
+        .await
         .map_err(QuotaCommandError::StateStore)
 }

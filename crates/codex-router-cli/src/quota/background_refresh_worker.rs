@@ -41,7 +41,7 @@ pub(crate) fn start_background_quota_refresh_worker_with_dependencies<R, P>(
     interval: Duration,
 ) -> BackgroundQuotaRefreshWorker
 where
-    R: ProviderCredentialResolver + Send + 'static,
+    R: AsyncProviderCredentialResolver + Send + 'static,
     P: QuotaRefreshProvider + Send + 'static,
 {
     start_background_quota_refresh_worker_with_clock(
@@ -66,7 +66,7 @@ pub(crate) fn start_background_quota_refresh_worker_with_clock<R, P, C>(
     interval: Duration,
 ) -> BackgroundQuotaRefreshWorker
 where
-    R: ProviderCredentialResolver + Send + 'static,
+    R: AsyncProviderCredentialResolver + Send + 'static,
     P: QuotaRefreshProvider + Send + 'static,
     C: FnMut() -> u64 + Send + 'static,
 {
@@ -89,7 +89,7 @@ pub(crate) fn start_background_quota_refresh_worker_with_reporter<R, P, C, D>(
     runtime: BackgroundQuotaRefreshRuntime<C, D>,
 ) -> BackgroundQuotaRefreshWorker
 where
-    R: ProviderCredentialResolver + Send + 'static,
+    R: AsyncProviderCredentialResolver + Send + 'static,
     P: QuotaRefreshProvider + Send + 'static,
     C: FnMut() -> u64 + Send + 'static,
     D: FnMut(String) + Send + 'static,
@@ -105,15 +105,21 @@ where
         loop {
             let mut sink = Vec::new();
             let observed_unix_seconds = observed_clock();
-            let result = refresh_quota_store_paths_with_dependencies(
-                &mut sink,
-                &state_db,
-                &secret_root,
-                base_url.clone(),
-                &credential_resolver,
-                &quota_provider,
-                observed_unix_seconds,
-            );
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(QuotaCommandError::BackgroundWorkerInitialization)
+                .and_then(|refresh_runtime| {
+                    refresh_runtime.block_on(refresh_quota_store_paths_with_dependencies(
+                        &mut sink,
+                        &state_db,
+                        &secret_root,
+                        base_url.clone(),
+                        &credential_resolver,
+                        &quota_provider,
+                        observed_unix_seconds,
+                    ))
+                });
             let diagnostic_output = String::from_utf8_lossy(&sink).into_owned();
             if diagnostic_output
                 .lines()

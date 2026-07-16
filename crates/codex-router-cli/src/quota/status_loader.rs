@@ -1,23 +1,5 @@
 use super::*;
 
-pub(super) fn load_quota_status_report(
-    router_root: &Path,
-    all_limits: bool,
-    now_unix_seconds: u64,
-    unicode_bars: bool,
-) -> Result<QuotaStatusReport, QuotaCommandError> {
-    let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(QuotaCommandError::Runtime)?;
-    quota_history_runtime.block_on(load_quota_status_report_async(
-        router_root,
-        all_limits,
-        now_unix_seconds,
-        unicode_bars,
-    ))
-}
-
 pub(super) async fn load_quota_status_report_async(
     router_root: &Path,
     all_limits: bool,

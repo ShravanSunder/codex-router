@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn refresh_quota_with_dependencies<R, P>(
+pub(crate) async fn refresh_quota_with_dependencies<R, P>(
     stdout: &mut impl Write,
     router_root: PathBuf,
     base_url: String,
@@ -9,7 +9,7 @@ pub(crate) fn refresh_quota_with_dependencies<R, P>(
     observed_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError>
 where
-    R: ProviderCredentialResolver,
+    R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
     refresh_quota_store_paths_with_dependencies(
@@ -21,9 +21,10 @@ where
         quota_provider,
         observed_unix_seconds,
     )
+    .await
 }
 
-pub(crate) fn refresh_quota_store_paths_with_dependencies<R, P>(
+pub(crate) async fn refresh_quota_store_paths_with_dependencies<R, P>(
     stdout: &mut impl Write,
     state_db: &Path,
     _secret_root: &Path,
@@ -33,16 +34,11 @@ pub(crate) fn refresh_quota_store_paths_with_dependencies<R, P>(
     observed_unix_seconds: u64,
 ) -> Result<(), QuotaCommandError>
 where
-    R: ProviderCredentialResolver,
+    R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
-    let quota_history_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(QuotaCommandError::Runtime)?;
-    let quota_history_state =
-        quota_history_runtime.block_on(AsyncSqliteStateStore::open(state_db))?;
-    let accounts = quota_history_runtime.block_on(quota_history_state.list_accounts())?;
+    let quota_history_state = AsyncSqliteStateStore::open(state_db).await?;
+    let accounts = quota_history_state.list_accounts().await?;
     let mut refreshed_count = 0_u64;
     let mut failed_count = 0_u64;
     for account in accounts
@@ -50,28 +46,30 @@ where
         .filter(|account| account.status() == AccountStatus::Enabled)
         .filter(|account| account.active_credential_generation().is_some())
     {
-        let resolved = match credential_resolver.resolve_provider_credentials(account.account_id())
+        let resolved = match credential_resolver
+            .resolve_provider_credentials_async(account.account_id())
+            .await
         {
             Ok(resolved) => resolved,
             Err(error) => {
                 failed_count = failed_count.saturating_add(DEFAULT_ROUTE_BANDS.len() as u64);
                 for route_band in DEFAULT_ROUTE_BANDS {
-                    quota_history_runtime.block_on(
-                        quota_history_state.record_refresh_failure_preserving_selector_windows(
+                    quota_history_state
+                        .record_refresh_failure_preserving_selector_windows(
                             account.account_id(),
                             route_band,
                             observed_unix_seconds,
                             QuotaRefreshErrorClass::AuthError,
-                        ),
-                    )?;
+                        )
+                        .await?;
                     append_failure_quota_history_observations(
-                        &quota_history_runtime,
                         &quota_history_state,
                         account,
                         route_band,
                         observed_unix_seconds,
                         QuotaRefreshErrorClass::AuthError,
-                    )?;
+                    )
+                    .await?;
                 }
                 tracing::warn!(
                     account.hash = telemetry_hash(account.account_id().as_str()),
@@ -94,34 +92,37 @@ where
             }
         };
         for route_band in DEFAULT_ROUTE_BANDS {
-            let response = match quota_provider.fetch_quota(QuotaRefreshProviderRequest::new(
-                account.account_id().clone(),
-                account.label(),
-                *route_band,
-                base_url.clone(),
-                resolved.access_token().clone(),
-                resolved.chatgpt_account_id(),
-            )) {
+            let response = match quota_provider
+                .fetch_quota(QuotaRefreshProviderRequest::new(
+                    account.account_id().clone(),
+                    account.label(),
+                    *route_band,
+                    base_url.clone(),
+                    resolved.access_token().clone(),
+                    resolved.chatgpt_account_id(),
+                ))
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => {
                     failed_count = failed_count.saturating_add(1);
                     let error_class = quota_refresh_error_class(&error);
-                    quota_history_runtime.block_on(
-                        quota_history_state.record_refresh_failure_preserving_selector_windows(
+                    quota_history_state
+                        .record_refresh_failure_preserving_selector_windows(
                             account.account_id(),
                             route_band,
                             observed_unix_seconds,
                             error_class,
-                        ),
-                    )?;
+                        )
+                        .await?;
                     append_failure_quota_history_observations(
-                        &quota_history_runtime,
                         &quota_history_state,
                         account,
                         route_band,
                         observed_unix_seconds,
                         error_class,
-                    )?;
+                    )
+                    .await?;
                     tracing::warn!(
                         account.hash = telemetry_hash(account.account_id().as_str()),
                         route_band,
@@ -142,22 +143,22 @@ where
                 Some(effective_window) => effective_window,
                 None => {
                     failed_count = failed_count.saturating_add(1);
-                    quota_history_runtime.block_on(
-                        quota_history_state.record_refresh_failure_preserving_selector_windows(
+                    quota_history_state
+                        .record_refresh_failure_preserving_selector_windows(
                             account.account_id(),
                             route_band,
                             observed_unix_seconds,
                             QuotaRefreshErrorClass::ParseError,
-                        ),
-                    )?;
+                        )
+                        .await?;
                     append_failure_quota_history_observations(
-                        &quota_history_runtime,
                         &quota_history_state,
                         account,
                         route_band,
                         observed_unix_seconds,
                         QuotaRefreshErrorClass::ParseError,
-                    )?;
+                    )
+                    .await?;
                     tracing::warn!(
                         account.hash = telemetry_hash(account.account_id().as_str()),
                         route_band,
@@ -195,7 +196,7 @@ where
             } else {
                 snapshot
             };
-            quota_history_runtime.block_on(quota_history_state.upsert_quota_snapshot(&snapshot))?;
+            quota_history_state.upsert_quota_snapshot(&snapshot).await?;
             let mut selector_windows = Vec::new();
             for window in &response.windows {
                 let status = if window.remaining_headroom == 0 {
@@ -219,24 +220,24 @@ where
                 };
                 selector_windows.push(selector_window);
                 append_success_quota_history_observation(
-                    &quota_history_runtime,
                     &quota_history_state,
                     account,
                     route_band,
                     window,
                     observed_unix_seconds,
                     response.reset_credits_available,
-                )?;
+                )
+                .await?;
             }
-            quota_history_runtime.block_on(
-                quota_history_state.record_refresh_success_and_replace_selector_windows(
+            quota_history_state
+                .record_refresh_success_and_replace_selector_windows(
                     account.account_id(),
                     route_band,
                     &selector_windows,
                     observed_unix_seconds,
                     stale_after_unix_seconds(observed_unix_seconds),
-                ),
-            )?;
+                )
+                .await?;
             tracing::info!(
                 account.hash = telemetry_hash(account.account_id().as_str()),
                 route_band,
@@ -248,11 +249,7 @@ where
             refreshed_count = refreshed_count.saturating_add(1);
         }
     }
-    purge_old_quota_history(
-        &quota_history_runtime,
-        &quota_history_state,
-        observed_unix_seconds,
-    )?;
+    purge_old_quota_history(&quota_history_state, observed_unix_seconds).await?;
 
     writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)?;
     if failed_count > 0 {
@@ -265,7 +262,7 @@ where
     } else {
         Ok(())
     };
-    quota_history_runtime.block_on(quota_history_state.close())?;
+    quota_history_state.close().await?;
 
     refresh_result
 }
@@ -288,13 +285,13 @@ fn quota_refresh_error_class(error: &QuotaCommandError) -> QuotaRefreshErrorClas
         }
         QuotaCommandError::ProviderStatus { .. } => QuotaRefreshErrorClass::ProviderError,
         QuotaCommandError::ProviderResponse { .. } => QuotaRefreshErrorClass::ParseError,
-        QuotaCommandError::InvalidFormat { .. }
+        QuotaCommandError::AsyncDispatchRequired
+        | QuotaCommandError::InvalidFormat { .. }
         | QuotaCommandError::DisallowedBaseUrl { .. }
         | QuotaCommandError::RefreshNotImplemented
         | QuotaCommandError::CredentialResolverOpen(_)
         | QuotaCommandError::StateStore(_)
-        | QuotaCommandError::Runtime(_)
-        | QuotaCommandError::Stdout(_)
-        | QuotaCommandError::AsyncResetDispatchRequired => QuotaRefreshErrorClass::ProviderError,
+        | QuotaCommandError::BackgroundWorkerInitialization(_)
+        | QuotaCommandError::Stdout(_) => QuotaRefreshErrorClass::ProviderError,
     }
 }

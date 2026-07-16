@@ -83,17 +83,7 @@ pub fn run() -> i32 {
 pub async fn run_async() -> i32 {
     let args = std::env::args_os().collect::<Vec<_>>();
     let context = CliContext::from_process();
-    let uses_async_dispatch = match CliCommand::parse(args.clone()) {
-        Ok(CliCommand::Quota(QuotaCommand::Reset { .. })) => true,
-        Ok(CliCommand::Quota(QuotaCommand::Status { format, .. })) => {
-            quota::should_run_interactive_quota(
-                format,
-                context.stdin_is_terminal(),
-                context.stdout_is_terminal(),
-            )
-        }
-        _ => false,
-    };
+    let uses_async_dispatch = matches!(CliCommand::parse(args.clone()), Ok(CliCommand::Quota(_)));
     if !uses_async_dispatch {
         return std::thread::spawn(move || run_sync_process_args(args))
             .join()
@@ -149,30 +139,24 @@ where
     E: std::io::Write,
 {
     match CliCommand::parse(args.clone())? {
-        CliCommand::Quota(QuotaCommand::Reset { router_root }) => {
-            quota_reset::run_interactive_quota_reset(
+        CliCommand::Quota(command) => {
+            let dispatch = quota::run_quota_command(
                 stdout,
-                router_root,
-                context.stdin_is_terminal(),
-                context.stdout_is_terminal(),
-            )
-            .await?;
-            stderr.flush().map_err(CliError::Stderr)
-        }
-        CliCommand::Quota(command @ QuotaCommand::Status { format, .. })
-            if quota::should_run_interactive_quota(
-                format,
-                context.stdin_is_terminal(),
-                context.stdout_is_terminal(),
-            ) =>
-        {
-            quota::run_interactive_quota_status(
                 command,
                 context.stdin_is_terminal(),
                 context.stdout_is_terminal(),
                 context.stdout_terminal_width(),
             )
             .await?;
+            if let quota::QuotaCommandDispatch::LegacyReset { router_root } = dispatch {
+                quota_reset::run_interactive_quota_reset(
+                    stdout,
+                    router_root,
+                    context.stdin_is_terminal(),
+                    context.stdout_is_terminal(),
+                )
+                .await?;
+            }
             stderr.flush().map_err(CliError::Stderr)
         }
         _ => run_with_io(args, context, stdout, stderr),
@@ -311,14 +295,7 @@ where
             }
         }
         CliCommand::Account(command) => account::run_account_command(stdout, command)?,
-        CliCommand::Quota(command) => {
-            quota::run_quota_command(
-                stdout,
-                command,
-                context.stdout_is_terminal(),
-                context.stdout_terminal_width(),
-            )?;
-        }
+        CliCommand::Quota(_) => return Err(QuotaCommandError::AsyncDispatchRequired.into()),
         CliCommand::Live(command) => live::run_live_command(stdout, command)?,
         CliCommand::Sessions(command) => sessions::run_sessions_command(stdout, command, context)?,
         CliCommand::Version => {
@@ -1404,6 +1381,7 @@ mod tests {
     use codex_router_auth::resolver::CredentialResolverError;
     use codex_router_auth::resolver::NoopCredentialRefreshClient;
     use codex_router_auth::resolver::ProviderCredentialResolver;
+    use codex_router_auth::resolver::ResolvedProviderCredential;
     use codex_router_auth::resolver::RouterCredentialResolver;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::ReservationId;
@@ -1444,6 +1422,7 @@ mod tests {
     use crate::account::AccountCommand;
     use crate::account::AccountImportRequest;
     use crate::account::import_codex_auth_from_request;
+    use crate::credential_runtime::AsyncProviderCredentialResolver;
     use crate::credential_runtime::CliCredentialResolver;
     use crate::doctor::DoctorAccountState;
     use crate::doctor::DoctorReport;
@@ -1458,8 +1437,8 @@ mod tests {
     use crate::quota::QuotaRefreshProviderRequest;
     use crate::quota::QuotaRefreshProviderResponse;
     use crate::quota::QuotaRefreshProviderWindow;
-    use crate::quota::refresh_quota_store_paths_with_dependencies;
-    use crate::quota::refresh_quota_with_dependencies;
+    use crate::quota::refresh_quota_store_paths_with_dependencies as refresh_quota_store_paths_with_dependencies_async;
+    use crate::quota::refresh_quota_with_dependencies as refresh_quota_with_dependencies_async;
     use crate::quota::start_background_quota_refresh_worker_with_clock;
     use crate::quota::start_background_quota_refresh_worker_with_dependencies;
     use crate::quota::start_background_quota_refresh_worker_with_reporter;
@@ -1468,6 +1447,73 @@ mod tests {
     use crate::token::export_token_assignment;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn refresh_quota_with_dependencies<R, P>(
+        stdout: &mut impl Write,
+        router_root: PathBuf,
+        base_url: String,
+        credential_resolver: &R,
+        quota_provider: &P,
+        observed_unix_seconds: u64,
+    ) -> Result<(), crate::quota::QuotaCommandError>
+    where
+        R: AsyncProviderCredentialResolver,
+        P: QuotaRefreshProvider,
+    {
+        test_async_runtime().block_on(refresh_quota_with_dependencies_async(
+            stdout,
+            router_root,
+            base_url,
+            credential_resolver,
+            quota_provider,
+            observed_unix_seconds,
+        ))
+    }
+
+    fn refresh_quota_store_paths_with_dependencies<R, P>(
+        stdout: &mut impl Write,
+        state_db: &Path,
+        secret_root: &Path,
+        base_url: String,
+        credential_resolver: &R,
+        quota_provider: &P,
+        observed_unix_seconds: u64,
+    ) -> Result<(), crate::quota::QuotaCommandError>
+    where
+        R: AsyncProviderCredentialResolver,
+        P: QuotaRefreshProvider,
+    {
+        test_async_runtime().block_on(refresh_quota_store_paths_with_dependencies_async(
+            stdout,
+            state_db,
+            secret_root,
+            base_url,
+            credential_resolver,
+            quota_provider,
+            observed_unix_seconds,
+        ))
+    }
+
+    fn test_async_runtime() -> tokio::runtime::Runtime {
+        must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        )
+    }
+
+    impl<S, C> AsyncProviderCredentialResolver for RouterCredentialResolver<'_, S, C>
+    where
+        S: SecretStore,
+        C: CredentialRefreshClient,
+    {
+        async fn resolve_provider_credentials_async(
+            &self,
+            account_id: &AccountId,
+        ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+            ProviderCredentialResolver::resolve_provider_credentials(self, account_id)
+        }
+    }
 
     struct TestRoot {
         path: PathBuf,
@@ -1791,12 +1837,12 @@ mod tests {
         ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            must_ok(run_with_io(
-                arguments.iter().map(OsString::from),
+            must_ok(test_async_runtime().block_on(run_with_io_async(
+                arguments.iter().map(OsString::from).collect(),
                 &CliContext::new(Vec::new()),
                 &mut stdout,
                 &mut stderr,
-            ));
+            )));
             let output = CliRunOutput {
                 stdout: must_ok(String::from_utf8(stdout)),
                 stderr: must_ok(String::from_utf8(stderr)),
@@ -3801,7 +3847,7 @@ exit 42
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let error = match run_with_io(
+        let error = match test_async_runtime().block_on(run_with_io_async(
             vec![
                 "codex-router".into(),
                 "quota".into(),
@@ -3814,7 +3860,7 @@ exit 42
             &CliContext::new(Vec::new()),
             &mut stdout,
             &mut stderr,
-        ) {
+        )) {
             Ok(()) => panic!("disallowed quota base URL must fail before token egress"),
             Err(error) => error,
         };
@@ -3936,7 +3982,7 @@ exit 42
     }
 
     #[test]
-    fn quota_refresh_store_paths_persist_to_explicit_state_db_and_secret_root() {
+    fn quota_refresh_store_paths_uses_current_thread_runtime_without_nested_runtime() {
         let test_root = TestRoot::new("quota-refresh-store-paths");
         must_ok(fs::create_dir(test_root.path()));
         let state_path = test_root.path().join("custom-state.sqlite");
@@ -4871,13 +4917,15 @@ exit 42
             Duration::from_millis(10),
         ));
 
-        let error = match provider.fetch_quota(QuotaRefreshProviderRequest::new(
-            account_id("acct_timeout"),
-            "timeout",
-            "responses",
-            format!("http://{address}"),
-            SecretString::new("timeout-token-canary"),
-            None,
+        let error = match test_async_runtime().block_on(provider.fetch_quota(
+            QuotaRefreshProviderRequest::new(
+                account_id("acct_timeout"),
+                "timeout",
+                "responses",
+                format!("http://{address}"),
+                SecretString::new("timeout-token-canary"),
+                None,
+            ),
         )) {
             Ok(response) => panic!("hanging quota endpoint should time out: {response:?}"),
             Err(error) => error,
@@ -7392,7 +7440,7 @@ exit 42
     }
 
     impl QuotaRefreshProvider for RecordingQuotaRefreshProvider {
-        fn fetch_quota(
+        async fn fetch_quota(
             &self,
             request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
@@ -7421,7 +7469,7 @@ exit 42
     }
 
     impl QuotaRefreshProvider for StaticQuotaRefreshProvider {
-        fn fetch_quota(
+        async fn fetch_quota(
             &self,
             _request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
@@ -7447,7 +7495,7 @@ exit 42
     }
 
     impl QuotaRefreshProvider for SlowQuotaRefreshProvider {
-        fn fetch_quota(
+        async fn fetch_quota(
             &self,
             _request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
@@ -7482,7 +7530,7 @@ exit 42
     }
 
     impl QuotaRefreshProvider for BlockingQuotaRefreshProvider {
-        fn fetch_quota(
+        async fn fetch_quota(
             &self,
             _request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
@@ -7522,7 +7570,7 @@ exit 42
     }
 
     impl QuotaRefreshProvider for SignalingQuotaRefreshProvider {
-        fn fetch_quota(
+        async fn fetch_quota(
             &self,
             request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
@@ -7551,7 +7599,7 @@ exit 42
     }
 
     impl QuotaRefreshProvider for AccountFailingQuotaRefreshProvider {
-        fn fetch_quota(
+        async fn fetch_quota(
             &self,
             request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
@@ -7657,12 +7705,12 @@ exit 42
     ) -> CliRunOutput {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        must_ok(run_with_io(
-            args.into_iter().map(Into::into),
+        must_ok(test_async_runtime().block_on(run_with_io_async(
+            args.into_iter().map(Into::into).collect(),
             &context,
             &mut stdout,
             &mut stderr,
-        ));
+        )));
 
         CliRunOutput {
             stdout: must_ok(String::from_utf8(stdout)),
