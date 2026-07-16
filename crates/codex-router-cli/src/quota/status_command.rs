@@ -36,10 +36,23 @@ pub(super) async fn render_interactive_quota_status(
     let report =
         load_quota_status_report_async(&router_root, all_limits, now_unix_seconds, true).await?;
     let view_model = quota_status_view_model(&report, report.rows(), width);
-    let reload_view_model = quota_status_view_model_loader(router_root, all_limits, true, width);
-    run_quota_status_view(view_model, Some(reload_view_model))
-        .await
-        .map_err(QuotaCommandError::Stdout)
+    let reload_view_model =
+        quota_status_view_model_loader(router_root.clone(), all_limits, true, width);
+    let reset_session = crate::quota_reset::compose_production_reset_session(&router_root)?;
+    let shutdown_sender = reset_session.ports.intent_sender.clone();
+    let session_task = tokio::spawn(reset_session.runner);
+    let render_result = run_quota_status_view(
+        view_model,
+        Some(reload_view_model),
+        Some(reset_session.ports),
+    )
+    .await;
+    let _ = shutdown_sender
+        .send(crate::quota_reset::supervisor::ResetSessionIntent::Shutdown)
+        .await;
+    drop(shutdown_sender);
+    let _ = session_task.await;
+    render_result.map_err(QuotaCommandError::Stdout)
 }
 
 pub(super) fn quota_status_view_model_loader(

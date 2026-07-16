@@ -5,15 +5,17 @@ mod model;
 mod reducer;
 
 pub(in crate::quota_reset) use contracts::CorrelatedOutcome;
+pub(crate) use contracts::OperationActivity;
 pub(in crate::quota_reset) use contracts::OperationCorrelation;
 pub(in crate::quota_reset) use contracts::RenderValueProvenance;
-pub(in crate::quota_reset) use contracts::WorkflowPhase;
-pub(in crate::quota_reset) use model::ConfirmationSelection;
+pub(crate) use contracts::WorkflowPhase;
+pub(crate) use model::ConfirmationSelection;
 pub(in crate::quota_reset) use model::InspectionStart;
+pub(crate) use model::OperationSuccess;
 pub(in crate::quota_reset) use model::ResetWorkflow;
-pub(in crate::quota_reset) use model::WorkflowActivities;
+pub(crate) use model::WorkflowActivities;
 pub(in crate::quota_reset) use model::WorkflowIntent;
-pub(in crate::quota_reset) use model::WorkflowResult;
+pub(crate) use model::WorkflowResult;
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,6 @@
 use iocraft::prelude::*;
 
-use super::component::visible_account_window_start;
+use super::layout::visible_account_window_start;
 use super::model::*;
 
 const DETAIL_LABEL_WIDTH: usize = 10;
@@ -15,9 +15,14 @@ pub(super) fn render_account_list(
     let row_width = width.saturating_sub(4).max(32);
     let mut children = Vec::new();
     let window_start = visible_account_window_start(focused_row_index, rows.len(), visible_rows);
+    let compact_overflow_markers =
+        super::layout::quota_account_list_height(rows.len(), focused_row_index, visible_rows)
+            > height;
     if window_start > 0 {
         children.push(quota_more_marker(format!("+{window_start} more above")));
-        children.push(quota_gap());
+        if !compact_overflow_markers {
+            children.push(quota_gap());
+        }
     }
     let window_end = (window_start + visible_rows).min(rows.len());
     for (offset, index) in (window_start..window_end).enumerate() {
@@ -34,7 +39,9 @@ pub(super) fn render_account_list(
     }
     let remaining = rows.len().saturating_sub(window_start + visible_rows);
     if remaining > 0 {
-        children.push(quota_gap());
+        if !compact_overflow_markers {
+            children.push(quota_gap());
+        }
         children.push(quota_more_marker(format!("+{remaining} more below")));
     }
 
@@ -169,7 +176,6 @@ pub(super) fn render_selected_details(
         ) {
             Text(content: "Selected account", color: Color::Cyan, weight: Weight::Bold)
             Text(content: fit_line(&format!("{}    {}    {}", selected.account, selected.status, selected.reason), detail_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-            #(quota_gap())
             Text(content: "Quota windows", color: Color::Cyan, weight: Weight::Bold)
             #(detail_line("weekly", &selected.weekly_window, detail_width, Color::White))
             #(detail_line("5h", &selected.short_window, detail_width, Color::White))

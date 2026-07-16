@@ -279,3 +279,61 @@ pub(crate) struct ResetSessionPorts {
     pub(crate) intent_sender: mpsc::Sender<ResetSessionIntent>,
     pub(crate) snapshot_receiver: watch::Receiver<ResetWorkflowSnapshot>,
 }
+
+#[cfg(test)]
+impl ResetSessionPorts {
+    pub(crate) fn test_channels(
+        initial_snapshot: ResetWorkflowSnapshot,
+    ) -> (
+        Self,
+        mpsc::Receiver<ResetSessionIntent>,
+        watch::Sender<ResetWorkflowSnapshot>,
+    ) {
+        let (intent_sender, intent_receiver) = mpsc::channel(16);
+        let (snapshot_sender, snapshot_receiver) = watch::channel(initial_snapshot);
+        (
+            Self {
+                intent_sender,
+                snapshot_receiver,
+            },
+            intent_receiver,
+            snapshot_sender,
+        )
+    }
+}
+
+#[cfg(test)]
+impl ResetWorkflowSnapshot {
+    pub(crate) fn test_snapshot(
+        phase: WorkflowPhase,
+        confirmation_selection: ConfirmationSelection,
+        yes_enabled: bool,
+        activities: WorkflowActivities,
+        result: Option<WorkflowResult>,
+        live_weekly: Option<LiveWeeklyDisplayFacts>,
+        credit_inventory: Vec<ResetCreditDisplayRecord>,
+        disabled_yes_reason: Option<ResetEligibilityDisabledReason>,
+    ) -> Self {
+        let selected_credit = credit_inventory
+            .iter()
+            .find(|credit| credit.earliest_usable)
+            .map(|credit| SelectedCreditConfirmationFacts {
+                id_hint: credit.id_hint.clone(),
+                title: credit.title.clone(),
+                expires_unix_seconds: credit.expires_unix_seconds,
+            });
+        Self {
+            phase,
+            confirmation_selection,
+            yes_enabled,
+            activities,
+            result,
+            target: None,
+            live_weekly,
+            credit_inventory,
+            credit_inventory_provenance: Some(ResetValueProvenance::CurrentLive),
+            selected_credit,
+            disabled_yes_reason,
+        }
+    }
+}

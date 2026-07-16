@@ -22,6 +22,7 @@ pub(crate) struct QuotaStatusViewModel {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaStatusAccountViewModel {
     pub(crate) account_id: AccountId,
+    pub(crate) account_tag: String,
     pub(crate) active_credential_generation: Option<u64>,
     pub(crate) selected: bool,
     pub(crate) account: String,

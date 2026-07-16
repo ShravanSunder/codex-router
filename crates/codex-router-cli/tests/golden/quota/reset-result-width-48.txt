@@ -1,0 +1,24 @@
+┌──────────────────────────────────────────────┐
+│ Reset credit                                 │
+│ alpha  [alpha-tag]                           │
+│ saved weekly  saved 4% remaining             │
+│ saved credits 3 resets                       │
+│ inspect usage      succeeded                 │
+│ inspect credits    succeeded                 │
+│ revalidate usage   succeeded                 │
+│ revalidate credits succeeded                 │
+│ consume credit     failed: provider transpo… │
+│ Reset result                                 │
+│ Outcome unknown: consume transport outcome … │
+│ Saved quota may remain stale until the norm… │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+└──────────────────────────────────────────────┘

@@ -1,6 +1,10 @@
 //! Command-level ownership for reset workflow effects and authority.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_router_core::ids::AccountId;
 use tokio::sync::mpsc;
@@ -14,6 +18,7 @@ use super::domain::ConsumeUnknownReason;
 use super::domain::CreditInventoryPortResult;
 use super::domain::LiveUsagePortResult;
 use super::domain::LiveWeeklyUsage;
+use super::domain::RedeemRequestId;
 use super::domain::RenderSafeFailure;
 use super::domain::ValidatedCreditInventory;
 use super::service::ConfirmationAuthority;
@@ -27,23 +32,62 @@ use super::workflow::InspectionStart;
 use super::workflow::OperationCorrelation;
 use super::workflow::ResetWorkflow;
 use super::workflow::WorkflowIntent;
-use super::workflow::WorkflowPhase;
-use super::workflow::WorkflowResult;
 
 mod effects;
 mod protocol;
 
+#[cfg(test)]
+pub(crate) use super::domain::ConsumeUnknownReason as TestConsumeUnknownReason;
+pub(crate) use super::domain::KnownConsumeOutcome;
+#[cfg(test)]
+pub(crate) use super::domain::RenderSafeFailure as TestRenderSafeFailure;
+pub(crate) use super::workflow::ConfirmationSelection;
+pub(crate) use super::workflow::OperationActivity;
+pub(crate) use super::workflow::OperationSuccess;
+pub(crate) use super::workflow::WorkflowPhase;
+pub(crate) use super::workflow::WorkflowResult;
 use effects::GenerationAllocator;
 use effects::RedeemRequestIdFactory;
 use effects::SessionTaskOutput;
+#[cfg(test)]
+pub(crate) use protocol::LiveWeeklyDisplayFacts;
 use protocol::PinnedResetTarget;
-use protocol::PinnedTargetInvalidationReason;
+pub(crate) use protocol::PinnedTargetInvalidationReason;
+#[cfg(test)]
+pub(crate) use protocol::ResetCreditDisplayRecord;
+pub(crate) use protocol::ResetCreditDisplayStatusDto;
+pub(crate) use protocol::ResetEligibilityDisabledReason;
 pub(crate) use protocol::ResetSessionIntent;
 pub(in crate::quota_reset) use protocol::ResetSessionOutcome;
 pub(crate) use protocol::ResetSessionPorts;
+pub(crate) use protocol::ResetValueProvenance;
 pub(crate) use protocol::ResetWorkflowSnapshot;
 
 const MINIMUM_PORT_CAPACITY: usize = 1;
+
+#[cfg(test)]
+pub(crate) fn test_live_usage_success(remaining_percent: u32) -> OperationSuccess {
+    OperationSuccess::LiveUsage(LiveWeeklyUsage::new(remaining_percent))
+}
+
+static REDEEM_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub(in crate::quota_reset) struct ProductionRedeemRequestIdFactory;
+
+impl RedeemRequestIdFactory for ProductionRedeemRequestIdFactory {
+    fn mint(&self) -> Result<RedeemRequestId, RenderSafeFailure> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RenderSafeFailure::CredentialUnavailable)?
+            .as_nanos();
+        let counter = REDEEM_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        RedeemRequestId::new(format!(
+            "codex-router-{}-{nanos}-{counter}",
+            std::process::id()
+        ))
+        .map_err(|_| RenderSafeFailure::InvalidResponse)
+    }
+}
 
 /// Sole reducer, authority, and reset-effect task owner for one quota command.
 pub(in crate::quota_reset) struct QuotaInteractiveSession<

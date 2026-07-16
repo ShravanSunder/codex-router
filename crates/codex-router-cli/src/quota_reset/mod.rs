@@ -23,6 +23,7 @@ use self::orchestration::prepare_guarded_reset;
 use self::provider::HttpLiveQuotaResetProvider;
 use self::provider::LiveResetAccountAuth;
 
+mod composition;
 pub(crate) mod credentials;
 pub(crate) mod domain;
 pub(crate) mod orchestration;
@@ -30,6 +31,8 @@ pub(crate) mod provider;
 pub(crate) mod service;
 pub(crate) mod supervisor;
 pub(crate) mod workflow;
+
+pub(crate) use composition::compose_production_reset_session;
 
 /// Interactive quota-reset failure.
 #[derive(Debug, Error)]

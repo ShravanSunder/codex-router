@@ -1,0 +1,24 @@
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Reset credit                                                                                                                                                 │
+│ alpha  [alpha-tag]                                                                                                                                           │
+│ saved weekly  saved 4% remaining                                                                                                                             │
+│ saved credits 3 resets                                                                                                                                       │
+│ inspect usage      succeeded                                                                                                                                 │
+│ inspect credits    succeeded                                                                                                                                 │
+│ revalidate usage   failed: reset eligibility refused                                                                                                         │
+│ revalidate credits succeeded                                                                                                                                 │
+│ consume credit     not started                                                                                                                               │
+│ current live weekly  4% remaining                                                                                                                            │
+│ Credits current live · 1-1 of 1                                                                                                                              │
+│ earliest [abcd…wxyz] Weekly recovery · available · expires 1900000000                                                                                        │
+│ Warning: saved count and current live count disagree (saved 3 resets, live 1).                                                                               │
+│ Reset result                                                                                                                                                 │
+│ Reset refused before consume: reset eligibility refused.                                                                                                     │
+│ Saved quota may remain stale until the normal quota refresh updates it.                                                                                      │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

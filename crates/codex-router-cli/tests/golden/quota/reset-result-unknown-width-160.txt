@@ -1,0 +1,24 @@
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Reset credit                                                                                                                                                 │
+│ alpha  [alpha-tag]                                                                                                                                           │
+│ saved weekly  saved 4% remaining                                                                                                                             │
+│ saved credits 3 resets                                                                                                                                       │
+│ inspect usage      succeeded                                                                                                                                 │
+│ inspect credits    succeeded                                                                                                                                 │
+│ revalidate usage   succeeded                                                                                                                                 │
+│ revalidate credits succeeded                                                                                                                                 │
+│ consume credit     failed: provider transport unavailable                                                                                                    │
+│ current live weekly  0% remaining                                                                                                                            │
+│ Credits current live · 1-1 of 1                                                                                                                              │
+│ earliest [abcd…wxyz] Weekly recovery · available · expires 1900000000                                                                                        │
+│ Warning: saved count and current live count disagree (saved 3 resets, live 1).                                                                               │
+│ Reset result                                                                                                                                                 │
+│ Outcome unknown: consume transport outcome unavailable. Do not retry automatically.                                                                          │
+│ Saved quota may remain stale until the normal quota refresh updates it.                                                                                      │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

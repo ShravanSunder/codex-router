@@ -15,6 +15,7 @@ pub(super) fn quota_status_view_model(
             .iter()
             .map(|row| QuotaStatusAccountViewModel {
                 account_id: row.account_id.clone(),
+                account_tag: account_display_tag(&row.account_id),
                 active_credential_generation: row.active_credential_generation,
                 selected: row.preferred_next,
                 account: row.account_label.clone(),
@@ -50,6 +51,15 @@ pub(super) fn quota_status_view_model(
             .collect(),
         selected: selected_row.map(|row| quota_selected_account_view_model(report, row)),
     }
+}
+
+fn account_display_tag(account_id: &AccountId) -> String {
+    let digest = Sha256::digest(account_id.as_str().as_bytes());
+    digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(super) fn quota_status_serving_clients(rows: &[QuotaStatusRow]) -> Option<u32> {

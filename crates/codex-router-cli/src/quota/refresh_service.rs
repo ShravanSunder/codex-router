@@ -285,7 +285,8 @@ fn quota_refresh_error_class(error: &QuotaCommandError) -> QuotaRefreshErrorClas
         }
         QuotaCommandError::ProviderStatus { .. } => QuotaRefreshErrorClass::ProviderError,
         QuotaCommandError::ProviderResponse { .. } => QuotaRefreshErrorClass::ParseError,
-        QuotaCommandError::AsyncDispatchRequired
+        QuotaCommandError::ResetComposition(_)
+        | QuotaCommandError::AsyncDispatchRequired
         | QuotaCommandError::InvalidFormat { .. }
         | QuotaCommandError::DisallowedBaseUrl { .. }
         | QuotaCommandError::RefreshNotImplemented

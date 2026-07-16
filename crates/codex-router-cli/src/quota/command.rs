@@ -107,6 +107,9 @@ pub enum QuotaStatusFormat {
 /// Quota command failure.
 #[derive(Debug, Error)]
 pub enum QuotaCommandError {
+    /// Integrated reset session composition failed before terminal entry.
+    #[error(transparent)]
+    ResetComposition(#[from] crate::quota_reset::QuotaResetError),
     /// A quota command was passed to the synchronous CLI dispatcher.
     #[error("quota commands require the async CLI dispatcher")]
     AsyncDispatchRequired,

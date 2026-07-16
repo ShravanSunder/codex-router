@@ -10,7 +10,6 @@
 │ ┌──────────────────────────────────────────┐ │
 │ │ Selected account                         │ │
 │ │ ssdev    [usable]    safest quota        │ │
-│ │                                          │ │
 │ │ Quota windows                            │ │
 │ │ weekly    ████ 83% left, reset 7d        │ │
 │ │ 5h        █████ 99% left, reset 5h       │ │
@@ -45,4 +44,5 @@
 │ │                                          │ │
 │ │                                          │ │
 │ └──────────────────────────────────────────┘ │
+│ ↑/↓ focus  ctrl-r inspect reset credits  es… │
 ╰──────────────────────────────────────────────╯

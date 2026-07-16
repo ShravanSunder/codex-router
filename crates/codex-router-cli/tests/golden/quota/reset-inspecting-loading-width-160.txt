@@ -1,0 +1,24 @@
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Reset credit                                                                                                                                                 │
+│ alpha  [alpha-tag]                                                                                                                                           │
+│ saved weekly  saved 4% remaining                                                                                                                             │
+│ saved credits 3 resets                                                                                                                                       │
+│ inspect usage      loading                                                                                                                                   │
+│ inspect credits    loading                                                                                                                                   │
+│ revalidate usage   not started                                                                                                                               │
+│ revalidate credits not started                                                                                                                               │
+│ consume credit     not started                                                                                                                               │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
