@@ -35,5 +35,9 @@ pub(super) fn credit_page_start(
 }
 
 pub(super) fn reset_inventory_page_size(detail_height: usize) -> usize {
-    detail_height.saturating_sub(13).clamp(1, 4)
+    const INSPECTED_DETAIL_NON_CREDIT_ROWS: usize = 10;
+
+    detail_height
+        .saturating_sub(INSPECTED_DETAIL_NON_CREDIT_ROWS)
+        .clamp(1, 4)
 }

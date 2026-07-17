@@ -370,6 +370,8 @@ fn inspected_reset_detail_has_user_facing_sections_readable_expiry_and_content_h
     // Act
     let content_height =
         super::quota_reset_detail_rendering::reset_panel_content_height(&snapshot, &target, 0);
+    let page_size =
+        super::quota_reset_presentation_model::reset_inventory_page_size(content_height);
     let frame = render_reset_panel(&snapshot, &target, 100, content_height, 0, 4, 0)
         .render(None)
         .to_string();
@@ -386,6 +388,7 @@ fn inspected_reset_detail_has_user_facing_sections_readable_expiry_and_content_h
     assert!(!frame.contains("inspect usage"), "{frame}");
     assert!(!frame.contains("not started"), "{frame}");
     assert!(!frame.contains("saved weekly"), "{frame}");
+    assert_eq!(page_size, 2);
     assert!(content_height < 21, "content height was {content_height}");
     assert_quota_golden("reset-inspected-panel-width-100", &frame);
 }

@@ -369,7 +369,7 @@ fn credit_rows(
                 credit_status_label(credit.status),
                 format_credit_expiry(credit.expires_unix_seconds)
             ),
-            marker_color: Color::Cyan,
+            marker_color: Color::Green,
         })
         .collect::<Vec<_>>();
     let remaining = inventory.len().saturating_sub(page_end);
