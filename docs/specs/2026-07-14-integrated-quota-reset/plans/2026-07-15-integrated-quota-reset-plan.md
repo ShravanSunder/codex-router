@@ -61,46 +61,47 @@ lib.rs
           |
           v
 quota/
-  command.rs              owns async QuotaCommand dispatch only
-  options.rs              owns quota status/refresh option parsing
-  status_command.rs       owns interactive/static status coordination
-  status_loader.rs        owns async query-only persisted reads
-  status_model.rs         owns status/report/view data types
-  status_projection.rs    owns typed display projection
-  status_formatting.rs    owns plain/table/JSON formatting
-  status_pace.rs          owns burn/run-rate/reset-pace calculations
-  status_json.rs          owns JSON DTO projection/serialization
-  status_metrics.rs       owns quota status telemetry emission
-  refresh_command.rs      owns explicit async refresh coordination
-  refresh_service.rs      owns refresh workflow/account decisions
-  refresh_provider.rs     owns refresh HTTP protocol
-  refresh_history.rs      owns burn-history observation/retention
-  background_refresh_worker.rs owns the unchanged serve-owned worker/runtime
-  selection_projection.rs owns route-band/runtime-selection projection
-  tests/                  owns tests grouped by the same responsibilities
+  quota_command_dispatch.rs       owns async QuotaCommand dispatch only
+  quota_command_options.rs        owns quota status/refresh option parsing
+  quota_status_command.rs         owns interactive/static status coordination
+  quota_status_loader.rs          owns async query-only persisted reads
+  quota_status_view_model.rs      owns status/report/view data types
+  quota_status_projection.rs      owns typed display projection
+  quota_status_formatting.rs      owns plain/table/JSON formatting
+  quota_reset_pace_projection.rs  owns burn/run-rate/reset-pace calculations
+  quota_status_json.rs            owns JSON DTO projection/serialization
+  quota_status_metrics.rs         owns quota status telemetry emission
+  quota_refresh_command.rs        owns explicit async refresh coordination
+  quota_refresh_service.rs        owns refresh workflow/account decisions
+  quota_refresh_provider.rs       owns refresh HTTP protocol
+  quota_refresh_history.rs        owns burn-history observation/retention
+  quota_background_refresh_worker.rs owns the unchanged serve-owned worker/runtime
+  quota_route_selection_projection.rs owns route-band/runtime-selection projection
+  *_test.rs                       owns colocated tests for the named responsibility
           |
           v
 presentation/quota/
-  component.rs  owns one iocraft loop, key routing, responsive shell
-  model.rs      owns stable AccountId focus and render-safe view state
-  render.rs     owns unchanged browse shell/list/detail geometry
-  reset.rs      owns reset-detail/confirmation/result rendering only
-  test_support.rs / tests.rs own deterministic frames and events
+  quota_status_component.rs          owns one iocraft loop and responsive shell
+  quota_status_view_model.rs         owns stable AccountId focus and render-safe state
+  quota_browse_rendering.rs          owns unchanged browse shell/list/detail geometry
+  quota_reset_detail_rendering.rs    owns reset-detail/confirmation/result rendering
+  quota_reset_keyboard_interaction.rs owns reset-mode key interpretation
+  *_test.rs                          owns colocated deterministic frames and events
           |
           v
 quota_reset/
-  domain.rs     pure credit policy and validated inventory
-  workflow.rs   pure reducer, intents, effects, correlated outcomes
-  credentials.rs read-only account/credential authority + fingerprint
-  provider.rs   fixed production HTTP and test-only loopback transport
-  service.rs    effect execution, revalidation, single-use capability
-  supervisor.rs command-level task ownership and result reduction
-  supervisor/inspection.rs inspection authority and independent initial reads
-  supervisor/revalidation.rs fresh-fact arbitration and commit authorization
-  supervisor/effects.rs task outputs, generation allocation, redeem identity minting
-  supervisor/protocol.rs render-safe intents, snapshots, and pinned-target protocol
-  supervisor/session_state.rs session bookkeeping and snapshot projection
-  test_support.rs fake ledgers/held effects behind test composition
+  reset_credit_policy.rs pure credit policy and validated inventory
+  reset_workflow_reducer.rs pure reducer, intents, effects, correlated outcomes
+  credential_authority.rs read-only account/credential authority + fingerprint
+  provider_protocol.rs fixed production HTTP and test-only loopback transport
+  reset_commit_service.rs effect execution, revalidation, single-use capability
+  reset_session_supervisor.rs command-level task ownership and result reduction
+  reset_session_supervisor/live_reset_inspection.rs owns independent initial reads
+  reset_session_supervisor/reset_commit_revalidation.rs owns fresh-fact arbitration
+  reset_session_supervisor/reset_effect_execution.rs owns task outputs and identities
+  reset_session_supervisor/reset_presentation_protocol.rs owns render-safe ports
+  reset_session_supervisor/reset_session_state.rs owns snapshot projection
+  *_test.rs owns colocated fake ledgers, fixtures, and behavior proof
 ```
 
 ### Command-session protocol and reducer ownership
@@ -194,7 +195,7 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
    - reject obsolete immutable-SQLite and superseded contract code;
    - remove temporary blanket lint allowances and split any finished source file at or above 900
      lines by named responsibility;
-   - restore parent ownership of `quota_reset/mod.rs` integration;
+   - restore parent ownership of `quota_reset.rs` integration;
    - run the intended slice-local tests, format, clippy, and diff checks;
    - commit accepted scoped foundations as explicit adoption checkpoints before Slice 1a3 work.
    The adoption ledger is parent-owned and must distinguish inherited worker reports from current
@@ -207,7 +208,7 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
    - Dedicated binary: `codex-router-quota-reset-test-harness` in the explicit `publish = false`
      workspace package `crates/codex-router-quota-reset-test-harness`.
    - Integration test:
-     `crates/codex-router-quota-reset-test-harness/tests/quota_reset_pty.rs`; the PTY dependency and
+     `crates/codex-router-quota-reset-test-harness/tests/quota_reset_pty_test.rs`; the PTY dependency and
      compiled executable are owned only by this test package.
    - Shared entry: a composition-parameterized internal quota-command dispatcher used by production
      and harness wrappers. The feature-only harness parser validates a canonical temp-child fixture
@@ -221,12 +222,11 @@ manifests, and shared integration files are parent-owned. Slices 5a–7b are ser
      all-feature production package installs only `codex-router`, the separate non-publish harness
      package builds, and both default/all-feature production target graphs keep loopback unreachable
      from the installed parser/factory. No provider or credential is accessed in this spike.
-5. Add deterministic normalized browse baselines before changing presentation behavior:
-   narrow/48, representative 100x24, 159 stacked, 160 sidecar, clipped short height, resize, empty,
-   error, and ordinary exit. Extend fixtures until every case exists; inability to produce one stops
-   Slice 1a0.
+5. Add deterministic normalized browse baselines before changing presentation behavior: narrow/48,
+   159 stacked, 160 sidecar, and clipped short height. Prove resize, empty, error, ordinary exit,
+   workflow states, and additional widths with structural assertions instead of snapshot files.
    - Permanent expected frames: `crates/codex-router-cli/tests/golden/quota/*.txt`.
-   - Normalizer: `presentation/quota/test_support.rs`; it may normalize ANSI cursor/color control
+   - Normalizer: `presentation/quota/quota_presentation_support_test.rs`; it may normalize ANSI cursor/color control
      sequences and nondeterministic spinner glyph only, never semantic text, spacing, geometry, or
      account ordering.
    - Explicit update command:
@@ -322,7 +322,8 @@ Behavior:
 
 Write owner:
 
-- `quota_reset/domain.rs`, new `quota_reset/workflow.rs`, and pure adjacent test modules.
+- `quota_reset/reset_credit_policy.rs`, `quota_reset/reset_workflow_reducer.rs`, and colocated
+  singular `*_test.rs` modules.
 - No iocraft, filesystem, state, secret, reqwest, or raw payload imports.
 
 Red/green proof:
@@ -367,7 +368,8 @@ Behavior:
 
 Write owner:
 
-- `quota_reset/provider.rs` or child provider modules and loopback protocol tests.
+- `quota_reset/provider_protocol.rs`, responsibility-named child modules, and colocated loopback
+  protocol `*_test.rs` files.
 - CLI manifest/lock only if streaming needs an already-reviewed dependency feature; parent owns
   manifest integration.
 
@@ -417,7 +419,7 @@ Behavior:
 
 Write owner:
 
-- `quota_reset/credentials.rs`, optional `quota_reset/authority.rs`, isolated fixture tests.
+- `quota_reset/credential_authority.rs` and colocated isolated fixture tests.
 - Existing state/secret crates remain read-only dependencies; any required modification is a
   separate scope-gated split.
 
@@ -448,8 +450,8 @@ Source: R9–R10 and R17–R25.
 
 Write owner:
 
-- Replace `quota_reset/orchestration.rs` with focused `service.rs` and test modules.
-- `quota_reset/mod.rs` only through parent-owned export/composition edits.
+- Replace `quota_reset/orchestration.rs` with focused `reset_commit_service.rs` and colocated tests.
+- `quota_reset.rs` only through parent-owned export/composition edits.
 - Dependencies from Slices 2–4 are read-only. No presentation or CLI dispatch edits.
 
 ### Slice 5a — independent inspection service
@@ -510,8 +512,8 @@ Behavior:
 
 Write owner:
 
-- New `quota_reset/session.rs` (or `supervisor.rs`), typed intent/snapshot ports, service integration
-  tests, and parent-owned module export.
+- `quota_reset/reset_session_supervisor.rs`, typed intent/snapshot ports, colocated service
+  integration tests, and parent-owned module export.
 - A narrow quota-component snapshot subscription/intent sender may be compiled in a test component,
   but no reset rendering or shell geometry edits occur yet.
 
@@ -530,7 +532,8 @@ Source: Product decisions 1–7, 9, 11–13; R1–R18 and R24–R25.
 
 Write owner:
 
-- `presentation/quota/{component,model,render,reset,test_support,tests}.rs` after Slice 1a split.
+- Responsibility-named `presentation/quota/*.rs` modules and colocated singular `*_test.rs` files
+  after the Slice 1a split.
 - Parent-owned `quota/`/`lib.rs` composition touchpoints only at integration checkpoints.
 - Presentation imports only render-safe workflow state, intents, and effect handles—never secrets,
   fingerprints, commit capabilities, provider clients, reqwest, or raw payloads.

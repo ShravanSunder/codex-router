@@ -572,13 +572,16 @@ The implementation plan must operationalize these proof modalities without using
    account removal, generation change, cancellation, delayed/out-of-order completions, repeated
    Enter/Ctrl-R, and stale attempt suppression. Controllable held futures prove keys, resize,
    independent activity rows, and cancellation remain responsive while each provider effect waits.
-3. Normalized golden/differential text/ANSI captures proving browse render equivalence and
-   browse-reset-browse round-trip restoration, plus captures for inspecting, independent partial
-   inspection, previous-result-refreshing labels, disagreement warning, ineligible confirmation
-   with disabled Yes, eligible default-No confirmation, Yes selection, revalidating, committing,
-   success, provider no-reset outcomes, pre-POST failure, and outcome unknown at existing narrow/
-   stacked/sidecar boundaries. Captures cover each of the five provider operations in flight and
-   prove that state meaning does not rely on spinner animation or color.
+3. A compact normalized golden set proves the canonical visual contracts: browse at narrow/48,
+   stacked/159, sidecar/160, and clipped-short-height layouts; reset confirmation at narrow,
+   stacked, and sidecar panel widths; and the sidecar-width unknown-outcome panel. Deterministic
+   structural assertions—not one snapshot file per state/width pair—prove inspecting, independent
+   partial inspection, previous-result-refreshing labels, disagreement warning, ineligible and
+   eligible confirmation, revalidating, committing, success, provider no-reset outcomes, pre-POST
+   failure, outcome unknown, browse-reset-browse restoration, and additional widths. Together they
+   cover all five provider operations and prove that meaning does not rely on spinner animation or
+   color. Rust test sources are colocated with their owning module, use responsibility-specific
+   names, and end in singular `_test.rs`.
    Navigation and rendering consume one computed detail viewport height; paging visits every credit
    exactly once without gaps or duplicates, and reset detail substitution preserves the ordinary
    browse list/detail height partition at stacked and sidecar widths.

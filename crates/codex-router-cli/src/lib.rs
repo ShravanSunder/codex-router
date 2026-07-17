@@ -6491,7 +6491,7 @@ exit 42
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
         ));
         let quota_source = must_ok(fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/quota/mod.rs"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/quota.rs"),
         ));
 
         assert!(!cli_manifest.contains("name = \"codex-router-quota-reset-test-harness\""));
