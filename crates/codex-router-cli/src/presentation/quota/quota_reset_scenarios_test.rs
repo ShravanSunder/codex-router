@@ -62,7 +62,7 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 Vec::new(),
                 Some(ResetEligibilityDisabledReason::LiveInspectionIncomplete),
             ),
-            &["inspect usage      ⠋ loading", "inspect credits    ⠋ loading"],
+            &["Weekly usage        ⠋ checking", "Reset credits       ⠋ checking"],
         ),
         (
             "inspection-partial",
@@ -75,7 +75,7 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 Vec::new(),
                 Some(ResetEligibilityDisabledReason::LiveInspectionIncomplete),
             ),
-            &["inspect usage      succeeded", "inspect credits    ⠋ loading"],
+            &["Weekly usage        ready", "Reset credits       ⠋ checking"],
         ),
         (
             "confirming-ineligible",
@@ -92,7 +92,7 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                     },
                 ),
             ),
-            &["[No]", "Yes disabled", "less than 1% is required"],
+            &["[No]", "Yes disabled", "below 1% is required"],
         ),
         (
             "confirming-eligible",
@@ -105,7 +105,7 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 test_credit_inventory(),
                 None,
             ),
-            &["[No]", " Yes ", "current live weekly  0% remaining"],
+            &["[No]", "Yes", "Weekly remaining    0%"],
         ),
         (
             "revalidating-refreshing",
@@ -119,9 +119,9 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 Some(ResetEligibilityDisabledReason::LiveInspectionIncomplete),
             ),
             &[
-                "revalidate usage   ⠋ loading",
-                "revalidate credits ⠋ refreshing · previous result visible",
-                "⠋ Revalidating account",
+                "Weekly usage        ⠋ checking",
+                "Reset credit        ⠋ refreshing · previous result visible",
+                "Rechecking live eligibility",
             ],
         ),
         (
@@ -136,8 +136,8 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 None,
             ),
             &[
-                "consume credit     ⠋ request dispatched · awaiting definitive outcome",
-                "⠋ Consuming reset credit",
+                "Reset request sent",
+                "Provider            ⠋ waiting for a definitive result",
             ],
         ),
         (
@@ -153,7 +153,7 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 test_credit_inventory(),
                 None,
             ),
-            &["SUCCESS — RESET COMPLETED", "2 quota windows reset", "One reset credit was consumed"],
+            &["Success — reset completed", "2 quota windows reset", "One reset credit was consumed"],
         ),
         (
             "result-refused",
@@ -172,7 +172,7 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                     },
                 ),
             ),
-            &["NOT CONSUMED", "Reset refused before consume", "No consume request was sent"],
+            &["Not consumed", "Reset refused before consume", "No consume request was sent"],
         ),
         (
             "result-unknown",
@@ -187,7 +187,7 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 test_credit_inventory(),
                 None,
             ),
-            &["OUTCOME UNKNOWN — DO NOT RETRY", "The credit may have been consumed"],
+            &["Outcome unknown — do not retry", "The credit may have been consumed"],
         ),
     ]
 }

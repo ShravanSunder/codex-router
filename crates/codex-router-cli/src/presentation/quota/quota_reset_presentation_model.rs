@@ -35,5 +35,5 @@ pub(super) fn credit_page_start(
 }
 
 pub(super) fn reset_inventory_page_size(detail_height: usize) -> usize {
-    detail_height.saturating_sub(15).clamp(1, 4)
+    detail_height.saturating_sub(13).clamp(1, 4)
 }

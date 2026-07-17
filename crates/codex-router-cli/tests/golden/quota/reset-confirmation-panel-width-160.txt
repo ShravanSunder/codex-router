@@ -1,23 +1,23 @@
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Reset credit                                                                                                                                                 │
 │ alpha  [alpha-tag]                                                                                                                                           │
-│ saved weekly  saved 4% remaining                                                                                                                             │
-│ saved credits 3 resets                                                                                                                                       │
-│ inspect usage      succeeded                                                                                                                                 │
-│ inspect credits    succeeded                                                                                                                                 │
-│ revalidate usage   not started                                                                                                                               │
-│ revalidate credits not started                                                                                                                               │
-│ consume credit     not started                                                                                                                               │
-│ current live weekly  0% remaining                                                                                                                            │
-│ Credits current live · 1-1 of 1                                                                                                                              │
-│ earliest [abcd…wxyz] Weekly recovery · available · expires 1900000000                                                                                        │
-│ Warning: saved count and current live count disagree (saved 3 resets, live 1).                                                                               │
-│ Confirm scarce reset credit                                                                                                                                  │
-│ Warning: confirming consumes one scarce reset credit.                                                                                                        │
-│ Account alpha [alpha-tag]                                                                                                                                    │
-│ Live weekly 0% remaining                                                                                                                                     │
-│ Credit [abcd…wxyz] Weekly recovery · expires 1900000000                                                                                                      │
+│                                                                                                                                                              │
+│ Confirm reset credit                                                                                                                                         │
+│ This consumes one scarce reset credit and cannot be undone.                                                                                                  │
+│ Weekly remaining    0%                                                                                                                                       │
+│ Credit              [abcd…wxyz] Weekly recovery                                                                                                              │
+│ Expires             2030-03-17 17:46 UTC                                                                                                                     │
+│                                                                                                                                                              │
 │ [No]    Yes                                                                                                                                                  │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 │                                                                                                                                                              │

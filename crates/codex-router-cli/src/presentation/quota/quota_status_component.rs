@@ -434,7 +434,11 @@ pub(super) fn QuotaStatusComponent(
     let details_content_height = current_reset_snapshot
         .as_ref()
         .filter(|_| reset_detail_active)
-        .map(reset_panel_content_height)
+        .and_then(|snapshot| {
+            current_reset_target.as_ref().map(|target| {
+                reset_panel_content_height(snapshot, target, inventory_page_start.get())
+            })
+        })
         .unwrap_or_else(|| selected_detail_height(focused_details.is_some()));
     let sidecar = width >= SIDECAR_QUOTA_WIDTH;
     let stacked_details = !sidecar

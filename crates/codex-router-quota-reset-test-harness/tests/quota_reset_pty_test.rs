@@ -46,8 +46,8 @@ mod quota_reset_pty_test {
         )?;
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
-        terminal.wait_for_text("inspect usage", SEMANTIC_WAIT)?;
-        terminal.wait_for_text("inspect credits", SEMANTIC_WAIT)?;
+        terminal.wait_for_text("Weekly usage", SEMANTIC_WAIT)?;
+        terminal.wait_for_text("Reset credits", SEMANTIC_WAIT)?;
 
         let requests = provider.wait_for_request_count(2, SEMANTIC_WAIT)?;
         ensure(
@@ -154,12 +154,12 @@ mod quota_reset_pty_test {
         )?;
         provider.release_get_responses()?;
         stage(
-            terminal.wait_for_text("Inspection complete", SEMANTIC_WAIT),
+            terminal.wait_for_text("Live eligibility", SEMANTIC_WAIT),
             "inspection completion",
         )?;
         terminal.send(b"\r")?;
         stage(
-            terminal.wait_for_text("Confirm scarce reset credit", SEMANTIC_WAIT),
+            terminal.wait_for_text("Confirm reset credit", SEMANTIC_WAIT),
             "confirmation screen",
         )?;
         terminal.send(b"\x1b[C")?;
@@ -196,7 +196,7 @@ mod quota_reset_pty_test {
             "consume POST method or path did not match the production protocol",
         )?;
         stage(
-            terminal.wait_for_text("Consuming reset credit", SEMANTIC_WAIT),
+            terminal.wait_for_text("Reset request sent", SEMANTIC_WAIT),
             "committing screen",
         )?;
         ensure(
@@ -206,7 +206,7 @@ mod quota_reset_pty_test {
 
         provider.release_post_response()?;
         stage(
-            terminal.wait_for_text("SUCCESS — RESET COMPLETED", SEMANTIC_WAIT),
+            terminal.wait_for_text("Success — reset completed", SEMANTIC_WAIT),
             "known reset result",
         )?;
         let browse_restoration_start = terminal.transcript_len();

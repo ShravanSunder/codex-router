@@ -211,9 +211,9 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
             .filter(|frame| frame.contains("Reset credit"))
             .collect::<Vec<_>>();
         assert!(
-            reset_frames
-                .iter()
-                .any(|frame| { frame.contains("❯ alpha") && frame.contains("saved credits") }),
+            reset_frames.iter().any(|frame| {
+                frame.contains("❯ alpha") && frame.contains("Checking live eligibility")
+            }),
             "reset must replace only detail while the account list remains: {frames:?}"
         );
         assert!(
@@ -232,7 +232,7 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
 }
 
 #[test]
-fn reset_detail_renders_all_five_semantic_operation_rows_and_safe_target_tag() {
+fn committing_reset_detail_shows_only_current_wait_and_safe_target_tag() {
     let activities = WorkflowActivities {
         inspection_live_usage: crate::quota_reset::reset_session_supervisor::OperationActivity::Loading,
         inspection_credit_inventory: crate::quota_reset::reset_session_supervisor::OperationActivity::Failed {
@@ -265,21 +265,11 @@ fn reset_detail_renders_all_five_semantic_operation_rows_and_safe_target_tag() {
         .render(None)
         .to_string();
 
-    for label in [
-        "inspect usage",
-        "inspect credits",
-        "revalidate usage",
-        "revalidate credits",
-        "consume credit",
-    ] {
-        assert!(text.contains(label), "missing {label}:\n{text}");
-    }
     assert!(text.contains("duplicate  [safe-tag]"), "{text}");
-    assert!(text.contains("request dispatched"), "{text}");
-    assert!(
-        text.contains("⠋ request dispatched"),
-        "provider waits need a visible activity indicator: {text}"
-    );
+    assert!(text.contains("Reset request sent"), "{text}");
+    assert!(text.contains("⠋ waiting"), "{text}");
+    assert!(!text.contains("inspect usage"), "{text}");
+    assert!(!text.contains("not started"), "{text}");
 }
 
 #[test]
@@ -341,13 +331,48 @@ fn provider_wait_indicator_animates_and_terminal_result_uses_compact_height() {
         .to_string();
 
     // Assert
-    assert!(first_frame.contains("⠋ loading"), "{first_frame}");
-    assert!(second_frame.contains("⠙ loading"), "{second_frame}");
+    assert!(first_frame.contains("⠋ checking"), "{first_frame}");
+    assert!(second_frame.contains("⠙ checking"), "{second_frame}");
     assert_ne!(first_frame, second_frame);
     assert_eq!(
-        super::quota_reset_detail_rendering::reset_panel_content_height(&result),
-        7
+        super::quota_reset_detail_rendering::reset_panel_content_height(&result, &target, 0),
+        10
     );
+}
+
+#[test]
+fn inspected_reset_detail_has_user_facing_sections_readable_expiry_and_content_height() {
+    // Arrange
+    let snapshot = ResetWorkflowSnapshot::test_snapshot(
+        WorkflowPhase::Inspected,
+        ConfirmationSelection::No,
+        completed_inspection_activities(),
+        None,
+        Some(test_live_weekly(0)),
+        test_credit_inventory(),
+        None,
+    );
+    let target = test_reset_target();
+
+    // Act
+    let content_height =
+        super::quota_reset_detail_rendering::reset_panel_content_height(&snapshot, &target, 0);
+    let frame = render_reset_panel(&snapshot, &target, 100, content_height, 0, 4, 0)
+        .render(None)
+        .to_string();
+
+    // Assert
+    assert!(frame.contains("Live eligibility"), "{frame}");
+    assert!(frame.contains("Weekly remaining"), "{frame}");
+    assert!(frame.contains("0% · eligible"), "{frame}");
+    assert!(frame.contains("Reset credits"), "{frame}");
+    assert!(frame.contains("UTC"), "expiry should be readable: {frame}");
+    assert!(frame.contains("2030-03-17 17:46 UTC"), "{frame}");
+    assert!(!frame.contains("inspect usage"), "{frame}");
+    assert!(!frame.contains("not started"), "{frame}");
+    assert!(!frame.contains("saved weekly"), "{frame}");
+    assert!(content_height < 21, "content height was {content_height}");
+    assert_quota_golden("reset-inspected-panel-width-100", &frame);
 }
 
 #[test]
@@ -439,7 +464,7 @@ fn reset_semantic_frames_render_at_narrow_stacked_boundary_and_wide_widths() {
             "width {width}: {confirmation_frame}"
         );
         assert!(
-            result_frame.contains("OUTCOME UNKNOWN"),
+            result_frame.contains("Outcome unknown"),
             "width {width}: {result_frame}"
         );
         assert!(

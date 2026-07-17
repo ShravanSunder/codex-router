@@ -1,6 +1,7 @@
 //! Quota status terminal presentation.
 
 mod quota_browse_rendering;
+mod quota_reset_detail_content;
 mod quota_reset_detail_rendering;
 mod quota_reset_keyboard_interaction;
 mod quota_reset_presentation_model;
