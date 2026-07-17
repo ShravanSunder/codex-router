@@ -84,7 +84,7 @@ fn serving_client_count_label(serving_clients: u32) -> String {
     }
 }
 
-fn quota_spinner_tick(tick: usize) -> &'static str {
+pub(super) fn quota_spinner_tick(tick: usize) -> &'static str {
     QUOTA_STATUS_SPINNER_TICKS
         .get(tick % QUOTA_STATUS_SPINNER_TICKS.len())
         .copied()
@@ -148,6 +148,7 @@ pub(super) fn quota_body_layout(
     row_count: usize,
     focused_row_index: Option<usize>,
     details_content_height: usize,
+    stacked_detail_fills_available_height: bool,
 ) -> QuotaBodyLayout {
     let details_height = details_content_height.min(body_budget);
     let list_budget = if sidecar {
@@ -172,7 +173,12 @@ pub(super) fn quota_body_layout(
         quota_account_list_height(row_count, focused_row_index, visible_account_budget)
             .min(body_budget);
     let stacked_details_height = if stacked_details {
-        body_budget.saturating_sub(list_height)
+        let available_height = body_budget.saturating_sub(list_height);
+        if stacked_detail_fills_available_height {
+            available_height
+        } else {
+            details_content_height.min(available_height)
+        }
     } else {
         0
     };

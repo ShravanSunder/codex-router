@@ -1,16 +1,16 @@
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Reset credit                                                                                                                                                 │
-│ alpha  [alpha-tag]                                                                                                                                           │
-│ saved weekly  saved 4% remaining                                                                                                                             │
-│ saved credits 3 resets                                                                                                                                       │
-│ inspect usage      succeeded                                                                                                                                 │
-│ inspect credits    succeeded                                                                                                                                 │
-│ revalidate usage   succeeded                                                                                                                                 │
-│ revalidate credits succeeded                                                                                                                                 │
-│ consume credit     failed: provider transport unavailable                                                                                                    │
-│ Reset result                                                                                                                                                 │
-│ Outcome unknown: consume transport outcome unavailable. Do not retry automatically.                                                                          │
+│ OUTCOME UNKNOWN — DO NOT RETRY                                                                                                                               │
+│ No definitive response: consume transport outcome unavailable.                                                                                               │
+│ The credit may have been consumed. Refresh live credits before deciding what to do next.                                                                     │
 │ Saved quota may remain stale until the normal quota refresh updates it.                                                                                      │
+│ Enter, Esc, or Ctrl-R returns to quota status.                                                                                                               │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 │                                                                                                                                                              │

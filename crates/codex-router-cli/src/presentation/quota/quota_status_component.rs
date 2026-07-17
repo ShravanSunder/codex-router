@@ -200,6 +200,7 @@ pub(super) fn QuotaStatusComponent(
                                 row_count,
                                 focused_index,
                                 selected_detail_height(focused_index.is_some()),
+                                false,
                             );
                             let page_size =
                                 reset_inventory_page_size(layout.detail_viewport_height(sidecar));
@@ -427,7 +428,14 @@ pub(super) fn QuotaStatusComponent(
         }
     }
     let body_budget = quota_body_budget(height);
-    let details_content_height = selected_detail_height(focused_details.is_some());
+    let reset_detail_active = current_reset_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| reset_mode(Some(snapshot)));
+    let details_content_height = current_reset_snapshot
+        .as_ref()
+        .filter(|_| reset_detail_active)
+        .map(reset_panel_content_height)
+        .unwrap_or_else(|| selected_detail_height(focused_details.is_some()));
     let sidecar = width >= SIDECAR_QUOTA_WIDTH;
     let stacked_details = !sidecar
         && width >= NARROW_QUOTA_WIDTH
@@ -439,6 +447,7 @@ pub(super) fn QuotaStatusComponent(
         row_count,
         focused_row_index_value,
         details_content_height,
+        !reset_detail_active,
     );
     let details_height = layout.details_height;
     let visible_account_budget = layout.visible_account_budget;
@@ -463,6 +472,7 @@ pub(super) fn QuotaStatusComponent(
                     details_width,
                     details_height,
                     inventory_page_start.get(),
+                    spinner_tick.get(),
                 ))
             }
         }
@@ -478,6 +488,7 @@ pub(super) fn QuotaStatusComponent(
                     content_width,
                     stacked_details_height,
                     inventory_page_start.get(),
+                    spinner_tick.get(),
                 ))
             }
         }
@@ -520,6 +531,7 @@ fn render_detail_panel(
     width: usize,
     height: usize,
     inventory_page_start: usize,
+    spinner_tick: usize,
 ) -> AnyElement<'static> {
     if let (Some(snapshot), Some(target)) = (reset_snapshot, reset_target)
         && reset_mode(Some(snapshot))
@@ -531,6 +543,7 @@ fn render_detail_panel(
             height,
             inventory_page_start,
             reset_inventory_page_size(height),
+            spinner_tick,
         );
     }
     render_selected_panel(focused_details, width, height)

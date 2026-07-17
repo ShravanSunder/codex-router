@@ -253,7 +253,7 @@ fn reset_detail_renders_all_five_semantic_operation_rows_and_safe_target_tag() {
         saved_weekly_window: "saved 4% remaining".to_owned(),
     };
 
-    let text = render_reset_panel(&snapshot, &target, 100, 24, 0, 4)
+    let text = render_reset_panel(&snapshot, &target, 100, 24, 0, 4, 0)
         .render(None)
         .to_string();
 
@@ -268,6 +268,10 @@ fn reset_detail_renders_all_five_semantic_operation_rows_and_safe_target_tag() {
     }
     assert!(text.contains("duplicate  [safe-tag]"), "{text}");
     assert!(text.contains("request dispatched"), "{text}");
+    assert!(
+        text.contains("⠋ request dispatched"),
+        "provider waits need a visible activity indicator: {text}"
+    );
 }
 
 #[test]
@@ -291,9 +295,57 @@ fn inventory_paging_is_bounded_and_deterministic() {
 }
 
 #[test]
+fn provider_wait_indicator_animates_and_terminal_result_uses_compact_height() {
+    // Arrange
+    let activities = WorkflowActivities {
+        inspection_live_usage: OperationActivity::Loading,
+        inspection_credit_inventory: OperationActivity::Loading,
+        ..WorkflowActivities::default()
+    };
+    let waiting = ResetWorkflowSnapshot::test_snapshot(
+        WorkflowPhase::Inspecting,
+        ConfirmationSelection::No,
+        activities,
+        None,
+        None,
+        Vec::new(),
+        Some(ResetEligibilityDisabledReason::LiveInspectionIncomplete),
+    );
+    let result = ResetWorkflowSnapshot::test_snapshot(
+        WorkflowPhase::Result,
+        ConfirmationSelection::No,
+        unknown_result_activities(),
+        Some(WorkflowResult::OutcomeUnknown(
+            ConsumeUnknownReason::Transport,
+        )),
+        None,
+        Vec::new(),
+        None,
+    );
+    let target = test_reset_target();
+
+    // Act
+    let first_frame = render_reset_panel(&waiting, &target, 100, 21, 0, 4, 0)
+        .render(None)
+        .to_string();
+    let second_frame = render_reset_panel(&waiting, &target, 100, 21, 0, 4, 1)
+        .render(None)
+        .to_string();
+
+    // Assert
+    assert!(first_frame.contains("⠋ loading"), "{first_frame}");
+    assert!(second_frame.contains("⠙ loading"), "{second_frame}");
+    assert_ne!(first_frame, second_frame);
+    assert_eq!(
+        super::quota_reset_detail_rendering::reset_panel_content_height(&result),
+        7
+    );
+}
+
+#[test]
 fn shared_detail_viewport_pages_every_credit_once_without_corrupting_stacked_geometry() {
     // Arrange
-    let body_budget = super::responsive_quota_layout::quota_body_budget(24);
+    let body_budget = super::responsive_quota_layout::quota_body_budget(48);
     let stacked_layout = super::responsive_quota_layout::quota_body_layout(
         body_budget,
         false,
@@ -301,6 +353,7 @@ fn shared_detail_viewport_pages_every_credit_once_without_corrupting_stacked_geo
         2,
         Some(0),
         super::responsive_quota_layout::selected_detail_height(true),
+        false,
     );
     let detail_height = stacked_layout.detail_viewport_height(false);
     let page_size = super::quota_reset_presentation_model::reset_inventory_page_size(detail_height);
@@ -324,8 +377,13 @@ fn shared_detail_viewport_pages_every_credit_once_without_corrupting_stacked_geo
     assert!(stacked_layout.list_height > 0);
     assert!(stacked_layout.show_stacked_details);
     assert_eq!(
-        stacked_layout.list_height + stacked_layout.stacked_details_height,
-        body_budget
+        stacked_layout.stacked_details_height,
+        super::responsive_quota_layout::selected_detail_height(true),
+        "stacked detail must be content-sized instead of consuming all remaining terminal rows"
+    );
+    assert!(
+        stacked_layout.list_height + stacked_layout.stacked_details_height < body_budget,
+        "unused terminal rows should remain outside the bordered detail pane"
     );
 }
 
@@ -358,10 +416,10 @@ fn reset_semantic_frames_render_at_narrow_stacked_boundary_and_wide_widths() {
     let target = test_reset_target();
 
     for width in [48usize, 100, 159, 160, 200] {
-        let confirmation_frame = render_reset_panel(&confirmation, &target, width, 24, 0, 4)
+        let confirmation_frame = render_reset_panel(&confirmation, &target, width, 24, 0, 4, 0)
             .render(None)
             .to_string();
-        let result_frame = render_reset_panel(&unknown, &target, width, 24, 0, 4)
+        let result_frame = render_reset_panel(&unknown, &target, width, 24, 0, 4, 0)
             .render(None)
             .to_string();
         assert!(
@@ -373,12 +431,22 @@ fn reset_semantic_frames_render_at_narrow_stacked_boundary_and_wide_widths() {
             "width {width}: {confirmation_frame}"
         );
         assert!(
-            result_frame.contains("Outcome unknown"),
+            result_frame.contains("OUTCOME UNKNOWN"),
             "width {width}: {result_frame}"
         );
         assert!(
             result_frame.contains("Saved quota may remain stale"),
             "width {width}: {result_frame}"
+        );
+        if width >= 100 {
+            assert!(
+                result_frame.contains("The credit may have been consumed"),
+                "width {width}: {result_frame}"
+            );
+        }
+        assert!(
+            !result_frame.contains("saved weekly") && !result_frame.contains("inspect usage"),
+            "terminal result must replace inspection details: {result_frame}"
         );
         match width {
             48 => assert_quota_golden("reset-confirmation-panel-width-48", &confirmation_frame),
@@ -398,7 +466,7 @@ fn reset_operation_transition_frames_are_semantic_and_state_valid() {
     let scenarios = reset_operation_scenarios();
     for width in [100usize, 160] {
         for (name, snapshot, required_text) in &scenarios {
-            let frame = render_reset_panel(snapshot, &target, width, 24, 0, 4)
+            let frame = render_reset_panel(snapshot, &target, width, 24, 0, 4, 0)
                 .render(None)
                 .to_string();
             for required in required_text.iter().copied() {

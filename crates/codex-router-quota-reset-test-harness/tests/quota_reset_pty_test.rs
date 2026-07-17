@@ -46,8 +46,8 @@ mod quota_reset_pty_test {
         )?;
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
-        terminal.wait_for_text("inspect usage      loading", SEMANTIC_WAIT)?;
-        terminal.wait_for_text("inspect credits    loading", SEMANTIC_WAIT)?;
+        terminal.wait_for_text("inspect usage", SEMANTIC_WAIT)?;
+        terminal.wait_for_text("inspect credits", SEMANTIC_WAIT)?;
 
         let requests = provider.wait_for_request_count(2, SEMANTIC_WAIT)?;
         ensure(
@@ -206,7 +206,7 @@ mod quota_reset_pty_test {
 
         provider.release_post_response()?;
         stage(
-            terminal.wait_for_text("Reset completed: 2 windows reset", SEMANTIC_WAIT),
+            terminal.wait_for_text("SUCCESS — RESET COMPLETED", SEMANTIC_WAIT),
             "known reset result",
         )?;
         let browse_restoration_start = terminal.transcript_len();

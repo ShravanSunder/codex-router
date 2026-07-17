@@ -13,6 +13,15 @@ use crate::quota_reset::reset_session_supervisor::WorkflowResult;
 
 use super::quota_browse_rendering::fit_line;
 use super::quota_reset_presentation_model::ResetPaneTarget;
+use super::responsive_quota_layout::quota_spinner_tick;
+
+pub(super) fn reset_panel_content_height(snapshot: &ResetWorkflowSnapshot) -> usize {
+    if snapshot.phase() == WorkflowPhase::Result {
+        7
+    } else {
+        21
+    }
+}
 
 pub(super) fn render_reset_panel(
     snapshot: &ResetWorkflowSnapshot,
@@ -21,8 +30,54 @@ pub(super) fn render_reset_panel(
     height: usize,
     inventory_page_start: usize,
     inventory_page_size: usize,
+    spinner_tick: usize,
 ) -> AnyElement<'static> {
     let inner_width = width.saturating_sub(4).max(12);
+    let spinner = quota_spinner_tick(spinner_tick);
+    let mut lines = if snapshot.phase() == WorkflowPhase::Result {
+        result_lines(snapshot.result())
+    } else {
+        reset_workflow_lines(
+            snapshot,
+            target,
+            inventory_page_start,
+            inventory_page_size,
+            spinner,
+        )
+    };
+    let children = lines
+        .drain(..)
+        .map(|(content, color, weight)| {
+            element! {
+                Text(content: fit_line(&content, inner_width), color, weight, wrap: TextWrap::NoWrap)
+            }
+            .into_any()
+        })
+        .collect::<Vec<_>>();
+    element! {
+        View(
+            width: width as u32,
+            height: height as u32,
+            flex_direction: FlexDirection::Column,
+            border_style: BorderStyle::Single,
+            border_color: Color::DarkGrey,
+            overflow: Overflow::Hidden,
+            padding_left: 1,
+            padding_right: 1,
+        ) {
+            #(children)
+        }
+    }
+    .into_any()
+}
+
+fn reset_workflow_lines(
+    snapshot: &ResetWorkflowSnapshot,
+    target: &ResetPaneTarget,
+    inventory_page_start: usize,
+    inventory_page_size: usize,
+    spinner: &str,
+) -> Vec<(String, Color, Weight)> {
     let mut lines = vec![
         reset_heading("Reset credit"),
         reset_line(
@@ -38,7 +93,7 @@ pub(super) fn render_reset_panel(
             Color::Grey,
         ),
     ];
-    lines.extend(operation_lines(snapshot));
+    lines.extend(operation_lines(snapshot, spinner));
     if let Some(live_weekly) = snapshot.live_weekly() {
         lines.push(reset_line(
             format!(
@@ -111,32 +166,8 @@ pub(super) fn render_reset_panel(
             ));
         }
     }
-    lines.extend(phase_lines(snapshot, target));
-
-    let children = lines
-        .into_iter()
-        .map(|(content, color, weight)| {
-            element! {
-                Text(content: fit_line(&content, inner_width), color, weight, wrap: TextWrap::NoWrap)
-            }
-            .into_any()
-        })
-        .collect::<Vec<_>>();
-    element! {
-        View(
-            width: width as u32,
-            height: height as u32,
-            flex_direction: FlexDirection::Column,
-            border_style: BorderStyle::Single,
-            border_color: Color::DarkGrey,
-            overflow: Overflow::Hidden,
-            padding_left: 1,
-            padding_right: 1,
-        ) {
-            #(children)
-        }
-    }
-    .into_any()
+    lines.extend(phase_lines(snapshot, target, spinner));
+    lines
 }
 
 pub(super) fn reset_footer(snapshot: Option<&ResetWorkflowSnapshot>) -> &'static str {
@@ -157,7 +188,10 @@ pub(super) fn reset_footer(snapshot: Option<&ResetWorkflowSnapshot>) -> &'static
     }
 }
 
-fn operation_lines(snapshot: &ResetWorkflowSnapshot) -> Vec<(String, Color, Weight)> {
+fn operation_lines(
+    snapshot: &ResetWorkflowSnapshot,
+    spinner: &str,
+) -> Vec<(String, Color, Weight)> {
     let activities = snapshot.activities();
     [
         ("inspect usage", &activities.inspection_live_usage),
@@ -172,19 +206,19 @@ fn operation_lines(snapshot: &ResetWorkflowSnapshot) -> Vec<(String, Color, Weig
     .into_iter()
     .map(|(label, activity)| {
         reset_line(
-            format!("{label:<18} {}", activity_label(activity)),
+            format!("{label:<18} {}", activity_label(activity, spinner)),
             Color::White,
         )
     })
     .collect()
 }
 
-fn activity_label(activity: &OperationActivity<OperationSuccess>) -> String {
+fn activity_label(activity: &OperationActivity<OperationSuccess>, spinner: &str) -> String {
     match activity {
         OperationActivity::NotStarted => "not started".to_owned(),
-        OperationActivity::Loading => "loading".to_owned(),
+        OperationActivity::Loading => format!("{spinner} loading"),
         OperationActivity::Refreshing { previous } => format!(
-            "refreshing{}",
+            "{spinner} refreshing{}",
             previous
                 .as_ref()
                 .map_or("", |_| " · previous result visible")
@@ -199,7 +233,7 @@ fn activity_label(activity: &OperationActivity<OperationSuccess>) -> String {
         ),
         OperationActivity::Cancelled => "cancelled".to_owned(),
         OperationActivity::RequestDispatchedAwaitingOutcome => {
-            "request dispatched · awaiting definitive outcome".to_owned()
+            format!("{spinner} request dispatched · awaiting definitive outcome")
         }
     }
 }
@@ -207,6 +241,7 @@ fn activity_label(activity: &OperationActivity<OperationSuccess>) -> String {
 fn phase_lines(
     snapshot: &ResetWorkflowSnapshot,
     target: &ResetPaneTarget,
+    spinner: &str,
 ) -> Vec<(String, Color, Weight)> {
     match snapshot.phase() {
         WorkflowPhase::Browse | WorkflowPhase::Inspecting => Vec::new(),
@@ -216,14 +251,16 @@ fn phase_lines(
         )],
         WorkflowPhase::Confirming => confirmation_lines(snapshot, target),
         WorkflowPhase::Revalidating => vec![reset_line(
-            "Revalidating account, credentials, live usage, and selected credit...".to_owned(),
+            format!(
+                "{spinner} Revalidating account, credentials, live usage, and selected credit..."
+            ),
             Color::Yellow,
         )],
         WorkflowPhase::Committing => vec![reset_line(
-            "Consuming reset credit... waiting for a definitive result.".to_owned(),
+            format!("{spinner} Consuming reset credit... waiting for a definitive result."),
             Color::Yellow,
         )],
-        WorkflowPhase::Result => result_lines(snapshot.result()),
+        WorkflowPhase::Result => Vec::new(),
     }
 }
 
@@ -287,36 +324,61 @@ fn confirmation_lines(
 }
 
 fn result_lines(result: Option<&WorkflowResult>) -> Vec<(String, Color, Weight)> {
-    let summary = match result {
-        Some(WorkflowResult::Known(KnownConsumeOutcome::Reset { windows_reset })) => {
-            format!("Reset completed: {windows_reset} windows reset.")
-        }
-        Some(WorkflowResult::Known(KnownConsumeOutcome::NothingToReset)) => {
-            "Provider reports nothing to reset.".to_owned()
-        }
-        Some(WorkflowResult::Known(KnownConsumeOutcome::NoCredit)) => {
-            "Provider reports no reset credit.".to_owned()
-        }
-        Some(WorkflowResult::Known(KnownConsumeOutcome::AlreadyRedeemed)) => {
-            "Provider reports credit already redeemed.".to_owned()
-        }
-        Some(WorkflowResult::OutcomeUnknown(reason)) => {
-            format!(
-                "Outcome unknown: {}. Do not retry automatically.",
-                reason.message()
-            )
-        }
-        Some(WorkflowResult::Refused(reason)) => {
-            format!("Reset refused before consume: {}.", reason.message())
-        }
-        None => "Reset result unavailable.".to_owned(),
+    let (heading, summary, assurance, color) = match result {
+        Some(WorkflowResult::Known(KnownConsumeOutcome::Reset { windows_reset })) => (
+            "SUCCESS — RESET COMPLETED",
+            format!("Provider confirmed: {windows_reset} quota windows reset."),
+            "One reset credit was consumed.",
+            Color::Green,
+        ),
+        Some(WorkflowResult::Known(KnownConsumeOutcome::NothingToReset)) => (
+            "DEFINITIVE PROVIDER RESULT",
+            "Provider reports nothing to reset.".to_owned(),
+            "The provider returned a definitive response.",
+            Color::Yellow,
+        ),
+        Some(WorkflowResult::Known(KnownConsumeOutcome::NoCredit)) => (
+            "DEFINITIVE PROVIDER RESULT",
+            "Provider reports no reset credit.".to_owned(),
+            "The provider returned a definitive response.",
+            Color::Yellow,
+        ),
+        Some(WorkflowResult::Known(KnownConsumeOutcome::AlreadyRedeemed)) => (
+            "DEFINITIVE PROVIDER RESULT",
+            "Provider reports credit already redeemed.".to_owned(),
+            "The provider returned a definitive response.",
+            Color::Yellow,
+        ),
+        Some(WorkflowResult::OutcomeUnknown(reason)) => (
+            "OUTCOME UNKNOWN — DO NOT RETRY",
+            format!("No definitive response: {}.", reason.message()),
+            "The credit may have been consumed. Refresh live credits before deciding what to do next.",
+            Color::Red,
+        ),
+        Some(WorkflowResult::Refused(reason)) => (
+            "NOT CONSUMED",
+            format!("Reset refused before consume: {}.", reason.message()),
+            "No consume request was sent. No reset credit was consumed.",
+            Color::Yellow,
+        ),
+        None => (
+            "RESULT UNAVAILABLE",
+            "Reset result unavailable.".to_owned(),
+            "Do not retry until live credits have been inspected again.",
+            Color::Red,
+        ),
     };
     vec![
-        reset_heading("Reset result"),
+        (heading.to_owned(), color, Weight::Bold),
         reset_line(summary, Color::White),
+        reset_line(assurance.to_owned(), color),
         reset_line(
             "Saved quota may remain stale until the normal quota refresh updates it.".to_owned(),
             Color::Grey,
+        ),
+        reset_line(
+            "Enter, Esc, or Ctrl-R returns to quota status.".to_owned(),
+            Color::Cyan,
         ),
     ]
 }
