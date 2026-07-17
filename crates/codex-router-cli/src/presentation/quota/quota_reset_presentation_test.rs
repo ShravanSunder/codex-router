@@ -206,13 +206,21 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
         .await;
 
         session_driver.await.expect("session driver should finish");
+        let reset_frames = frames
+            .iter()
+            .filter(|frame| frame.contains("Reset credit"))
+            .collect::<Vec<_>>();
         assert!(
-            frames.iter().any(|frame| {
-                frame.contains("Reset credit")
-                    && frame.contains("❯ alpha")
-                    && frame.contains("saved credits")
-            }),
+            reset_frames
+                .iter()
+                .any(|frame| { frame.contains("❯ alpha") && frame.contains("saved credits") }),
             "reset must replace only detail while the account list remains: {frames:?}"
+        );
+        assert!(
+            reset_frames
+                .iter()
+                .all(|frame| !frame.contains("Selected account")),
+            "reset and selected-account detail panes must be mutually exclusive: {reset_frames:?}"
         );
         assert!(
             frames
