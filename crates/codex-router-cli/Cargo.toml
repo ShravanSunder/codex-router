@@ -9,6 +9,10 @@ publish.workspace = true
 name = "codex-router"
 path = "src/main.rs"
 
+[features]
+default = []
+quota-reset-test-harness = []
+
 [lints]
 workspace = true
 
