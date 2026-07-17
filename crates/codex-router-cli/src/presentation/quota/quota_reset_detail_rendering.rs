@@ -39,7 +39,7 @@ pub(super) enum ResetDetailRow {
         marker: String,
         id_hint: String,
         description: String,
-        color: Color,
+        marker_color: Color,
     },
     Choices {
         no_label: String,
@@ -163,7 +163,7 @@ fn render_detail_row(row: ResetDetailRow, width: usize) -> AnyElement<'static> {
             marker,
             id_hint,
             description,
-            color,
+            marker_color,
         } => {
             let description_width = width
                 .saturating_sub(CREDIT_MARKER_WIDTH)
@@ -171,12 +171,12 @@ fn render_detail_row(row: ResetDetailRow, width: usize) -> AnyElement<'static> {
             element! {
                 View(width: 100pct) {
                     View(width: CREDIT_MARKER_WIDTH as u32) {
-                        Text(content: fit_line(&marker, CREDIT_MARKER_WIDTH), color, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+                        Text(content: fit_line(&marker, CREDIT_MARKER_WIDTH), color: marker_color, weight: Weight::Bold, wrap: TextWrap::NoWrap)
                     }
                     View(width: CREDIT_ID_WIDTH as u32) {
-                        Text(content: fit_line(&id_hint, CREDIT_ID_WIDTH), color, wrap: TextWrap::NoWrap)
+                        Text(content: fit_line(&id_hint, CREDIT_ID_WIDTH), color: Color::White, wrap: TextWrap::NoWrap)
                     }
-                    Text(content: fit_line(&description, description_width), color, wrap: TextWrap::NoWrap)
+                    Text(content: fit_line(&description, description_width), color: Color::White, wrap: TextWrap::NoWrap)
                 }
             }
             .into_any()
@@ -228,7 +228,7 @@ fn reset_detail_document(
         WorkflowPhase::Committing => committing_sections(spinner),
     };
     ResetDetailDocument {
-        title: heading("Reset credit"),
+        title: heading("← Reset credit"),
         account: Some(StyledText {
             content: format!("{}  [{}]", target.account_label, target.account_tag),
             color: Color::White,
@@ -317,12 +317,6 @@ fn inspected_sections(
             )),
             rows: credit_rows(snapshot, target, inventory_page_start, inventory_page_size),
         },
-        ResetDetailSection {
-            title: heading("Next step"),
-            rows: vec![accent_text(
-                "Enter to review the earliest-expiring available credit.",
-            )],
-        },
     ]
 }
 
@@ -364,7 +358,7 @@ fn credit_rows(
         .take(page_size)
         .map(|credit| ResetDetailRow::Credit {
             marker: if credit.earliest_usable {
-                "Use first".to_owned()
+                "◆ next".to_owned()
             } else {
                 String::new()
             },
@@ -375,11 +369,7 @@ fn credit_rows(
                 credit_status_label(credit.status),
                 format_credit_expiry(credit.expires_unix_seconds)
             ),
-            color: if credit.earliest_usable {
-                Color::Yellow
-            } else {
-                Color::White
-            },
+            marker_color: Color::Cyan,
         })
         .collect::<Vec<_>>();
     let remaining = inventory.len().saturating_sub(page_end);
@@ -571,7 +561,7 @@ pub(super) fn reset_footer(snapshot: Option<&ResetWorkflowSnapshot>) -> &'static
         }
         Some(WorkflowPhase::Inspecting) => "esc/ctrl-r back  ctrl-c exit without consume",
         Some(WorkflowPhase::Inspected) => {
-            "enter review  pgup/pgdn credits  esc/ctrl-r back  ctrl-c exit without consume"
+            "←/esc back  enter review  pgup/pgdn credits  ctrl-c exit without consume"
         }
         Some(WorkflowPhase::Confirming) => {
             "←/→ select  enter confirm  esc/ctrl-r cancel  ctrl-c exit without consume"

@@ -158,7 +158,7 @@ async fn precommit_cancel_is_not_lost_behind_queued_intents() {
 
 #[tokio::test]
 async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
-    for width in [159usize, 160] {
+    for (width, height) in [(159usize, 24usize), (160, 24), (159, 48), (160, 48)] {
         let browse_snapshot = test_snapshot(WorkflowPhase::Browse);
         let (ports, mut intent_receiver, snapshot_sender) =
             ResetSessionPorts::test_channels(browse_snapshot.clone());
@@ -180,8 +180,8 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
         });
         let events = vec![
             TerminalEvent::Key(control_key('r')),
-            TerminalEvent::Resize(width.saturating_sub(1) as u16, 24),
-            TerminalEvent::Resize(width as u16, 24),
+            TerminalEvent::Resize(width.saturating_sub(1) as u16, height as u16),
+            TerminalEvent::Resize(width as u16, height as u16),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
         ];
@@ -190,7 +190,7 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
             QuotaStatusComponent(
                 view_model: quota_two_account_view_model(),
                 width,
-                height: 24usize,
+                height,
                 reset_intent_sender: Some(ports.intent_sender),
                 reset_snapshot_receiver: Some(ports.snapshot_receiver),
             )
@@ -222,6 +222,19 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
                 .all(|frame| !frame.contains("Selected account")),
             "reset and selected-account detail panes must be mutually exclusive: {reset_frames:?}"
         );
+        if height == 48 {
+            for frame in &reset_frames {
+                let lines = frame.lines().collect::<Vec<_>>();
+                let footer_index = lines
+                    .iter()
+                    .position(|line| line.contains("esc/ctrl-r back"))
+                    .expect("reset footer should be visible");
+                assert!(
+                    footer_index >= lines.len().saturating_sub(3),
+                    "reset footer must remain bottom-aligned: {frame}"
+                );
+            }
+        }
         assert!(
             frames
                 .last()
@@ -366,6 +379,8 @@ fn inspected_reset_detail_has_user_facing_sections_readable_expiry_and_content_h
     assert!(frame.contains("Weekly remaining"), "{frame}");
     assert!(frame.contains("0% · eligible"), "{frame}");
     assert!(frame.contains("Reset credits"), "{frame}");
+    assert!(frame.contains("← Reset credit"), "{frame}");
+    assert!(!frame.contains("Next step"), "{frame}");
     assert!(frame.contains("UTC"), "expiry should be readable: {frame}");
     assert!(frame.contains("2030-03-17 17:46 UTC"), "{frame}");
     assert!(!frame.contains("inspect usage"), "{frame}");

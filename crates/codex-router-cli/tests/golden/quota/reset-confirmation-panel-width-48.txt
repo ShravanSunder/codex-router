@@ -1,5 +1,5 @@
 ┌──────────────────────────────────────────────┐
-│ Reset credit                                 │
+│ ← Reset credit                               │
 │ alpha  [alpha-tag]                           │
 │                                              │
 │ Confirm reset credit                         │

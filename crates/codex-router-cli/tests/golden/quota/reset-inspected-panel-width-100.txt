@@ -1,5 +1,5 @@
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Reset credit                                                                                     │
+│ ← Reset credit                                                                                   │
 │ alpha  [alpha-tag]                                                                               │
 │                                                                                                  │
 │ Live eligibility                                                                                 │
@@ -7,9 +7,6 @@
 │ Usable credits      1                                                                            │
 │                                                                                                  │
 │ Reset credits · live · 1-1 of 1                                                                  │
-│ Use first [abcd…wxyz] Weekly recovery · available · expires 2030-03-17 17:46 UTC                 │
+│ ◆ next    [abcd…wxyz] Weekly recovery · available · expires 2030-03-17 17:46 UTC                 │
 │ Saved count differs: 3 resets saved, 1 live.                                                     │
-│                                                                                                  │
-│ Next step                                                                                        │
-│ Enter to review the earliest-expiring available credit.                                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

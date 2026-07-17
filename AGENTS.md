@@ -15,3 +15,13 @@
 - The debug Codex profile lives in normal Codex home as
   `$HOME/.codex/codex-router-debug.config.toml` and points Codex at the debug
   router port. Keep this profile/config separate from router-owned state.
+
+## Terminal UI Layout
+
+- Build every terminal UI with iocraft layout primitives. Use nested
+  `View`s, flex growth/shrink, gaps, margins, padding, and separate `Text`
+  children for alignment and spacing. Do not simulate layout with manually
+  padded formatted strings or terminal-filling child panels.
+- Keep navigation, content, flexible empty space, and bottom shortcuts as
+  distinct iocraft siblings. Use a flex-growing spacer to pin shortcuts to the
+  bottom while allowing detail panels to remain content-sized.

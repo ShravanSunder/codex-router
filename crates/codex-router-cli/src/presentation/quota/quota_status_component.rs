@@ -523,7 +523,10 @@ pub(super) fn QuotaStatusComponent(
             Text(content: quota_title_line(&view_model, content_width, spinner_tick.get()), color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             Text(content: fit_line(&view_model.route_line, content_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             #(body)
-            Text(content: fit_line(reset_footer(current_reset_snapshot.as_ref()), content_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+            View(width: 100pct, flex_grow: 1.0) {}
+            View(width: 100pct, padding_left: if reset_detail_active { 2 } else { 0 }) {
+                Text(content: fit_line(reset_footer(current_reset_snapshot.as_ref()), content_width.saturating_sub(if reset_detail_active { 2 } else { 0 })), color: Color::Grey, wrap: TextWrap::NoWrap)
+            }
         }
     }
 }
