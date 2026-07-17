@@ -277,7 +277,8 @@ async fn declared_response_lengths_enforce_the_limit_plus_one_boundary() {
             body.len()
         )
         .into_bytes();
-        let result = fetch_usage_from_loopback_response(response, body).await;
+        let response_body = if should_succeed { body } else { Vec::new() };
+        let result = fetch_usage_from_loopback_response(response, response_body).await;
 
         assert_eq!(result.is_ok(), should_succeed, "body length {body_length}");
     }
