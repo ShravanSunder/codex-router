@@ -2727,22 +2727,6 @@ impl AsyncWeeklyQuotaFloorMutationStore {
     }
 }
 
-/// Async account-routing-policy reader for projection and observer callers.
-pub trait AsyncAccountRoutingPolicyRepository {
-    /// Bulk-loads all enabled account routing policies.
-    fn list_account_routing_policies(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>>;
-}
-
-impl AsyncAccountRoutingPolicyRepository for AsyncSqliteStateStore {
-    fn list_account_routing_policies(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>> {
-        Box::pin(async move { self.list_account_routing_policies().await })
-    }
-}
-
 /// Async quota history repository contract for Tokio runtime callers.
 pub trait AsyncQuotaHistoryRepository {
     /// Appends one quota history observation.
