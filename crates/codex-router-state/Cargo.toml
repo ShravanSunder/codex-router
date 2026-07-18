@@ -18,7 +18,7 @@ futures-util.workspace = true
 rusqlite = { workspace = true, optional = true }
 sqlx.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
-tokio.workspace = true

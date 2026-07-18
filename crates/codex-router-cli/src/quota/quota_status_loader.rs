@@ -31,6 +31,17 @@ pub(super) async fn quota_status_report(
     let selector_inputs = quota_history_state
         .selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds)
         .await?;
+    let weekly_quota_floors = quota_history_state
+        .list_account_routing_policies()
+        .await?
+        .into_iter()
+        .map(|policy| {
+            (
+                policy.account_id().clone(),
+                u32::from(policy.weekly_quota_floor_basis_points().basis_points()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let refresh_statuses = quota_history_state
         .quota_refresh_statuses_for_route_band(USER_QUOTA_ROUTE_BAND)
         .await?;
@@ -118,9 +129,15 @@ pub(super) async fn quota_status_report(
         });
         let weekly_pace =
             quota_pace_snapshot(&display_windows, projected_weekly_window, now_unix_seconds);
-        let assessment_input = projection_account.cloned().unwrap_or_else(|| {
+        let mut assessment_input = projection_account.cloned().unwrap_or_else(|| {
             burn_down_input_from_display_windows(account, &display_windows, now_unix_seconds)
         });
+        let weekly_quota_floor_basis_points =
+            weekly_quota_floors.get(account.account_id()).copied();
+        if let Some(floor_basis_points) = weekly_quota_floor_basis_points {
+            assessment_input =
+                assessment_input.with_weekly_quota_floor_basis_points(floor_basis_points);
+        }
         let active_clients =
             active_client_counts
                 .as_ref()
@@ -148,6 +165,7 @@ pub(super) async fn quota_status_report(
             active_clients,
             windows: display_windows,
             weekly_pace,
+            weekly_quota_floor_basis_points,
         });
         assessment_inputs.push(assessment_input);
     }

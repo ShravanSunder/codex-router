@@ -31,6 +31,8 @@ pub const ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS: u64 = 300;
 pub const REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS: u64 = 900;
 /// Fixed v1 weekly reset horizon for the near-reset drain pool.
 pub const DRAIN_POOL_RESET_HORIZON_SECONDS: u64 = 172_800;
+/// Largest configurable per-account weekly quota floor in basis points.
+pub const MAX_WEEKLY_QUOTA_FLOOR_BASIS_POINTS: u32 = 1_000;
 
 const DEFAULT_SHORT_WINDOW_CUTOFF_SECONDS: u64 = 86_400;
 const DEFAULT_LONG_NEAR_RESET_MAX_SECONDS: u64 = 43_200;
@@ -88,6 +90,7 @@ pub struct BurnDownAccountInput {
     has_active_credential: bool,
     active_load_pressure: u32,
     current_active_sessions: u32,
+    weekly_quota_floor_basis_points: Option<u32>,
 }
 
 impl BurnDownAccountInput {
@@ -106,6 +109,7 @@ impl BurnDownAccountInput {
             has_active_credential: true,
             active_load_pressure: 0,
             current_active_sessions: 0,
+            weekly_quota_floor_basis_points: None,
         }
     }
 
@@ -137,6 +141,20 @@ impl BurnDownAccountInput {
         self
     }
 
+    /// Sets an optional hard weekly quota floor. Zero disables the floor.
+    #[must_use]
+    pub const fn with_weekly_quota_floor_basis_points(
+        mut self,
+        weekly_quota_floor_basis_points: u32,
+    ) -> Self {
+        self.weekly_quota_floor_basis_points = if weekly_quota_floor_basis_points == 0 {
+            None
+        } else {
+            Some(weekly_quota_floor_basis_points)
+        };
+        self
+    }
+
     /// Returns the account id.
     #[must_use]
     pub const fn account_id(&self) -> &AccountId {
@@ -153,6 +171,12 @@ impl BurnDownAccountInput {
     #[must_use]
     pub const fn current_active_sessions(&self) -> u32 {
         self.current_active_sessions
+    }
+
+    /// Returns the configured hard weekly quota floor in basis points.
+    #[must_use]
+    pub const fn weekly_quota_floor_basis_points(&self) -> Option<u32> {
+        self.weekly_quota_floor_basis_points
     }
 
     /// Returns whether account metadata permits routing.
@@ -654,7 +678,7 @@ pub enum QuotaEvidenceFreshness {
     Unknown,
 }
 
-/// Non-quota routing exclusion.
+/// Hard routing exclusion applied before candidate-pool construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingExclusion {
     /// No non-quota exclusion applies.
@@ -663,6 +687,8 @@ pub enum RoutingExclusion {
     Disabled,
     /// Account lacks active credentials.
     MissingCredential,
+    /// Account is below its configured hard weekly quota floor or lacks required evidence.
+    WeeklyQuotaFloor,
 }
 
 /// Raw quota evidence reason.
@@ -688,6 +714,8 @@ pub enum QuotaEvidenceReason {
     AccountDisabled,
     /// Account lacks active credentials.
     MissingCredential,
+    /// Configured hard weekly quota floor excludes the account from new work.
+    WeeklyQuotaFloor,
 }
 
 /// Public routing reason.
@@ -727,6 +755,8 @@ pub enum RoutingReason {
     ExcludedDisabled,
     /// Excluded because the account has no active credential.
     ExcludedMissingCredential,
+    /// Excluded by the configured hard weekly quota floor.
+    ExcludedWeeklyQuotaFloor,
     /// Blocked because quota is exhausted.
     BlockedWindowExhausted,
     /// Blocked because quota is ineligible.
@@ -754,6 +784,7 @@ impl RoutingReason {
             Self::RetiringNearZero => "retiring_near_zero",
             Self::ExcludedDisabled => "excluded_disabled",
             Self::ExcludedMissingCredential => "excluded_missing_credential",
+            Self::ExcludedWeeklyQuotaFloor => "excluded_weekly_quota_floor",
             Self::BlockedWindowExhausted => "blocked_window_exhausted",
             Self::BlockedWindowIneligible => "blocked_window_ineligible",
             Self::HeldShortWindowGuard => "held_short_window_guard",
@@ -782,6 +813,7 @@ impl RoutingReason {
             Self::RetiringNearZero => "retiring: near zero quota",
             Self::ExcludedDisabled => "blocked: disabled",
             Self::ExcludedMissingCredential => "blocked: missing credential",
+            Self::ExcludedWeeklyQuotaFloor => "blocked: weekly quota floor",
             Self::BlockedWindowExhausted => "blocked: quota empty",
             Self::BlockedWindowIneligible => "blocked: quota ineligible",
             Self::HeldShortWindowGuard => "held: 5h guard",
@@ -1030,6 +1062,14 @@ fn assess_account(
         .iter()
         .map(|window| assess_window(window, now_unix_seconds, policy))
         .collect::<Vec<_>>();
+    if (windows.is_empty() || missing_required_weekly_window(&windows))
+        && input.weekly_quota_floor_basis_points.is_some()
+    {
+        let display_metrics = account_display_metrics(input, &windows, now_unix_seconds, policy);
+        if weekly_quota_floor_excludes(input, &windows) {
+            return weekly_quota_floor_exclusion(base, &windows, display_metrics);
+        }
+    }
     if windows.is_empty() {
         return base;
     }
@@ -1057,6 +1097,27 @@ fn assess_account(
             },
             display_metrics,
         );
+    }
+    if input.weekly_quota_floor_basis_points.is_some()
+        && windows.iter().any(|window| window.remaining_headroom == 0)
+    {
+        return with_display_metrics(
+            BurnDownAccountAssessment {
+                availability: AccountAvailability::Blocked,
+                freshness: freshness_for_windows(&windows),
+                limiting_window: limiting_window(&windows),
+                quota_evidence_reason: QuotaEvidenceReason::WindowExhausted,
+                routing_reason: RoutingReason::BlockedWindowExhausted,
+                routing_weight: None,
+                ..base
+            },
+            display_metrics,
+        );
+    }
+    if input.weekly_quota_floor_basis_points.is_some()
+        && weekly_quota_floor_excludes(input, &windows)
+    {
+        return weekly_quota_floor_exclusion(base, &windows, display_metrics);
     }
     if windows
         .iter()
@@ -1150,6 +1211,57 @@ fn assess_account(
         },
         display_metrics,
     )
+}
+
+fn weekly_quota_floor_exclusion(
+    base: BurnDownAccountAssessment,
+    windows: &[WindowAssessment],
+    display_metrics: AccountDisplayMetrics,
+) -> BurnDownAccountAssessment {
+    with_display_metrics(
+        BurnDownAccountAssessment {
+            availability: AccountAvailability::Excluded,
+            freshness: freshness_for_windows(windows),
+            routing_exclusion: RoutingExclusion::WeeklyQuotaFloor,
+            limiting_window: limiting_window(windows),
+            quota_evidence_reason: QuotaEvidenceReason::WeeklyQuotaFloor,
+            routing_reason: RoutingReason::ExcludedWeeklyQuotaFloor,
+            routing_weight: None,
+            ..base
+        },
+        display_metrics,
+    )
+}
+
+fn weekly_quota_floor_excludes(input: &BurnDownAccountInput, windows: &[WindowAssessment]) -> bool {
+    let Some(floor_basis_points) = input.weekly_quota_floor_basis_points else {
+        return false;
+    };
+    if floor_basis_points > MAX_WEEKLY_QUOTA_FLOOR_BASIS_POINTS {
+        return true;
+    }
+    let Some(weekly_window) = windows
+        .iter()
+        .find(|window| window.window_seconds == V1_WEEKLY_WINDOW_SECONDS)
+    else {
+        return true;
+    };
+
+    if weekly_window.status != QuotaWindowStatus::Eligible
+        || weekly_window.reset_unix_seconds.is_none()
+        || matches!(
+            weekly_window.burn_rate_confidence,
+            QuotaRunRateConfidence::Stale | QuotaRunRateConfidence::Unknown
+        )
+    {
+        return true;
+    }
+
+    let current_remaining_basis_points = weekly_window.remaining_headroom.saturating_mul(100);
+    current_remaining_basis_points < floor_basis_points
+        || weekly_window
+            .survival_margin_basis_points
+            .is_none_or(|margin_basis_points| margin_basis_points < i64::from(floor_basis_points))
 }
 
 fn account_display_metrics(
@@ -1651,6 +1763,9 @@ fn routing_reason_for_account(
     match account.routing_exclusion {
         RoutingExclusion::Disabled => return RoutingReason::ExcludedDisabled,
         RoutingExclusion::MissingCredential => return RoutingReason::ExcludedMissingCredential,
+        RoutingExclusion::WeeklyQuotaFloor => {
+            return RoutingReason::ExcludedWeeklyQuotaFloor;
+        }
         RoutingExclusion::None => {}
     }
 
@@ -1667,7 +1782,8 @@ fn routing_reason_for_account(
         | QuotaEvidenceReason::UnknownQuotaWindow
         | QuotaEvidenceReason::MissingResetTime
         | QuotaEvidenceReason::AccountDisabled
-        | QuotaEvidenceReason::MissingCredential => {}
+        | QuotaEvidenceReason::MissingCredential
+        | QuotaEvidenceReason::WeeklyQuotaFloor => {}
     }
 
     match account.availability {
@@ -4344,6 +4460,337 @@ mod tests {
         assert!(account.account_label().starts_with("acct-"));
         assert!(!account.account_label().contains("person"));
         assert!(!account.account_label().contains('@'));
+    }
+
+    #[test]
+    fn weekly_quota_floor_current_remaining_allows_equality_and_blocks_only_below() {
+        let cases = [
+            (4, RoutingExclusion::WeeklyQuotaFloor, false),
+            (5, RoutingExclusion::None, true),
+            (6, RoutingExclusion::None, true),
+        ];
+
+        for (remaining_percent, expected_exclusion, expected_selectable) in cases {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_protected",
+                    vec![
+                        window(FIVE_HOURS, 90, 4 * 3_600),
+                        window_with_per_connection_burn_basis_points_per_hour(
+                            WEEKLY,
+                            remaining_percent,
+                            3_600,
+                            0,
+                        ),
+                    ],
+                )
+                .with_weekly_quota_floor_basis_points(500),
+            ]));
+            let protected = account_assessment(&assessment, "acct_protected");
+
+            assert_eq!(protected.routing_exclusion(), expected_exclusion);
+            assert_eq!(assessment.preferred_next().is_some(), expected_selectable);
+        }
+    }
+
+    #[test]
+    fn weekly_quota_floor_projected_margin_allows_equality_and_blocks_only_below() {
+        let cases = [
+            (501, 499, RoutingExclusion::WeeklyQuotaFloor, false),
+            (500, 500, RoutingExclusion::None, true),
+            (499, 501, RoutingExclusion::None, true),
+        ];
+
+        for (projected_burn_basis_points, expected_margin, expected_exclusion, selectable) in cases
+        {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_protected",
+                    vec![
+                        window(FIVE_HOURS, 90, 4 * 3_600),
+                        window_with_per_connection_burn_basis_points_per_hour(
+                            WEEKLY,
+                            10,
+                            3_600,
+                            projected_burn_basis_points,
+                        ),
+                    ],
+                )
+                .with_weekly_quota_floor_basis_points(500),
+            ]));
+            let protected = account_assessment(&assessment, "acct_protected");
+
+            assert_eq!(
+                protected.weekly_survival_margin_basis_points(),
+                Some(expected_margin)
+            );
+            assert_eq!(protected.routing_exclusion(), expected_exclusion);
+            assert_eq!(assessment.preferred_next().is_some(), selectable);
+        }
+    }
+
+    #[test]
+    fn weekly_quota_floor_fails_closed_for_missing_stale_or_unknown_weekly_evidence() {
+        let protected_accounts = vec![
+            account("acct_missing", vec![window(FIVE_HOURS, 90, 4 * 3_600)])
+                .with_weekly_quota_floor_basis_points(500),
+            account(
+                "acct_stale",
+                vec![
+                    window(FIVE_HOURS, 90, 4 * 3_600),
+                    stale_window(WEEKLY, 80, 3_600)
+                        .with_per_connection_burn_basis_points_per_hour(0),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500),
+            account(
+                "acct_unknown",
+                vec![
+                    window(FIVE_HOURS, 90, 4 * 3_600),
+                    QuotaWindowFact::new(WEEKLY, QuotaWindowStatus::Unknown)
+                        .with_remaining_headroom(80)
+                        .with_reset_unix_seconds(NOW + 3_600)
+                        .with_observed_unix_seconds(NOW)
+                        .with_per_connection_burn_basis_points_per_hour(0),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500),
+        ];
+
+        let assessment = assess_route_band(input(protected_accounts));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::None);
+        assert!(assessment.weighted_candidates().is_empty());
+        for account_id_value in ["acct_missing", "acct_stale", "acct_unknown"] {
+            let protected = account_assessment(&assessment, account_id_value);
+            assert_eq!(
+                protected.routing_exclusion(),
+                RoutingExclusion::WeeklyQuotaFloor
+            );
+            assert_eq!(
+                protected.routing_reason(),
+                RoutingReason::ExcludedWeeklyQuotaFloor
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_zero_weekly_quota_floor_preserves_existing_two_percent_assessment() {
+        let unprotected = account(
+            "acct_legacy",
+            vec![
+                window(FIVE_HOURS, 90, 4 * 3_600),
+                window_with_per_connection_burn_basis_points_per_hour(WEEKLY, 2, 3_600, 50),
+            ],
+        );
+        let without_policy = assess_route_band(input(vec![unprotected.clone()]));
+        let disabled_policy = assess_route_band(input(vec![
+            unprotected.with_weekly_quota_floor_basis_points(0),
+        ]));
+
+        assert_eq!(without_policy, disabled_policy);
+    }
+
+    #[test]
+    fn enabled_weekly_quota_floor_does_not_replace_existing_two_percent_assessment() {
+        let account_input = account(
+            "acct_protected",
+            vec![
+                window(FIVE_HOURS, 90, 4 * 3_600),
+                window_with_per_connection_burn_basis_points_per_hour(WEEKLY, 2, 3_600, 50),
+            ],
+        );
+        let without_policy = assess_route_band(input(vec![account_input.clone()]));
+        let protected_below_two_percent = assess_route_band(input(vec![
+            account_input.with_weekly_quota_floor_basis_points(100),
+        ]));
+
+        assert_eq!(
+            account_assessment(&without_policy, "acct_protected"),
+            account_assessment(&protected_below_two_percent, "acct_protected")
+        );
+        assert_eq!(
+            without_policy.preferred_next(),
+            protected_below_two_percent.preferred_next()
+        );
+    }
+
+    #[test]
+    fn weekly_quota_floor_exclusion_cannot_reenter_reserve_or_last_resort_pools() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_protected",
+                vec![
+                    window(FIVE_HOURS, 1, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(WEEKLY, 4, 5 * 86_400, 0),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500),
+        ]));
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::None);
+        assert!(assessment.weighted_candidates().is_empty());
+        assert_eq!(assessment.preferred_next(), None);
+    }
+
+    #[test]
+    fn weekly_quota_floor_input_preserves_invalid_value_and_zero_is_canonical_disabled() {
+        let account = account("acct_policy", vec![]);
+
+        assert_eq!(account.weekly_quota_floor_basis_points(), None);
+        assert_eq!(
+            account
+                .clone()
+                .with_weekly_quota_floor_basis_points(0)
+                .weekly_quota_floor_basis_points(),
+            None
+        );
+        assert_eq!(
+            account
+                .with_weekly_quota_floor_basis_points(u32::MAX)
+                .weekly_quota_floor_basis_points(),
+            Some(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn invalid_weekly_quota_floor_input_fails_closed_without_becoming_ten_percent() {
+        for invalid_floor in [MAX_WEEKLY_QUOTA_FLOOR_BASIS_POINTS + 1, u32::MAX] {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_invalid_policy",
+                    vec![
+                        window(FIVE_HOURS, 90, 4 * 3_600),
+                        window_with_per_connection_burn_basis_points_per_hour(
+                            WEEKLY, 100, 3_600, 0,
+                        ),
+                    ],
+                )
+                .with_weekly_quota_floor_basis_points(invalid_floor),
+            ]));
+
+            assert_eq!(assessment.selected_pool(), SelectedPool::None);
+            assert_eq!(
+                account_assessment(&assessment, "acct_invalid_policy").routing_exclusion(),
+                RoutingExclusion::WeeklyQuotaFloor
+            );
+        }
+    }
+
+    #[test]
+    fn weekly_quota_floor_fails_closed_for_stale_or_unknown_burn_confidence() {
+        for confidence in [
+            QuotaRunRateConfidence::Stale,
+            QuotaRunRateConfidence::Unknown,
+        ] {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_untrusted_burn",
+                    vec![
+                        window(FIVE_HOURS, 90, 4 * 3_600),
+                        window_with_per_connection_burn_basis_points_per_hour(
+                            WEEKLY, 80, 3_600, 100,
+                        )
+                        .with_burn_rate_confidence(confidence),
+                    ],
+                )
+                .with_weekly_quota_floor_basis_points(500),
+            ]));
+            let protected = account_assessment(&assessment, "acct_untrusted_burn");
+
+            assert!(
+                protected
+                    .weekly_survival_margin_basis_points()
+                    .is_some_and(|margin| margin > 500)
+            );
+            assert_eq!(
+                protected.routing_exclusion(),
+                RoutingExclusion::WeeklyQuotaFloor
+            );
+        }
+    }
+
+    #[test]
+    fn exhausted_or_ineligible_window_reason_precedes_weekly_quota_floor() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_exhausted",
+                vec![
+                    window(FIVE_HOURS, 90, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(WEEKLY, 0, 3_600, 0),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500),
+            account(
+                "acct_ineligible",
+                vec![
+                    window(FIVE_HOURS, 90, 4 * 3_600),
+                    QuotaWindowFact::new(WEEKLY, QuotaWindowStatus::Ineligible)
+                        .with_remaining_headroom(80)
+                        .with_reset_unix_seconds(NOW + 3_600)
+                        .with_observed_unix_seconds(NOW)
+                        .with_per_connection_burn_basis_points_per_hour(0),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500),
+        ]));
+
+        let exhausted = account_assessment(&assessment, "acct_exhausted");
+        assert_eq!(exhausted.routing_exclusion(), RoutingExclusion::None);
+        assert_eq!(
+            exhausted.quota_evidence_reason(),
+            QuotaEvidenceReason::WindowExhausted
+        );
+        assert_eq!(
+            exhausted.routing_reason(),
+            RoutingReason::BlockedWindowExhausted
+        );
+        let ineligible = account_assessment(&assessment, "acct_ineligible");
+        assert_eq!(ineligible.routing_exclusion(), RoutingExclusion::None);
+        assert_eq!(
+            ineligible.quota_evidence_reason(),
+            QuotaEvidenceReason::WindowIneligible
+        );
+        assert_eq!(
+            ineligible.routing_reason(),
+            RoutingReason::BlockedWindowIneligible
+        );
+    }
+
+    #[test]
+    fn weekly_quota_floor_stays_excluded_across_mutating_peer_starts() {
+        let protected = account(
+            "acct_protected",
+            vec![
+                window(FIVE_HOURS, 90, 4 * 3_600),
+                window_with_per_connection_burn_basis_points_per_hour(WEEKLY, 4, 3_600, 0),
+            ],
+        )
+        .with_weekly_quota_floor_basis_points(500);
+        let peer_windows = vec![
+            window(FIVE_HOURS, 90, 4 * 3_600),
+            window_with_per_connection_burn_basis_points_per_hour(WEEKLY, 80, 5 * 86_400, 20),
+        ];
+
+        for peer_active_sessions in 0..5 {
+            let assessment = assess_route_band(input(vec![
+                protected.clone(),
+                account("acct_peer", peer_windows.clone())
+                    .with_current_active_sessions(peer_active_sessions),
+            ]));
+
+            assert_eq!(assessment.preferred_next(), Some(&account_id("acct_peer")));
+            assert_eq!(
+                account_assessment(&assessment, "acct_protected").routing_exclusion(),
+                RoutingExclusion::WeeklyQuotaFloor
+            );
+            assert!(
+                assessment
+                    .weighted_candidates()
+                    .iter()
+                    .all(|(candidate, _weight)| candidate.as_str() != "acct_protected")
+            );
+        }
     }
 
     fn input(accounts: Vec<BurnDownAccountInput>) -> BurnDownRouteBandAssessmentInput {

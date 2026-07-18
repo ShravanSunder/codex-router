@@ -1,6 +1,7 @@
 //! SQLite-backed metadata boundary for codex-router.
 
 pub mod account;
+pub mod account_routing_policy;
 pub mod affinity_owner;
 pub mod quota_snapshot;
 pub mod repositories;
@@ -20,6 +21,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
@@ -36,6 +38,8 @@ mod tests {
     use super::package_name;
     use crate::account::AccountRecord;
     use crate::account::AccountStatus;
+    use crate::account_routing_policy::AccountRoutingPolicy;
+    use crate::account_routing_policy::WeeklyQuotaFloorBasisPoints;
     use crate::affinity_owner::AffinitySourceTransport;
     use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
     use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
@@ -58,8 +62,10 @@ mod tests {
     use crate::sqlite::AsyncQuotaHistoryRepository;
     use crate::sqlite::AsyncSelectorQuotaRepository;
     use crate::sqlite::AsyncSqliteStateStore;
+    use crate::sqlite::AsyncWeeklyQuotaFloorMutationStore;
     use crate::sqlite::SqliteStateStore;
     use crate::sqlite::StateStoreError;
+    use crate::sqlite::WeeklyQuotaFloorMutationResult;
 
     fn expect_error<T, E>(result: Result<T, E>, context: &'static str) -> E {
         match result {
@@ -70,9 +76,706 @@ mod tests {
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+    fn convert_current_fixture_to_v10(database_path: &Path) {
+        let connection = Connection::open(database_path)
+            .unwrap_or_else(|error| panic!("fixture should reopen for v10 conversion: {error}"));
+        connection
+            .execute_batch(
+                "DROP TABLE account_routing_policies;
+                 PRAGMA user_version = 10;",
+            )
+            .unwrap_or_else(|error| panic!("fixture should convert to v10: {error}"));
+    }
+
     #[test]
     fn reports_package_name() {
         assert_eq!(package_name(), "codex-router-state");
+    }
+
+    #[test]
+    fn weekly_floor_accepts_only_integer_percent_basis_points() {
+        for basis_points in [100_u16, 200, 500, 1_000] {
+            assert_eq!(
+                WeeklyQuotaFloorBasisPoints::new(basis_points)
+                    .map(WeeklyQuotaFloorBasisPoints::basis_points),
+                Ok(basis_points)
+            );
+        }
+        for basis_points in [0_u16, 1, 99, 101, 999, 1_001] {
+            assert!(WeeklyQuotaFloorBasisPoints::new(basis_points).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn v11_migration_preserves_v10_state_and_exposes_policy_read_only() {
+        let temp_dir = TestTempDir::new("v11_policy_migration");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let v10 = SqliteStateStore::open(&database_path)
+            .unwrap_or_else(|error| panic!("v10 fixture should open: {error}"));
+        let account = AccountRecord::new(
+            account_id("acct_v11_preserved"),
+            "preserved",
+            AccountStatus::Enabled,
+        );
+        v10.upsert_account(&account)
+            .unwrap_or_else(|error| panic!("v10 account should persist: {error}"));
+        drop(v10);
+        let raw = Connection::open(&database_path).expect("fixture should reopen for seeding");
+        raw.execute_batch(
+            "INSERT INTO quota_snapshots VALUES (
+                'acct_v11_preserved', 'mock_endpoint', 100, 'responses', 5000,
+                1000, NULL, 0
+             );
+             INSERT INTO selector_quota_windows VALUES (
+                'acct_v11_preserved', 'responses', 604800, 'eligible', 5000,
+                1000, 1, 100
+             );
+             INSERT INTO active_client_leases VALUES (
+                'responses', 'process', 'reservation', 'acct_v11_preserved', 100, 0
+             );
+             INSERT INTO active_session_events (
+                account_id, route_band, process_run_id, logical_session_id,
+                reservation_id, event_kind, event_unix_seconds,
+                session_started_unix_seconds, session_ended_unix_seconds,
+                transport_kind
+             ) VALUES (
+                'acct_v11_preserved', 'responses', 'process', 'session',
+                'reservation', 'acquired', 100, 100, NULL, 'websocket'
+             );
+             INSERT INTO active_session_rollups VALUES (
+                'acct_v11_preserved', 'responses', 0, 300, 100, 1, 0, 0
+             );
+             CREATE TABLE unrelated_v10_sentinel (value TEXT NOT NULL);
+             INSERT INTO unrelated_v10_sentinel VALUES ('preserved');",
+        )
+        .expect("canonical v10 rows should seed");
+        drop(raw);
+        convert_current_fixture_to_v10(&database_path);
+
+        let migrated = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("v10 database should migrate: {error}"));
+        assert_eq!(migrated.schema_version().await, Ok(11));
+        assert_eq!(migrated.list_accounts().await, Ok(vec![account]));
+        assert_eq!(
+            migrated.list_account_routing_policies().await,
+            Ok(Vec::new())
+        );
+        migrated.close().await.expect("migrated store should close");
+
+        let raw = Connection::open(&database_path).expect("migrated database should inspect");
+        for table_name in [
+            "quota_snapshots",
+            "selector_quota_windows",
+            "active_client_leases",
+            "active_session_events",
+            "active_session_rollups",
+            "unrelated_v10_sentinel",
+        ] {
+            let count: i64 = raw
+                .query_row(&format!("SELECT COUNT(*) FROM {table_name}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap_or_else(|error| panic!("{table_name} should survive: {error}"));
+            assert_eq!(count, 1, "{table_name} row should survive migration");
+        }
+        let integrity: String = raw
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .expect("integrity check should run");
+        assert_eq!(integrity, "ok");
+        assert!(
+            raw.execute(
+                "INSERT INTO account_routing_policies VALUES ('acct_v11_preserved', 50)",
+                [],
+            )
+            .is_err()
+        );
+        assert!(
+            raw.execute(
+                "INSERT INTO account_routing_policies VALUES ('acct_v11_preserved', 1050)",
+                [],
+            )
+            .is_err()
+        );
+        drop(raw);
+
+        let read_only = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("v11 should reopen read-only: {error}"));
+        assert_eq!(
+            read_only.list_account_routing_policies().await,
+            Ok(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn v11_migration_rolls_back_atomically_and_retries_after_async_failure() {
+        let temp_dir = TestTempDir::new("v11_async_rollback_retry");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let account = AccountRecord::new(
+            account_id("acct_v11_async_rollback"),
+            "rollback",
+            AccountStatus::Enabled,
+        );
+        let store = SqliteStateStore::open(&database_path).expect("fixture should open");
+        store
+            .upsert_account(&account)
+            .expect("account should persist");
+        drop(store);
+        convert_current_fixture_to_v10(&database_path);
+
+        let error = AsyncSqliteStateStore::inject_v11_migration_rollback_for_test(&database_path)
+            .await
+            .expect_err("migration failure should be injected");
+        assert!(!error.to_string().contains(account.account_id().as_str()));
+        let connection = Connection::open(&database_path).expect("fixture should reopen");
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version should read");
+        assert_eq!(version, 10);
+        assert!(
+            connection
+                .prepare("SELECT 1 FROM account_routing_policies")
+                .is_err()
+        );
+        drop(connection);
+
+        let migrated = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("migration retry should succeed");
+        assert_eq!(migrated.schema_version().await, Ok(11));
+        assert_eq!(migrated.list_accounts().await, Ok(vec![account]));
+    }
+
+    #[test]
+    fn v11_sync_migration_rolls_back_atomically_and_retries() {
+        let temp_dir = TestTempDir::new("v11_sync_rollback_retry");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = SqliteStateStore::open(&database_path).expect("fixture should open");
+        drop(store);
+        convert_current_fixture_to_v10(&database_path);
+
+        SqliteStateStore::inject_v11_migration_rollback_for_test(&database_path)
+            .expect_err("sync migration failure should be injected");
+        let connection = Connection::open(&database_path).expect("fixture should reopen");
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version should read");
+        assert_eq!(version, 10);
+        assert!(
+            connection
+                .prepare("SELECT 1 FROM account_routing_policies")
+                .is_err()
+        );
+        drop(connection);
+
+        let migrated =
+            SqliteStateStore::open(&database_path).expect("sync migration retry should succeed");
+        assert_eq!(migrated.schema_version(), 11);
+    }
+
+    #[tokio::test]
+    async fn mutation_only_store_requires_v11_and_roundtrips_set_then_delete() {
+        let temp_dir = TestTempDir::new("weekly_floor_mutation");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("state should open: {error}"));
+        let account_id = account_id("acct_weekly_floor");
+        store
+            .upsert_account(&AccountRecord::new(
+                account_id.clone(),
+                "weekly-floor",
+                AccountStatus::Enabled,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("account should persist: {error}"));
+        store.close().await.expect("state should close");
+
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("v11 mutation store should open: {error}"));
+        let floor = WeeklyQuotaFloorBasisPoints::new(500)
+            .unwrap_or_else(|error| panic!("floor should validate: {error}"));
+        assert_eq!(
+            mutation
+                .set_weekly_quota_floor_by_label("weekly-floor", Some(floor))
+                .await,
+            Ok(WeeklyQuotaFloorMutationResult::Enabled(
+                AccountRoutingPolicy::new(account_id.clone(), floor)
+            ))
+        );
+        assert_eq!(
+            mutation
+                .set_weekly_quota_floor_by_label("weekly-floor", None)
+                .await,
+            Ok(WeeklyQuotaFloorMutationResult::Disabled)
+        );
+        mutation.close().await;
+
+        let read_only = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("state should reopen: {error}"));
+        assert_eq!(
+            read_only.list_account_routing_policies().await,
+            Ok(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_only_store_rejects_v10_without_migrating() {
+        let temp_dir = TestTempDir::new("weekly_floor_requires_v11");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let raw = Connection::open(&database_path)
+            .unwrap_or_else(|error| panic!("v10 fixture should open: {error}"));
+        raw.execute_batch(
+            "CREATE TABLE accounts (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                active_credential_generation INTEGER
+             );
+             PRAGMA user_version = 10;",
+        )
+        .unwrap_or_else(|error| panic!("v10 fixture should initialize: {error}"));
+        drop(raw);
+
+        let error = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .expect_err("mutation open must reject v10");
+        assert_eq!(
+            error,
+            StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired
+        );
+
+        let raw = Connection::open(&database_path)
+            .unwrap_or_else(|error| panic!("v10 fixture should reopen: {error}"));
+        let version: i64 = raw
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap_or_else(|error| panic!("version should read: {error}"));
+        assert_eq!(version, 10);
+        assert!(
+            raw.prepare("SELECT 1 FROM account_routing_policies")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn every_v11_open_rejects_malformed_policy_columns() {
+        let temp_dir = TestTempDir::new("v11_malformed_policy_columns");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("valid v11 should open");
+        store.close().await.expect("valid v11 should close");
+        let raw = Connection::open(&database_path).expect("fixture should reopen");
+        raw.execute_batch(
+            "DROP TABLE account_routing_policies;
+             CREATE TABLE account_routing_policies (account_id TEXT PRIMARY KEY NOT NULL);",
+        )
+        .expect("malformed policy table should install");
+        drop(raw);
+
+        for error in [
+            AsyncSqliteStateStore::open(&database_path)
+                .await
+                .expect_err("async writable open must reject malformed policy schema"),
+            AsyncSqliteStateStore::open_read_only(&database_path)
+                .await
+                .expect_err("read-only open must reject malformed policy schema"),
+        ] {
+            assert_eq!(
+                error,
+                StateStoreError::MissingReadOnlySchemaObject {
+                    object_kind: "column",
+                    object_name: "weekly_quota_floor_basis_points",
+                }
+            );
+        }
+        assert_eq!(
+            AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+                .await
+                .expect_err("mutation open must reject malformed policy schema"),
+            StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired
+        );
+        assert_eq!(
+            SqliteStateStore::open(&database_path)
+                .expect_err("sync writable open must reject malformed policy schema"),
+            StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "column",
+                object_name: "weekly_quota_floor_basis_points",
+            }
+        );
+
+        let raw = Connection::open(&database_path).expect("fixture should reopen");
+        raw.execute_batch("DROP TABLE account_routing_policies;")
+            .expect("policy table should drop");
+        drop(raw);
+        for error in [
+            AsyncSqliteStateStore::open(&database_path)
+                .await
+                .expect_err("async writable open must reject missing policy table"),
+            AsyncSqliteStateStore::open_read_only(&database_path)
+                .await
+                .expect_err("read-only open must reject missing policy table"),
+        ] {
+            assert_eq!(
+                error,
+                StateStoreError::MissingReadOnlySchemaObject {
+                    object_kind: "table",
+                    object_name: "account_routing_policies",
+                }
+            );
+        }
+        assert_eq!(
+            AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+                .await
+                .expect_err("mutation open must reject missing policy table"),
+            StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired
+        );
+        assert_eq!(
+            SqliteStateStore::open(&database_path)
+                .expect_err("sync writable open must reject missing policy table"),
+            StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "table",
+                object_name: "account_routing_policies",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn production_async_v11_migration_contention_is_atomic_and_retryable() {
+        let temp_dir = TestTempDir::new("v11_production_migration_contention");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let account = AccountRecord::new(
+            account_id("acct_migration_contention"),
+            "migration-contention",
+            AccountStatus::Enabled,
+        );
+        let store = SqliteStateStore::open(&database_path).expect("fixture should open");
+        store
+            .upsert_account(&account)
+            .expect("account should persist");
+        drop(store);
+        convert_current_fixture_to_v10(&database_path);
+
+        let lock = Connection::open(&database_path).expect("lock connection should open");
+        lock.execute_batch("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;")
+            .expect("writer lock should be held");
+        let migration_attempt = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            AsyncSqliteStateStore::open(&database_path),
+        )
+        .await;
+        match migration_attempt {
+            Ok(Err(StateStoreError::Sqlite { message })) => assert!(
+                message.contains("locked") || message.contains("busy"),
+                "held-writer migration should return a lock error, got: {message}"
+            ),
+            Ok(Err(error)) => panic!("held-writer migration returned the wrong error: {error}"),
+            Ok(Ok(_)) => panic!("migration must not commit beneath a held writer"),
+            Err(_) => panic!("production migration must return before the test timeout"),
+        }
+        let version: i64 = lock
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version should read under lock");
+        assert_eq!(version, 10);
+        assert!(
+            lock.prepare("SELECT 1 FROM account_routing_policies")
+                .is_err()
+        );
+        let preserved_accounts: i64 = lock
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+            .expect("preserved account count should read");
+        assert_eq!(preserved_accounts, 1);
+        lock.execute_batch("ROLLBACK;")
+            .expect("lock should release");
+
+        let migrated = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("production migration retry should succeed");
+        assert_eq!(migrated.schema_version().await, Ok(11));
+        assert_eq!(migrated.list_accounts().await, Ok(vec![account]));
+        migrated.close().await.expect("migrated store should close");
+        let raw = Connection::open(&database_path).expect("migrated DB should inspect");
+        let integrity: String = raw
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .expect("integrity check should run");
+        assert_eq!(integrity, "ok");
+    }
+
+    #[tokio::test]
+    async fn policy_bulk_read_is_independent_and_unknown_account_is_redacted() {
+        let temp_dir = TestTempDir::new("weekly_floor_bulk_read");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("state should open: {error}"));
+        let account_a = account_id("acct_policy_a");
+        let account_b = account_id("acct_policy_b");
+        for (account_id, label) in [(&account_a, "policy-a"), (&account_b, "policy-b")] {
+            store
+                .upsert_account(&AccountRecord::new(
+                    account_id.clone(),
+                    label,
+                    AccountStatus::Enabled,
+                ))
+                .await
+                .unwrap_or_else(|error| panic!("account should persist: {error}"));
+        }
+        store.close().await.expect("state should close");
+
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("mutation store should open: {error}"));
+        let floor_a = WeeklyQuotaFloorBasisPoints::new(300).expect("valid floor");
+        let floor_b = WeeklyQuotaFloorBasisPoints::new(900).expect("valid floor");
+        mutation
+            .set_weekly_quota_floor_by_label("policy-a", Some(floor_a))
+            .await
+            .expect("policy A should persist");
+        mutation
+            .set_weekly_quota_floor_by_label("policy-b", Some(floor_b))
+            .await
+            .expect("policy B should persist");
+        let missing_label = "sensitive-missing-label";
+        let error = mutation
+            .set_weekly_quota_floor_by_label(missing_label, Some(floor_a))
+            .await
+            .expect_err("unknown account must fail");
+        assert_eq!(error, StateStoreError::WeeklyQuotaFloorAccountNotFound);
+        assert!(!error.to_string().contains(missing_label));
+        mutation.close().await;
+
+        let read_only = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .expect("state should reopen read-only");
+        assert_eq!(
+            read_only.list_account_routing_policies().await,
+            Ok(vec![
+                AccountRoutingPolicy::new(account_a, floor_a),
+                AccountRoutingPolicy::new(account_b, floor_b),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn weekly_floor_label_resolution_rejects_duplicate_exact_labels_without_mutation() {
+        let temp_dir = TestTempDir::new("weekly_floor_duplicate_label");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        for account_id_value in ["acct_duplicate_a", "acct_duplicate_b"] {
+            state
+                .upsert_account(&AccountRecord::new(
+                    account_id(account_id_value),
+                    "duplicate-label",
+                    AccountStatus::Enabled,
+                ))
+                .await
+                .expect("duplicate-label account should persist");
+        }
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .expect("mutation store should open");
+        let error = mutation
+            .set_weekly_quota_floor_by_label(
+                "duplicate-label",
+                Some(WeeklyQuotaFloorBasisPoints::new(500).expect("valid floor")),
+            )
+            .await
+            .expect_err("duplicate exact labels must fail");
+        assert_eq!(
+            error,
+            StateStoreError::WeeklyQuotaFloorAccountLabelAmbiguous
+        );
+        assert!(!error.to_string().contains("duplicate-label"));
+        assert_eq!(state.list_account_routing_policies().await, Ok(Vec::new()));
+        mutation.close().await;
+    }
+
+    #[tokio::test]
+    async fn weekly_floor_transaction_resolves_current_account_label_metadata() {
+        let temp_dir = TestTempDir::new("weekly_floor_current_label");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        let account_id = account_id("acct_current_label");
+        state
+            .upsert_account(&AccountRecord::new(
+                account_id.clone(),
+                "old-label",
+                AccountStatus::Enabled,
+            ))
+            .await
+            .expect("old label should persist");
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .expect("mutation store should open");
+
+        state
+            .upsert_account(&AccountRecord::new(
+                account_id.clone(),
+                "new-label",
+                AccountStatus::Enabled,
+            ))
+            .await
+            .expect("new label should replace old metadata");
+        let floor = WeeklyQuotaFloorBasisPoints::new(800).expect("valid floor");
+        assert_eq!(
+            mutation
+                .set_weekly_quota_floor_by_label("old-label", Some(floor))
+                .await,
+            Err(StateStoreError::WeeklyQuotaFloorAccountNotFound)
+        );
+        assert_eq!(
+            mutation
+                .set_weekly_quota_floor_by_label("new-label", Some(floor))
+                .await,
+            Ok(WeeklyQuotaFloorMutationResult::Enabled(
+                AccountRoutingPolicy::new(account_id, floor)
+            ))
+        );
+        mutation.close().await;
+    }
+
+    #[tokio::test]
+    async fn weekly_floor_mutation_busy_retry_is_bounded_and_preserves_value() {
+        let temp_dir = TestTempDir::new("weekly_floor_busy");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        let account_id = account_id("acct_policy_busy");
+        store
+            .upsert_account(&AccountRecord::new(
+                account_id.clone(),
+                "busy-policy",
+                AccountStatus::Enabled,
+            ))
+            .await
+            .expect("account should persist");
+        store.close().await.expect("state should close");
+
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .expect("mutation store should open");
+        let old_floor = WeeklyQuotaFloorBasisPoints::new(400).expect("valid old floor");
+        mutation
+            .set_weekly_quota_floor_by_label("busy-policy", Some(old_floor))
+            .await
+            .expect("old floor should persist");
+
+        let lock = Connection::open(&database_path).expect("lock connection should open");
+        lock.execute_batch("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;")
+            .expect("writer lock should be held");
+        let concurrent_reader = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .expect("WAL reader should remain responsive during a held writer");
+        assert_eq!(
+            concurrent_reader.list_account_routing_policies().await,
+            Ok(vec![AccountRoutingPolicy::new(
+                account_id.clone(),
+                old_floor
+            )])
+        );
+        concurrent_reader
+            .close()
+            .await
+            .expect("reader should close");
+        let started_at = std::time::Instant::now();
+        let error = mutation
+            .set_weekly_quota_floor_by_label(
+                "busy-policy",
+                Some(WeeklyQuotaFloorBasisPoints::new(700).expect("valid new floor")),
+            )
+            .await
+            .expect_err("held writer must exhaust retries");
+        let elapsed = started_at.elapsed();
+        assert_eq!(error, StateStoreError::WeeklyQuotaFloorDatabaseBusy);
+        assert!(elapsed >= std::time::Duration::from_millis(150));
+        assert!(elapsed < std::time::Duration::from_millis(250));
+        lock.execute_batch("ROLLBACK;")
+            .expect("lock should release");
+        mutation.close().await;
+
+        let read_only = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .expect("state should reopen read-only");
+        assert_eq!(
+            read_only.list_account_routing_policies().await,
+            Ok(vec![AccountRoutingPolicy::new(account_id, old_floor)])
+        );
+    }
+
+    #[tokio::test]
+    async fn weekly_floor_mutation_commits_after_held_writer_releases() {
+        let temp_dir = TestTempDir::new("weekly_floor_busy_then_release");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        let account_id = account_id("acct_policy_busy_then_release");
+        store
+            .upsert_account(&AccountRecord::new(
+                account_id.clone(),
+                "busy-then-release",
+                AccountStatus::Enabled,
+            ))
+            .await
+            .expect("account should persist");
+        store.close().await.expect("state should close");
+
+        let lock = Connection::open(&database_path).expect("lock connection should open");
+        lock.execute_batch("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;")
+            .expect("writer lock should be held");
+        let mutation = Arc::new(
+            AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+                .await
+                .expect("mutation store should open"),
+        );
+        let committed_floor = WeeklyQuotaFloorBasisPoints::new(600).expect("valid floor");
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let mutation_task = {
+            let mutation = Arc::clone(&mutation);
+            tokio::spawn(async move {
+                started_sender
+                    .send(())
+                    .expect("test should observe mutation start");
+                mutation
+                    .set_weekly_quota_floor_by_label("busy-then-release", Some(committed_floor))
+                    .await
+            })
+        };
+        started_receiver
+            .await
+            .expect("mutation task should establish its first attempt");
+        tokio::task::yield_now().await;
+        assert!(
+            !mutation_task.is_finished(),
+            "held writer should leave the setter pending for a retry"
+        );
+        lock.execute_batch("ROLLBACK;")
+            .expect("lock should release");
+
+        assert_eq!(
+            mutation_task.await.expect("mutation task should join"),
+            Ok(WeeklyQuotaFloorMutationResult::Enabled(
+                AccountRoutingPolicy::new(account_id.clone(), committed_floor)
+            ))
+        );
+        let mutation = Arc::into_inner(mutation).expect("mutation task should release store");
+        mutation.close().await;
+
+        let read_only = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .expect("state should reopen read-only");
+        assert_eq!(
+            read_only.list_account_routing_policies().await,
+            Ok(vec![AccountRoutingPolicy::new(account_id, committed_floor)])
+        );
     }
 
     #[test]
@@ -117,7 +820,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 10);
+        assert_eq!(store.schema_version(), 11);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -367,6 +1070,10 @@ mod tests {
         let temp_dir = TestTempDir::new("async_read_only_missing_schema");
         let database_path = temp_dir.path().join("state.sqlite");
         create_v10_database_missing_async_projection_tables(&database_path);
+        let raw = Connection::open(&database_path).expect("fixture should reopen");
+        raw.pragma_update(None, "user_version", 11_i64)
+            .expect("fixture should claim current schema");
+        drop(raw);
 
         let error = expect_error(
             AsyncSqliteStateStore::open_read_only(&database_path).await,
@@ -1164,7 +1871,7 @@ mod tests {
                 .schema_version()
                 .await
                 .unwrap_or_else(|error| panic!("schema version should load: {error}")),
-            10
+            11
         );
         assert_eq!(
             store
@@ -2231,7 +2938,7 @@ mod tests {
             Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 10);
+        assert_eq!(store.schema_version(), 11);
         let selector_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -2290,7 +2997,7 @@ mod tests {
             Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 10);
+        assert_eq!(store.schema_version(), 11);
         let responses_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -2324,7 +3031,7 @@ mod tests {
             Err(error) => panic!("v6 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 10);
+        assert_eq!(store.schema_version(), 11);
         let account_id = account_id("acct_v6_reset_credits");
         let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
             &store,

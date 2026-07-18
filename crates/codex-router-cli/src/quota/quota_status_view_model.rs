@@ -53,6 +53,7 @@ pub(super) struct QuotaStatusAccountInput {
     pub(super) active_clients: ActiveClientMirrorStatus,
     pub(super) windows: Vec<DisplayQuotaWindow>,
     pub(super) weekly_pace: Option<QuotaPaceSnapshot>,
+    pub(super) weekly_quota_floor_basis_points: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +90,7 @@ pub(super) struct QuotaStatusRow {
     pub(super) weekly_survival_margin_basis_points: Option<i64>,
     pub(super) weekly_projected_exhaustion_unix_seconds: Option<u64>,
     pub(super) weekly_burn_rate_confidence: QuotaRunRateConfidence,
+    pub(super) weekly_quota_floor_basis_points: Option<u32>,
 }
 
 impl QuotaStatusRow {
@@ -142,6 +144,7 @@ impl QuotaStatusRow {
             weekly_projected_exhaustion_unix_seconds: assessment
                 .weekly_projected_exhaustion_unix_seconds(),
             weekly_burn_rate_confidence: assessment.weekly_burn_rate_confidence(),
+            weekly_quota_floor_basis_points: input.weekly_quota_floor_basis_points,
         }
     }
 
