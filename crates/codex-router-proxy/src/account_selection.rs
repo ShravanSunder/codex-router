@@ -3104,6 +3104,18 @@ mod tests {
     impl codex_router_state::selection_projection::AsyncSelectionProjectionRepository
         for PanicSelectionProjectionRepository
     {
+        fn list_account_routing_policies(
+            &self,
+        ) -> futures_util::future::BoxFuture<
+            '_,
+            Result<
+                Vec<codex_router_state::account_routing_policy::AccountRoutingPolicy>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { panic!("degraded queue health should prevent policy reads") })
+        }
+
         fn selector_inputs_for_route_band<'a>(
             &'a self,
             _route_band: &'a str,
@@ -3208,6 +3220,18 @@ mod tests {
     impl codex_router_state::selection_projection::AsyncSelectionProjectionRepository
         for StaticSelectionProjectionRepository
     {
+        fn list_account_routing_policies(
+            &self,
+        ) -> futures_util::future::BoxFuture<
+            '_,
+            Result<
+                Vec<codex_router_state::account_routing_policy::AccountRoutingPolicy>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
         fn selector_inputs_for_route_band<'a>(
             &'a self,
             _route_band: &'a str,
@@ -3323,6 +3347,18 @@ mod tests {
     impl codex_router_state::selection_projection::AsyncSelectionProjectionRepository
         for SlowSelectionProjectionRepository
     {
+        fn list_account_routing_policies(
+            &self,
+        ) -> futures_util::future::BoxFuture<
+            '_,
+            Result<
+                Vec<codex_router_state::account_routing_policy::AccountRoutingPolicy>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
         fn selector_inputs_for_route_band<'a>(
             &'a self,
             route_band: &'a str,

@@ -47,6 +47,8 @@ pub(super) struct JsonQuotaStatusAccount {
     pub(super) short_quota_guard: Option<u32>,
     pub(super) weekly_quota_guard: Option<u32>,
     pub(super) weekly_survival_margin_basis_points: Option<i64>,
+    pub(super) weekly_quota_floor_basis_points: Option<u32>,
+    pub(super) weekly_quota_floor_percent: Option<u32>,
     pub(super) weekly_projected_exhaustion_unix_seconds: Option<u64>,
     pub(super) short_guard_result: &'static str,
     pub(super) current_active_sessions: Option<u32>,
@@ -82,6 +84,10 @@ impl JsonQuotaStatusAccount {
             short_quota_guard: Some(row.short_pressure),
             weekly_quota_guard: Some(row.long_pressure),
             weekly_survival_margin_basis_points: row.weekly_survival_margin_basis_points,
+            weekly_quota_floor_basis_points: row.weekly_quota_floor_basis_points,
+            weekly_quota_floor_percent: row
+                .weekly_quota_floor_basis_points
+                .map(|basis_points| basis_points / 100),
             weekly_projected_exhaustion_unix_seconds: row.weekly_projected_exhaustion_unix_seconds,
             short_guard_result: short_guard_result_json(row),
             current_active_sessions: row.active_clients_value,
@@ -292,6 +298,7 @@ pub(super) const fn routing_exclusion_json(value: RoutingExclusion) -> &'static 
         RoutingExclusion::None => "none",
         RoutingExclusion::Disabled => "disabled",
         RoutingExclusion::MissingCredential => "missing_credential",
+        RoutingExclusion::WeeklyQuotaFloor => "excluded_weekly_quota_floor",
     }
 }
 
@@ -307,6 +314,7 @@ pub(super) const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'
         QuotaEvidenceReason::ShortWindowGuard => "short_window_guard",
         QuotaEvidenceReason::AccountDisabled => "account_disabled",
         QuotaEvidenceReason::MissingCredential => "missing_credential",
+        QuotaEvidenceReason::WeeklyQuotaFloor => "excluded_weekly_quota_floor",
     }
 }
 

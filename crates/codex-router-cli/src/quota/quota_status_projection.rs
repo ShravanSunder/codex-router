@@ -148,8 +148,16 @@ pub(super) fn quota_selected_account_view_model(
         total_rate: quota_total_rate_summary(row.weekly_pace),
         connection_rate: quota_connection_rate_summary(row.weekly_pace),
         active_clients: active_clients_label(row),
-        guards: format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure),
+        guards: weekly_floor_guard_summary(row),
         reset: row.reset_credits_available.clone(),
         note: first_line(&row.routing).to_owned(),
     }
+}
+
+fn weekly_floor_guard_summary(row: &QuotaStatusRow) -> String {
+    let base = format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure);
+    row.weekly_quota_floor_basis_points
+        .map_or(base.clone(), |floor| {
+            format!("{base} / floor {}%", floor / 100)
+        })
 }

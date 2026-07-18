@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
 
 use codex_router_core::affinity::AffinityKeyHash;
 use codex_router_core::ids::AccountId;
@@ -29,6 +30,8 @@ use thiserror::Error;
 
 use crate::account::AccountRecord;
 use crate::account::AccountStatus;
+use crate::account_routing_policy::AccountRoutingPolicy;
+use crate::account_routing_policy::WeeklyQuotaFloorBasisPoints;
 use crate::affinity_owner::AffinitySourceTransport;
 use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
 use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
@@ -50,7 +53,14 @@ use crate::repositories::QuotaSnapshotRepository;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::SelectorQuotaRepository;
 
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 11;
+const PREVIOUS_SCHEMA_VERSION: i64 = 10;
+const WEEKLY_FLOOR_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(25),
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+];
+const WEEKLY_FLOOR_MUTATION_DEADLINE: Duration = Duration::from_millis(250);
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const WEEKLY_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 604_800;
 const SUSPECT_EXHAUSTED_TTL_SECONDS: u64 = 300;
@@ -120,6 +130,14 @@ const ASYNC_V1_SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "PRAGMA user_version = 10",
 ];
+const ACCOUNT_ROUTING_POLICY_TABLE_SQL: &str = "CREATE TABLE account_routing_policies (
+    account_id TEXT PRIMARY KEY NOT NULL,
+    weekly_quota_floor_basis_points INTEGER NOT NULL
+        CHECK (
+            weekly_quota_floor_basis_points BETWEEN 100 AND 1000
+            AND weekly_quota_floor_basis_points % 100 = 0
+        )
+)";
 const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS quota_history_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -502,6 +520,21 @@ pub enum StateStoreError {
         /// Observed schema version.
         version: i64,
     },
+    /// Weekly-floor mutation requires a router-migrated v11 database.
+    #[error("weekly quota floor requires a compatible upgraded router database")]
+    WeeklyQuotaFloorSchemaUpgradeRequired,
+    /// Weekly-floor mutation could not acquire the SQLite writer lock in time.
+    #[error("database is busy; retry the command")]
+    WeeklyQuotaFloorDatabaseBusy,
+    /// Weekly-floor mutation named an account that is not configured.
+    #[error("weekly quota floor account was not found")]
+    WeeklyQuotaFloorAccountNotFound,
+    /// Weekly-floor mutation matched more than one configured display label.
+    #[error("weekly quota floor account label is ambiguous")]
+    WeeklyQuotaFloorAccountLabelAmbiguous,
+    /// Persisted weekly-floor policy is outside the supported integer-percent range.
+    #[error("stored weekly quota floor policy is invalid")]
+    CorruptAccountRoutingPolicy,
     /// Read-only open found a current-version database missing required schema.
     #[error(
         "sqlite state store requires writable schema upgrade: missing {object_kind} {object_name}"
@@ -561,6 +594,35 @@ pub struct AsyncSqliteStateStore {
     read_only: bool,
 }
 
+/// Committed result of a weekly-floor mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WeeklyQuotaFloorMutationResult {
+    /// The floor is enabled with this committed policy.
+    Enabled(AccountRoutingPolicy),
+    /// The policy row was deleted and the floor is disabled.
+    Disabled,
+}
+
+#[derive(Debug)]
+enum WeeklyQuotaFloorMutationAttemptError {
+    AccountNotFound,
+    AccountLabelAmbiguous,
+    InvalidAccountMetadata,
+    Sqlite(sqlx::Error),
+}
+
+impl From<sqlx::Error> for WeeklyQuotaFloorMutationAttemptError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Sqlite(error)
+    }
+}
+
+/// Narrow writable connection used only by the account weekly-floor setter.
+#[derive(Debug)]
+pub struct AsyncWeeklyQuotaFloorMutationStore {
+    pool: sqlx::SqlitePool,
+}
+
 impl AsyncSqliteStateStore {
     /// Opens a SQLite state database through SQLx and applies supported migrations.
     pub async fn open(database_path: &Path) -> Result<Self, StateStoreError> {
@@ -583,6 +645,11 @@ impl AsyncSqliteStateStore {
         store.ensure_active_client_schema().await?;
         store.ensure_route_band_account_state_schema().await?;
         store.ensure_active_session_history_schema().await?;
+        store.apply_v11_if_needed().await?;
+        if let Err(error) = store.verify_account_routing_policy_schema().await {
+            store.pool.close().await;
+            return Err(error);
+        }
 
         Ok(store)
     }
@@ -610,7 +677,10 @@ impl AsyncSqliteStateStore {
         };
         match store.schema_version().await? {
             CURRENT_SCHEMA_VERSION => {
-                store.verify_read_only_schema().await?;
+                if let Err(error) = store.verify_read_only_schema().await {
+                    store.pool.close().await;
+                    return Err(error);
+                }
                 Ok(store)
             }
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
@@ -827,6 +897,24 @@ impl AsyncSqliteStateStore {
         }
 
         Ok(accounts)
+    }
+
+    /// Bulk-loads every enabled per-account routing policy.
+    pub async fn list_account_routing_policies(
+        &self,
+    ) -> Result<Vec<AccountRoutingPolicy>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT account_id, weekly_quota_floor_basis_points
+               FROM account_routing_policies
+              ORDER BY account_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        rows.into_iter()
+            .map(parse_account_routing_policy_row)
+            .collect()
     }
 
     /// Inserts or updates a persisted quota snapshot through the async state pool.
@@ -2095,9 +2183,58 @@ impl AsyncSqliteStateStore {
                 self.apply_v10().await
             }
             9 => self.apply_v10().await,
-            CURRENT_SCHEMA_VERSION => self.apply_v10().await,
+            PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
+    }
+
+    async fn apply_v11_if_needed(&self) -> Result<(), StateStoreError> {
+        match self.schema_version().await? {
+            PREVIOUS_SCHEMA_VERSION => {
+                let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+                sqlx::query(ACCOUNT_ROUTING_POLICY_TABLE_SQL)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(sqlx_error)?;
+                sqlx::query("PRAGMA user_version = 11")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(sqlx_error)?;
+                transaction.commit().await.map_err(sqlx_error)
+            }
+            CURRENT_SCHEMA_VERSION => Ok(()),
+            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
+        }
+    }
+
+    /// Exercises rollback immediately before the v11 commit.
+    #[cfg(test)]
+    pub async fn inject_v11_migration_rollback_for_test(
+        database_path: &Path,
+    ) -> Result<(), StateStoreError> {
+        let options = SqliteConnectOptions::new()
+            .filename(database_path)
+            .create_if_missing(false)
+            .busy_timeout(Duration::from_millis(0));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(sqlx_error)?;
+        let mut transaction = pool.begin().await.map_err(sqlx_error)?;
+        sqlx::query(ACCOUNT_ROUTING_POLICY_TABLE_SQL)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        sqlx::query("PRAGMA user_version = 11")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        transaction.rollback().await.map_err(sqlx_error)?;
+        pool.close().await;
+        Err(redacted_weekly_floor_sqlite_error(
+            "injected migration failure",
+        ))
     }
 
     async fn apply_v1(&self) -> Result<(), StateStoreError> {
@@ -2213,6 +2350,7 @@ impl AsyncSqliteStateStore {
             "route_band_account_states",
             "active_session_events",
             "active_session_rollups",
+            "account_routing_policies",
         ] {
             if !self.schema_object_exists("table", table_name).await? {
                 return Err(StateStoreError::MissingReadOnlySchemaObject {
@@ -2231,6 +2369,11 @@ impl AsyncSqliteStateStore {
             ("active_session_events", "transport_kind"),
             ("active_session_rollups", "completed_sessions"),
             ("active_session_rollups", "stale_purged_sessions"),
+            ("account_routing_policies", "account_id"),
+            (
+                "account_routing_policies",
+                "weekly_quota_floor_basis_points",
+            ),
         ] {
             if !self.table_has_column(table_name, column_name).await? {
                 return Err(StateStoreError::MissingReadOnlySchemaObject {
@@ -2240,6 +2383,30 @@ impl AsyncSqliteStateStore {
             }
         }
 
+        Ok(())
+    }
+
+    async fn verify_account_routing_policy_schema(&self) -> Result<(), StateStoreError> {
+        if !self
+            .schema_object_exists("table", "account_routing_policies")
+            .await?
+        {
+            return Err(StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "table",
+                object_name: "account_routing_policies",
+            });
+        }
+        for column_name in ["account_id", "weekly_quota_floor_basis_points"] {
+            if !self
+                .table_has_column("account_routing_policies", column_name)
+                .await?
+            {
+                return Err(StateStoreError::MissingReadOnlySchemaObject {
+                    object_kind: "column",
+                    object_name: column_name,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -2380,11 +2547,199 @@ impl AsyncSqliteStateStore {
                     .await
                     .map_err(sqlx_error)?
             }
+            "account_routing_policies" => {
+                sqlx::query("PRAGMA table_info(\"account_routing_policies\")")
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(sqlx_error)?
+            }
             _ => Vec::new(),
         };
         Ok(rows
             .iter()
             .any(|row| row.get::<String, _>("name") == column_name))
+    }
+}
+
+impl AsyncWeeklyQuotaFloorMutationStore {
+    /// Opens an existing v11 database without migrating, ensuring schemas, or checkpointing.
+    pub async fn open(database_path: &Path) -> Result<Self, StateStoreError> {
+        let options = SqliteConnectOptions::new()
+            .filename(database_path)
+            .create_if_missing(false)
+            .busy_timeout(Duration::from_millis(0));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| redacted_weekly_floor_sqlite_error("unable to open database"))?;
+        let version = sqlx::query("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .map(|row| row.get::<i64, _>(0))
+            .map_err(|_| redacted_weekly_floor_sqlite_error("unable to read schema version"))?;
+        if version != CURRENT_SCHEMA_VERSION {
+            pool.close().await;
+            return Err(StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired);
+        }
+        let table_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'account_routing_policies'
+            )",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| redacted_weekly_floor_sqlite_error("unable to verify policy schema"))?;
+        if table_exists != 1 {
+            pool.close().await;
+            return Err(StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired);
+        }
+        let columns = sqlx::query("PRAGMA table_info(account_routing_policies)")
+            .fetch_all(&pool)
+            .await
+            .map_err(|_| redacted_weekly_floor_sqlite_error("unable to verify policy schema"))?
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        if !["account_id", "weekly_quota_floor_basis_points"]
+            .iter()
+            .all(|required| columns.iter().any(|column| column == required))
+        {
+            pool.close().await;
+            return Err(StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired);
+        }
+
+        Ok(Self { pool })
+    }
+
+    /// Atomically enables or disables one account's weekly quota floor.
+    pub async fn set_weekly_quota_floor_by_label(
+        &self,
+        account_label: &str,
+        floor: Option<WeeklyQuotaFloorBasisPoints>,
+    ) -> Result<WeeklyQuotaFloorMutationResult, StateStoreError> {
+        let deadline = Instant::now() + WEEKLY_FLOOR_MUTATION_DEADLINE;
+        let mut next_delay_index = 0;
+        loop {
+            if deadline.checked_duration_since(Instant::now()).is_none() {
+                return Err(StateStoreError::WeeklyQuotaFloorDatabaseBusy);
+            }
+            let attempt = self
+                .try_set_weekly_quota_floor_by_label(account_label, floor)
+                .await;
+            match attempt {
+                Ok(result) => return Ok(result),
+                Err(WeeklyQuotaFloorMutationAttemptError::Sqlite(error))
+                    if is_busy_or_locked_sqlx_error(&error) =>
+                {
+                    let Some(delay) = WEEKLY_FLOOR_RETRY_DELAYS.get(next_delay_index).copied()
+                    else {
+                        return Err(StateStoreError::WeeklyQuotaFloorDatabaseBusy);
+                    };
+                    next_delay_index += 1;
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(StateStoreError::WeeklyQuotaFloorDatabaseBusy);
+                    };
+                    if delay >= remaining {
+                        return Err(StateStoreError::WeeklyQuotaFloorDatabaseBusy);
+                    }
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        Instant::now() + delay,
+                    ))
+                    .await;
+                }
+                Err(WeeklyQuotaFloorMutationAttemptError::AccountNotFound) => {
+                    return Err(StateStoreError::WeeklyQuotaFloorAccountNotFound);
+                }
+                Err(WeeklyQuotaFloorMutationAttemptError::AccountLabelAmbiguous) => {
+                    return Err(StateStoreError::WeeklyQuotaFloorAccountLabelAmbiguous);
+                }
+                Err(WeeklyQuotaFloorMutationAttemptError::InvalidAccountMetadata) => {
+                    return Err(redacted_weekly_floor_sqlite_error(
+                        "invalid account metadata",
+                    ));
+                }
+                Err(WeeklyQuotaFloorMutationAttemptError::Sqlite(_)) => {
+                    return Err(redacted_weekly_floor_sqlite_error("mutation failed"));
+                }
+            }
+        }
+    }
+
+    async fn try_set_weekly_quota_floor_by_label(
+        &self,
+        account_label: &str,
+        floor: Option<WeeklyQuotaFloorBasisPoints>,
+    ) -> Result<WeeklyQuotaFloorMutationResult, WeeklyQuotaFloorMutationAttemptError> {
+        let mut transaction = self.pool.begin().await?;
+        let matching_account_ids = sqlx::query_scalar::<_, String>(
+            "SELECT account_id FROM accounts WHERE label = ?1 ORDER BY account_id LIMIT 2",
+        )
+        .bind(account_label)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let account_id_value = match matching_account_ids.as_slice() {
+            [] => {
+                transaction.rollback().await?;
+                return Err(WeeklyQuotaFloorMutationAttemptError::AccountNotFound);
+            }
+            [account_id] => account_id,
+            [_, _, ..] => {
+                transaction.rollback().await?;
+                return Err(WeeklyQuotaFloorMutationAttemptError::AccountLabelAmbiguous);
+            }
+        };
+        let account_id = match AccountId::new(account_id_value.clone()) {
+            Ok(account_id) => account_id,
+            Err(_) => {
+                transaction.rollback().await?;
+                return Err(WeeklyQuotaFloorMutationAttemptError::InvalidAccountMetadata);
+            }
+        };
+        let result = if let Some(floor) = floor {
+            sqlx::query(
+                "INSERT INTO account_routing_policies (
+                    account_id, weekly_quota_floor_basis_points
+                 ) VALUES (?1, ?2)
+                 ON CONFLICT(account_id) DO UPDATE SET
+                    weekly_quota_floor_basis_points = excluded.weekly_quota_floor_basis_points",
+            )
+            .bind(account_id.as_str())
+            .bind(i64::from(floor.basis_points()))
+            .execute(&mut *transaction)
+            .await?;
+            WeeklyQuotaFloorMutationResult::Enabled(AccountRoutingPolicy::new(account_id, floor))
+        } else {
+            sqlx::query("DELETE FROM account_routing_policies WHERE account_id = ?1")
+                .bind(account_id.as_str())
+                .execute(&mut *transaction)
+                .await?;
+            WeeklyQuotaFloorMutationResult::Disabled
+        };
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    /// Closes the mutation pool without issuing a WAL checkpoint.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+}
+
+/// Async account-routing-policy reader for projection and observer callers.
+pub trait AsyncAccountRoutingPolicyRepository {
+    /// Bulk-loads all enabled account routing policies.
+    fn list_account_routing_policies(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>>;
+}
+
+impl AsyncAccountRoutingPolicyRepository for AsyncSqliteStateStore {
+    fn list_account_routing_policies(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>> {
+        Box::pin(async move { self.list_account_routing_policies().await })
     }
 }
 
@@ -2541,12 +2896,14 @@ impl SqliteStateStore {
     /// Opens a SQLite state database and applies migrations.
     pub fn open(database_path: &Path) -> Result<Self, StateStoreError> {
         let connection = Connection::open(database_path).map_err(sqlite_error)?;
-        let store = Self {
+        let mut store = Self {
             database_path: database_path.to_path_buf(),
             connection,
         };
         store.migrate()?;
         store.ensure_async_read_only_schema()?;
+        store.apply_v11_if_needed()?;
+        store.verify_account_routing_policy_schema()?;
 
         Ok(store)
     }
@@ -3478,9 +3835,63 @@ impl SqliteStateStore {
                 self.apply_v10()
             }
             9 => self.apply_v10(),
-            CURRENT_SCHEMA_VERSION => self.apply_v10(),
+            PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
+    }
+
+    fn apply_v11_if_needed(&mut self) -> Result<(), StateStoreError> {
+        match self.schema_version() {
+            PREVIOUS_SCHEMA_VERSION => {
+                let transaction = self.connection.transaction().map_err(sqlite_error)?;
+                transaction
+                    .execute(ACCOUNT_ROUTING_POLICY_TABLE_SQL, [])
+                    .map_err(sqlite_error)?;
+                transaction
+                    .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
+                    .map_err(sqlite_error)?;
+                transaction.commit().map_err(sqlite_error)
+            }
+            CURRENT_SCHEMA_VERSION => Ok(()),
+            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
+        }
+    }
+
+    fn verify_account_routing_policy_schema(&self) -> Result<(), StateStoreError> {
+        if !self.table_exists("account_routing_policies")? {
+            return Err(StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "table",
+                object_name: "account_routing_policies",
+            });
+        }
+        for column_name in ["account_id", "weekly_quota_floor_basis_points"] {
+            if !self.table_has_column("account_routing_policies", column_name)? {
+                return Err(StateStoreError::MissingReadOnlySchemaObject {
+                    object_kind: "column",
+                    object_name: column_name,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Exercises sync-fixture rollback immediately before the v11 commit.
+    #[cfg(test)]
+    pub fn inject_v11_migration_rollback_for_test(
+        database_path: &Path,
+    ) -> Result<(), StateStoreError> {
+        let mut connection = Connection::open(database_path).map_err(sqlite_error)?;
+        let transaction = connection.transaction().map_err(sqlite_error)?;
+        transaction
+            .execute(ACCOUNT_ROUTING_POLICY_TABLE_SQL, [])
+            .map_err(sqlite_error)?;
+        transaction
+            .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
+            .map_err(sqlite_error)?;
+        transaction.rollback().map_err(sqlite_error)?;
+        Err(redacted_weekly_floor_sqlite_error(
+            "injected migration failure",
+        ))
     }
 
     fn apply_v1(&self) -> Result<(), StateStoreError> {
@@ -4250,6 +4661,36 @@ fn sqlx_error(error: sqlx::Error) -> StateStoreError {
     StateStoreError::Sqlite {
         message: error.to_string(),
     }
+}
+
+fn redacted_weekly_floor_sqlite_error(message: &'static str) -> StateStoreError {
+    StateStoreError::Sqlite {
+        message: message.to_owned(),
+    }
+}
+
+fn is_busy_or_locked_sqlx_error(error: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(database_error) = error else {
+        return false;
+    };
+    matches!(database_error.code().as_deref(), Some("5" | "6"))
+        || database_error.message().contains("database is locked")
+        || database_error
+            .message()
+            .contains("database table is locked")
+}
+
+fn parse_account_routing_policy_row(
+    row: SqliteRow,
+) -> Result<AccountRoutingPolicy, StateStoreError> {
+    let account_id = AccountId::new(row.get::<String, _>(0))
+        .map_err(|_| StateStoreError::CorruptAccountRoutingPolicy)?;
+    let basis_points = row.get::<i64, _>(1);
+    let basis_points = u16::try_from(basis_points)
+        .ok()
+        .and_then(|value| WeeklyQuotaFloorBasisPoints::new(value).ok())
+        .ok_or(StateStoreError::CorruptAccountRoutingPolicy)?;
+    Ok(AccountRoutingPolicy::new(account_id, basis_points))
 }
 
 async fn insert_selector_window_in_async_transaction(

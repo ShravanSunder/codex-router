@@ -116,6 +116,7 @@ pub(super) fn quota_capture_row(fixture: QuotaCaptureRowFixture) -> QuotaStatusR
         weekly_survival_margin_basis_points: None,
         weekly_projected_exhaustion_unix_seconds: None,
         weekly_burn_rate_confidence: QuotaRunRateConfidence::Unknown,
+        weekly_quota_floor_basis_points: None,
     }
 }
 
@@ -328,6 +329,7 @@ pub(super) fn format_next_use_for_capture(reason: RoutingReason) -> &'static str
         | RoutingReason::ExcludedMissingCredential
         | RoutingReason::BlockedWindowExhausted
         | RoutingReason::BlockedWindowIneligible => "blocked",
+        RoutingReason::ExcludedWeeklyQuotaFloor => "blocked",
     }
 }
 

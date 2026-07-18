@@ -129,6 +129,7 @@ mod tests {
     use codex_router_selection::reservation::ReservationHandle;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
+    use codex_router_state::account_routing_policy::WeeklyQuotaFloorBasisPoints;
     use codex_router_state::affinity_owner::AffinitySourceTransport;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
@@ -145,6 +146,7 @@ mod tests {
     use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts;
     use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
+    use codex_router_state::sqlite::AsyncWeeklyQuotaFloorMutationStore;
     use codex_router_state::sqlite::SqliteStateStore;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
@@ -2239,6 +2241,101 @@ mod tests {
         assert_eq!(selected.selection_reason(), "previous_response_affinity");
     }
 
+    #[tokio::test]
+    async fn weekly_floor_exclusion_precedes_affinity_and_all_blocked_fails_closed() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_weekly_floor");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let eligible = AccountRecord::new(
+            account_id("acct_floor_eligible"),
+            "eligible",
+            AccountStatus::Enabled,
+        );
+        let protected = AccountRecord::new(
+            account_id("acct_floor_protected"),
+            "protected",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &eligible,
+            "responses",
+            &[(18_000, 80, true), (604_800, 80, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &protected,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let affinity_secret = test_affinity_secret();
+        persist_previous_response_owner(
+            &state,
+            "resp_protected",
+            &affinity_secret,
+            protected.account_id(),
+        )
+        .expect("protected affinity owner should persist");
+        drop(state);
+
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .expect("mutation store should open");
+        let floor = WeeklyQuotaFloorBasisPoints::new(500).expect("valid floor");
+        mutation
+            .set_weekly_quota_floor_by_label(protected.label(), Some(floor))
+            .await
+            .expect("protected floor should commit");
+
+        let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
+        let ordinary_request = HttpProxyRequest::new(Method::Post, "/v1/responses");
+        let affinity_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
+            .with_body(br#"{"previous_response_id":"resp_protected"}"#.to_vec());
+        let selected = selector
+            .select_upstream_account(
+                &ordinary_request,
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+            .expect("eligible peer should be selected");
+        assert_eq!(selected.account_id(), eligible.account_id());
+        assert_ne!(selected.selection_reason(), "previous_response_affinity");
+        assert_eq!(
+            selector
+                .select_upstream_account(
+                    &affinity_request,
+                    TokenGeneration::new(1),
+                    Some(&affinity_secret),
+                )
+                .await,
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable
+            })
+        );
+
+        mutation
+            .set_weekly_quota_floor_by_label(eligible.label(), Some(floor))
+            .await
+            .expect("eligible floor should commit");
+        assert_eq!(
+            selector
+                .select_upstream_account(
+                    &ordinary_request,
+                    TokenGeneration::new(1),
+                    Some(&affinity_secret),
+                )
+                .await,
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+            })
+        );
+        mutation.close().await;
+    }
+
     #[test]
     fn repository_backed_selector_allows_reserve_affinity_owner_outside_selected_pool() {
         let temp_dir = ProxyTestTempDir::new("repository_selector_reserve_affinity_owner");
@@ -4210,6 +4307,247 @@ mod tests {
     }
 
     #[test]
+    fn served_http_weekly_floor_routes_only_to_eligible_peer() {
+        const NOW: u64 = 1_030;
+        let temp_dir = ProxyTestTempDir::new("served_http_weekly_floor");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = SqliteStateStore::open(&database_path).expect("state should open");
+        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let protected = AccountRecord::new(
+            account_id("acct_served_http_protected"),
+            "protected",
+            AccountStatus::Enabled,
+        );
+        let peer = AccountRecord::new(
+            account_id("acct_served_http_peer"),
+            "peer",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &protected,
+            5,
+            "protected-http-token",
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &peer, 80, "peer-http-token");
+        drop(state);
+        seed_computable_weekly_margin_for_test(
+            &database_path,
+            protected.account_id(),
+            NOW,
+            100,
+            6,
+            5,
+        );
+        set_weekly_floor_for_test(&database_path, protected.label(), 500);
+        assert_projected_weekly_margin_for_test(&database_path, protected.account_id(), NOW, 499);
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
+        let upstream_address = upstream_listener.local_addr().expect("address should read");
+        let (request_sender, request_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener
+                .accept()
+                .expect("peer request should arrive");
+            let request = read_test_http_request(&mut stream);
+            request_sender.send(request).expect("request should record");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .expect("response should write");
+        });
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("bind should validate"),
+            UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+                .expect("endpoint should validate"),
+            database_path,
+            secret_path,
+        )
+        .with_quota_clock(NOW, 60);
+        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses HTTP/1.1\r\n",
+                br#"{"model":"gpt-5"}"#,
+            )
+        });
+        assert_eq!(
+            runtime
+                .serve_http_connections(1)
+                .expect("runtime should serve HTTP"),
+            1
+        );
+        let response = client_thread.join().expect("client should join");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let request = request_receiver.recv().expect("peer request should record");
+        assert!(request.contains("authorization: Bearer peer-http-token\r\n"));
+        assert_eq!(request.matches("protected-http-token").count(), 0);
+        upstream_thread.join().expect("upstream should join");
+    }
+
+    #[test]
+    fn served_http_weekly_floor_equality_remains_eligible() {
+        const NOW: u64 = 1_030;
+        let temp_dir = ProxyTestTempDir::new("served_http_weekly_floor_equality");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = SqliteStateStore::open(&database_path).expect("state should open");
+        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let protected = AccountRecord::new(
+            account_id("acct_served_http_floor_equality"),
+            "protected-equality",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &protected,
+            5,
+            "protected-equality-http-token",
+        );
+        drop(state);
+        seed_computable_weekly_margin_for_test(
+            &database_path,
+            protected.account_id(),
+            NOW,
+            100,
+            5,
+            5,
+        );
+        set_weekly_floor_for_test(&database_path, protected.label(), 500);
+        assert_projected_weekly_margin_for_test(&database_path, protected.account_id(), NOW, 500);
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
+        let upstream_address = upstream_listener.local_addr().expect("address should read");
+        let (request_sender, request_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener
+                .accept()
+                .expect("equality request should arrive");
+            let request = read_test_http_request(&mut stream);
+            request_sender.send(request).expect("request should record");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .expect("response should write");
+        });
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("bind should validate"),
+            UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+                .expect("endpoint should validate"),
+            database_path,
+            secret_path,
+        )
+        .with_quota_clock(NOW, 60);
+        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses HTTP/1.1\r\n",
+                br#"{"model":"gpt-5"}"#,
+            )
+        });
+        assert_eq!(
+            runtime
+                .serve_http_connections(1)
+                .expect("runtime should serve HTTP"),
+            1
+        );
+        let response = client_thread.join().expect("client should join");
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "equality account should remain eligible, got:\n{response}"
+        );
+        let request = request_receiver
+            .recv()
+            .expect("equality request should record");
+        assert!(request.contains("authorization: Bearer protected-equality-http-token\r\n"));
+        upstream_thread.join().expect("upstream should join");
+    }
+
+    #[test]
+    fn served_http_all_weekly_floor_blocked_is_scrubbed_and_sends_zero_upstream_requests() {
+        let temp_dir = ProxyTestTempDir::new("served_http_all_weekly_floor_blocked");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = SqliteStateStore::open(&database_path).expect("state should open");
+        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let first = AccountRecord::new(
+            account_id("acct_all_floor_first"),
+            "sensitive-first-label",
+            AccountStatus::Enabled,
+        );
+        let second = AccountRecord::new(
+            account_id("acct_all_floor_second"),
+            "sensitive-second-label",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &first,
+            100,
+            "first-secret-token",
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &second,
+            90,
+            "second-secret-token",
+        );
+        drop(state);
+        set_weekly_floor_for_test(&database_path, first.label(), 500);
+        set_weekly_floor_for_test(&database_path, second.label(), 500);
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
+        upstream_listener
+            .set_nonblocking(true)
+            .expect("upstream should become nonblocking");
+        let upstream_address = upstream_listener.local_addr().expect("address should read");
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("bind should validate"),
+            UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+                .expect("endpoint should validate"),
+            database_path,
+            secret_path,
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses HTTP/1.1\r\n",
+                br#"{"model":"gpt-5"}"#,
+            )
+        });
+        assert_eq!(
+            runtime
+                .serve_http_connections(1)
+                .expect("runtime should serve HTTP"),
+            1
+        );
+        let response = client_thread.join().expect("client should join");
+        assert!(response.contains("codex_router_all_accounts_exhausted"));
+        for canary in [
+            "sensitive-first-label",
+            "sensitive-second-label",
+            "first-secret-token",
+            "second-secret-token",
+        ] {
+            assert!(!response.contains(canary));
+        }
+        assert!(matches!(
+            upstream_listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[test]
     fn assembled_loopback_router_runtime_retries_http_quota_error_on_fallback_account() {
         let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_quota_retry");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -6134,6 +6472,118 @@ mod tests {
 
     #[test]
     #[allow(clippy::result_large_err)]
+    fn served_new_websocket_weekly_floor_routes_only_to_eligible_peer() {
+        const NOW: u64 = 1_030;
+        let temp_dir = ProxyTestTempDir::new("served_new_websocket_weekly_floor");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = SqliteStateStore::open(&database_path).expect("state should open");
+        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let protected = AccountRecord::new(
+            account_id("acct_served_ws_protected"),
+            "protected",
+            AccountStatus::Enabled,
+        );
+        let peer = AccountRecord::new(
+            account_id("acct_served_ws_peer"),
+            "peer",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &protected,
+            5,
+            "protected-ws-token",
+        );
+        persist_account_with_snapshot_and_token(&state, &secrets, &peer, 80, "peer-ws-token");
+        drop(state);
+        seed_computable_weekly_margin_for_test(
+            &database_path,
+            protected.account_id(),
+            NOW,
+            100,
+            6,
+            5,
+        );
+        set_weekly_floor_for_test(&database_path, protected.label(), 500);
+        assert_projected_weekly_margin_for_test(&database_path, protected.account_id(), NOW, 499);
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
+        let upstream_address = upstream_listener.local_addr().expect("address should read");
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (stream, _) = upstream_listener
+                .accept()
+                .expect("peer websocket should arrive");
+            let mut websocket = accept_hdr(stream, |request: &Request, response: Response| {
+                let authorization = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<missing>")
+                    .to_owned();
+                upstream_sender
+                    .send(authorization)
+                    .expect("authorization should record");
+                Ok(response)
+            })
+            .expect("upstream handshake should accept");
+            let first_frame = websocket.read().expect("response.create should arrive");
+            upstream_sender
+                .send(first_frame.to_string())
+                .expect("first frame should record");
+            websocket
+                .send(Message::text(r#"{"type":"response.completed"}"#))
+                .expect("completed response should send");
+        });
+
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("bind should validate"),
+            UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+                .expect("endpoint should validate"),
+            database_path,
+            secret_path,
+        )
+        .with_quota_clock(NOW, 60);
+        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            let mut websocket =
+                connect_local_websocket_with_timeout(router_address, Duration::from_secs(2));
+            websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .expect("client should send response.create");
+            websocket
+                .read()
+                .expect("client should read response.completed")
+                .to_string()
+        });
+
+        assert_eq!(
+            runtime
+                .serve_protocol_connections(1)
+                .expect("runtime should serve websocket"),
+            1
+        );
+        assert_eq!(
+            client_thread.join().expect("client should join"),
+            r#"{"type":"response.completed"}"#
+        );
+        let authorization = upstream_receiver
+            .recv()
+            .expect("upstream authorization should record");
+        assert_eq!(authorization, "Bearer peer-ws-token");
+        assert_eq!(authorization.matches("protected-ws-token").count(), 0);
+        assert_eq!(
+            upstream_receiver.recv().expect("first frame should record"),
+            r#"{"type":"response.create"}"#
+        );
+        upstream_thread.join().expect("upstream should join");
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
     fn loopback_router_runtime_accepts_http_while_websocket_is_blocked() {
         let temp_dir = ProxyTestTempDir::new("runtime_websocket_concurrent_accept");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -7808,6 +8258,170 @@ mod tests {
         if let Err(error) = secrets.write_secret(&token_key, &bundle) {
             panic!("upstream token should persist: {error}");
         }
+    }
+
+    fn set_weekly_floor_for_test(
+        database_path: &Path,
+        account_label: &str,
+        floor_basis_points: u16,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("weekly-floor test runtime should build");
+        runtime.block_on(async {
+            let mutation = AsyncWeeklyQuotaFloorMutationStore::open(database_path)
+                .await
+                .expect("weekly-floor mutation store should open");
+            mutation
+                .set_weekly_quota_floor_by_label(
+                    account_label,
+                    Some(
+                        WeeklyQuotaFloorBasisPoints::new(floor_basis_points)
+                            .expect("weekly floor should validate"),
+                    ),
+                )
+                .await
+                .expect("weekly floor should commit");
+            mutation.close().await;
+        });
+    }
+
+    fn seed_computable_weekly_margin_for_test(
+        database_path: &Path,
+        account_id: &AccountId,
+        now_unix_seconds: u64,
+        history_span_seconds: u64,
+        prior_remaining_percent: u32,
+        current_remaining_percent: u32,
+    ) {
+        let history_start = now_unix_seconds.saturating_sub(history_span_seconds);
+        let history_middle = history_start + history_span_seconds / 2;
+        let weekly_reset = now_unix_seconds + 1;
+        let state = SqliteStateStore::open(database_path).expect("state should reopen for windows");
+        let windows = [
+            PersistedSelectorQuotaWindow::new(
+                account_id.clone(),
+                "responses",
+                18_000,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(90)
+            .with_effective(true)
+            .with_observed_unix_seconds(now_unix_seconds)
+            .with_reset_unix_seconds(now_unix_seconds + 4 * 3_600),
+            PersistedSelectorQuotaWindow::new(
+                account_id.clone(),
+                "responses",
+                604_800,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(current_remaining_percent)
+            .with_effective(false)
+            .with_observed_unix_seconds(now_unix_seconds)
+            .with_reset_unix_seconds(weekly_reset),
+        ];
+        SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+            &state,
+            account_id,
+            "responses",
+            &windows,
+            now_unix_seconds,
+            now_unix_seconds + 300,
+        )
+        .expect("fresh selector windows should persist atomically");
+        drop(state);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("weekly-margin test runtime should build");
+        runtime.block_on(async {
+            let state = AsyncSqliteStateStore::open(database_path)
+                .await
+                .expect("async state should open for history");
+            append_history_series_with_reset(
+                &state,
+                account_id,
+                "responses",
+                604_800,
+                weekly_reset,
+                &[
+                    (history_start, prior_remaining_percent),
+                    (history_middle, prior_remaining_percent),
+                    (now_unix_seconds, current_remaining_percent),
+                ],
+            )
+            .await;
+            record_completed_active_session(
+                &state,
+                account_id,
+                &format!("process-floor-margin-{}", account_id.as_str()),
+                &format!("reservation-floor-margin-{}", account_id.as_str()),
+                history_start,
+                now_unix_seconds,
+            )
+            .await;
+            state
+                .refresh_active_session_rollups_for_interval(
+                    "responses",
+                    history_start,
+                    now_unix_seconds,
+                    300,
+                )
+                .await
+                .expect("active-session rollups should refresh");
+            state.close().await.expect("async state should close");
+        });
+    }
+
+    fn assert_projected_weekly_margin_for_test(
+        database_path: &Path,
+        account_id: &AccountId,
+        now_unix_seconds: u64,
+        expected_margin_basis_points: i64,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("weekly-margin assertion runtime should build");
+        runtime.block_on(async {
+            let state = AsyncSqliteStateStore::open(database_path)
+                .await
+                .expect("async state should open for margin assertion");
+            let projection = project_route_band_selection_inputs_with_active_counts(
+                &state,
+                "responses",
+                now_unix_seconds,
+                60,
+                None,
+            )
+            .await
+            .expect("weekly-margin projection should load");
+            let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+                RouteBand::Responses,
+                now_unix_seconds,
+                projection.accounts().to_vec(),
+            ));
+            let account = assessment
+                .accounts()
+                .iter()
+                .find(|account| account.account_id() == account_id)
+                .expect("weekly-margin account should be assessed");
+            assert_eq!(
+                account.weekly_survival_margin_basis_points(),
+                Some(expected_margin_basis_points)
+            );
+            if expected_margin_basis_points >= 500 {
+                assert_eq!(
+                    account.routing_exclusion(),
+                    codex_router_selection::burn_down::RoutingExclusion::None,
+                    "equality assessment should be selectable: {account:?}"
+                );
+                assert_eq!(assessment.preferred_next(), Some(account.account_id()));
+            }
+            state.close().await.expect("assertion state should close");
+        });
     }
 
     async fn append_history_series_with_reset(

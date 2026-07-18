@@ -164,6 +164,59 @@ fn quota_status_view_model_reports_serving_clients_from_active_mirror() {
 }
 
 #[test]
+fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
+    let mut report = quota_capture_report();
+    let row = report
+        .rows
+        .get_mut(0)
+        .unwrap_or_else(|| panic!("capture report should include a selected row"));
+    row.weekly_quota_floor_basis_points = Some(500);
+    row.routing_exclusion = RoutingExclusion::WeeklyQuotaFloor;
+    row.quota_evidence_reason = QuotaEvidenceReason::WeeklyQuotaFloor;
+    row.routing_reason = RoutingReason::ExcludedWeeklyQuotaFloor;
+    row.routing = format_routing_reason(row.routing_reason).to_owned();
+    row.next_use = format_next_use_from_routing_reason(row.routing_reason).to_owned();
+
+    let mut json_output = Vec::new();
+    must_ok(write_quota_json(&mut json_output, &report));
+    let json: serde_json::Value = must_ok(serde_json::from_slice(&json_output));
+    assert_eq!(json["accounts"][0]["weekly_quota_floor_basis_points"], 500);
+    assert_eq!(json["accounts"][0]["weekly_quota_floor_percent"], 5);
+    assert_eq!(
+        json["accounts"][0]["routing_exclusion"],
+        "excluded_weekly_quota_floor"
+    );
+    assert_eq!(
+        json["accounts"][0]["routing_reason"],
+        "excluded_weekly_quota_floor"
+    );
+
+    let mut plain_output = Vec::new();
+    must_ok(write_quota_plain(&mut plain_output, &report));
+    let plain = must_ok(String::from_utf8(plain_output));
+    assert!(plain.contains("weekly floor"));
+    assert!(plain.contains("\t5%\t"));
+    assert!(plain.contains("blocked: weekly quota floor"));
+
+    let view_model = quota_status_view_model(&report, report.rows(), 120);
+    let selected = view_model
+        .selected
+        .unwrap_or_else(|| panic!("capture should include selected details"));
+    assert_eq!(selected.reason, "blocked: weekly quota floor");
+    assert!(selected.guards.contains("floor 5%"));
+
+    for width in [48, 160] {
+        let mut tui_output = Vec::new();
+        must_ok(write_quota_table(&mut tui_output, &report, Some(width)));
+        let text = must_ok(String::from_utf8(tui_output));
+        assert!(
+            text.contains("floor 5%"),
+            "weekly floor should remain visible at width {width}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn quota_status_table_can_emit_terminal_color() {
     let report = quota_capture_report();
     let mut output = Vec::new();

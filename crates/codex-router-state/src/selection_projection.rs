@@ -12,6 +12,7 @@ use codex_router_selection::run_rate::QuotaRunRateConfidence;
 use futures_util::future::BoxFuture;
 
 use crate::account::AccountStatus;
+use crate::account_routing_policy::AccountRoutingPolicy;
 use crate::quota_snapshot::PersistedQuotaHistoryObservation;
 use crate::quota_snapshot::PersistedSelectorQuotaWindow;
 use crate::quota_snapshot::SelectorQuotaInput;
@@ -46,6 +47,11 @@ impl RouteBandSelectionProjection {
 
 /// Async state operations required to project selector inputs.
 pub trait AsyncSelectionProjectionRepository {
+    /// Bulk-loads all enabled per-account routing policies.
+    fn list_account_routing_policies(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>>;
+
     /// Loads selector inputs for one route band.
     fn selector_inputs_for_route_band<'a>(
         &'a self,
@@ -98,6 +104,12 @@ pub trait AsyncSelectionProjectionRepository {
 }
 
 impl AsyncSelectionProjectionRepository for AsyncSqliteStateStore {
+    fn list_account_routing_policies(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>> {
+        Box::pin(async move { self.list_account_routing_policies().await })
+    }
+
     fn selector_inputs_for_route_band<'a>(
         &'a self,
         route_band: &'a str,
@@ -295,6 +307,16 @@ async fn project_route_band_selection_inputs_with_active_counts_internal<R>(
 where
     R: AsyncSelectionProjectionRepository + Sync,
 {
+    let account_routing_policies = state.list_account_routing_policies().await?;
+    let weekly_quota_floors = account_routing_policies
+        .into_iter()
+        .map(|policy| {
+            (
+                policy.account_id().clone(),
+                u32::from(policy.weekly_quota_floor_basis_points().basis_points()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let selector_inputs = state
         .selector_inputs_for_route_band(route_band, now_unix_seconds)
         .await?;
@@ -380,12 +402,16 @@ where
             windows.push(fact);
         }
 
-        projected_accounts.push(
+        let mut projected_account =
             BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
                 .with_account_enabled(input.account_status() == AccountStatus::Enabled)
                 .with_active_credential(input.active_credential_generation().is_some())
-                .with_current_active_sessions(current_active_sessions),
-        );
+                .with_current_active_sessions(current_active_sessions);
+        if let Some(floor_basis_points) = weekly_quota_floors.get(input.account_id()).copied() {
+            projected_account =
+                projected_account.with_weekly_quota_floor_basis_points(floor_basis_points);
+        }
+        projected_accounts.push(projected_account);
     }
 
     Ok(RouteBandSelectionProjection::new(projected_accounts))
@@ -632,11 +658,15 @@ fn projected_exhaustion_unix_seconds(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use codex_router_core::ids::AccountId;
 
+    use crate::account::AccountRecord;
     use crate::account::AccountStatus;
+    use crate::account_routing_policy::WeeklyQuotaFloorBasisPoints;
+    use crate::sqlite::AsyncWeeklyQuotaFloorMutationStore;
 
     use super::*;
 
@@ -699,11 +729,158 @@ mod tests {
             "the fixture should reach rollup estimation instead of passing before the refresh boundary"
         );
         assert_eq!(
+            state.policy_bulk_reads.load(Ordering::SeqCst),
+            1,
+            "projection should bulk-load account policies exactly once"
+        );
+        assert_eq!(
             projection.accounts()[0].current_active_sessions(),
             2,
             "projection should use the read-only active-count snapshot"
         );
         assert_eq!(projection.accounts()[0].account_id(), &account_id);
+    }
+
+    #[tokio::test]
+    async fn projection_bulk_policy_read_is_account_isolated_and_visible_after_commit() {
+        let temp_dir = ProjectionTempDir::new("policy_projection_visibility");
+        let database_path = temp_dir.path.join("state.sqlite");
+        let state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        let protected_account_id = account_id("acct_projection_protected");
+        let unprotected_account_id = account_id("acct_projection_unprotected");
+        for (account_id, label) in [
+            (&protected_account_id, "protected"),
+            (&unprotected_account_id, "unprotected"),
+        ] {
+            state
+                .upsert_account(&AccountRecord::new(
+                    account_id.clone(),
+                    label,
+                    AccountStatus::Enabled,
+                ))
+                .await
+                .expect("account should persist");
+            for route_band in ["responses", "models"] {
+                state
+                    .upsert_selector_quota_window(
+                        &PersistedSelectorQuotaWindow::new(
+                            account_id.clone(),
+                            route_band,
+                            604_800,
+                            SelectorQuotaWindowStatus::Eligible,
+                        )
+                        .with_remaining_headroom(50)
+                        .with_reset_unix_seconds(10_000)
+                        .with_observed_unix_seconds(1_000)
+                        .with_effective(true),
+                    )
+                    .await
+                    .expect("selector window should persist");
+            }
+        }
+
+        let before_commit =
+            project_route_band_selection_inputs_read_only(&state, "responses", 1_000, 7_200)
+                .await
+                .expect("pre-commit projection should succeed");
+        assert!(
+            before_commit
+                .accounts()
+                .iter()
+                .all(|account| account.weekly_quota_floor_basis_points().is_none())
+        );
+
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .expect("mutation store should open");
+        mutation
+            .set_weekly_quota_floor_by_label(
+                "protected",
+                Some(WeeklyQuotaFloorBasisPoints::new(500).expect("valid floor")),
+            )
+            .await
+            .expect("policy should commit");
+        mutation.close().await;
+
+        for route_band in ["responses", "models"] {
+            let projection =
+                project_route_band_selection_inputs_read_only(&state, route_band, 1_000, 7_200)
+                    .await
+                    .expect("post-commit projection should succeed");
+            let protected = projection
+                .accounts()
+                .iter()
+                .find(|account| account.account_id() == &protected_account_id)
+                .expect("protected account should project");
+            let unprotected = projection
+                .accounts()
+                .iter()
+                .find(|account| account.account_id() == &unprotected_account_id)
+                .expect("unprotected account should project");
+            assert_eq!(protected.weekly_quota_floor_basis_points(), Some(500));
+            assert_eq!(unprotected.weekly_quota_floor_basis_points(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_persisted_policy_error_fails_the_whole_projection() {
+        let state = ReadOnlyProjectionPurityRepository::with_policy_error(account_id(
+            "acct_invalid_policy",
+        ));
+
+        assert_eq!(
+            project_route_band_selection_inputs_read_only(&state, "responses", 1_000, 7_200).await,
+            Err(StateStoreError::CorruptAccountRoutingPolicy)
+        );
+        assert_eq!(state.policy_bulk_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(state.read_only_active_count_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(state.rollup_refreshes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn writable_projection_bulk_loads_policy_once_and_attaches_it() {
+        let account_id = account_id("acct_writable_policy");
+        let state = ReadOnlyProjectionPurityRepository::with_policy_floor(
+            account_id.clone(),
+            WeeklyQuotaFloorBasisPoints::new(700).expect("valid floor"),
+        );
+
+        let projection = project_route_band_selection_inputs(&state, "responses", 1_000, 7_200)
+            .await
+            .expect("writable projection should succeed");
+
+        assert_eq!(state.policy_bulk_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mutating_active_count_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(state.read_only_active_count_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            projection.accounts()[0].weekly_quota_floor_basis_points(),
+            Some(700)
+        );
+    }
+
+    struct ProjectionTempDir {
+        path: PathBuf,
+    }
+
+    impl ProjectionTempDir {
+        fn new(name: &str) -> Self {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "codex-router-state-projection-{name}-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("projection temp dir should create");
+            Self { path }
+        }
+    }
+
+    impl Drop for ProjectionTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 
     struct ActiveCountUnavailableProjectionRepository {
@@ -717,6 +894,12 @@ mod tests {
     }
 
     impl AsyncSelectionProjectionRepository for ActiveCountUnavailableProjectionRepository {
+        fn list_account_routing_policies(
+            &self,
+        ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
         fn selector_inputs_for_route_band<'a>(
             &'a self,
             route_band: &'a str,
@@ -798,6 +981,10 @@ mod tests {
         read_only_active_count_reads: AtomicUsize,
         rollup_refreshes: AtomicUsize,
         rollup_reads: AtomicUsize,
+        policy_bulk_reads: AtomicUsize,
+        policy_error: bool,
+        policy_floor: Option<WeeklyQuotaFloorBasisPoints>,
+        allow_mutating_active_count_read: bool,
     }
 
     impl ReadOnlyProjectionPurityRepository {
@@ -808,11 +995,51 @@ mod tests {
                 read_only_active_count_reads: AtomicUsize::new(0),
                 rollup_refreshes: AtomicUsize::new(0),
                 rollup_reads: AtomicUsize::new(0),
+                policy_bulk_reads: AtomicUsize::new(0),
+                policy_error: false,
+                policy_floor: None,
+                allow_mutating_active_count_read: false,
+            }
+        }
+
+        fn with_policy_error(account_id: AccountId) -> Self {
+            Self {
+                policy_error: true,
+                ..Self::new(account_id)
+            }
+        }
+
+        fn with_policy_floor(
+            account_id: AccountId,
+            policy_floor: WeeklyQuotaFloorBasisPoints,
+        ) -> Self {
+            Self {
+                policy_floor: Some(policy_floor),
+                allow_mutating_active_count_read: true,
+                ..Self::new(account_id)
             }
         }
     }
 
     impl AsyncSelectionProjectionRepository for ReadOnlyProjectionPurityRepository {
+        fn list_account_routing_policies(
+            &self,
+        ) -> BoxFuture<'_, Result<Vec<AccountRoutingPolicy>, StateStoreError>> {
+            Box::pin(async move {
+                self.policy_bulk_reads.fetch_add(1, Ordering::SeqCst);
+                if self.policy_error {
+                    Err(StateStoreError::CorruptAccountRoutingPolicy)
+                } else if let Some(policy_floor) = self.policy_floor {
+                    Ok(vec![AccountRoutingPolicy::new(
+                        self.account_id.clone(),
+                        policy_floor,
+                    )])
+                } else {
+                    Ok(Vec::new())
+                }
+            })
+        }
+
         fn selector_inputs_for_route_band<'a>(
             &'a self,
             route_band: &'a str,
@@ -849,9 +1076,14 @@ mod tests {
             Box::pin(async move {
                 self.mutating_active_count_reads
                     .fetch_add(1, Ordering::SeqCst);
-                Err(StateStoreError::Sqlite {
-                    message: "read-only projection called mutating active-count reader".to_owned(),
-                })
+                if self.allow_mutating_active_count_read {
+                    Ok(vec![ActiveClientCount::new(self.account_id.clone(), 2, 2)])
+                } else {
+                    Err(StateStoreError::Sqlite {
+                        message: "read-only projection called mutating active-count reader"
+                            .to_owned(),
+                    })
+                }
             })
         }
 
@@ -928,9 +1160,13 @@ mod tests {
         ) -> BoxFuture<'a, Result<(), StateStoreError>> {
             Box::pin(async move {
                 self.rollup_refreshes.fetch_add(1, Ordering::SeqCst);
-                Err(StateStoreError::Sqlite {
-                    message: "read-only projection called rollup refresh".to_owned(),
-                })
+                if self.allow_mutating_active_count_read {
+                    Ok(())
+                } else {
+                    Err(StateStoreError::Sqlite {
+                        message: "read-only projection called rollup refresh".to_owned(),
+                    })
+                }
             })
         }
     }

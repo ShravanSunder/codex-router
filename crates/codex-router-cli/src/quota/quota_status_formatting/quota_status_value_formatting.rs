@@ -434,6 +434,7 @@ pub(in crate::quota) fn format_routing_reason(reason: RoutingReason) -> &'static
         RoutingReason::RetiringNearZero => "retiring: near zero quota",
         RoutingReason::ExcludedDisabled => "excluded: account disabled",
         RoutingReason::ExcludedMissingCredential => "excluded: missing credential",
+        RoutingReason::ExcludedWeeklyQuotaFloor => "blocked: weekly quota floor",
         RoutingReason::BlockedWindowExhausted => "blocked: quota empty",
         RoutingReason::BlockedWindowIneligible => "blocked: quota ineligible",
     }
@@ -463,6 +464,7 @@ pub(in crate::quota) fn format_next_use_from_routing_reason(reason: RoutingReaso
         RoutingReason::RetiringNearZero => "retiring",
         RoutingReason::ExcludedDisabled
         | RoutingReason::ExcludedMissingCredential
+        | RoutingReason::ExcludedWeeklyQuotaFloor
         | RoutingReason::BlockedWindowExhausted
         | RoutingReason::BlockedWindowIneligible => "blocked",
     }

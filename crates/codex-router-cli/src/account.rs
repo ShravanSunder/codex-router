@@ -18,9 +18,11 @@ use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
+use codex_router_state::account_routing_policy::WeeklyQuotaFloorBasisPoints;
 #[cfg(test)]
 use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
+use codex_router_state::sqlite::AsyncWeeklyQuotaFloorMutationStore;
 #[cfg(test)]
 use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
@@ -75,6 +77,15 @@ pub enum AccountCommand {
         /// Router-owned root.
         router_root: PathBuf,
     },
+    /// Sets or disables one account's weekly quota floor.
+    SetWeeklyFloor {
+        /// Router-owned root.
+        router_root: PathBuf,
+        /// Exact display label used to resolve one account.
+        account_label: String,
+        /// Integer percentage from zero through ten.
+        percent: u16,
+    },
 }
 
 impl AccountCommand {
@@ -128,6 +139,18 @@ impl AccountCommand {
                 let options = AccountRootOptions::parse(parser)?;
                 Ok(Self::List {
                     router_root: options.router_root()?,
+                })
+            }
+            "set-weekly-floor" => {
+                if parser.next_if_help()? {
+                    parser.reject_remaining()?;
+                    return Ok(Self::Help(ACCOUNT_SET_WEEKLY_FLOOR_HELP_TEXT));
+                }
+                let options = AccountSetWeeklyFloorOptions::parse(parser)?;
+                Ok(Self::SetWeeklyFloor {
+                    router_root: options.router_root()?,
+                    account_label: options.account_label()?,
+                    percent: options.percent()?,
                 })
             }
             unknown => Err(CliError::UnknownCommand {
@@ -209,6 +232,30 @@ pub enum AccountCommandError {
     /// Display label was empty.
     #[error("account label must not be empty")]
     EmptyLabel,
+    /// A setter option was supplied more than once.
+    #[error("weekly floor option supplied more than once: {option}")]
+    DuplicateWeeklyFloorOption {
+        /// Duplicated option name.
+        option: &'static str,
+    },
+    /// The configured percentage was not an integer in the supported range.
+    #[error("weekly floor percent must be an integer from 0 through 10")]
+    InvalidWeeklyFloorPercent,
+    /// No configured account has the supplied exact label.
+    #[error("weekly floor account label did not match a configured account")]
+    WeeklyFloorAccountNotFound,
+    /// More than one configured account has the supplied exact label.
+    #[error("weekly floor account label matched more than one configured account")]
+    WeeklyFloorAccountAmbiguous,
+    /// SQLite writer contention exceeded the state layer's bounded retry window.
+    #[error("failed to update weekly floor: database is busy; retry the command")]
+    WeeklyFloorDatabaseBusy,
+    /// The router must migrate the database before the setter can write policy.
+    #[error("weekly quota floor requires a compatible upgraded router database")]
+    WeeklyFloorSchemaUpgradeRequired,
+    /// A weekly-floor state operation failed without exposing storage details.
+    #[error("weekly floor state operation failed")]
+    WeeklyFloorStateOperationFailed,
     /// Secret-store operation failed.
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
@@ -271,6 +318,11 @@ pub fn run_account_command(
             AccountImportOutputMode::Import,
         ),
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
+        AccountCommand::SetWeeklyFloor {
+            router_root,
+            account_label,
+            percent,
+        } => set_weekly_floor(stdout, router_root, account_label, percent),
     }
 }
 
@@ -280,6 +332,7 @@ codex-router account
 commands:
   login --label <name>  Add an OAuth account with device-code login
   list                  Show configured router accounts
+  set-weekly-floor      Set or disable one account's weekly quota floor
 ";
 
 const ACCOUNT_LOGIN_HELP_TEXT: &str = "\
@@ -296,6 +349,12 @@ const ACCOUNT_LIST_HELP_TEXT: &str = "\
 codex-router account list
 
 Shows configured router accounts.
+";
+
+const ACCOUNT_SET_WEEKLY_FLOOR_HELP_TEXT: &str = "\
+codex-router account set-weekly-floor --account <label> --percent <0-10>
+
+Sets an integer weekly quota floor for exactly one account label. Zero disables it.
 ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -582,19 +641,84 @@ pub async fn import_codex_auth_from_request_async(
 
 fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), AccountCommandError> {
     let runtime = account_command_runtime()?;
-    let state = runtime.block_on(AsyncSqliteStateStore::open(
+    let state = runtime.block_on(AsyncSqliteStateStore::open_read_only(
         &router_root.join("state.sqlite"),
     ))?;
     let accounts = runtime.block_on(state.list_accounts())?;
+    let policies = runtime.block_on(state.list_account_routing_policies())?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(["account", "status"]);
+    table.set_header(["account", "status", "weekly floor"]);
     for account in accounts {
-        table.add_row([account.label(), account.status().as_str()]);
+        let weekly_floor = policies
+            .iter()
+            .find(|policy| policy.account_id() == account.account_id())
+            .map_or_else(
+                || "disabled".to_owned(),
+                |policy| format!("{}%", policy.weekly_quota_floor_basis_points().percent()),
+            );
+        table.add_row([account.label(), account.status().as_str(), &weekly_floor]);
     }
     writeln!(stdout, "{table}").map_err(AccountCommandError::Stdout)?;
 
     Ok(())
+}
+
+fn set_weekly_floor(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    account_label: String,
+    percent: u16,
+) -> Result<(), AccountCommandError> {
+    let runtime = account_command_runtime()?;
+    let database_path = router_root.join("state.sqlite");
+    let floor = if percent == 0 {
+        None
+    } else {
+        let basis_points = percent
+            .checked_mul(100)
+            .ok_or(AccountCommandError::InvalidWeeklyFloorPercent)?;
+        Some(
+            WeeklyQuotaFloorBasisPoints::new(basis_points)
+                .map_err(|_| AccountCommandError::InvalidWeeklyFloorPercent)?,
+        )
+    };
+    let mutation = runtime
+        .block_on(AsyncWeeklyQuotaFloorMutationStore::open(&database_path))
+        .map_err(redacted_weekly_floor_state_error)?;
+    let mutation_result =
+        runtime.block_on(mutation.set_weekly_quota_floor_by_label(&account_label, floor));
+    runtime.block_on(mutation.close());
+    mutation_result.map_err(redacted_weekly_floor_state_error)?;
+
+    if percent == 0 {
+        writeln!(
+            stdout,
+            "updated weekly floor: {account_label} = disabled (0%)"
+        )
+        .map_err(AccountCommandError::Stdout)
+    } else {
+        writeln!(stdout, "updated weekly floor: {account_label} = {percent}%")
+            .map_err(AccountCommandError::Stdout)
+    }
+}
+
+fn redacted_weekly_floor_state_error(error: StateStoreError) -> AccountCommandError {
+    match error {
+        StateStoreError::WeeklyQuotaFloorDatabaseBusy => {
+            AccountCommandError::WeeklyFloorDatabaseBusy
+        }
+        StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired => {
+            AccountCommandError::WeeklyFloorSchemaUpgradeRequired
+        }
+        StateStoreError::WeeklyQuotaFloorAccountNotFound => {
+            AccountCommandError::WeeklyFloorAccountNotFound
+        }
+        StateStoreError::WeeklyQuotaFloorAccountLabelAmbiguous => {
+            AccountCommandError::WeeklyFloorAccountAmbiguous
+        }
+        _ => AccountCommandError::WeeklyFloorStateOperationFailed,
+    }
 }
 
 fn account_command_runtime() -> Result<tokio::runtime::Runtime, AccountCommandError> {
@@ -855,6 +979,79 @@ impl AccountImportOptions {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AccountRootOptions {
     router_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct AccountSetWeeklyFloorOptions {
+    router_root: Option<PathBuf>,
+    account_label: Option<String>,
+    percent: Option<u16>,
+}
+
+impl AccountSetWeeklyFloorOptions {
+    fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
+        let mut options = Self::default();
+        while let Some(argument) = parser.next_string()? {
+            match argument.as_str() {
+                "--router-root" => {
+                    if options.router_root.is_some() {
+                        return Err(AccountCommandError::DuplicateWeeklyFloorOption {
+                            option: "--router-root",
+                        }
+                        .into());
+                    }
+                    options.router_root =
+                        Some(PathBuf::from(parser.next_required_value("--router-root")?));
+                }
+                "--account" => {
+                    if options.account_label.is_some() {
+                        return Err(AccountCommandError::DuplicateWeeklyFloorOption {
+                            option: "--account",
+                        }
+                        .into());
+                    }
+                    options.account_label = Some(parser.next_required_value("--account")?);
+                }
+                "--percent" => {
+                    if options.percent.is_some() {
+                        return Err(AccountCommandError::DuplicateWeeklyFloorOption {
+                            option: "--percent",
+                        }
+                        .into());
+                    }
+                    let raw_percent = parser.next_required_value("--percent")?;
+                    let percent = raw_percent
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|percent| *percent <= 10)
+                        .ok_or(AccountCommandError::InvalidWeeklyFloorPercent)?;
+                    options.percent = Some(percent);
+                }
+                unknown => {
+                    return Err(CliError::UnknownOption {
+                        option: unknown.to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(options)
+    }
+
+    fn router_root(&self) -> Result<PathBuf, CliError> {
+        router_root_or_default(self.router_root.clone())
+    }
+
+    fn account_label(&self) -> Result<String, CliError> {
+        self.account_label.clone().ok_or(CliError::MissingOption {
+            option: "--account",
+        })
+    }
+
+    fn percent(&self) -> Result<u16, CliError> {
+        self.percent.ok_or(CliError::MissingOption {
+            option: "--percent",
+        })
+    }
 }
 
 impl AccountRootOptions {

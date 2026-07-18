@@ -50,7 +50,7 @@ pub(super) fn write_quota_plain(
     writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     writeln!(
         stdout,
-        "account\tstatus\t5h\tweekly\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
+        "account\tstatus\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
@@ -60,11 +60,15 @@ pub(super) fn write_quota_plain(
             sample_metadata_from_display_windows(&row.windows, report.now_unix_seconds);
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
             row.account_status,
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
+            row.weekly_quota_floor_basis_points.map_or_else(
+                || "disabled".to_owned(),
+                |floor| format!("{}%", floor / 100)
+            ),
             plain_reset_pace_summary(&reset_pace),
             plain_sample_metadata_summary(&sample_metadata),
             row.updated.replace('\n', " "),
