@@ -23,6 +23,7 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use codex_router_core::redaction::safe_account_label;
 use codex_router_core::routes::RouteBand;
+use codex_router_proxy::websocket::WebSocketQuotaFloorNotifier;
 use codex_router_selection::burn_down::AccountAvailability;
 use codex_router_selection::burn_down::BurnDownAccountAssessment;
 use codex_router_selection::burn_down::BurnDownAccountInput;

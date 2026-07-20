@@ -1,5 +1,20 @@
 use super::*;
 
+pub(crate) trait WeeklyQuotaFloorReachedObserver: Send + Sync {
+    fn weekly_quota_floor_reached(&self, account_id: &AccountId);
+}
+
+pub(crate) struct QuotaRefreshObservationContext<'a> {
+    pub(crate) observed_unix_seconds: u64,
+    pub(crate) weekly_floor_observer: Option<&'a dyn WeeklyQuotaFloorReachedObserver>,
+}
+
+impl WeeklyQuotaFloorReachedObserver for WebSocketQuotaFloorNotifier {
+    fn weekly_quota_floor_reached(&self, account_id: &AccountId) {
+        self.signal_weekly_quota_floor_reached(account_id);
+    }
+}
+
 pub(crate) async fn refresh_quota_with_dependencies<R, P>(
     stdout: &mut impl Write,
     router_root: PathBuf,
@@ -37,8 +52,51 @@ where
     R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
+    refresh_quota_store_paths_with_dependencies_and_floor_notifier(
+        stdout,
+        state_db,
+        _secret_root,
+        base_url,
+        credential_resolver,
+        quota_provider,
+        QuotaRefreshObservationContext {
+            observed_unix_seconds,
+            weekly_floor_observer: None,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn refresh_quota_store_paths_with_dependencies_and_floor_notifier<R, P>(
+    stdout: &mut impl Write,
+    state_db: &Path,
+    _secret_root: &Path,
+    base_url: String,
+    credential_resolver: &R,
+    quota_provider: &P,
+    observation_context: QuotaRefreshObservationContext<'_>,
+) -> Result<(), QuotaCommandError>
+where
+    R: AsyncProviderCredentialResolver,
+    P: QuotaRefreshProvider,
+{
+    let QuotaRefreshObservationContext {
+        observed_unix_seconds,
+        weekly_floor_observer,
+    } = observation_context;
     let quota_history_state = AsyncSqliteStateStore::open(state_db).await?;
     let accounts = quota_history_state.list_accounts().await?;
+    let weekly_quota_floors = quota_history_state
+        .list_account_routing_policies()
+        .await?
+        .into_iter()
+        .map(|policy| {
+            (
+                policy.account_id().clone(),
+                u32::from(policy.weekly_quota_floor_basis_points().basis_points()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut refreshed_count = 0_u64;
     let mut failed_count = 0_u64;
     for account in accounts
@@ -238,6 +296,17 @@ where
                     stale_after_unix_seconds(observed_unix_seconds),
                 )
                 .await?;
+            if *route_band == USER_QUOTA_ROUTE_BAND
+                && let Some(floor_basis_points) =
+                    weekly_quota_floors.get(account.account_id()).copied()
+                && response.windows.iter().any(|window| {
+                    window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS
+                        && window.remaining_headroom.saturating_mul(100) <= floor_basis_points
+                })
+                && let Some(weekly_floor_observer) = weekly_floor_observer
+            {
+                weekly_floor_observer.weekly_quota_floor_reached(account.account_id());
+            }
             tracing::info!(
                 account.hash = telemetry_hash(account.account_id().as_str()),
                 route_band,

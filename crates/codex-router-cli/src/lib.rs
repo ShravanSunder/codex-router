@@ -226,6 +226,7 @@ where
                     secret_root,
                     DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
                     Duration::from_secs(command.quota_refresh_interval_seconds),
+                    runtime.websocket_quota_floor_notifier(),
                 )?)
             } else {
                 None
@@ -1433,11 +1434,14 @@ mod tests {
     use crate::quota::BackgroundQuotaRefreshRuntime;
     use crate::quota::HttpQuotaRefreshProvider;
     use crate::quota::QuotaCommand;
+    use crate::quota::QuotaRefreshObservationContext;
     use crate::quota::QuotaRefreshProvider;
     use crate::quota::QuotaRefreshProviderRequest;
     use crate::quota::QuotaRefreshProviderResponse;
     use crate::quota::QuotaRefreshProviderWindow;
+    use crate::quota::WeeklyQuotaFloorReachedObserver;
     use crate::quota::refresh_quota_store_paths_with_dependencies as refresh_quota_store_paths_with_dependencies_async;
+    use crate::quota::refresh_quota_store_paths_with_dependencies_and_floor_notifier as refresh_quota_store_paths_with_dependencies_and_floor_notifier_async;
     use crate::quota::refresh_quota_with_dependencies as refresh_quota_with_dependencies_async;
     use crate::quota::start_background_quota_refresh_worker_with_clock;
     use crate::quota::start_background_quota_refresh_worker_with_dependencies;
@@ -1492,6 +1496,43 @@ mod tests {
             quota_provider,
             observed_unix_seconds,
         ))
+    }
+
+    fn refresh_quota_store_paths_with_floor_observer<R, P>(
+        stdout: &mut impl Write,
+        state_db: &Path,
+        secret_root: &Path,
+        base_url: String,
+        credential_resolver: &R,
+        quota_provider: &P,
+        observation_context: QuotaRefreshObservationContext<'_>,
+    ) -> Result<(), crate::quota::QuotaCommandError>
+    where
+        R: AsyncProviderCredentialResolver,
+        P: QuotaRefreshProvider,
+    {
+        test_async_runtime().block_on(
+            refresh_quota_store_paths_with_dependencies_and_floor_notifier_async(
+                stdout,
+                state_db,
+                secret_root,
+                base_url,
+                credential_resolver,
+                quota_provider,
+                observation_context,
+            ),
+        )
+    }
+
+    #[derive(Default)]
+    struct RecordingWeeklyFloorObserver {
+        account_ids: Mutex<Vec<AccountId>>,
+    }
+
+    impl WeeklyQuotaFloorReachedObserver for RecordingWeeklyFloorObserver {
+        fn weekly_quota_floor_reached(&self, account_id: &AccountId) {
+            lock_test_mutex(&self.account_ids, "weekly floor observer").push(account_id.clone());
+        }
     }
 
     fn test_async_runtime() -> tokio::runtime::Runtime {
@@ -4521,17 +4562,49 @@ exit 42
         );
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-        let provider = RecordingQuotaRefreshProvider::new(37);
+        let provider = StaticQuotaRefreshProvider::new(vec![
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 18_000,
+                remaining_headroom: 37,
+                reset_unix_seconds: Some(20_000),
+                effective: true,
+            },
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 604_800,
+                remaining_headroom: 15,
+                reset_unix_seconds: Some(614_800),
+                effective: false,
+            },
+        ]);
         let mut stdout = Vec::new();
+        let mutation = must_ok(test_async_runtime().block_on(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
+        ));
+        must_ok(
+            test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
+                &account_id,
+                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_500))),
+            )),
+        );
+        test_async_runtime().block_on(mutation.close());
+        let floor_observer = RecordingWeeklyFloorObserver::default();
 
-        must_ok(refresh_quota_with_dependencies(
+        must_ok(refresh_quota_store_paths_with_floor_observer(
             &mut stdout,
-            router_root.clone(),
+            &router_root.join("state.sqlite"),
+            &router_root.join("secrets"),
             "https://chatgpt.com/backend-api".to_owned(),
             &resolver,
             &provider,
-            1_100,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds: 1_100,
+                weekly_floor_observer: Some(&floor_observer),
+            },
         ));
+        assert_eq!(
+            *lock_test_mutex(&floor_observer.account_ids, "weekly floor observer"),
+            vec![account_id]
+        );
 
         let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
             &state,
@@ -4549,7 +4622,7 @@ exit 42
         assert!(windows[0].effective());
         assert_eq!(windows[1].limit_window_seconds(), 604_800);
         assert_eq!(windows[1].status(), SelectorQuotaWindowStatus::Eligible);
-        assert_eq!(windows[1].remaining_headroom(), 50);
+        assert_eq!(windows[1].remaining_headroom(), 15);
         assert_eq!(windows[1].reset_unix_seconds(), Some(614_800));
         assert_eq!(windows[1].observed_unix_seconds(), 1_100);
         assert!(!windows[1].effective());
