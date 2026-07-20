@@ -111,6 +111,18 @@ mod quota_reset_pty_test {
             "terminal transcript contained a child panic",
         )?;
         ensure(
+            transcript.contains("\u{1b}[?1049h")
+                && transcript.contains("\u{1b}[?1003h")
+                && transcript.contains("\u{1b}[?1006h"),
+            "fullscreen quota TUI did not enable alternate-screen mouse capture",
+        )?;
+        ensure(
+            transcript.contains("\u{1b}[?1006l")
+                && transcript.contains("\u{1b}[?1003l")
+                && transcript.contains("\u{1b}[?1049l"),
+            "fullscreen quota TUI did not restore mouse and alternate-screen modes",
+        )?;
+        ensure(
             transcript.contains("\u{1b}[?25h") || transcript.contains("\u{1b}[?1049l"),
             "terminal restoration sequence was not observed",
         )?;
@@ -231,6 +243,137 @@ mod quota_reset_pty_test {
             "terminal transcript contained a child panic",
         )?;
         assert_no_printable_output_after_terminal_restoration(transcript.as_bytes())?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compiled_quota_tui_floor_arrow_handles_real_mouse_click() -> TestResult<()> {
+        let fixture = QuotaResetFixture::create().await?;
+        let provider = HeldLoopbackProvider::bind()?;
+        let arguments = [
+            OsString::from("--router-root"),
+            fixture.root().as_os_str().to_owned(),
+            OsString::from("--fixture-capability"),
+            OsString::from(fixture.capability()),
+            OsString::from("--provider-listener"),
+            OsString::from(provider.address().to_string()),
+        ];
+        let mut terminal = TerminalDriver::spawn(
+            Path::new(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness")),
+            arguments,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )?;
+
+        stage(
+            terminal.wait_for_text("ctrl-e edit floor", SEMANTIC_WAIT),
+            "initial floor browse",
+        )?;
+        terminal.send(&[0x05])?;
+        stage(
+            terminal.wait_for_text("Weekly floor", SEMANTIC_WAIT),
+            "weekly-floor editor",
+        )?;
+        let click_start = terminal.transcript_len();
+        terminal.send_sgr_mouse_left_down(22, 19)?;
+        stage(
+            terminal.wait_for_text_after("1%", click_start, SEMANTIC_WAIT),
+            "pointer-incremented floor",
+        )?;
+        terminal.send(b"\x1b")?;
+        terminal.wait_for_text("ctrl-e edit floor", SEMANTIC_WAIT)?;
+        terminal.send(b"q")?;
+
+        let transcript = terminal.finish(SEMANTIC_WAIT)?;
+        let request_records = provider.finish()?;
+        ensure(
+            request_records.is_empty(),
+            "weekly-floor pointer editing unexpectedly contacted the provider",
+        )?;
+        fixture.assert_read_only()?;
+        let transcript = String::from_utf8_lossy(&transcript);
+        ensure(
+            transcript.contains("\u{1b}[?1003h") && transcript.contains("\u{1b}[?1006h"),
+            "floor-button pointer test did not run with mouse capture enabled",
+        )?;
+        assert_no_printable_output_after_terminal_restoration(transcript.as_bytes())?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_sessions_tui_click_focuses_preview_and_enter_resumes() -> TestResult<()> {
+        let arguments = [OsString::from("--sessions-picker")];
+        let mut terminal = TerminalDriver::spawn(
+            Path::new(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness")),
+            arguments,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )?;
+        terminal.resize(24, 160)?;
+
+        stage(
+            terminal.wait_for_text("Start new session", SEMANTIC_WAIT),
+            "initial sessions picker",
+        )?;
+        let pointer_focus_start = terminal.transcript_len();
+        terminal.send_sgr_mouse_left_down(10, 14)?;
+        stage(
+            terminal.wait_for_text_after("BETA_PREVIEW_ACTIVE", pointer_focus_start, SEMANTIC_WAIT),
+            "pointer-focused existing session preview",
+        )?;
+        ensure(
+            terminal.child_is_running()?,
+            "existing-session click activated instead of changing preview focus",
+        )?;
+        terminal.send(b"\r")?;
+
+        let transcript = terminal.finish(SEMANTIC_WAIT)?;
+        let transcript = String::from_utf8_lossy(&transcript);
+        ensure(
+            transcript.contains("SESSION_PICKER_OUTCOME resume:thread-b"),
+            "Enter did not resume the pointer-focused existing session",
+        )?;
+        ensure(
+            transcript.contains("\u{1b}[?1049h")
+                && transcript.contains("\u{1b}[?1003h")
+                && transcript.contains("\u{1b}[?1006h"),
+            "fullscreen sessions TUI did not enable alternate-screen mouse capture",
+        )?;
+        ensure(
+            transcript.contains("\u{1b}[?1006l")
+                && transcript.contains("\u{1b}[?1003l")
+                && transcript.contains("\u{1b}[?1049l"),
+            "fullscreen sessions TUI did not restore mouse and alternate-screen modes",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_sessions_tui_start_new_click_activates_immediately() -> TestResult<()> {
+        let arguments = [OsString::from("--sessions-picker")];
+        let mut terminal = TerminalDriver::spawn(
+            Path::new(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness")),
+            arguments,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )?;
+        terminal.resize(24, 160)?;
+
+        stage(
+            terminal.wait_for_text("Start new session", SEMANTIC_WAIT),
+            "initial sessions picker",
+        )?;
+        terminal.send_sgr_mouse_left_down(10, 7)?;
+
+        let transcript = terminal.finish(SEMANTIC_WAIT)?;
+        let transcript = String::from_utf8_lossy(&transcript);
+        ensure(
+            transcript.contains("SESSION_PICKER_OUTCOME start-new"),
+            "Start New click did not activate immediately",
+        )?;
+        ensure(
+            transcript.contains("\u{1b}[?1006l")
+                && transcript.contains("\u{1b}[?1003l")
+                && transcript.contains("\u{1b}[?1049l"),
+            "Start New click did not restore terminal modes",
+        )?;
         Ok(())
     }
 

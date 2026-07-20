@@ -6,8 +6,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::presentation::session_picker::action::SessionsPickerKey;
 use crate::presentation::session_picker::action::SessionsPickerOutcome;
+use crate::presentation::session_picker::interactive_row::InteractiveSessionChoiceRow;
 use crate::presentation::session_picker::model::SessionsPickerModel;
-use crate::presentation::session_picker::model::visible_window_start;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
 use crate::presentation::session_picker::request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::request::SessionsPickerRecordLoader;
@@ -203,7 +203,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 {
                     model_value.handle_key(SessionsPickerKey::SearchChar(character));
                 }
-                KeyCode::Enter => selected_outcome.set(model_value.selected_outcome()),
+                KeyCode::Enter => selected_outcome.set(model_value.activation_outcome_for_focus()),
                 KeyCode::Esc => {
                     if model_value.search.is_empty() {
                         should_cancel.set(true);
@@ -253,7 +253,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
 
     let selected_conversation = {
         let model_value = model.read();
-        model_value.selected_record().map(|record| {
+        model_value.focused_record().map(|record| {
             let selected_preview = {
                 let cache = conversation_cache.read();
                 selected_conversation_preview_for_record(record, &cache)
@@ -276,6 +276,8 @@ pub(crate) fn SessionsPickerComponent<'a>(
     };
     render_picker_view(
         &model.read(),
+        model,
+        selected_outcome,
         selected_conversation.as_ref(),
         height,
         minimum_render_height,
@@ -314,6 +316,8 @@ fn selected_conversation_preview_for_record(
 
 fn render_picker_view(
     model: &SessionsPickerModel,
+    model_state: State<SessionsPickerModel>,
+    selected_outcome: State<Option<SessionsPickerOutcome>>,
     selected_conversation: Option<&SessionConversationPreview>,
     height: usize,
     minimum_render_height: usize,
@@ -335,18 +339,17 @@ fn render_picker_view(
     children.extend(filter_controls);
 
     let visible_len = model.visible_len();
-    let selected_record = model.selected_record();
+    let focused_record = model.focused_record();
     if model.width >= SIDECAR_PICKER_WIDTH {
         let list_width = (content_width.saturating_sub(2) / 2).max(42);
         let detail_width = content_width.saturating_sub(list_width + 2).max(28);
-        let visible_row_budget =
-            session_visible_row_budget(visible_len, model.selected_index, body_budget);
+        let visible_row_budget = session_visible_row_budget(model, body_budget);
         children.push(
             element! {
                 View(width: 100pct, height: body_budget as u32) {
-                    #(render_session_list(model, list_width, visible_row_budget, body_budget))
+                    #(render_session_list(model, model_state, selected_outcome, list_width, visible_row_budget, body_budget))
                     View(width: 2) { Text(content: "") }
-                    #(selected_record
+                    #(focused_record
                         .map(|record| render_details(record, detail_width, selected_conversation, body_budget))
                         .unwrap_or_else(|| render_start_new_details(model, detail_width, body_budget)))
                 }
@@ -354,13 +357,13 @@ fn render_picker_view(
             .into_any(),
         );
     } else {
-        let details_height = selected_record
+        let details_height = focused_record
             .filter(|_| model.width >= NARROW_PICKER_WIDTH)
             .map(|record| detail_height(selected_conversation.or(Some(&record.conversation))));
         let minimum_list_height = if visible_len == 0 {
             0
         } else {
-            session_list_height(visible_len, model.selected_index, 1)
+            session_list_height(visible_len, model.focused_window_start(1), 1)
         };
         let show_stacked_details = details_height
             .map(|height| minimum_list_height + height <= body_budget)
@@ -370,15 +373,20 @@ fn render_picker_view(
         } else {
             0
         });
-        let visible_row_budget =
-            session_visible_row_budget(visible_len, model.selected_index, list_budget);
+        let visible_row_budget = session_visible_row_budget(model, list_budget);
         children.push(render_session_list(
             model,
+            model_state,
+            selected_outcome,
             content_width,
             visible_row_budget,
-            session_list_height(visible_len, model.selected_index, visible_row_budget),
+            session_list_height(
+                visible_len,
+                model.focused_window_start(visible_row_budget),
+                visible_row_budget,
+            ),
         ));
-        if show_stacked_details && let Some(record) = selected_record {
+        if show_stacked_details && let Some(record) = focused_record {
             children.push(render_details(
                 record,
                 content_width,
@@ -418,25 +426,26 @@ fn picker_body_budget(height: usize, control_height: usize, minimum_render_heigh
         .saturating_sub(root_border_height + title_height + control_height + footer_height)
 }
 
-fn session_visible_row_budget(
-    visible_len: usize,
-    selected_index: usize,
-    available_height: usize,
-) -> usize {
+fn session_visible_row_budget(model: &SessionsPickerModel, available_height: usize) -> usize {
+    let visible_len = model.visible_len();
     if visible_len == 0 {
         return 0;
     }
     for candidate in (1..=visible_len).rev() {
-        if session_list_height(visible_len, selected_index, candidate) <= available_height {
+        if session_list_height(
+            visible_len,
+            model.focused_window_start(candidate),
+            candidate,
+        ) <= available_height
+        {
             return candidate;
         }
     }
     1
 }
 
-fn session_list_height(visible_len: usize, selected_index: usize, visible_rows: usize) -> usize {
+fn session_list_height(visible_len: usize, window_start: usize, visible_rows: usize) -> usize {
     let visible_rows = visible_rows.max(1);
-    let window_start = visible_window_start(selected_index, visible_len, visible_rows);
     let window_end = (window_start + visible_rows).min(visible_len);
     let visible_count = window_end.saturating_sub(window_start);
     let remaining = visible_len.saturating_sub(window_start + visible_rows);
@@ -562,6 +571,8 @@ fn render_start_new_details(
 
 fn render_session_list(
     model: &SessionsPickerModel,
+    mut model_state: State<SessionsPickerModel>,
+    mut selected_outcome: State<Option<SessionsPickerOutcome>>,
     width: usize,
     visible_rows: usize,
     panel_height: usize,
@@ -569,9 +580,9 @@ fn render_session_list(
     let row_width = width.saturating_sub(6).max(24);
     let mut rows = vec![render_session_header(row_width)];
     let visible_len = model.visible_len();
-    let selected_index = model.selected_index;
+    let focused_index = model.focused_visible_index();
     let visible_rows = visible_rows.max(1);
-    let window_start = visible_window_start(selected_index, visible_len, visible_rows);
+    let window_start = model.focused_window_start(visible_rows);
     if window_start > 0 {
         rows.push(
             element! {
@@ -591,17 +602,56 @@ fn render_session_list(
             rows.push(list_gap());
         }
         if visible_index == 0 {
-            rows.push(render_start_new_row(
-                model,
-                visible_index == selected_index,
-                row_width,
-            ));
+            let row = render_start_new_row(model, visible_index == focused_index, row_width);
+            rows.push(
+                element! {
+                    InteractiveSessionChoiceRow(
+                        focus_handler: move |_| {
+                            let should_update_focus = {
+                                let model_value = model_state.read();
+                                model_value.focused_session_id().is_some()
+                                    || model_value.focused_window_start(visible_rows) != window_start
+                            };
+                            if should_update_focus {
+                                model_state.write().focus_start_new_in_window(window_start);
+                            }
+                        },
+                        activation_handler: move |_| {
+                            selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
+                        },
+                        activates_on_click: true,
+                    ) {
+                        #(row)
+                    }
+                }
+                .into_any(),
+            );
         } else if let Some(record) = model.visible_choice_record_at(visible_index) {
-            rows.push(render_record_row(
-                record,
-                visible_index == selected_index,
-                row_width,
-            ));
+            let session_id = record.session_id.clone();
+            let row = render_record_row(record, visible_index == focused_index, row_width);
+            rows.push(
+                element! {
+                    InteractiveSessionChoiceRow(
+                        focus_handler: move |_| {
+                            let should_update_focus = {
+                                let model_value = model_state.read();
+                                model_value.focused_session_id() != Some(session_id.as_str())
+                                    || model_value.focused_window_start(visible_rows) != window_start
+                            };
+                            if should_update_focus {
+                                let _ = model_state.write().focus_visible_session_in_window(
+                                    &session_id,
+                                    Some(window_start),
+                                );
+                            }
+                        },
+                        activates_on_click: false,
+                    ) {
+                        #(row)
+                    }
+                }
+                .into_any(),
+            );
         }
     }
     let remaining = visible_len.saturating_sub(window_start + visible_rows);
@@ -1003,13 +1053,50 @@ pub(crate) fn run_sessions_picker(
             )
         }
         .render_loop()
+        .fullscreen()
         .ignore_ctrl_c(),
     )?;
     Ok(selected_outcome)
 }
 
+#[cfg(feature = "quota-reset-test-harness")]
+pub(crate) fn run_sessions_picker_test_harness() -> io::Result<()> {
+    use std::io::Write;
+
+    use crate::presentation::session_picker::test_support::picker_request;
+
+    let mut request = picker_request();
+    request.root = SessionsRoot::Any;
+    request.source = SessionsSource::All;
+    if let Some(pointer_focus_record) = request
+        .records
+        .iter_mut()
+        .find(|record| record.session_id == "thread-b")
+    {
+        pointer_focus_record.title = "Pointer focus beta".to_owned();
+        pointer_focus_record.preview = Some("BETA_PREVIEW_ACTIVE".to_owned());
+        pointer_focus_record.conversation.snippets = vec!["BETA_CONVERSATION_ACTIVE".to_owned()];
+    }
+
+    let outcome = run_sessions_picker(request, None)?;
+    let marker = match outcome {
+        Some(SessionsPickerOutcome::ResumeSession(session_id)) => {
+            format!("SESSION_PICKER_OUTCOME resume:{session_id}")
+        }
+        Some(SessionsPickerOutcome::StartNewSession) => {
+            "SESSION_PICKER_OUTCOME start-new".to_owned()
+        }
+        Some(SessionsPickerOutcome::TerminalTooNarrow) => {
+            "SESSION_PICKER_OUTCOME terminal-too-narrow".to_owned()
+        }
+        None => "SESSION_PICKER_OUTCOME canceled".to_owned(),
+    };
+    writeln!(io::stdout(), "{marker}")
+}
+
 #[cfg(test)]
 mod tests {
+    use crossterm::event::MouseButton;
     use futures_util::StreamExt;
     use iocraft::prelude::*;
     use std::path::{Path, PathBuf};
@@ -1058,6 +1145,221 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessions_picker_existing_row_pointer_focus_updates_preview_without_activation() {
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 160usize,
+                height: 24usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                    MouseEventKind::Moved,
+                    10,
+                    14,
+                )),
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                    MouseEventKind::Down(MouseButton::Left),
+                    10,
+                    14,
+                )),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(selected_outcome, None);
+        assert!(
+            frames.iter().any(|frame| {
+                frame.contains("❯ Provider migration")
+                    && frame.contains(
+                        "Provider migration with very very long provider metadata preview text",
+                    )
+            }),
+            "pointer focus should update the existing-session preview without activation: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_start_new_hover_focuses_preview_without_activation() {
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 160usize,
+                height: 24usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                    MouseEventKind::Moved,
+                    10,
+                    7,
+                )),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
+        )))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(selected_outcome, None);
+        assert!(
+            frames.iter().any(|frame| {
+                frame.contains("❯ Start new session") && frame.contains("no extra args")
+            }),
+            "Start New hover should focus its preview without activation: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_enter_resumes_pointer_focused_existing_session() {
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let _frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 160usize,
+                height: 24usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                    MouseEventKind::Down(MouseButton::Left),
+                    10,
+                    14,
+                )),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+            ],
+        )))
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            selected_outcome,
+            Some(SessionsPickerOutcome::ResumeSession("thread-b".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_start_new_click_activates_immediately() {
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let _frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 160usize,
+                height: 24usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                MouseEventKind::Down(MouseButton::Left),
+                10,
+                7,
+            ))],
+        )))
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            selected_outcome,
+            Some(SessionsPickerOutcome::StartNewSession)
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_non_left_row_events_do_not_focus_or_activate() {
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let _frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 160usize,
+                height: 24usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                    MouseEventKind::Down(MouseButton::Right),
+                    10,
+                    14,
+                )),
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                    MouseEventKind::Up(MouseButton::Left),
+                    10,
+                    14,
+                )),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+            ],
+        )))
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            selected_outcome,
+            Some(SessionsPickerOutcome::ResumeSession("thread-a".to_owned())),
+            "ignored pointer events must leave the initial existing-session focus unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_hover_keeps_scrolled_row_under_pointer_until_click_and_enter() {
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let events = futures_util::stream::iter(vec![
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::End)),
+            TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(MouseEventKind::Moved, 10, 8)),
+            TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                MouseEventKind::Down(MouseButton::Left),
+                10,
+                8,
+            )),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+        ])
+        .then(|event| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            event
+        });
+        let frames = element! {
+            SessionsPickerComponent(
+                request: capture_picker_request(),
+                width: 160usize,
+                height: 24usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            frames.iter().any(|frame| {
+                frame.contains("❯ Follow-up implementation lane 4")
+                    && frame.contains("+8 more above")
+            }),
+            "pointer focus should not rewindow a scrolled row before mouse-down: {frames:?}"
+        );
+        assert_eq!(
+            selected_outcome,
+            Some(SessionsPickerOutcome::ResumeSession(
+                "thread-extra-4".to_owned()
+            )),
+            "Enter must resume the stable session that remained under the pointer"
+        );
+    }
+
+    #[tokio::test]
     async fn sessions_picker_iocraft_mock_terminal_ctrl_shortcuts_drive_filters() {
         let actual = element! {
             SessionsPickerComponent(
@@ -1087,12 +1389,15 @@ mod tests {
     #[tokio::test]
     async fn sessions_picker_filter_shortcuts_reload_records_from_query_source() {
         let observed_queries = Arc::new(Mutex::new(Vec::<SessionsPickerDataQuery>::new()));
+        let loader_called = Arc::new(tokio::sync::Notify::new());
         let loader_queries = Arc::clone(&observed_queries);
+        let loader_called_from_blocking_task = Arc::clone(&loader_called);
         let record_loader: SessionsPickerRecordLoader = Arc::new(move |query| {
             loader_queries
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .push(query);
+            loader_called_from_blocking_task.notify_one();
             Ok(vec![picker_record(
                 "thread-reloaded",
                 "Reloaded SQL result",
@@ -1111,6 +1416,16 @@ mod tests {
         )];
 
         let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let events = futures_util::stream::once(async { ctrl_key('t') }).chain(
+            futures_util::stream::once(async move {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    loader_called.notified(),
+                )
+                .await;
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc))
+            }),
+        );
         let _actual = element! {
             SessionsPickerComponent(
                 request,
@@ -1119,13 +1434,7 @@ mod tests {
                 selected_outcome_out: &mut selected_outcome,
             )
         }
-        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
-            vec![
-                ctrl_key('t'),
-                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            ],
-        )))
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
         .collect::<Vec<_>>()
         .await;
 

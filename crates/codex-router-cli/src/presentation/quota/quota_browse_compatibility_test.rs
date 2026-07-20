@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_router_core::ids::AccountId;
+use crossterm::event::MouseButton;
 use futures_util::StreamExt;
 use iocraft::prelude::*;
 

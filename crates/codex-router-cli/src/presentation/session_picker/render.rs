@@ -39,8 +39,11 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
     ];
 
     if visible_len > 0 {
-        let window_start =
-            visible_window_start(model.selected_index, visible_len, VISIBLE_SESSION_ROWS);
+        let window_start = visible_window_start(
+            model.focused_visible_index(),
+            visible_len,
+            VISIBLE_SESSION_ROWS,
+        );
         if window_start > 0 {
             lines.push(fit_line(
                 &format!("+{window_start} more above"),
@@ -49,7 +52,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         }
         let window_end = (window_start + VISIBLE_SESSION_ROWS).min(visible_len);
         for visible_index in window_start..window_end {
-            let marker = if visible_index == model.selected_index {
+            let marker = if visible_index == model.focused_visible_index() {
                 "❯"
             } else {
                 " "
@@ -102,7 +105,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
             lines.push(fit_line(&format!("+{remaining} more below"), model.width));
         }
         if model.width >= NARROW_PICKER_WIDTH
-            && let Some(record) = model.selected_record()
+            && let Some(record) = model.focused_record()
         {
             lines.push(fit_line("Preview", model.width));
             lines.push(fit_line(

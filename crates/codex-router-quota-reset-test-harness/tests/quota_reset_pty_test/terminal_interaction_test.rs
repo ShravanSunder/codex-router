@@ -132,6 +132,11 @@ impl TerminalDriver {
         Ok(())
     }
 
+    pub(super) fn send_sgr_mouse_left_down(&mut self, column: u16, row: u16) -> TestResult<()> {
+        let sequence = format!("\u{1b}[<0;{};{}M", column + 1, row + 1);
+        self.send(sequence.as_bytes())
+    }
+
     pub(super) fn child_is_running(&mut self) -> TestResult<bool> {
         Ok(self
             .child

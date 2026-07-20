@@ -11,6 +11,8 @@ pub(super) fn render_account_list(
     height: usize,
     focused_row_index: Option<usize>,
     visible_rows: usize,
+    mut focused_account_id: State<Option<codex_router_core::ids::AccountId>>,
+    interaction_enabled: bool,
 ) -> AnyElement<'static> {
     let row_width = width.saturating_sub(4).max(32);
     let mut children = Vec::new();
@@ -32,11 +34,23 @@ pub(super) fn render_account_list(
             children.push(quota_gap());
         }
         if let Some(row) = rows.get(index) {
-            children.push(render_account_row(
-                row,
-                row_width,
-                focused_row_index == Some(index),
-            ));
+            let account_id = row.account_id.clone();
+            children.push(
+                element! {
+                    InteractiveQuotaAccountRow(
+                        row: Some(row.clone()),
+                        width: row_width,
+                        focused: focused_row_index == Some(index),
+                        interaction_enabled,
+                        click_handler: move |_| {
+                            if focused_account_id.read().as_ref() != Some(&account_id) {
+                                focused_account_id.set(Some(account_id.clone()));
+                            }
+                        },
+                    )
+                }
+                .into_any(),
+            );
         }
     }
     let remaining = rows.len().saturating_sub(window_start + visible_rows);
@@ -64,6 +78,43 @@ pub(super) fn render_account_list(
         }
     }
     .into_any()
+}
+
+#[derive(Default, Props)]
+struct InteractiveQuotaAccountRowProps {
+    row: Option<QuotaStatusAccountViewModel>,
+    width: usize,
+    focused: bool,
+    interaction_enabled: bool,
+    click_handler: HandlerMut<'static, ()>,
+}
+
+#[component]
+fn InteractiveQuotaAccountRow(
+    props: &mut InteractiveQuotaAccountRowProps,
+    mut hooks: Hooks,
+) -> impl Into<AnyElement<'static>> {
+    hooks.use_local_terminal_events({
+        let interaction_enabled = props.interaction_enabled;
+        let mut click_handler = props.click_handler.take();
+        move |event| {
+            if !interaction_enabled {
+                return;
+            }
+            if let TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                ..
+            }) = event
+            {
+                click_handler(());
+            }
+        }
+    });
+
+    props.row.as_ref().map_or_else(
+        || element!(View).into_any(),
+        |row| render_account_row(row, props.width, props.focused),
+    )
 }
 
 pub(super) fn quota_more_marker(content: String) -> AnyElement<'static> {
