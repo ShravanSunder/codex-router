@@ -4307,7 +4307,7 @@ mod tests {
     }
 
     #[test]
-    fn served_http_weekly_floor_routes_only_to_eligible_peer() {
+    fn served_http_weekly_floor_at_threshold_routes_only_to_eligible_peer() {
         const NOW: u64 = 1_030;
         let temp_dir = ProxyTestTempDir::new("served_http_weekly_floor");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -4333,16 +4333,7 @@ mod tests {
         );
         persist_account_with_snapshot_and_token(&state, &secrets, &peer, 80, "peer-http-token");
         drop(state);
-        seed_computable_weekly_margin_for_test(
-            &database_path,
-            protected.account_id(),
-            NOW,
-            100,
-            6,
-            5,
-        );
         set_weekly_floor_for_test(&database_path, protected.label(), 500);
-        assert_projected_weekly_margin_for_test(&database_path, protected.account_id(), NOW, 499);
 
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
         let upstream_address = upstream_listener.local_addr().expect("address should read");
@@ -4389,24 +4380,24 @@ mod tests {
     }
 
     #[test]
-    fn served_http_weekly_floor_equality_remains_eligible() {
+    fn served_http_weekly_floor_ignores_bad_forecast_above_current_threshold() {
         const NOW: u64 = 1_030;
-        let temp_dir = ProxyTestTempDir::new("served_http_weekly_floor_equality");
+        let temp_dir = ProxyTestTempDir::new("served_http_weekly_floor_bad_forecast");
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let state = SqliteStateStore::open(&database_path).expect("state should open");
         let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
         let protected = AccountRecord::new(
-            account_id("acct_served_http_floor_equality"),
-            "protected-equality",
+            account_id("acct_served_http_floor_forecast"),
+            "protected-forecast",
             AccountStatus::Enabled,
         );
         persist_account_with_snapshot_and_token(
             &state,
             &secrets,
             &protected,
-            5,
-            "protected-equality-http-token",
+            48,
+            "protected-forecast-http-token",
         );
         drop(state);
         seed_computable_weekly_margin_for_test(
@@ -4414,11 +4405,17 @@ mod tests {
             protected.account_id(),
             NOW,
             100,
-            5,
-            5,
+            100,
+            48,
+            5 * 86_400,
         );
-        set_weekly_floor_for_test(&database_path, protected.label(), 500);
-        assert_projected_weekly_margin_for_test(&database_path, protected.account_id(), NOW, 500);
+        set_weekly_floor_for_test(&database_path, protected.label(), 1_000);
+        assert_bad_projected_margin_does_not_floor_block_for_test(
+            &database_path,
+            protected.account_id(),
+            NOW,
+            1_000,
+        );
 
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
         let upstream_address = upstream_listener.local_addr().expect("address should read");
@@ -4426,7 +4423,7 @@ mod tests {
         let upstream_thread = thread::spawn(move || {
             let (mut stream, _) = upstream_listener
                 .accept()
-                .expect("equality request should arrive");
+                .expect("above-floor request should arrive");
             let request = read_test_http_request(&mut stream);
             request_sender.send(request).expect("request should record");
             stream
@@ -4459,12 +4456,12 @@ mod tests {
         let response = client_thread.join().expect("client should join");
         assert!(
             response.starts_with("HTTP/1.1 200 OK"),
-            "equality account should remain eligible, got:\n{response}"
+            "current quota above the floor should remain eligible, got:\n{response}"
         );
         let request = request_receiver
             .recv()
-            .expect("equality request should record");
-        assert!(request.contains("authorization: Bearer protected-equality-http-token\r\n"));
+            .expect("above-floor request should record");
+        assert!(request.contains("authorization: Bearer protected-forecast-http-token\r\n"));
         upstream_thread.join().expect("upstream should join");
     }
 
@@ -6498,16 +6495,7 @@ mod tests {
         );
         persist_account_with_snapshot_and_token(&state, &secrets, &peer, 80, "peer-ws-token");
         drop(state);
-        seed_computable_weekly_margin_for_test(
-            &database_path,
-            protected.account_id(),
-            NOW,
-            100,
-            6,
-            5,
-        );
         set_weekly_floor_for_test(&database_path, protected.label(), 500);
-        assert_projected_weekly_margin_for_test(&database_path, protected.account_id(), NOW, 499);
 
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
         let upstream_address = upstream_listener.local_addr().expect("address should read");
@@ -8294,10 +8282,11 @@ mod tests {
         history_span_seconds: u64,
         prior_remaining_percent: u32,
         current_remaining_percent: u32,
+        weekly_reset_seconds: u64,
     ) {
         let history_start = now_unix_seconds.saturating_sub(history_span_seconds);
         let history_middle = history_start + history_span_seconds / 2;
-        let weekly_reset = now_unix_seconds + 1;
+        let weekly_reset = now_unix_seconds + weekly_reset_seconds;
         let state = SqliteStateStore::open(database_path).expect("state should reopen for windows");
         let windows = [
             PersistedSelectorQuotaWindow::new(
@@ -8375,11 +8364,11 @@ mod tests {
         });
     }
 
-    fn assert_projected_weekly_margin_for_test(
+    fn assert_bad_projected_margin_does_not_floor_block_for_test(
         database_path: &Path,
         account_id: &AccountId,
         now_unix_seconds: u64,
-        expected_margin_basis_points: i64,
+        floor_basis_points: i64,
     ) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -8408,18 +8397,18 @@ mod tests {
                 .iter()
                 .find(|account| account.account_id() == account_id)
                 .expect("weekly-margin account should be assessed");
-            assert_eq!(
-                account.weekly_survival_margin_basis_points(),
-                Some(expected_margin_basis_points)
+            assert!(
+                account
+                    .weekly_survival_margin_basis_points()
+                    .is_some_and(|margin| margin < floor_basis_points),
+                "test requires a forecast below the configured floor: {account:?}"
             );
-            if expected_margin_basis_points >= 500 {
-                assert_eq!(
-                    account.routing_exclusion(),
-                    codex_router_selection::burn_down::RoutingExclusion::None,
-                    "equality assessment should be selectable: {account:?}"
-                );
-                assert_eq!(assessment.preferred_next(), Some(account.account_id()));
-            }
+            assert_eq!(
+                account.routing_exclusion(),
+                codex_router_selection::burn_down::RoutingExclusion::None,
+                "forecast must not control the observed-current floor: {account:?}"
+            );
+            assert_eq!(assessment.preferred_next(), Some(account.account_id()));
             state.close().await.expect("assertion state should close");
         });
     }
