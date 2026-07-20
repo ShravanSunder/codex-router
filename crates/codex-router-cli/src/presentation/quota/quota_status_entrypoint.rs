@@ -83,6 +83,7 @@ pub(crate) async fn run_quota_status_view(
         )
     }
     .render_loop()
+    .fullscreen()
     .ignore_ctrl_c()
     .await
 }

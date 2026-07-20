@@ -18,6 +18,13 @@ use crate::sessions::SessionsSource;
 
 pub(super) const VISIBLE_SESSION_ROWS: usize = 8;
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) enum SessionsPickerFocus {
+    #[default]
+    StartNew,
+    SessionId(String),
+}
+
 /// Pure sessions picker state. iocraft owns rendering/input, this owns behavior.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionsPickerModel {
@@ -28,7 +35,8 @@ pub(crate) struct SessionsPickerModel {
     pub(super) source: SessionsSource,
     pub(super) sort: SessionsSort,
     pub(super) search: String,
-    pub(super) selected_index: usize,
+    focus: SessionsPickerFocus,
+    pointer_window_start: Option<usize>,
     visible_indices: Vec<usize>,
     visible_rows_generation: usize,
 }
@@ -43,78 +51,87 @@ impl SessionsPickerModel {
             request,
             width,
             search: String::new(),
-            selected_index: 0,
+            focus: SessionsPickerFocus::StartNew,
+            pointer_window_start: None,
             visible_indices: Vec::new(),
             visible_rows_generation: 0,
         };
         model.rebuild_visible_rows();
-        model.select_first_record_when_available();
+        model.focus_first_record_when_available();
         model
     }
 
     pub(crate) fn handle_key(&mut self, key: SessionsPickerKey) {
+        self.pointer_window_start = None;
         match key {
             SessionsPickerKey::MoveDown => {
                 let visible_len = self.visible_len();
-                if visible_len > 0 {
-                    self.selected_index = (self.selected_index + 1).min(visible_len - 1);
-                }
+                self.focus_visible_index(
+                    (self.focused_visible_index() + 1).min(visible_len.saturating_sub(1)),
+                );
             }
             SessionsPickerKey::MoveUp => {
-                self.selected_index = self.selected_index.saturating_sub(1);
+                self.focus_visible_index(self.focused_visible_index().saturating_sub(1));
             }
             SessionsPickerKey::PageDown => {
                 let visible_len = self.visible_len();
-                if visible_len > 0 {
-                    self.selected_index =
-                        (self.selected_index + VISIBLE_SESSION_ROWS).min(visible_len - 1);
-                }
+                self.focus_visible_index(
+                    (self.focused_visible_index() + VISIBLE_SESSION_ROWS)
+                        .min(visible_len.saturating_sub(1)),
+                );
             }
             SessionsPickerKey::PageUp => {
-                self.selected_index = self.selected_index.saturating_sub(VISIBLE_SESSION_ROWS);
+                self.focus_visible_index(
+                    self.focused_visible_index()
+                        .saturating_sub(VISIBLE_SESSION_ROWS),
+                );
             }
             SessionsPickerKey::MoveFirst => {
-                self.selected_index = 0;
+                self.focus_start_new();
             }
             SessionsPickerKey::MoveLast => {
                 let visible_len = self.visible_len();
-                if visible_len > 0 {
-                    self.selected_index = visible_len - 1;
-                }
+                self.focus_visible_index(visible_len.saturating_sub(1));
             }
             SessionsPickerKey::CycleRoot => {
+                let previous_index = self.focused_visible_index();
                 self.root = next_root_filter(self.root);
                 self.rebuild_visible_rows();
-                self.clamp_selection();
+                self.restore_focus_or_fallback(previous_index);
             }
             SessionsPickerKey::CycleSource => {
+                let previous_index = self.focused_visible_index();
                 self.source = next_source_filter(self.source);
                 self.rebuild_visible_rows();
-                self.clamp_selection();
+                self.restore_focus_or_fallback(previous_index);
             }
             SessionsPickerKey::CycleSort => {
+                let previous_index = self.focused_visible_index();
                 self.sort = next_sort_filter(self.sort);
                 self.rebuild_visible_rows();
-                self.clamp_selection();
+                self.restore_focus_or_fallback(previous_index);
             }
             SessionsPickerKey::SearchChar(character) => {
+                let previous_index = self.focused_visible_index();
                 if !character.is_control() {
                     self.search.push(character);
                     self.rebuild_visible_rows();
                 }
-                self.clamp_selection();
+                self.restore_focus_or_fallback(previous_index);
             }
             SessionsPickerKey::SearchBackspace => {
+                let previous_index = self.focused_visible_index();
                 if self.search.pop().is_some() {
                     self.rebuild_visible_rows();
-                    self.clamp_selection();
+                    self.restore_focus_or_fallback(previous_index);
                 }
             }
             SessionsPickerKey::ClearSearch => {
+                let previous_index = self.focused_visible_index();
                 if !self.search.is_empty() {
                     self.search.clear();
                     self.rebuild_visible_rows();
-                    self.clamp_selection();
+                    self.restore_focus_or_fallback(previous_index);
                 }
             }
         }
@@ -135,18 +152,53 @@ impl SessionsPickerModel {
     }
 
     pub(crate) fn replace_records(&mut self, records: Vec<SessionPickerRecord>) {
+        let previous_index = self.focused_visible_index();
+        self.pointer_window_start = None;
         self.request.records = records;
         self.rebuild_visible_rows();
-        self.clamp_selection();
+        self.restore_focus_or_fallback(previous_index);
     }
 
-    pub(crate) fn selected_session_id(&self) -> Option<&str> {
-        self.selected_record()
-            .map(|record| record.session_id.as_str())
+    #[cfg(test)]
+    pub(crate) fn focus_visible_session(&mut self, session_id: &str) -> bool {
+        self.pointer_window_start = None;
+        self.focus_visible_session_in_window(session_id, None)
     }
 
-    pub(crate) fn selected_outcome(&self) -> Option<SessionsPickerOutcome> {
-        match self.selected_session_id() {
+    pub(crate) fn focus_visible_session_in_window(
+        &mut self,
+        session_id: &str,
+        window_start: Option<usize>,
+    ) -> bool {
+        if self.visible_index_for_session(session_id).is_none() {
+            return false;
+        }
+        self.pointer_window_start = window_start;
+        if self.focused_session_id() != Some(session_id) {
+            self.focus = SessionsPickerFocus::SessionId(session_id.to_owned());
+        }
+        true
+    }
+
+    pub(crate) fn focus_start_new(&mut self) {
+        self.pointer_window_start = None;
+        self.focus = SessionsPickerFocus::StartNew;
+    }
+
+    pub(crate) fn focus_start_new_in_window(&mut self, window_start: usize) {
+        self.pointer_window_start = Some(window_start);
+        self.focus = SessionsPickerFocus::StartNew;
+    }
+
+    pub(crate) fn focused_session_id(&self) -> Option<&str> {
+        match &self.focus {
+            SessionsPickerFocus::StartNew => None,
+            SessionsPickerFocus::SessionId(session_id) => Some(session_id.as_str()),
+        }
+    }
+
+    pub(crate) fn activation_outcome_for_focus(&self) -> Option<SessionsPickerOutcome> {
+        match self.focused_session_id() {
             Some(session_id) => Some(SessionsPickerOutcome::ResumeSession(session_id.to_owned())),
             None => Some(SessionsPickerOutcome::StartNewSession),
         }
@@ -170,8 +222,30 @@ impl SessionsPickerModel {
         self.visible_indices.len()
     }
 
-    pub(super) fn selected_record(&self) -> Option<&SessionPickerRecord> {
-        self.visible_choice_record_at(self.selected_index)
+    pub(super) fn focused_visible_index(&self) -> usize {
+        match self.focused_session_id() {
+            Some(session_id) => self.visible_index_for_session(session_id).unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    pub(super) fn focused_record(&self) -> Option<&SessionPickerRecord> {
+        self.visible_choice_record_at(self.focused_visible_index())
+    }
+
+    pub(super) fn focused_window_start(&self, visible_rows: usize) -> usize {
+        let visible_len = self.visible_len();
+        let maximum_window_start = visible_len.saturating_sub(visible_rows);
+        if let Some(pointer_window_start) = self.pointer_window_start {
+            let pointer_window_start = pointer_window_start.min(maximum_window_start);
+            let focused_index = self.focused_visible_index();
+            if focused_index >= pointer_window_start
+                && focused_index < pointer_window_start.saturating_add(visible_rows)
+            {
+                return pointer_window_start;
+            }
+        }
+        visible_window_start(self.focused_visible_index(), visible_len, visible_rows)
     }
 
     pub(super) fn visible_choice_record_at(&self, index: usize) -> Option<&SessionPickerRecord> {
@@ -232,31 +306,60 @@ impl SessionsPickerModel {
         self.visible_rows_generation = self.visible_rows_generation.saturating_add(1);
     }
 
-    fn select_first_record_when_available(&mut self) {
-        if !self.visible_indices.is_empty() {
-            self.selected_index = 1;
+    fn focus_first_record_when_available(&mut self) {
+        if let Some(session_id) = self
+            .visible_record_at(0)
+            .map(|record| record.session_id.clone())
+        {
+            self.focus = SessionsPickerFocus::SessionId(session_id);
         }
     }
 
-    fn clamp_selection(&mut self) {
-        let visible_len = self.visible_len();
-        if visible_len == 0 {
-            self.selected_index = 0;
-        } else if self.selected_index >= visible_len {
-            self.selected_index = visible_len - 1;
+    fn focus_visible_index(&mut self, index: usize) {
+        if index == 0 {
+            self.focus_start_new();
+            return;
         }
+        if let Some(session_id) = self
+            .visible_choice_record_at(index)
+            .map(|record| record.session_id.clone())
+        {
+            self.focus = SessionsPickerFocus::SessionId(session_id);
+        }
+    }
+
+    fn visible_index_for_session(&self, session_id: &str) -> Option<usize> {
+        self.visible_indices
+            .iter()
+            .position(|record_index| {
+                self.request
+                    .records
+                    .get(*record_index)
+                    .is_some_and(|record| record.session_id == session_id)
+            })
+            .map(|index| index + 1)
+    }
+
+    fn restore_focus_or_fallback(&mut self, previous_index: usize) {
+        if self
+            .focused_session_id()
+            .is_some_and(|session_id| self.visible_index_for_session(session_id).is_some())
+        {
+            return;
+        }
+        self.focus_visible_index(previous_index.min(self.visible_len().saturating_sub(1)));
     }
 }
 
 pub(super) fn visible_window_start(
-    selected_index: usize,
+    focused_index: usize,
     visible_len: usize,
     max_visible: usize,
 ) -> usize {
     if visible_len <= max_visible {
         return 0;
     }
-    selected_index
+    focused_index
         .saturating_add(1)
         .saturating_sub(max_visible)
         .min(visible_len.saturating_sub(max_visible))

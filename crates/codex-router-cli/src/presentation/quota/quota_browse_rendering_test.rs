@@ -110,6 +110,71 @@ async fn quota_status_down_arrow_focuses_next_account_details() {
 }
 
 #[tokio::test]
+async fn quota_status_left_click_focuses_account_details_without_opening_an_action() {
+    let frames = element! {
+        QuotaStatusComponent(
+            view_model: quota_two_account_view_model(),
+            width: 160usize,
+            height: 24usize,
+        )
+    }
+    .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+        vec![
+            TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                MouseEventKind::Down(MouseButton::Left),
+                10,
+                9,
+            )),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+        ],
+    )))
+    .map(|canvas| canvas.to_string())
+    .collect::<Vec<_>>()
+    .await;
+
+    assert!(
+        frames.iter().any(|frame| {
+            frame.contains("❯ beta") && frame.contains("beta    [usable]    beta detail")
+        }),
+        "left-click should focus the clicked account and its details: {frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn quota_status_non_left_row_events_do_not_change_account_focus() {
+    let frames = element! {
+        QuotaStatusComponent(
+            view_model: quota_two_account_view_model(),
+            width: 160usize,
+            height: 24usize,
+        )
+    }
+    .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+        vec![
+            TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                MouseEventKind::Down(MouseButton::Right),
+                10,
+                9,
+            )),
+            TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                MouseEventKind::Up(MouseButton::Left),
+                10,
+                9,
+            )),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+        ],
+    )))
+    .map(|canvas| canvas.to_string())
+    .collect::<Vec<_>>()
+    .await;
+
+    assert!(
+        frames.iter().all(|frame| !frame.contains("❯ beta")),
+        "ignored pointer events must not change quota focus: {frames:?}"
+    );
+}
+
+#[tokio::test]
 async fn quota_status_reloads_view_model_on_timer() {
     let reload_count = Arc::new(AtomicUsize::new(0));
     let reload_view_model: QuotaStatusViewModelLoader = {

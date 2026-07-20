@@ -10,6 +10,7 @@ pub(crate) struct BackgroundQuotaRefreshRuntime<C, D> {
     observed_clock: C,
     diagnostic_reporter: D,
     interval: Duration,
+    quota_floor_notifier: Option<Arc<dyn WeeklyQuotaFloorReachedObserver>>,
 }
 
 impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {
@@ -18,7 +19,16 @@ impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {
             observed_clock,
             diagnostic_reporter,
             interval,
+            quota_floor_notifier: None,
         }
+    }
+
+    pub(crate) fn with_quota_floor_notifier(
+        mut self,
+        quota_floor_notifier: WebSocketQuotaFloorNotifier,
+    ) -> Self {
+        self.quota_floor_notifier = Some(Arc::new(quota_floor_notifier));
+        self
     }
 }
 
@@ -98,6 +108,7 @@ where
         mut observed_clock,
         mut diagnostic_reporter,
         interval,
+        quota_floor_notifier,
     } = runtime;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_thread = Arc::clone(&stop);
@@ -110,15 +121,20 @@ where
                 .build()
                 .map_err(QuotaCommandError::BackgroundWorkerInitialization)
                 .and_then(|refresh_runtime| {
-                    refresh_runtime.block_on(refresh_quota_store_paths_with_dependencies(
-                        &mut sink,
-                        &state_db,
-                        &secret_root,
-                        base_url.clone(),
-                        &credential_resolver,
-                        &quota_provider,
-                        observed_unix_seconds,
-                    ))
+                    refresh_runtime.block_on(
+                        refresh_quota_store_paths_with_dependencies_and_floor_notifier(
+                            &mut sink,
+                            &state_db,
+                            &secret_root,
+                            base_url.clone(),
+                            &credential_resolver,
+                            &quota_provider,
+                            QuotaRefreshObservationContext {
+                                observed_unix_seconds,
+                                weekly_floor_observer: quota_floor_notifier.as_deref(),
+                            },
+                        ),
+                    )
                 });
             let diagnostic_output = String::from_utf8_lossy(&sink).into_owned();
             if diagnostic_output
@@ -147,6 +163,7 @@ pub(crate) fn start_background_quota_refresh_worker(
     secret_root: PathBuf,
     base_url: String,
     interval: Duration,
+    quota_floor_notifier: WebSocketQuotaFloorNotifier,
 ) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
     let resolver = CliCredentialResolver::open(&state_db, &secret_root, current_unix_seconds())?;
     let provider = HttpQuotaRefreshProvider::new()?;
@@ -160,7 +177,8 @@ pub(crate) fn start_background_quota_refresh_worker(
             current_unix_seconds,
             |diagnostic| eprintln!("{diagnostic}"),
             interval,
-        ),
+        )
+        .with_quota_floor_notifier(quota_floor_notifier),
     ))
 }
 

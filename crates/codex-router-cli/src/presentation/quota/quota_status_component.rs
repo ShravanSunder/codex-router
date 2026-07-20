@@ -534,6 +534,8 @@ pub(super) fn QuotaStatusComponent(
     let show_stacked_details = layout.show_stacked_details;
     let body_height = layout.body_height;
     let component_height = quota_status_height(height);
+    let account_pointer_interaction_enabled =
+        !reset_detail_active && current_weekly_floor_editor.is_none();
     let body = if sidecar {
         let list_width = (content_width.saturating_sub(2) * 3 / 5)
             .max(58)
@@ -541,7 +543,7 @@ pub(super) fn QuotaStatusComponent(
         let details_width = content_width.saturating_sub(list_width + 2).max(34);
         element! {
             View(width: 100pct, height: body_height as u32) {
-                #(render_account_list(&view_model.rows, list_width, list_height, focused_row_index_value, visible_account_budget))
+                #(render_account_list(&view_model.rows, list_width, list_height, focused_row_index_value, visible_account_budget, focused_account_id, account_pointer_interaction_enabled))
                 View(width: 2) { Text(content: "") }
                 #(render_detail_panel(QuotaDetailPanelProps {
                     focused_details,
@@ -560,7 +562,7 @@ pub(super) fn QuotaStatusComponent(
     } else if show_stacked_details {
         element! {
             View(width: content_width as u32, flex_direction: FlexDirection::Column) {
-                #(render_account_list(&view_model.rows, content_width, list_height, focused_row_index_value, visible_account_budget))
+                #(render_account_list(&view_model.rows, content_width, list_height, focused_row_index_value, visible_account_budget, focused_account_id, account_pointer_interaction_enabled))
                 #(render_detail_panel(QuotaDetailPanelProps {
                     focused_details,
                     reset_snapshot: current_reset_snapshot.as_ref(),
@@ -582,6 +584,8 @@ pub(super) fn QuotaStatusComponent(
             list_height,
             focused_row_index_value,
             visible_account_budget,
+            focused_account_id,
+            account_pointer_interaction_enabled,
         )
     };
 

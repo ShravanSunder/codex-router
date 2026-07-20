@@ -124,6 +124,7 @@ use crate::upstream::UpstreamEndpoint;
 use crate::websocket::AsyncWebSocketTunnel;
 use crate::websocket::WebSocketHandshakeRequest;
 use crate::websocket::WebSocketProtocolRouter;
+use crate::websocket::WebSocketQuotaFloorNotifier;
 use crate::websocket::WebSocketRegistrySnapshot;
 use crate::websocket::WebSocketRevocationRegistry;
 use crate::websocket::router_websocket_config;
@@ -579,6 +580,12 @@ impl LoopbackRouterRuntime {
     #[must_use]
     pub fn websocket_registry_snapshot(&self) -> WebSocketRegistrySnapshot {
         self.websocket_revocations.snapshot()
+    }
+
+    /// Returns a narrow handle for reconnecting sessions whose account reached its quota floor.
+    #[must_use]
+    pub fn websocket_quota_floor_notifier(&self) -> WebSocketQuotaFloorNotifier {
+        WebSocketQuotaFloorNotifier::new(self.websocket_revocations.clone())
     }
 
     /// Replaces local auth and closes WebSocket connections authenticated with old generations.
