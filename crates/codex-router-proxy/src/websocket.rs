@@ -823,10 +823,29 @@ pub struct WebSocketRevocationRegistry {
     capacity_retry_thread_ids: Arc<Mutex<HashMap<u64, String>>>,
 }
 
+/// Narrow runtime handle for reconnecting sessions pinned to a floor-blocked account.
+#[derive(Clone, Debug)]
+pub struct WebSocketQuotaFloorNotifier {
+    registry: WebSocketRevocationRegistry,
+}
+
+impl WebSocketQuotaFloorNotifier {
+    pub(crate) const fn new(registry: WebSocketRevocationRegistry) -> Self {
+        Self { registry }
+    }
+
+    /// Sends the existing Codex reconnect signal to sessions pinned to this account.
+    pub fn signal_weekly_quota_floor_reached(&self, account_id: &AccountId) {
+        self.registry.signal_weekly_quota_floor_reached(account_id);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct WebSocketCancellationEntry {
     session_id: u64,
+    account_id: AccountId,
     token: CancellationToken,
+    quota_floor_reconnect: CancellationToken,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -888,6 +907,7 @@ struct WebSocketSessionRegistration {
     generation: TokenGeneration,
     session_id: u64,
     cancellation: CancellationToken,
+    quota_floor_reconnect: CancellationToken,
 }
 
 impl WebSocketRevocationRegistry {
@@ -944,15 +964,21 @@ impl WebSocketRevocationRegistry {
 
     #[cfg(test)]
     fn register_cancellation(&self, generation: TokenGeneration) -> WebSocketSessionRegistration {
-        self.register_cancellation_with_peer_addr(generation, None)
+        self.register_cancellation_with_peer_addr(
+            generation,
+            AccountId::new("acct_registry_test").unwrap_or_else(|error| panic!("{error}")),
+            None,
+        )
     }
 
     fn register_cancellation_with_peer_addr(
         &self,
         generation: TokenGeneration,
+        account_id: AccountId,
         peer_addr: Option<SocketAddr>,
     ) -> WebSocketSessionRegistration {
         let cancellation = CancellationToken::new();
+        let quota_floor_reconnect = CancellationToken::new();
         let session_id = self.note_session_opened();
         if let Some(peer_addr) = peer_addr
             && let Ok(mut session_peer_addrs) = self.session_peer_addrs.lock()
@@ -971,7 +997,9 @@ impl WebSocketRevocationRegistry {
                 .or_default()
                 .push(WebSocketCancellationEntry {
                     session_id,
+                    account_id,
                     token: cancellation.clone(),
+                    quota_floor_reconnect: quota_floor_reconnect.clone(),
                 });
         }
 
@@ -980,6 +1008,21 @@ impl WebSocketRevocationRegistry {
             generation,
             session_id,
             cancellation,
+            quota_floor_reconnect,
+        }
+    }
+
+    /// Asks active sessions pinned to an account to reconnect after it reaches its quota floor.
+    pub fn signal_weekly_quota_floor_reached(&self, account_id: &AccountId) {
+        let Ok(cancellations) = self.cancellations.lock() else {
+            return;
+        };
+        for entry in cancellations
+            .values()
+            .flatten()
+            .filter(|entry| &entry.account_id == account_id)
+        {
+            entry.quota_floor_reconnect.cancel();
         }
     }
 
@@ -1299,6 +1342,7 @@ mod registry_tests {
 mod async_forwarding_tests {
     use super::ActiveTurnReservationState;
     use super::AsyncWebSocketTunnel;
+    use super::CODEX_WEBSOCKET_RECONNECT_SIGNAL;
     use super::CapacityRetryOutcome;
     use super::Header;
     use super::HeaderCollection;
@@ -1310,6 +1354,7 @@ mod async_forwarding_tests {
     use super::WebSocketForwardingContext;
     use super::WebSocketHandshakeRequest;
     use super::WebSocketProtocolRouter;
+    use super::WebSocketQuotaFloorNotifier;
     use super::WebSocketRevocationRegistry;
     use super::capacity_retry_thread_id;
     use super::forward_duplex_until_complete;
@@ -1332,6 +1377,7 @@ mod async_forwarding_tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
     use tokio::io::duplex;
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
@@ -1965,6 +2011,98 @@ mod async_forwarding_tests {
             router_result.is_ok(),
             "shutdown should close pending first-frame routing cleanly, got {router_result:?}"
         );
+        assert_eq!(registry.snapshot().active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn weekly_floor_notification_during_upstream_handshake_prevents_first_frame_forwarding() {
+        let account_id = AccountId::new("acct_floor_during_connect")
+            .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+        let selector = FixedAsyncSelector {
+            account_id: account_id.clone(),
+        };
+        let credential_resolver = FixedAsyncCredentialResolver {
+            account_id: account_id.clone(),
+        };
+        let auth_gate = ProxyLocalAuthGate::disabled();
+        let affinity_secret_provider = FixedAffinitySecretProvider::new();
+        let protocol_router = WebSocketProtocolRouter::new();
+        let registry = WebSocketRevocationRegistry::new();
+        let notifier = WebSocketQuotaFloorNotifier::new(registry.clone());
+        let tunnel = AsyncWebSocketTunnel::new(
+            &auth_gate,
+            &selector,
+            &credential_resolver,
+            &protocol_router,
+        )
+        .with_revocation_registry(registry.clone())
+        .with_affinity_secret_provider(&affinity_secret_provider);
+        let upstream_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("test upstream should bind: {error}"));
+        let upstream_address = upstream_listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("test upstream address should resolve: {error}"));
+        let (router_local_stream, client_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+
+        let upstream_url = format!("ws://{upstream_address}/v1/responses");
+        let router_future = tunnel.handle_upgraded_connection(
+            router_local_websocket,
+            WebSocketHandshakeRequest::new(),
+            &upstream_url,
+        );
+        let upstream_future = async {
+            let (mut stream, _peer_address) = upstream_listener
+                .accept()
+                .await
+                .unwrap_or_else(|error| panic!("test upstream should accept: {error}"));
+            let mut received = Vec::new();
+            stream
+                .read_to_end(&mut received)
+                .await
+                .unwrap_or_else(|error| panic!("test upstream should read to close: {error}"));
+            received
+        };
+        let peer_future = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create"}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first local frame should send: {error}"));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while registry.snapshot().active_sessions == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_elapsed| panic!("session should register before floor signal"));
+            notifier.signal_weekly_quota_floor_reached(&account_id);
+            client_websocket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("client should receive reconnect signal"))
+                .unwrap_or_else(|error| panic!("reconnect signal should be readable: {error}"))
+                .to_string()
+        };
+
+        let (router_result, upstream_received, client_message) =
+            tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::join!(router_future, upstream_future, peer_future)
+            })
+            .await
+            .unwrap_or_else(|_elapsed| {
+                panic!("floor cutoff should not wait for upstream handshake")
+            });
+
+        assert!(
+            router_result.is_ok(),
+            "router should signal then close: {router_result:?}"
+        );
+        assert_eq!(client_message, CODEX_WEBSOCKET_RECONNECT_SIGNAL);
+        assert!(!String::from_utf8_lossy(&upstream_received).contains("response.create"));
         assert_eq!(registry.snapshot().active_sessions, 0);
     }
 
@@ -4299,6 +4437,7 @@ mod async_forwarding_tests {
                 affinity_owner_context: None,
                 active_turn_reservation: ActiveTurnReservationState::new(None),
                 provider_error_observer: None,
+                quota_floor_reconnect: CancellationToken::new(),
             },
         )
         .await;
@@ -4764,6 +4903,89 @@ mod async_forwarding_tests {
         );
         assert_eq!(registry.snapshot().active_sessions, 0);
     }
+
+    #[tokio::test]
+    async fn weekly_floor_notification_sends_existing_reconnect_signal_and_closes_socket() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let registry = WebSocketRevocationRegistry::new();
+        let selected_account = AccountId::new("acct_floor_reached")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let session = registry.register_cancellation_with_peer_addr(
+            TokenGeneration::new(1),
+            selected_account.clone(),
+            None,
+        );
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context = WebSocketAffinityOwnerContext {
+            affinity_secret,
+            account_id: selected_account.clone(),
+            credential_generation: 1,
+            active_reservation_guard: None,
+        };
+        let notifier = WebSocketQuotaFloorNotifier::new(registry.clone());
+
+        let router_task = forward_duplex_until_complete(
+            router_local_websocket,
+            router_upstream_websocket,
+            WebSocketForwardingContext {
+                session_registration: session,
+                affinity_owner_recorder: None,
+                async_affinity_owner_recorder: None,
+                affinity_record_tasks: TaskTracker::new(),
+                affinity_owner_context: Some(&affinity_owner_context),
+                provider_error_observer: None,
+                revocation: &revocation,
+                session_shutdown: &session_shutdown,
+            },
+        );
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"response.create","turn":1}"#))
+                .await
+                .unwrap_or_else(|error| panic!("first local frame should send: {error}"));
+            match upstream_websocket.next().await {
+                Some(Ok(_message)) => {}
+                Some(Err(error)) => panic!("upstream should receive first frame: {error}"),
+                None => panic!("upstream should receive first frame"),
+            }
+
+            notifier.signal_weekly_quota_floor_reached(&selected_account);
+
+            let client_message =
+                tokio::time::timeout(Duration::from_secs(1), client_websocket.next())
+                    .await
+                    .unwrap_or_else(|_elapsed| {
+                        panic!("client should promptly receive reconnect signal")
+                    })
+                    .unwrap_or_else(|| panic!("client should receive reconnect signal"))
+                    .unwrap_or_else(|error| {
+                        panic!("client reconnect signal should be readable: {error}")
+                    });
+            assert_eq!(client_message.to_string(), CODEX_WEBSOCKET_RECONNECT_SIGNAL);
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "router should signal then close: {router_result:?}"
+        );
+        assert_eq!(registry.snapshot().quota_reconnect_signal_count, 1);
+        assert_eq!(registry.snapshot().active_sessions, 0);
+    }
 }
 
 /// Blocking WebSocket tunnel that uses the authenticated first-frame router.
@@ -5138,9 +5360,19 @@ where
             first_frame,
             affinity_owner_context,
         } = decision;
-        let session_registration = self
-            .revocations
-            .register_cancellation_with_peer_addr(token_generation, self.local_peer_addr);
+        let selected_account_id = match affinity_owner_context.as_ref() {
+            Some(context) => context.account_id.clone(),
+            None => {
+                return Err(WebSocketTunnelError::TaskJoin(
+                    "selected websocket account context was missing".to_owned(),
+                ));
+            }
+        };
+        let session_registration = self.revocations.register_cancellation_with_peer_addr(
+            token_generation,
+            selected_account_id,
+            self.local_peer_addr,
+        );
         self.revocations.set_capacity_retry_thread_id(
             session_registration.session_id,
             capacity_retry_thread_id(&headers),
@@ -5150,6 +5382,15 @@ where
         let mut upstream_request = upstream_url.into_client_request()?;
         apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
         let (mut upstream_websocket, _response) = tokio::select! {
+            biased;
+            () = session_registration.quota_floor_reconnect.cancelled() => {
+                self.revocations.note_quota_reconnect_signal();
+                local_websocket
+                    .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
+                    .await?;
+                close_websocket_stream_best_effort(&mut local_websocket).await?;
+                return Ok(());
+            }
             () = self.session_shutdown.cancelled() => {
                 close_websocket_stream_best_effort(&mut local_websocket).await?;
                 return Ok(());
@@ -5162,6 +5403,16 @@ where
         };
         let upstream_first_message = message_from_frame(first_frame)?;
         tokio::select! {
+            biased;
+            () = session_registration.quota_floor_reconnect.cancelled() => {
+                self.revocations.note_quota_reconnect_signal();
+                local_websocket
+                    .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
+                    .await?;
+                close_websocket_stream_best_effort(&mut local_websocket).await?;
+                close_websocket_stream_best_effort(&mut upstream_websocket).await?;
+                return Ok(());
+            }
             () = self.session_shutdown.cancelled() => {
                 close_websocket_stream_best_effort(&mut local_websocket).await?;
                 close_websocket_stream_best_effort(&mut upstream_websocket).await?;
@@ -5303,8 +5554,10 @@ where
     let tunnel_shutdown = CancellationToken::new();
     let local_to_upstream_tunnel_shutdown = tunnel_shutdown.clone();
     let upstream_to_local_tunnel_shutdown = tunnel_shutdown.clone();
-    let session_registry = context.session_registration.registry.clone();
-    let session_id = context.session_registration.session_id;
+    let session_registration = context.session_registration;
+    let session_registry = session_registration.registry.clone();
+    let session_id = session_registration.session_id;
+    let quota_floor_reconnect = session_registration.quota_floor_reconnect.clone();
     let affinity_owner_context = context.affinity_owner_context.cloned();
     let active_turn_reservation = ActiveTurnReservationState::new(
         affinity_owner_context
@@ -5339,6 +5592,7 @@ where
                 affinity_owner_context,
                 active_turn_reservation,
                 provider_error_observer: context.provider_error_observer,
+                quota_floor_reconnect,
             },
         )
         .await
@@ -5370,7 +5624,7 @@ where
         }
     };
 
-    drop(context.session_registration);
+    drop(session_registration);
     result
 }
 
@@ -5440,6 +5694,7 @@ struct UpstreamToLocalPumpContext {
     affinity_owner_context: Option<WebSocketAffinityOwnerContext>,
     active_turn_reservation: ActiveTurnReservationState,
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
+    quota_floor_reconnect: CancellationToken,
 }
 
 async fn pump_upstream_to_local<LocalStream, UpstreamStream>(
@@ -5453,6 +5708,17 @@ where
 {
     loop {
         tokio::select! {
+            biased;
+            () = context.quota_floor_reconnect.cancelled() => {
+                context.tunnel_shutdown.cancel();
+                context.active_turn_reservation.retire();
+                context.session_registry.note_quota_reconnect_signal();
+                local_write
+                    .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
+                    .await?;
+                close_websocket_sink_best_effort(&mut local_write).await?;
+                return Ok(());
+            }
             () = context.revocation.cancelled() => {
                 close_websocket_sink_best_effort(&mut local_write).await?;
                 return Ok(());
