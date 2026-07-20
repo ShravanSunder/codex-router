@@ -687,7 +687,7 @@ pub enum RoutingExclusion {
     Disabled,
     /// Account lacks active credentials.
     MissingCredential,
-    /// Account is below its configured hard weekly quota floor or lacks required evidence.
+    /// Account is at or below its configured hard weekly quota floor or lacks required evidence.
     WeeklyQuotaFloor,
 }
 
@@ -1247,21 +1247,12 @@ fn weekly_quota_floor_excludes(input: &BurnDownAccountInput, windows: &[WindowAs
         return true;
     };
 
-    if weekly_window.status != QuotaWindowStatus::Eligible
-        || weekly_window.reset_unix_seconds.is_none()
-        || matches!(
-            weekly_window.burn_rate_confidence,
-            QuotaRunRateConfidence::Stale | QuotaRunRateConfidence::Unknown
-        )
-    {
+    if weekly_window.status != QuotaWindowStatus::Eligible {
         return true;
     }
 
     let current_remaining_basis_points = weekly_window.remaining_headroom.saturating_mul(100);
-    current_remaining_basis_points < floor_basis_points
-        || weekly_window
-            .survival_margin_basis_points
-            .is_none_or(|margin_basis_points| margin_basis_points < i64::from(floor_basis_points))
+    current_remaining_basis_points <= floor_basis_points
 }
 
 fn account_display_metrics(
@@ -4463,10 +4454,10 @@ mod tests {
     }
 
     #[test]
-    fn weekly_quota_floor_current_remaining_allows_equality_and_blocks_only_below() {
+    fn weekly_quota_floor_blocks_at_or_below_current_remaining_threshold() {
         let cases = [
             (4, RoutingExclusion::WeeklyQuotaFloor, false),
-            (5, RoutingExclusion::None, true),
+            (5, RoutingExclusion::WeeklyQuotaFloor, false),
             (6, RoutingExclusion::None, true),
         ];
 
@@ -4494,39 +4485,31 @@ mod tests {
     }
 
     #[test]
-    fn weekly_quota_floor_projected_margin_allows_equality_and_blocks_only_below() {
-        let cases = [
-            (501, 499, RoutingExclusion::WeeklyQuotaFloor, false),
-            (500, 500, RoutingExclusion::None, true),
-            (499, 501, RoutingExclusion::None, true),
-        ];
+    fn weekly_quota_floor_ignores_projected_margin_above_current_threshold() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_protected",
+                vec![
+                    window(FIVE_HOURS, 90, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        48,
+                        5 * 86_400,
+                        115,
+                    ),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(1_000),
+        ]));
+        let protected = account_assessment(&assessment, "acct_protected");
 
-        for (projected_burn_basis_points, expected_margin, expected_exclusion, selectable) in cases
-        {
-            let assessment = assess_route_band(input(vec![
-                account(
-                    "acct_protected",
-                    vec![
-                        window(FIVE_HOURS, 90, 4 * 3_600),
-                        window_with_per_connection_burn_basis_points_per_hour(
-                            WEEKLY,
-                            10,
-                            3_600,
-                            projected_burn_basis_points,
-                        ),
-                    ],
-                )
-                .with_weekly_quota_floor_basis_points(500),
-            ]));
-            let protected = account_assessment(&assessment, "acct_protected");
-
-            assert_eq!(
-                protected.weekly_survival_margin_basis_points(),
-                Some(expected_margin)
-            );
-            assert_eq!(protected.routing_exclusion(), expected_exclusion);
-            assert_eq!(assessment.preferred_next().is_some(), selectable);
-        }
+        assert!(
+            protected
+                .weekly_survival_margin_basis_points()
+                .is_some_and(|margin| margin < 1_000)
+        );
+        assert_eq!(protected.routing_exclusion(), RoutingExclusion::None);
+        assert!(assessment.preferred_next().is_some());
     }
 
     #[test]
@@ -4678,7 +4661,7 @@ mod tests {
     }
 
     #[test]
-    fn weekly_quota_floor_fails_closed_for_stale_or_unknown_burn_confidence() {
+    fn weekly_quota_floor_does_not_depend_on_burn_confidence() {
         for confidence in [
             QuotaRunRateConfidence::Stale,
             QuotaRunRateConfidence::Unknown,
@@ -4703,10 +4686,7 @@ mod tests {
                     .weekly_survival_margin_basis_points()
                     .is_some_and(|margin| margin > 500)
             );
-            assert_eq!(
-                protected.routing_exclusion(),
-                RoutingExclusion::WeeklyQuotaFloor
-            );
+            assert_eq!(protected.routing_exclusion(), RoutingExclusion::None);
         }
     }
 
