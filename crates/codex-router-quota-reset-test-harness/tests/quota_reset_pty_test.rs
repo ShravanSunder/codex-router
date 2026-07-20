@@ -41,7 +41,7 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text("ctrl-r inspect reset credits", SEMANTIC_WAIT),
+            terminal.wait_for_text("ctrl-r reset credits", SEMANTIC_WAIT),
             "initial browse",
         )?;
         terminal.send(b"\x1b[B")?;
@@ -80,11 +80,7 @@ mod quota_reset_pty_test {
         terminal.wait_for_text_after("Reset credit", resize_start, SEMANTIC_WAIT)?;
         let cancel_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
-        terminal.wait_for_text_after(
-            "ctrl-r inspect reset credits",
-            cancel_start,
-            SEMANTIC_WAIT,
-        )?;
+        terminal.wait_for_text_after("ctrl-r reset credits", cancel_start, SEMANTIC_WAIT)?;
         terminal.send(b"q")?;
         let transcript = terminal.finish(SEMANTIC_WAIT)?;
         let request_records = provider.finish()?;
@@ -141,7 +137,7 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text("ctrl-r inspect reset credits", SEMANTIC_WAIT),
+            terminal.wait_for_text("ctrl-r reset credits", SEMANTIC_WAIT),
             "committed path initial browse",
         )?;
         terminal.send(b"\x1b[B")?;
@@ -213,7 +209,7 @@ mod quota_reset_pty_test {
         terminal.send(b"\r")?;
         stage(
             terminal.wait_for_text_after(
-                "ctrl-r inspect reset credits",
+                "ctrl-r reset credits",
                 browse_restoration_start,
                 SEMANTIC_WAIT,
             ),
@@ -344,7 +340,7 @@ mod quota_reset_pty_test {
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
 
-        terminal.wait_for_text("ctrl-r inspect reset credits", SEMANTIC_WAIT)?;
+        terminal.wait_for_text("ctrl-r reset credits", SEMANTIC_WAIT)?;
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
         provider.wait_for_request_count(2, SEMANTIC_WAIT)?;

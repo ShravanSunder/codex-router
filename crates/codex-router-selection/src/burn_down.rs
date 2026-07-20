@@ -32,7 +32,7 @@ pub const REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS: u64 = 900;
 /// Fixed v1 weekly reset horizon for the near-reset drain pool.
 pub const DRAIN_POOL_RESET_HORIZON_SECONDS: u64 = 172_800;
 /// Largest configurable per-account weekly quota floor in basis points.
-pub const MAX_WEEKLY_QUOTA_FLOOR_BASIS_POINTS: u32 = 1_000;
+pub const MAX_WEEKLY_QUOTA_FLOOR_BASIS_POINTS: u32 = 1_500;
 
 const DEFAULT_SHORT_WINDOW_CUTOFF_SECONDS: u64 = 86_400;
 const DEFAULT_LONG_NEAR_RESET_MAX_SECONDS: u64 = 43_200;
@@ -4482,6 +4482,45 @@ mod tests {
             assert_eq!(protected.routing_exclusion(), expected_exclusion);
             assert_eq!(assessment.preferred_next().is_some(), expected_selectable);
         }
+    }
+
+    #[test]
+    fn weekly_quota_floor_supports_fifteen_percent_and_rejects_above_maximum() {
+        for (remaining_percent, expected_exclusion) in [
+            (15, RoutingExclusion::WeeklyQuotaFloor),
+            (16, RoutingExclusion::None),
+        ] {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_fifteen_percent_floor",
+                    vec![
+                        window(FIVE_HOURS, 90, 4 * 3_600),
+                        window(WEEKLY, remaining_percent, 3_600),
+                    ],
+                )
+                .with_weekly_quota_floor_basis_points(1_500),
+            ]));
+
+            assert_eq!(
+                account_assessment(&assessment, "acct_fifteen_percent_floor").routing_exclusion(),
+                expected_exclusion
+            );
+        }
+
+        let invalid = assess_route_band(input(vec![
+            account(
+                "acct_invalid_above_fifteen",
+                vec![
+                    window(FIVE_HOURS, 90, 4 * 3_600),
+                    window(WEEKLY, 100, 3_600),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(1_501),
+        ]));
+        assert_eq!(
+            account_assessment(&invalid, "acct_invalid_above_fifteen").routing_exclusion(),
+            RoutingExclusion::WeeklyQuotaFloor
+        );
     }
 
     #[test]

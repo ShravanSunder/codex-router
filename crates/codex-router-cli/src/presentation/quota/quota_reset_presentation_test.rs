@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -23,6 +24,7 @@ use crate::quota_reset::reset_workflow_reducer::WorkflowActivities;
 
 use super::quota_browse_presentation_test::assert_quota_golden;
 use super::quota_browse_presentation_test::quota_two_account_view_model;
+use super::quota_floor_editor::WeeklyQuotaFloorSaver;
 use super::quota_reset_detail_rendering::render_reset_panel;
 use super::quota_reset_keyboard_interaction::ResetKeyAction;
 use super::quota_reset_keyboard_interaction::reset_key_action;
@@ -76,6 +78,44 @@ async fn ctrl_r_inspects_the_focused_stable_account_and_generation() {
         }
         other => panic!("expected focused-account inspection, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn ctrl_e_cannot_open_floor_editor_after_reset_target_is_pinned() {
+    let snapshot = test_snapshot(WorkflowPhase::Browse);
+    let (ports, mut intent_receiver, _snapshot_sender) = ResetSessionPorts::test_channels(snapshot);
+    let saver: WeeklyQuotaFloorSaver = Arc::new(|_account_id, _percent| Box::pin(async { Ok(()) }));
+    let events = vec![
+        TerminalEvent::Key(control_key('r')),
+        TerminalEvent::Key(control_key('e')),
+        TerminalEvent::Key(control_key('c')),
+    ];
+
+    let frames = element! {
+        QuotaStatusComponent(
+            view_model: quota_two_account_view_model(),
+            width: 120usize,
+            height: 48usize,
+            reset_intent_sender: Some(ports.intent_sender),
+            reset_snapshot_receiver: Some(ports.snapshot_receiver),
+            weekly_floor_saver: Some(saver),
+        )
+    }
+    .mock_terminal_render_loop(MockTerminalConfig::with_events(
+        futures_util::stream::iter(events).then(|event| async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            event
+        }),
+    ))
+    .map(|canvas| canvas.to_string())
+    .collect::<Vec<_>>()
+    .await;
+
+    assert!(matches!(
+        intent_receiver.recv().await,
+        Some(ResetSessionIntent::BeginInspection { .. })
+    ));
+    assert!(frames.iter().all(|frame| !frame.contains("Weekly floor")));
 }
 
 #[tokio::test]

@@ -170,7 +170,7 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
         .rows
         .get_mut(0)
         .unwrap_or_else(|| panic!("capture report should include a selected row"));
-    row.weekly_quota_floor_basis_points = Some(500);
+    row.weekly_quota_floor_basis_points = Some(1_500);
     row.routing_exclusion = RoutingExclusion::WeeklyQuotaFloor;
     row.quota_evidence_reason = QuotaEvidenceReason::WeeklyQuotaFloor;
     row.routing_reason = RoutingReason::ExcludedWeeklyQuotaFloor;
@@ -180,8 +180,11 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
     let mut json_output = Vec::new();
     must_ok(write_quota_json(&mut json_output, &report));
     let json: serde_json::Value = must_ok(serde_json::from_slice(&json_output));
-    assert_eq!(json["accounts"][0]["weekly_quota_floor_basis_points"], 500);
-    assert_eq!(json["accounts"][0]["weekly_quota_floor_percent"], 5);
+    assert_eq!(
+        json["accounts"][0]["weekly_quota_floor_basis_points"],
+        1_500
+    );
+    assert_eq!(json["accounts"][0]["weekly_quota_floor_percent"], 15);
     assert_eq!(
         json["accounts"][0]["routing_exclusion"],
         "excluded_weekly_quota_floor"
@@ -195,7 +198,7 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
     must_ok(write_quota_plain(&mut plain_output, &report));
     let plain = must_ok(String::from_utf8(plain_output));
     assert!(plain.contains("weekly floor"));
-    assert!(plain.contains("\t5%\t"));
+    assert!(plain.contains("\t15%\t"));
     assert!(plain.contains("blocked: weekly quota floor"));
 
     let view_model = quota_status_view_model(&report, report.rows(), 120);
@@ -203,14 +206,14 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
         .selected
         .unwrap_or_else(|| panic!("capture should include selected details"));
     assert_eq!(selected.reason, "blocked: weekly quota floor");
-    assert!(selected.guards.contains("floor 5%"));
+    assert!(selected.guards.contains("floor 15%"));
 
     for width in [48, 160] {
         let mut tui_output = Vec::new();
         must_ok(write_quota_table(&mut tui_output, &report, Some(width)));
         let text = must_ok(String::from_utf8(tui_output));
         assert!(
-            text.contains("floor 5%"),
+            text.contains("floor 15%"),
             "weekly floor should remain visible at width {width}:\n{text}"
         );
     }
