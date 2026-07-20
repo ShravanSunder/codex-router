@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -13,6 +14,7 @@ use crate::quota_reset::reset_session_supervisor::ResetWorkflowSnapshot;
 use crate::quota_reset::reset_session_supervisor::WorkflowPhase;
 
 use super::quota_browse_rendering::*;
+use super::quota_floor_editor::*;
 use super::quota_reset_detail_rendering::*;
 use super::quota_reset_keyboard_interaction::*;
 use super::quota_reset_presentation_model::*;
@@ -39,6 +41,7 @@ pub(super) struct QuotaStatusComponentProps {
     pub(super) spinner_interval: Duration,
     pub(super) reset_intent_sender: Option<ResetIntentSender>,
     pub(super) reset_snapshot_receiver: Option<watch::Receiver<ResetWorkflowSnapshot>>,
+    pub(super) weekly_floor_saver: Option<WeeklyQuotaFloorSaver>,
 }
 
 #[component]
@@ -53,6 +56,7 @@ pub(super) fn QuotaStatusComponent(
     let view_model = hooks.use_state(|| props.view_model.clone());
     let rows_for_navigation = view_model.read().rows.clone();
     let row_count = rows_for_navigation.len();
+    let weekly_floor_editing_enabled = props.weekly_floor_saver.is_some();
     let initial_focused_account_id = props
         .view_model
         .rows
@@ -87,6 +91,9 @@ pub(super) fn QuotaStatusComponent(
             .map(|receiver| receiver.borrow().clone())
     });
     let reset_target = hooks.use_state(|| None::<ResetPaneTarget>);
+    let weekly_floor_editor = hooks.use_state(|| None::<WeeklyFloorEditorState>);
+    let weekly_floor_command_port = hooks.use_memo(WeeklyFloorEditorCommandPort::new, ());
+    let reload_lock = hooks.use_memo(|| Arc::new(tokio::sync::Mutex::new(())), ());
     let inventory_page_start = hooks.use_state(|| 0usize);
     let spinner_tick = hooks.use_state(|| 0usize);
     let mut should_exit = hooks.use_state(|| false);
@@ -96,6 +103,8 @@ pub(super) fn QuotaStatusComponent(
         let mut focused_account_id = focused_account_id;
         let mut reset_target = reset_target;
         let mut inventory_page_start = inventory_page_start;
+        let mut weekly_floor_editor = weekly_floor_editor;
+        let weekly_floor_command_port = weekly_floor_command_port.clone();
         let reset_intent_sender = props.reset_intent_sender.clone();
         let current_reset_snapshot = reset_snapshot.read().clone().or_else(|| {
             props
@@ -128,6 +137,26 @@ pub(super) fn QuotaStatusComponent(
                 let phase = current_reset_snapshot
                     .as_ref()
                     .map_or(WorkflowPhase::Browse, ResetWorkflowSnapshot::phase);
+                if phase == WorkflowPhase::Browse
+                    && weekly_floor_editor.read().is_some()
+                    && forced_quota_exit_key(&code, modifiers)
+                {
+                    should_exit.set(true);
+                    return;
+                }
+                if phase == WorkflowPhase::Browse && weekly_floor_editor.read().is_some() {
+                    let mut next = weekly_floor_editor.read().clone();
+                    let command = weekly_floor_editor_key_command(&mut next, code, modifiers);
+                    weekly_floor_editor.set(next);
+                    if let Some(command) = command
+                        && !weekly_floor_command_port.send(command)
+                    {
+                        let mut next = weekly_floor_editor.read().clone();
+                        weekly_floor_editor_send_failed(&mut next);
+                        weekly_floor_editor.set(next);
+                    }
+                    return;
+                }
                 if phase != WorkflowPhase::Browse {
                     let selection = current_reset_snapshot.as_ref().map_or(
                         ConfirmationSelection::No,
@@ -286,6 +315,23 @@ pub(super) fn QuotaStatusComponent(
                             }
                         }
                     }
+                    KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        let current_index = focused_row_index_for_account(
+                            &rows_for_navigation,
+                            focused_account_id.read().as_ref(),
+                        );
+                        if weekly_floor_editing_enabled
+                            && reset_target.read().is_none()
+                            && let Some(row) =
+                                current_index.and_then(|index| rows_for_navigation.get(index))
+                        {
+                            weekly_floor_editor.set(Some(WeeklyFloorEditorState::new(
+                                row.account_id.clone(),
+                                row.account.clone(),
+                                row.weekly_quota_floor_percent,
+                            )));
+                        }
+                    }
                     KeyCode::Esc | KeyCode::Char('q') => should_exit.set(true),
                     KeyCode::Char('c' | 'd') if modifiers.contains(KeyModifiers::CONTROL) => {
                         should_exit.set(true);
@@ -298,8 +344,29 @@ pub(super) fn QuotaStatusComponent(
         }
     });
     hooks.use_future({
+        let weekly_floor_saver = props.weekly_floor_saver.clone();
+        let reload_view_model = props.reload_view_model.clone();
+        let reload_lock = reload_lock.clone();
+        let receiver = weekly_floor_command_port.take_receiver();
+        async move {
+            let Some(receiver) = receiver else {
+                return;
+            };
+            run_weekly_floor_editor_commands(
+                receiver,
+                weekly_floor_saver,
+                reload_view_model,
+                reload_lock,
+                view_model,
+                weekly_floor_editor,
+            )
+            .await;
+        }
+    });
+    hooks.use_future({
         let mut view_model = view_model;
         let reload_view_model = props.reload_view_model.clone();
+        let reload_lock = reload_lock;
         let reload_interval = if props.reload_interval.is_zero() {
             LIVE_QUOTA_STATUS_RELOAD_INTERVAL
         } else {
@@ -313,6 +380,7 @@ pub(super) fn QuotaStatusComponent(
             interval.tick().await;
             loop {
                 interval.tick().await;
+                let _reload_guard = reload_lock.lock().await;
                 if let Some(next_view_model) = reload_view_model().await {
                     view_model.set(next_view_model);
                 }
@@ -394,6 +462,7 @@ pub(super) fn QuotaStatusComponent(
             .map(|receiver| receiver.borrow().clone())
     });
     let current_reset_target = reset_target.read().clone();
+    let current_weekly_floor_editor = weekly_floor_editor.read().clone();
     if let (Some(snapshot), Some(target), Some(sender)) = (
         current_reset_snapshot.as_ref(),
         current_reset_target.as_ref(),
@@ -431,15 +500,20 @@ pub(super) fn QuotaStatusComponent(
     let reset_detail_active = current_reset_snapshot
         .as_ref()
         .is_some_and(|snapshot| reset_mode(Some(snapshot)));
-    let details_content_height = current_reset_snapshot
-        .as_ref()
-        .filter(|_| reset_detail_active)
-        .and_then(|snapshot| {
-            current_reset_target.as_ref().map(|target| {
-                reset_panel_content_height(snapshot, target, inventory_page_start.get())
-            })
-        })
-        .unwrap_or_else(|| selected_detail_height(focused_details.is_some()));
+    let details_content_height = current_weekly_floor_editor.as_ref().map_or_else(
+        || {
+            current_reset_snapshot
+                .as_ref()
+                .filter(|_| reset_detail_active)
+                .and_then(|snapshot| {
+                    current_reset_target.as_ref().map(|target| {
+                        reset_panel_content_height(snapshot, target, inventory_page_start.get())
+                    })
+                })
+                .unwrap_or_else(|| selected_detail_height(focused_details.is_some()))
+        },
+        |_| weekly_floor_editor_content_height(),
+    );
     let sidecar = width >= SIDECAR_QUOTA_WIDTH;
     let stacked_details = !sidecar
         && width >= NARROW_QUOTA_WIDTH
@@ -451,7 +525,7 @@ pub(super) fn QuotaStatusComponent(
         row_count,
         focused_row_index_value,
         details_content_height,
-        !reset_detail_active,
+        !reset_detail_active && current_weekly_floor_editor.is_none(),
     );
     let details_height = layout.details_height;
     let visible_account_budget = layout.visible_account_budget;
@@ -469,15 +543,17 @@ pub(super) fn QuotaStatusComponent(
             View(width: 100pct, height: body_height as u32) {
                 #(render_account_list(&view_model.rows, list_width, list_height, focused_row_index_value, visible_account_budget))
                 View(width: 2) { Text(content: "") }
-                #(render_detail_panel(
+                #(render_detail_panel(QuotaDetailPanelProps {
                     focused_details,
-                    current_reset_snapshot.as_ref(),
-                    current_reset_target.as_ref(),
-                    details_width,
-                    details_height,
-                    inventory_page_start.get(),
-                    spinner_tick.get(),
-                ))
+                    reset_snapshot: current_reset_snapshot.as_ref(),
+                    reset_target: current_reset_target.as_ref(),
+                    weekly_floor_editor: current_weekly_floor_editor.as_ref(),
+                    weekly_floor_editor_state: weekly_floor_editor,
+                    width: details_width,
+                    height: details_height,
+                    inventory_page_start: inventory_page_start.get(),
+                    spinner_tick: spinner_tick.get(),
+                }))
             }
         }
         .into_any()
@@ -485,15 +561,17 @@ pub(super) fn QuotaStatusComponent(
         element! {
             View(width: content_width as u32, flex_direction: FlexDirection::Column) {
                 #(render_account_list(&view_model.rows, content_width, list_height, focused_row_index_value, visible_account_budget))
-                #(render_detail_panel(
+                #(render_detail_panel(QuotaDetailPanelProps {
                     focused_details,
-                    current_reset_snapshot.as_ref(),
-                    current_reset_target.as_ref(),
-                    content_width,
-                    stacked_details_height,
-                    inventory_page_start.get(),
-                    spinner_tick.get(),
-                ))
+                    reset_snapshot: current_reset_snapshot.as_ref(),
+                    reset_target: current_reset_target.as_ref(),
+                    weekly_floor_editor: current_weekly_floor_editor.as_ref(),
+                    weekly_floor_editor_state: weekly_floor_editor,
+                    width: content_width,
+                    height: stacked_details_height,
+                    inventory_page_start: inventory_page_start.get(),
+                    spinner_tick: spinner_tick.get(),
+                }))
             }
         }
         .into_any()
@@ -524,36 +602,66 @@ pub(super) fn QuotaStatusComponent(
             Text(content: fit_line(&view_model.route_line, content_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             #(body)
             View(width: 100pct, flex_grow: 1.0) {}
-            View(width: 100pct, padding_left: if reset_detail_active { 2 } else { 0 }) {
-                Text(content: fit_line(reset_footer(current_reset_snapshot.as_ref()), content_width.saturating_sub(if reset_detail_active { 2 } else { 0 })), color: Color::Grey, wrap: TextWrap::NoWrap)
+            View(width: 100pct, padding_left: if reset_detail_active || current_weekly_floor_editor.is_some() { 2 } else { 0 }) {
+                Text(
+                    content: fit_line(
+                        current_weekly_floor_editor.as_ref().map_or_else(
+                            || {
+                                if weekly_floor_editing_enabled
+                                    && !reset_detail_active
+                                {
+                                    "↑/↓ focus  ctrl-e edit floor  ctrl-r reset credits  esc/q exit  ctrl-c exit"
+                                } else {
+                                    reset_footer(current_reset_snapshot.as_ref())
+                                }
+                            },
+                            weekly_floor_editor_footer,
+                        ),
+                        content_width.saturating_sub(if reset_detail_active || current_weekly_floor_editor.is_some() { 2 } else { 0 }),
+                    ),
+                    color: Color::Grey,
+                    wrap: TextWrap::NoWrap,
+                )
             }
         }
     }
 }
 
-fn render_detail_panel(
-    focused_details: Option<&QuotaSelectedAccountViewModel>,
-    reset_snapshot: Option<&ResetWorkflowSnapshot>,
-    reset_target: Option<&ResetPaneTarget>,
+struct QuotaDetailPanelProps<'a> {
+    focused_details: Option<&'a QuotaSelectedAccountViewModel>,
+    reset_snapshot: Option<&'a ResetWorkflowSnapshot>,
+    reset_target: Option<&'a ResetPaneTarget>,
+    weekly_floor_editor: Option<&'a WeeklyFloorEditorState>,
+    weekly_floor_editor_state: State<Option<WeeklyFloorEditorState>>,
     width: usize,
     height: usize,
     inventory_page_start: usize,
     spinner_tick: usize,
-) -> AnyElement<'static> {
-    if let (Some(snapshot), Some(target)) = (reset_snapshot, reset_target)
+}
+
+fn render_detail_panel(props: QuotaDetailPanelProps<'_>) -> AnyElement<'static> {
+    if let Some(editor) = props.weekly_floor_editor {
+        return render_weekly_floor_editor(
+            editor,
+            props.width,
+            props.height,
+            props.weekly_floor_editor_state,
+        );
+    }
+    if let (Some(snapshot), Some(target)) = (props.reset_snapshot, props.reset_target)
         && reset_mode(Some(snapshot))
     {
         return render_reset_panel(
             snapshot,
             target,
-            width,
-            height,
-            inventory_page_start,
-            reset_inventory_page_size(height),
-            spinner_tick,
+            props.width,
+            props.height,
+            props.inventory_page_start,
+            reset_inventory_page_size(props.height),
+            props.spinner_tick,
         );
     }
-    render_selected_panel(focused_details, width, height)
+    render_selected_panel(props.focused_details, props.width, props.height)
 }
 
 fn try_send_reset_intent(sender: Option<&ResetIntentSender>, intent: ResetSessionIntent) -> bool {
@@ -561,6 +669,11 @@ fn try_send_reset_intent(sender: Option<&ResetIntentSender>, intent: ResetSessio
         return sender.send_now(intent).is_ok();
     }
     false
+}
+
+pub(super) fn forced_quota_exit_key(code: &KeyCode, modifiers: KeyModifiers) -> bool {
+    (matches!(code, KeyCode::Char('c' | 'd')) && modifiers.contains(KeyModifiers::CONTROL))
+        || matches!(code, KeyCode::Char('\u{3}' | '\u{4}'))
 }
 
 fn current_unix_seconds() -> u64 {

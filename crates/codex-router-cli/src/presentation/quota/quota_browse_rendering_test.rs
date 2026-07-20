@@ -278,6 +278,7 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
             sample_metadata,
             reset_pace,
             weekly_pace: "legacy safe pace sentinel".to_owned(),
+            weekly_quota_floor_percent: 0,
             details: selected_details.clone(),
         }],
         selected: Some(selected_details),

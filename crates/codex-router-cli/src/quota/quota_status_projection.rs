@@ -47,6 +47,10 @@ pub(super) fn quota_status_view_model(
                     report.now_unix_seconds,
                 ),
                 weekly_pace: quota_pace_summary(row.weekly_pace, report.now_unix_seconds),
+                weekly_quota_floor_percent: row
+                    .weekly_quota_floor_basis_points
+                    .and_then(|basis_points| u16::try_from(basis_points / 100).ok())
+                    .unwrap_or(0),
                 details: quota_selected_account_view_model(report, row),
             })
             .collect(),

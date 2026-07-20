@@ -83,7 +83,7 @@ pub enum AccountCommand {
         router_root: PathBuf,
         /// Exact display label used to resolve one account.
         account_label: String,
-        /// Integer percentage from zero through ten.
+        /// Integer percentage from zero through fifteen.
         percent: u16,
     },
 }
@@ -239,7 +239,7 @@ pub enum AccountCommandError {
         option: &'static str,
     },
     /// The configured percentage was not an integer in the supported range.
-    #[error("weekly floor percent must be an integer from 0 through 10")]
+    #[error("weekly floor percent must be an integer from 0 through 15")]
     InvalidWeeklyFloorPercent,
     /// No configured account has the supplied exact label.
     #[error("weekly floor account label did not match a configured account")]
@@ -352,7 +352,7 @@ Shows configured router accounts.
 ";
 
 const ACCOUNT_SET_WEEKLY_FLOOR_HELP_TEXT: &str = "\
-codex-router account set-weekly-floor --account <label> --percent <0-10>
+codex-router account set-weekly-floor --account <label> --percent <0-15>
 
 Sets an integer weekly quota floor for exactly one account label. Zero disables it.
 ";
@@ -1023,7 +1023,7 @@ impl AccountSetWeeklyFloorOptions {
                     let percent = raw_percent
                         .parse::<u16>()
                         .ok()
-                        .filter(|percent| *percent <= 10)
+                        .filter(|percent| *percent <= 15)
                         .ok_or(AccountCommandError::InvalidWeeklyFloorPercent)?;
                     options.percent = Some(percent);
                 }

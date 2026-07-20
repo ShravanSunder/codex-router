@@ -225,6 +225,7 @@ fn quota_view_model() -> QuotaStatusViewModel {
                 unavailable_reason: None,
             },
             weekly_pace: "ahead reset by 2d".to_owned(),
+            weekly_quota_floor_percent: 0,
             details: selected_details.clone(),
         }],
         selected: Some(selected_details),
@@ -279,6 +280,7 @@ pub(super) fn quota_two_account_view_model() -> QuotaStatusViewModel {
                 sample_metadata: SampleMetadata::default(),
                 reset_pace: ResetPaceViewModel::default(),
                 weekly_pace: "ahead reset by 2d".to_owned(),
+                weekly_quota_floor_percent: 0,
                 details: alpha_details.clone(),
             },
             QuotaStatusAccountViewModel {
@@ -298,6 +300,7 @@ pub(super) fn quota_two_account_view_model() -> QuotaStatusViewModel {
                 sample_metadata: SampleMetadata::default(),
                 reset_pace: ResetPaceViewModel::default(),
                 weekly_pace: "behind reset by 1d".to_owned(),
+                weekly_quota_floor_percent: 0,
                 details: beta_details,
             },
         ],
@@ -328,6 +331,7 @@ fn quota_many_account_view_model() -> QuotaStatusViewModel {
             sample_metadata: SampleMetadata::default(),
             reset_pace: ResetPaceViewModel::default(),
             weekly_pace: "ahead reset by 2d".to_owned(),
+            weekly_quota_floor_percent: 0,
             details,
         });
     }
@@ -516,6 +520,7 @@ fn quota_state_color_row(
         },
         reset_pace: reset_pace.clone(),
         weekly_pace: String::new(),
+        weekly_quota_floor_percent: 0,
         details: QuotaSelectedAccountViewModel {
             reset_pace,
             ..selected_account_details(account, semantic_label)

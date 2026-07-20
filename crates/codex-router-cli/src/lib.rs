@@ -5317,7 +5317,7 @@ exit 42
             OsString::from("--account"),
             OsString::from("primary"),
             OsString::from("--percent"),
-            OsString::from("5"),
+            OsString::from("15"),
             OsString::from("--router-root"),
             router_root.clone().into_os_string(),
         ]) {
@@ -5336,12 +5336,23 @@ exit 42
         };
         assert_eq!(parsed_root, router_root);
         assert_eq!(account_label, "primary");
-        assert_eq!(percent, 5);
+        assert_eq!(percent, 15);
+
+        let help = match CliCommand::parse([
+            OsString::from("account"),
+            OsString::from("set-weekly-floor"),
+            OsString::from("--help"),
+        ]) {
+            Ok(CliCommand::Account(AccountCommand::Help(help))) => help,
+            Ok(other) => panic!("weekly-floor help should parse, got {other:?}"),
+            Err(error) => panic!("weekly-floor help should parse: {error}"),
+        };
+        assert!(help.contains("--percent <0-15>"));
     }
 
     #[test]
     fn account_set_weekly_floor_rejects_invalid_and_duplicate_options() {
-        for invalid_percent in ["-1", "2.5", "11", "65536"] {
+        for invalid_percent in ["-1", "2.5", "16", "65536"] {
             let result = CliCommand::parse([
                 OsString::from("account"),
                 OsString::from("set-weekly-floor"),

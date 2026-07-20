@@ -37,6 +37,7 @@ pub(crate) struct QuotaStatusAccountViewModel {
     pub(crate) sample_metadata: SampleMetadata,
     pub(crate) reset_pace: ResetPaceViewModel,
     pub(crate) weekly_pace: String,
+    pub(crate) weekly_quota_floor_percent: u16,
     pub(crate) details: QuotaSelectedAccountViewModel,
 }
 

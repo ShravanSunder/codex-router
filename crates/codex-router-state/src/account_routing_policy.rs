@@ -5,7 +5,7 @@ use thiserror::Error;
 
 /// Invalid configured weekly quota floor.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-#[error("weekly quota floor must be an integer percent from 1 through 10")]
+#[error("weekly quota floor must be an integer percent from 1 through 15")]
 pub struct InvalidWeeklyQuotaFloor;
 
 /// Enabled weekly quota floor stored as basis points.
@@ -17,7 +17,7 @@ pub struct WeeklyQuotaFloorBasisPoints(u16);
 impl WeeklyQuotaFloorBasisPoints {
     /// Creates an enabled floor from integer-percent-derived basis points.
     pub fn new(basis_points: u16) -> Result<Self, InvalidWeeklyQuotaFloor> {
-        if (100..=1_000).contains(&basis_points) && basis_points.is_multiple_of(100) {
+        if (100..=1_500).contains(&basis_points) && basis_points.is_multiple_of(100) {
             Ok(Self(basis_points))
         } else {
             Err(InvalidWeeklyQuotaFloor)
