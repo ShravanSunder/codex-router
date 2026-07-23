@@ -1,0 +1,291 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing semantic-version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  publish:
+    name: Apple Silicon release and Homebrew tap
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@v5
+        with:
+          path: automation
+          persist-credentials: false
+
+      - name: Checkout tagged release source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          path: release-source
+          persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Validate release metadata and architecture
+        id: metadata
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must use v<major>.<minor>.<patch> syntax" >&2
+            exit 1
+          fi
+
+          release_version="${RELEASE_TAG#v}"
+          runner_architecture="$(uname -m)"
+          if [[ "${runner_architecture}" != "arm64" ]]; then
+            echo "release requires an arm64 runner; received ${runner_architecture}" >&2
+            exit 1
+          fi
+
+          source_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          if [[ "${source_commit}" != "${tag_commit}" ]]; then
+            echo "checked-out source does not match the release tag" >&2
+            exit 1
+          fi
+          if [[ "$(git tag --points-at HEAD --list "${RELEASE_TAG}")" != "${RELEASE_TAG}" ]]; then
+            echo "release tag is not exact for the checked-out source" >&2
+            exit 1
+          fi
+
+          cargo_version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "codex-router-cli") | .version'
+          )"
+          if [[ "${cargo_version}" != "${release_version}" ]]; then
+            echo "release tag version does not match codex-router-cli" >&2
+            exit 1
+          fi
+
+          {
+            echo "version=${release_version}"
+            echo "source_commit=${source_commit}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build release binary
+        working-directory: release-source
+        run: cargo build --locked --release -p codex-router-cli --bin codex-router
+
+      - name: Verify and package release binary
+        id: artifact
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+
+          release_binary="target/release/codex-router"
+          file_description="$(file "${release_binary}")"
+          if [[ "${file_description}" != *"Mach-O 64-bit executable arm64"* ]]; then
+            echo "release binary is not Mach-O arm64" >&2
+            exit 1
+          fi
+          codesign --verify --verbose=2 "${release_binary}"
+          if [[ "$("${release_binary}" --version)" != "codex-router ${RELEASE_VERSION}" ]]; then
+            echo "release binary version does not match the release tag" >&2
+            exit 1
+          fi
+
+          asset_name="codex-router-v${RELEASE_VERSION}-aarch64-apple-darwin.tar.gz"
+          release_directory="${RUNNER_TEMP}/codex-router-release"
+          payload_directory="${release_directory}/payload"
+          mkdir -p "${payload_directory}"
+          install -m 0755 "${release_binary}" "${payload_directory}/codex-router"
+          COPYFILE_DISABLE=1 tar \
+            -C "${payload_directory}" \
+            -czf "${release_directory}/${asset_name}" \
+            codex-router
+          asset_sha256="$(shasum -a 256 "${release_directory}/${asset_name}" | cut -d ' ' -f 1)"
+
+          {
+            echo "name=${asset_name}"
+            echo "path=${release_directory}/${asset_name}"
+            echo "sha256=${asset_sha256}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub release asset
+        env:
+          ASSET_NAME: ${{ steps.artifact.outputs.name }}
+          ASSET_PATH: ${{ steps.artifact.outputs.path }}
+          ASSET_SHA256: ${{ steps.artifact.outputs.sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_api="repos/${GITHUB_REPOSITORY}/releases"
+          if release_id="$(gh api "${release_api}/tags/${RELEASE_TAG}" --jq '.id' 2>/dev/null)"; then
+            :
+          else
+            release_id="$(
+              gh api -X POST "${release_api}" \
+                -f tag_name="${RELEASE_TAG}" \
+                -f name="codex-router ${RELEASE_TAG}" \
+                -f body="Prebuilt codex-router ${RELEASE_VERSION} for Apple Silicon macOS." \
+                -F draft=false \
+                -F prerelease=false \
+                --jq '.id'
+            )"
+          fi
+
+          release_json="${RUNNER_TEMP}/release-${release_id}.json"
+          gh api "${release_api}/${release_id}" > "${release_json}"
+          existing_asset_id="$(
+            jq -r --arg asset_name "${ASSET_NAME}" \
+              '.assets[] | select(.name == $asset_name) | .id' \
+              "${release_json}"
+          )"
+
+          upload_response="${RUNNER_TEMP}/release-upload.json"
+          candidate_asset_name="${ASSET_NAME}.candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          release_upload_token="${GH_TOKEN}"
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${release_upload_token}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/gzip" \
+            --data-binary "@${ASSET_PATH}" \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${candidate_asset_name}" \
+            > "${upload_response}"
+
+          uploaded_asset_id="$(jq -r '.id' "${upload_response}")"
+          uploaded_asset_name="$(jq -r '.name' "${upload_response}")"
+          uploaded_asset_state="$(jq -r '.state' "${upload_response}")"
+          if [[ "${uploaded_asset_name}" != "${candidate_asset_name}" || "${uploaded_asset_state}" != "uploaded" ]]; then
+            echo "release asset upload did not reach the expected state" >&2
+            exit 1
+          fi
+          uploaded_digest="$(gh api "${release_api}/assets/${uploaded_asset_id}" --jq '.digest')"
+          if [[ "${uploaded_digest}" != "sha256:${ASSET_SHA256}" ]]; then
+            echo "release asset digest does not match the packaged archive" >&2
+            exit 1
+          fi
+
+          if [[ -n "${existing_asset_id}" ]]; then
+            previous_asset_name="${ASSET_NAME}.previous-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            gh api -X PATCH "${release_api}/assets/${existing_asset_id}" \
+              -f name="${previous_asset_name}" \
+              > /dev/null
+          fi
+          if ! gh api -X PATCH "${release_api}/assets/${uploaded_asset_id}" \
+            -f name="${ASSET_NAME}" \
+            > /dev/null; then
+            if [[ -n "${existing_asset_id}" ]]; then
+              gh api -X PATCH "${release_api}/assets/${existing_asset_id}" \
+                -f name="${ASSET_NAME}" \
+                > /dev/null
+            fi
+            echo "unable to promote the verified release asset" >&2
+            exit 1
+          fi
+          if [[ -n "${existing_asset_id}" ]]; then
+            gh api -X DELETE "${release_api}/assets/${existing_asset_id}"
+          fi
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          path: homebrew-taps
+          repository: ShravanSunder/homebrew-taps
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+
+      - name: Update Homebrew formula
+        env:
+          ASSET_SHA256: ${{ steps.artifact.outputs.sha256 }}
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.metadata.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          python3 automation/scripts/update_homebrew_formula.py \
+            --formula homebrew-taps/Formula/codex-router.rb \
+            --version "${RELEASE_VERSION}" \
+            --sha256 "${ASSET_SHA256}" \
+            --source-commit "${SOURCE_COMMIT}"
+
+      - name: Register local Homebrew tap
+        id: tap
+        run: |
+          set -euo pipefail
+          tap_path="$(brew --repository)/Library/Taps/shravansunder/homebrew-taps"
+          if [[ -e "${tap_path}" ]]; then
+            echo "Homebrew tap path already exists on the release runner" >&2
+            exit 1
+          fi
+          mkdir -p "$(dirname "${tap_path}")"
+          ln -s "${GITHUB_WORKSPACE}/homebrew-taps" "${tap_path}"
+          echo "path=${tap_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate Homebrew formula and installation
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        working-directory: homebrew-taps
+        run: |
+          set -euo pipefail
+          ruby -c Formula/codex-router.rb
+          brew style shravansunder/taps/codex-router
+          brew audit --strict shravansunder/taps/codex-router
+          brew install shravansunder/taps/codex-router
+          brew test shravansunder/taps/codex-router
+          brew linkage --test codex-router
+
+          installed_binary="$(brew --prefix codex-router)/bin/codex-router"
+          installed_description="$(file "${installed_binary}")"
+          if [[ "${installed_description}" != *"Mach-O 64-bit executable arm64"* ]]; then
+            echo "Homebrew installed a non-arm64 binary" >&2
+            exit 1
+          fi
+          codesign --verify --verbose=2 "${installed_binary}"
+          if [[ "$("${installed_binary}" --version)" != "codex-router ${RELEASE_VERSION}" ]]; then
+            echo "Homebrew installed an unexpected codex-router version" >&2
+            exit 1
+          fi
+
+      - name: Commit Homebrew formula update
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        working-directory: homebrew-taps
+        run: |
+          set -euo pipefail
+          git add -- Formula/codex-router.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew formula already matches this release"
+            exit 0
+          fi
+          if [[ "$(git diff --cached --name-only)" != "Formula/codex-router.rb" ]]; then
+            echo "tap update attempted to commit an unexpected path" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "codex-router ${RELEASE_VERSION}"
+          git push origin HEAD:main
