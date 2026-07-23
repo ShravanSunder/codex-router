@@ -12,7 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -22,19 +22,19 @@ env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  publish:
-    name: Apple Silicon release and Homebrew tap
+  release:
+    name: Apple Silicon release
+    permissions:
+      contents: write
     runs-on: macos-15
     timeout-minutes: 45
+    outputs:
+      asset_sha256: ${{ steps.artifact.outputs.sha256 }}
+      source_commit: ${{ steps.metadata.outputs.source_commit }}
+      version: ${{ steps.metadata.outputs.version }}
     steps:
-      - name: Checkout release automation
-        uses: actions/checkout@v5
-        with:
-          path: automation
-          persist-credentials: false
-
       - name: Checkout tagged release source
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
           path: release-source
@@ -42,7 +42,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.95.0
 
@@ -210,8 +210,22 @@ jobs:
             gh api -X DELETE "${release_api}/assets/${existing_asset_id}"
           fi
 
+  publish-tap:
+    name: Homebrew tap
+    needs: release
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: automation
+          persist-credentials: false
+
       - name: Checkout Homebrew tap
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
           path: homebrew-taps
@@ -220,9 +234,9 @@ jobs:
 
       - name: Update Homebrew formula
         env:
-          ASSET_SHA256: ${{ steps.artifact.outputs.sha256 }}
-          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
-          SOURCE_COMMIT: ${{ steps.metadata.outputs.source_commit }}
+          ASSET_SHA256: ${{ needs.release.outputs.asset_sha256 }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.release.outputs.source_commit }}
         run: |
           set -euo pipefail
           python3 automation/scripts/update_homebrew_formula.py \
@@ -246,7 +260,7 @@ jobs:
 
       - name: Validate Homebrew formula and installation
         env:
-          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
         working-directory: homebrew-taps
         run: |
           set -euo pipefail
@@ -271,7 +285,7 @@ jobs:
 
       - name: Commit Homebrew formula update
         env:
-          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
         working-directory: homebrew-taps
         run: |
           set -euo pipefail
