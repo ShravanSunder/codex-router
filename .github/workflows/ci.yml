@@ -48,6 +48,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Homebrew formula updater tests
+        run: python3 -m unittest scripts.tests.test_update_homebrew_formula -v
+
       - name: Integrated quota reset PTY harness
         run: |
           cargo build -p codex-router-cli --bin codex-router
