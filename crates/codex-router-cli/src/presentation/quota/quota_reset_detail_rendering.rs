@@ -266,11 +266,7 @@ fn inspected_sections(
         .iter()
         .filter(|credit| credit.status == ResetCreditDisplayStatusDto::Available)
         .count();
-    let inspection_eligible = snapshot.disabled_yes_reason().is_none()
-        && snapshot
-            .live_weekly()
-            .is_some_and(|weekly| weekly.remaining_percent < 1)
-        && usable_count > 0;
+    let inspection_eligible = snapshot.disabled_yes_reason().is_none() && usable_count > 0;
     let mut eligibility_rows = Vec::new();
     if let Some(weekly) = snapshot.live_weekly() {
         eligibility_rows.push(ResetDetailRow::Field {

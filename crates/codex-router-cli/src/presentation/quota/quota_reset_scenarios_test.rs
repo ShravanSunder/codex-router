@@ -78,21 +78,38 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
             &["Weekly usage        ready", "Reset credits       ⠋ checking"],
         ),
         (
+            "inspected-below-ten-eligible",
+            ResetWorkflowSnapshot::test_snapshot(
+                WorkflowPhase::Inspected,
+                ConfirmationSelection::No,
+                completed_inspection_activities(),
+                None,
+                Some(test_live_weekly(9)),
+                test_credit_inventory(),
+                None,
+            ),
+            &["Weekly remaining    9% · eligible"],
+        ),
+        (
             "confirming-ineligible",
             ResetWorkflowSnapshot::test_snapshot(
                 WorkflowPhase::Confirming,
                 ConfirmationSelection::No,
                 completed_inspection_activities(),
                 None,
-                Some(test_live_weekly(4)),
+                Some(test_live_weekly(10)),
                 test_credit_inventory(),
                 Some(
-                    ResetEligibilityDisabledReason::WeeklyRemainingNotBelowOnePercent {
-                        remaining_percent: 4,
+                    ResetEligibilityDisabledReason::WeeklyRemainingNotBelowTenPercentOrCreditNotExpiringSoon {
+                        remaining_percent: 10,
                     },
                 ),
             ),
-            &["[No]", "Yes disabled", "below 1% is required"],
+            &[
+                "[No]",
+                "Yes disabled",
+                "below 10% or credit expiry within 12h is required",
+            ],
         ),
         (
             "confirming-eligible",
@@ -164,11 +181,11 @@ fn reset_operation_scenarios() -> Vec<(&'static str, ResetWorkflowSnapshot, &'st
                 Some(WorkflowResult::Refused(
                     RenderSafeFailure::EligibilityRefused,
                 )),
-                Some(test_live_weekly(4)),
+                Some(test_live_weekly(10)),
                 test_credit_inventory(),
                 Some(
-                    ResetEligibilityDisabledReason::WeeklyRemainingNotBelowOnePercent {
-                        remaining_percent: 4,
+                    ResetEligibilityDisabledReason::WeeklyRemainingNotBelowTenPercentOrCreditNotExpiringSoon {
+                        remaining_percent: 10,
                     },
                 ),
             ),

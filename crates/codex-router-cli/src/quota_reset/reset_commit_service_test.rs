@@ -247,6 +247,30 @@ async fn every_authority_expiry_and_weekly_precommit_refusal_has_zero_posts() {
 }
 
 #[tokio::test]
+async fn precommit_allows_below_ten_percent_or_imminent_credit_expiry() {
+    for (remaining_percent, credit_expiration) in [(9, 50_000), (10, 43_300)] {
+        let usage = LiveUsagePortResult::Known(LiveWeeklyUsage::new(remaining_percent));
+        let inventory = validated_inventory(vec![credit("earliest", credit_expiration)]);
+        let service = service(
+            vec![Ok(authority(7)), Ok(authority(7))],
+            vec![usage.clone(), usage],
+            vec![inventory; 2],
+        );
+        let confirmation = inspected_confirmation(&service).await;
+
+        let authorization = service
+            .revalidate(confirmation, 100, redeem_id())
+            .await
+            .authorization;
+
+        assert!(
+            authorization.is_ok(),
+            "remaining={remaining_percent}, expiration={credit_expiration}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn later_credit_only_change_allows_exactly_one_by_value_consume() {
     let service = service(
         vec![Ok(authority(7)), Ok(authority(7))],

@@ -89,9 +89,11 @@ pub(super) fn disabled_reason(reason: &ResetEligibilityDisabledReason) -> String
         ResetEligibilityDisabledReason::LiveInspectionIncomplete => {
             "Live inspection is incomplete.".to_owned()
         }
-        ResetEligibilityDisabledReason::WeeklyRemainingNotBelowOnePercent { remaining_percent } => {
-            format!("{remaining_percent}% remains; below 1% is required.")
-        }
+        ResetEligibilityDisabledReason::WeeklyRemainingNotBelowTenPercentOrCreditNotExpiringSoon {
+            remaining_percent,
+        } => format!(
+            "{remaining_percent}% remains; below 10% or credit expiry within 12h is required."
+        ),
         ResetEligibilityDisabledReason::NoUsableCredit => {
             "No usable live reset credit is available.".to_owned()
         }
