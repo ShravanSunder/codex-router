@@ -267,6 +267,7 @@ mod quota_reset_pty_test {
             arguments,
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
+        terminal.resize(36, 120)?;
 
         stage(
             terminal.wait_for_text("ctrl-e edit floor", SEMANTIC_WAIT),
