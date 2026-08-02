@@ -25,6 +25,7 @@ use super::reset_credit_policy::RedeemRequestId;
 use super::reset_credit_policy::RenderSafeFailure;
 use super::reset_credit_policy::SelectedResetCreditSnapshot;
 use super::reset_credit_policy::ValidatedCreditInventory;
+use super::reset_credit_policy::reset_credit_is_eligible;
 use super::reset_credit_policy::validate_credit_inventory;
 
 pub(in crate::quota_reset) struct LiveResetAuthorityReader {
@@ -386,6 +387,9 @@ where
         weekly_usage: LiveWeeklyUsage,
         inventory: &ValidatedCreditInventory,
     ) -> Result<ConfirmationAuthority<TAuthorityReader::Authority>, RenderSafeFailure> {
+        if !reset_credit_is_eligible(weekly_usage, inventory) {
+            return Err(RenderSafeFailure::EligibilityRefused);
+        }
         let selected_credit = inventory
             .earliest_usable_snapshot()
             .ok_or(RenderSafeFailure::EligibilityRefused)?;
@@ -451,7 +455,9 @@ where
         let CreditInventoryPortResult::Validated(validated_inventory) = inventory else {
             return Err(RenderSafeFailure::SelectedCreditChanged);
         };
-        if *live_usage != context.expected_weekly_usage || live_usage.remaining_percent() >= 1 {
+        if *live_usage != context.expected_weekly_usage
+            || !reset_credit_is_eligible(*live_usage, validated_inventory)
+        {
             return Err(RenderSafeFailure::EligibilityRefused);
         }
         let selected_credit = match validated_inventory.earliest_usable_snapshot() {

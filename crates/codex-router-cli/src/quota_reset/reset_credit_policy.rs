@@ -172,6 +172,7 @@ pub(crate) struct ValidatedCreditInventory {
     credits: Vec<ValidatedResetCredit>,
     earliest_usable_index: Option<usize>,
     usable_credit_count: usize,
+    validated_at_unix_seconds: i64,
 }
 
 impl ValidatedCreditInventory {
@@ -179,6 +180,7 @@ impl ValidatedCreditInventory {
         self.credits.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn earliest_usable_credit_id(&self) -> Option<&str> {
         self.earliest_usable_index
             .and_then(|index| self.credits.get(index))
@@ -187,6 +189,18 @@ impl ValidatedCreditInventory {
 
     pub(crate) const fn usable_credit_count(&self) -> usize {
         self.usable_credit_count
+    }
+
+    fn earliest_usable_credit_expires_within(&self, duration_seconds: i64) -> bool {
+        self.earliest_usable_index
+            .and_then(|index| self.credits.get(index))
+            .and_then(|credit| credit.expires_unix_seconds)
+            .is_some_and(|expiration| {
+                expiration
+                    <= self
+                        .validated_at_unix_seconds
+                        .saturating_add(duration_seconds)
+            })
     }
 
     pub(in crate::quota_reset) fn earliest_usable_identity(&self) -> Option<ResetCreditIdentity> {
@@ -339,7 +353,22 @@ pub(crate) fn validate_credit_inventory(
         credits,
         earliest_usable_index,
         usable_credit_count,
+        validated_at_unix_seconds: now_unix_seconds,
     })
+}
+
+const WEEKLY_REMAINING_RESET_THRESHOLD_PERCENT: u32 = 10;
+const EXPIRING_CREDIT_RESET_WINDOW_SECONDS: i64 = 12 * 60 * 60;
+
+/// Returns whether live usage or imminent selected-credit expiry permits reset.
+pub(crate) fn reset_credit_is_eligible(
+    live_usage: LiveWeeklyUsage,
+    inventory: &ValidatedCreditInventory,
+) -> bool {
+    inventory.earliest_usable_index.is_some()
+        && (live_usage.remaining_percent() < WEEKLY_REMAINING_RESET_THRESHOLD_PERCENT
+            || inventory
+                .earliest_usable_credit_expires_within(EXPIRING_CREDIT_RESET_WINDOW_SECONDS))
 }
 
 fn validate_credit(

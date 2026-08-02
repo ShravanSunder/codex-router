@@ -131,7 +131,7 @@ mod quota_reset_pty_test {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compiled_quota_tui_commits_one_post_and_owns_it_until_result() -> TestResult<()> {
+    async fn compiled_quota_tui_allows_nine_percent_and_commits_one_owned_post() -> TestResult<()> {
         let fixture = QuotaResetFixture::create().await?;
         let mut provider = HeldLoopbackProvider::bind()?;
         let arguments = [
@@ -164,6 +164,10 @@ mod quota_reset_pty_test {
         stage(
             terminal.wait_for_text("Live eligibility", SEMANTIC_WAIT),
             "inspection completion",
+        )?;
+        stage(
+            terminal.wait_for_text("9% · eligible", SEMANTIC_WAIT),
+            "below-ten weekly eligibility",
         )?;
         terminal.send(b"\r")?;
         stage(
@@ -263,6 +267,7 @@ mod quota_reset_pty_test {
             arguments,
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
+        terminal.resize(36, 120)?;
 
         stage(
             terminal.wait_for_text("ctrl-e edit floor", SEMANTIC_WAIT),

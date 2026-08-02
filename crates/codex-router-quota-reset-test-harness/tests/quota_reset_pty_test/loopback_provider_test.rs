@@ -175,7 +175,7 @@ fn handle_provider_connection(
     let body = if method == "POST" {
         r#"{"code":"reset","windows_reset":2}"#
     } else if path.ends_with("/usage") {
-        r#"{"rate_limit":{"primary_window":{"used_percent":10,"reset_at":2000000000,"limit_window_seconds":18000},"secondary_window":{"used_percent":100,"reset_at":2000000000,"limit_window_seconds":604800}},"additional_rate_limits":[]}"#
+        r#"{"rate_limit":{"primary_window":{"used_percent":10,"reset_at":2000000000,"limit_window_seconds":18000},"secondary_window":{"used_percent":91,"reset_at":2000000000,"limit_window_seconds":604800}},"additional_rate_limits":[]}"#
     } else {
         r#"{"credits":[{"id":"pty-credit-earliest","status":"available","expires_at":"2030-01-01T00:00:00Z","title":"PTY weekly reset"}],"available_count":1}"#
     };

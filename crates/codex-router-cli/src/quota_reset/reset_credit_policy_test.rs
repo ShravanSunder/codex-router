@@ -79,6 +79,41 @@ fn inventory_validation_fails_closed_for_any_malformed_or_unknown_credit() {
 }
 
 #[test]
+fn reset_eligibility_uses_weekly_and_credit_expiry_boundaries() {
+    let expiring_at_twelve_hours = validate_credit_inventory(
+        vec![available_credit("expires-at-boundary", Some(43_300))],
+        100,
+    )
+    .expect("valid inventory");
+    let expiring_after_twelve_hours = validate_credit_inventory(
+        vec![available_credit("expires-after-boundary", Some(43_301))],
+        100,
+    )
+    .expect("valid inventory");
+    let non_expiring = validate_credit_inventory(vec![available_credit("never", None)], 100)
+        .expect("valid inventory");
+    let empty = validate_credit_inventory(Vec::new(), 100).expect("valid empty inventory");
+
+    assert!(!reset_credit_is_eligible(LiveWeeklyUsage::new(0), &empty));
+    assert!(reset_credit_is_eligible(
+        LiveWeeklyUsage::new(9),
+        &non_expiring
+    ));
+    assert!(!reset_credit_is_eligible(
+        LiveWeeklyUsage::new(10),
+        &non_expiring
+    ));
+    assert!(reset_credit_is_eligible(
+        LiveWeeklyUsage::new(10),
+        &expiring_at_twelve_hours
+    ));
+    assert!(!reset_credit_is_eligible(
+        LiveWeeklyUsage::new(10),
+        &expiring_after_twelve_hours
+    ));
+}
+
+#[test]
 fn redeem_request_identity_is_bounded_and_control_character_free() {
     assert!(RedeemRequestId::new("redeem-1".to_owned()).is_ok());
     assert!(RedeemRequestId::new(String::new()).is_err());

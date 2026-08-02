@@ -88,7 +88,7 @@ pub(crate) struct SelectedCreditConfirmationFacts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ResetEligibilityDisabledReason {
     LiveInspectionIncomplete,
-    WeeklyRemainingNotBelowOnePercent { remaining_percent: u32 },
+    WeeklyRemainingNotBelowTenPercentOrCreditNotExpiringSoon { remaining_percent: u32 },
     NoUsableCredit,
     AuthorityUnavailable,
     PinnedTargetInvalidated(PinnedTargetInvalidationReason),
@@ -255,17 +255,14 @@ fn disabled_yes_reason(
     if live_weekly.provenance != ResetValueProvenance::CurrentLive {
         return Some(ResetEligibilityDisabledReason::LiveInspectionIncomplete);
     }
-    if live_weekly.remaining_percent >= 1 {
-        return Some(
-            ResetEligibilityDisabledReason::WeeklyRemainingNotBelowOnePercent {
-                remaining_percent: live_weekly.remaining_percent,
-            },
-        );
-    }
     if !credit_inventory.iter().any(|credit| credit.earliest_usable) {
         return Some(ResetEligibilityDisabledReason::NoUsableCredit);
     }
-    Some(ResetEligibilityDisabledReason::LiveInspectionIncomplete)
+    Some(
+        ResetEligibilityDisabledReason::WeeklyRemainingNotBelowTenPercentOrCreditNotExpiringSoon {
+            remaining_percent: live_weekly.remaining_percent,
+        },
+    )
 }
 
 /// Render-safe terminal value returned by the command-owned session.

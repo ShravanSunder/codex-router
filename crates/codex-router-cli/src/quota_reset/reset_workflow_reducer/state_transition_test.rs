@@ -190,19 +190,49 @@ fn reducer_disables_yes_and_suppresses_repeated_or_stale_completions() {
     workflow.reduce(WorkflowIntent::OperationCompleted(
         CorrelatedOutcome::inspection_live_usage(
             inspection.live_usage_correlation(),
-            LiveUsagePortResult::Known(LiveWeeklyUsage::new(1)),
+            LiveUsagePortResult::Known(LiveWeeklyUsage::new(10)),
         ),
     ));
     workflow.reduce(WorkflowIntent::OperationCompleted(
         CorrelatedOutcome::inspection_credit_inventory(
             inspection.credit_inventory_correlation(),
-            eligible_inventory_result(),
+            inventory_result_with_expiry(43_301),
         ),
     ));
     workflow.reduce(WorkflowIntent::OpenConfirmation);
     assert!(!workflow.yes_enabled());
     workflow.reduce(WorkflowIntent::SelectYes);
     assert_eq!(workflow.confirmation_selection(), ConfirmationSelection::No);
+}
+
+#[test]
+fn yes_enabled_allows_below_ten_percent_or_imminent_credit_expiry() {
+    for (remaining_percent, credit_expiration, expected_enabled) in
+        [(9, 50_000, true), (10, 43_300, true), (10, 43_301, false)]
+    {
+        let mut workflow = ResetWorkflow::default();
+        let inspection = inspection_start("account-a", 1, 10, 100, 101);
+        workflow.reduce(WorkflowIntent::BeginInspection(inspection.clone()));
+        workflow.reduce(WorkflowIntent::OperationCompleted(
+            CorrelatedOutcome::inspection_live_usage(
+                inspection.live_usage_correlation(),
+                LiveUsagePortResult::Known(LiveWeeklyUsage::new(remaining_percent)),
+            ),
+        ));
+        workflow.reduce(WorkflowIntent::OperationCompleted(
+            CorrelatedOutcome::inspection_credit_inventory(
+                inspection.credit_inventory_correlation(),
+                inventory_result_with_expiry(credit_expiration),
+            ),
+        ));
+        workflow.reduce(WorkflowIntent::OpenConfirmation);
+
+        assert_eq!(
+            workflow.yes_enabled(),
+            expected_enabled,
+            "remaining={remaining_percent}, expiration={credit_expiration}"
+        );
+    }
 }
 
 #[test]
@@ -405,13 +435,17 @@ fn inspection_start(
 }
 
 fn eligible_inventory_result() -> CreditInventoryPortResult {
+    inventory_result_with_expiry(200)
+}
+
+fn inventory_result_with_expiry(expires_unix_seconds: i64) -> CreditInventoryPortResult {
     CreditInventoryPortResult::Validated(
         validate_credit_inventory(
             vec![LiveResetCredit {
                 id: "credit-a".to_owned(),
                 status: "available".to_owned(),
-                expires_unix_seconds: Some(200),
-                expires_at: Some("unix-200".to_owned()),
+                expires_unix_seconds: Some(expires_unix_seconds),
+                expires_at: Some(format!("unix-{expires_unix_seconds}")),
                 title: Some("Weekly reset".to_owned()),
             }],
             100,

@@ -415,6 +415,7 @@ fn inspected_reset_detail_has_user_facing_sections_readable_expiry_and_content_h
     let frame = render_reset_panel(&snapshot, &target, 100, content_height, 0, 4, 0)
         .render(None)
         .to_string();
+    let local_expiry = super::quota_reset_detail_content::format_unix_local(1_900_000_000);
 
     // Assert
     assert!(frame.contains("Live eligibility"), "{frame}");
@@ -423,14 +424,16 @@ fn inspected_reset_detail_has_user_facing_sections_readable_expiry_and_content_h
     assert!(frame.contains("Reset credits"), "{frame}");
     assert!(frame.contains("← Reset credit"), "{frame}");
     assert!(!frame.contains("Next step"), "{frame}");
-    assert!(frame.contains("UTC"), "expiry should be readable: {frame}");
-    assert!(frame.contains("2030-03-17 17:46 UTC"), "{frame}");
+    assert!(frame.contains(&local_expiry), "{frame}");
     assert!(!frame.contains("inspect usage"), "{frame}");
     assert!(!frame.contains("not started"), "{frame}");
     assert!(!frame.contains("saved weekly"), "{frame}");
     assert_eq!(page_size, 2);
     assert!(content_height < 21, "content height was {content_height}");
-    assert_quota_golden("reset-inspected-panel-width-100", &frame);
+    assert_quota_golden(
+        "reset-inspected-panel-width-100",
+        &frame.replace(&local_expiry, "2030-03-17 00:00 +00:00"),
+    );
 }
 
 #[test]
@@ -510,6 +513,9 @@ fn reset_semantic_frames_render_at_narrow_stacked_boundary_and_wide_widths() {
         let confirmation_frame = render_reset_panel(&confirmation, &target, width, 24, 0, 4, 0)
             .render(None)
             .to_string();
+        let local_expiry = super::quota_reset_detail_content::format_unix_local(1_900_000_000);
+        let canonical_confirmation_frame =
+            confirmation_frame.replace(&local_expiry, "2030-03-17 00:00 +00:00");
         let result_frame = render_reset_panel(&unknown, &target, width, 24, 0, 4, 0)
             .render(None)
             .to_string();
@@ -540,10 +546,19 @@ fn reset_semantic_frames_render_at_narrow_stacked_boundary_and_wide_widths() {
             "terminal result must replace inspection details: {result_frame}"
         );
         match width {
-            48 => assert_quota_golden("reset-confirmation-panel-width-48", &confirmation_frame),
-            100 => assert_quota_golden("reset-confirmation-panel-width-100", &confirmation_frame),
+            48 => assert_quota_golden(
+                "reset-confirmation-panel-width-48",
+                &canonical_confirmation_frame,
+            ),
+            100 => assert_quota_golden(
+                "reset-confirmation-panel-width-100",
+                &canonical_confirmation_frame,
+            ),
             160 => {
-                assert_quota_golden("reset-confirmation-panel-width-160", &confirmation_frame);
+                assert_quota_golden(
+                    "reset-confirmation-panel-width-160",
+                    &canonical_confirmation_frame,
+                );
                 assert_quota_golden("reset-unknown-outcome-panel-width-160", &result_frame);
             }
             _ => {}

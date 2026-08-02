@@ -4,6 +4,7 @@ use crate::quota_reset::reset_credit_policy::LiveUsagePortResult;
 use crate::quota_reset::reset_credit_policy::LiveWeeklyUsage;
 use crate::quota_reset::reset_credit_policy::OperationGeneration;
 use crate::quota_reset::reset_credit_policy::RenderSafeFailure;
+use crate::quota_reset::reset_credit_policy::reset_credit_is_eligible;
 
 use super::correlated_effect_contracts::CorrelatedOutcome;
 use super::correlated_effect_contracts::CorrelatedRequest;
@@ -81,14 +82,15 @@ impl ResetWorkflow {
         };
         current_authority_operations_succeeded
             && self.authority_failure.is_none()
-            && self.live_usage.as_ref().is_some_and(|usage| {
-                usage.provenance == RenderValueProvenance::CurrentLive
-                    && usage.value.remaining_percent() < 1
-            })
-            && self.inventory.as_ref().is_some_and(|inventory| {
-                inventory.provenance == RenderValueProvenance::CurrentLive
-                    && inventory.value.earliest_usable_credit_id().is_some()
-            })
+            && self
+                .live_usage
+                .as_ref()
+                .zip(self.inventory.as_ref())
+                .is_some_and(|(usage, inventory)| {
+                    usage.provenance == RenderValueProvenance::CurrentLive
+                        && inventory.provenance == RenderValueProvenance::CurrentLive
+                        && reset_credit_is_eligible(usage.value, &inventory.value)
+                })
     }
 
     pub(in crate::quota_reset) fn reduce(
