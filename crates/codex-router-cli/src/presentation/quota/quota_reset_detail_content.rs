@@ -1,3 +1,5 @@
+use chrono::Local;
+use chrono::TimeZone;
 use iocraft::prelude::*;
 
 use crate::quota_reset::reset_session_supervisor::OperationActivity;
@@ -47,41 +49,31 @@ fn activity_label(activity: &OperationActivity<OperationSuccess>, spinner: &str)
 
 pub(super) fn format_credit_expiry(expires_unix_seconds: Option<i64>) -> String {
     match expires_unix_seconds {
-        Some(value) => format!("expires {}", format_unix_utc(value)),
+        Some(value) => format!("expires {}", format_unix_local(value)),
         None => "does not expire".to_owned(),
     }
 }
 
 pub(super) fn format_credit_expiry_value(expires_unix_seconds: Option<i64>) -> String {
-    expires_unix_seconds.map_or_else(|| "Does not expire".to_owned(), format_unix_utc)
+    expires_unix_seconds.map_or_else(|| "Does not expire".to_owned(), format_unix_local)
 }
 
-fn format_unix_utc(unix_seconds: i64) -> String {
-    let days = unix_seconds.div_euclid(86_400);
-    let seconds_in_day = unix_seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_date_from_unix_days(days);
-    let hour = seconds_in_day / 3_600;
-    let minute = seconds_in_day % 3_600 / 60;
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+pub(super) fn format_unix_local(unix_seconds: i64) -> String {
+    format_unix_in_timezone(unix_seconds, &Local)
 }
 
-fn civil_date_from_unix_days(unix_days: i64) -> (i64, i64, i64) {
-    let shifted_days = unix_days + 719_468;
-    let era = if shifted_days >= 0 {
-        shifted_days
-    } else {
-        shifted_days - 146_096
-    } / 146_097;
-    let day_of_era = shifted_days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month, day)
+fn format_unix_in_timezone<TTimeZone>(unix_seconds: i64, timezone: &TTimeZone) -> String
+where
+    TTimeZone: TimeZone,
+    TTimeZone::Offset: std::fmt::Display,
+{
+    timezone
+        .timestamp_opt(unix_seconds, 0)
+        .single()
+        .map_or_else(
+            || "invalid expiry".to_owned(),
+            |date_time| date_time.format("%Y-%m-%d %H:%M %:z").to_string(),
+        )
 }
 
 pub(super) fn disabled_reason(reason: &ResetEligibilityDisabledReason) -> String {
@@ -151,4 +143,24 @@ fn styled_row(content: impl Into<String>, color: Color) -> ResetDetailRow {
         weight: Weight::Normal,
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::FixedOffset;
+
+    use super::format_unix_in_timezone;
+
+    #[test]
+    fn reset_credit_expiry_formats_the_same_instant_in_the_requested_local_offset() {
+        // Arrange
+        let eastern_daylight_time = FixedOffset::west_opt(4 * 60 * 60)
+            .unwrap_or_else(|| panic!("four-hour west offset should be valid"));
+
+        // Act
+        let formatted = format_unix_in_timezone(1_900_000_000, &eastern_daylight_time);
+
+        // Assert
+        assert_eq!(formatted, "2030-03-17 13:46 -04:00");
+    }
 }

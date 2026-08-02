@@ -7,6 +7,6 @@
 │ Usable credits      1                                                                            │
 │                                                                                                  │
 │ Reset credits · live · 1-1 of 1                                                                  │
-│ ◆ next    [abcd…wxyz] Weekly recovery · available · expires 2030-03-17 17:46 UTC                 │
+│ ◆ next    [abcd…wxyz] Weekly recovery · available · expires 2030-03-17 00:00 +00:00              │
 │ Saved count differs: 3 resets saved, 1 live.                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
