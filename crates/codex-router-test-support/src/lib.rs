@@ -4,6 +4,7 @@
 pub mod installed_codex;
 pub mod mock_upstream;
 pub mod route_native;
+pub mod shared_host;
 pub mod transcript;
 
 /// Returns this crate's package name.

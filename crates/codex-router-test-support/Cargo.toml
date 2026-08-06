@@ -15,7 +15,10 @@ codex-router-core.workspace = true
 codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.3" }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.3" }
 codex-router-state = { path = "../codex-router-state", version = "0.1.3", features = ["sync-rusqlite-fixtures"] }
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
 tungstenite = "0.28.0"

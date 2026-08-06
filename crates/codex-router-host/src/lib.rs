@@ -1,9 +1,25 @@
 //! Foreground lifecycle control for one shared Codex app-server.
 
+mod app_server;
 mod config;
 mod domain;
 mod instance;
 mod operator_protocol;
+mod process;
+mod router;
+
+pub use app_server::APP_SERVER_FORCE_AFTER;
+pub use app_server::APP_SERVER_SHUTDOWN_TOTAL;
+pub use app_server::AppServerChild;
+pub use app_server::AppServerEndpointError;
+pub use app_server::AppServerReadiness;
+pub use app_server::AppServerReadinessError;
+pub use app_server::AppServerShutdownDeadlines;
+pub use app_server::AppServerShutdownError;
+pub use app_server::ExpectedExit;
+pub use app_server::ShutdownAction;
+pub use app_server::ShutdownOutcome;
+pub use app_server::require_unowned_app_server_endpoint;
 
 pub use config::HostConfig;
 pub use config::HostConfigInputs;
@@ -32,3 +48,13 @@ pub use operator_protocol::decode_operator_frame;
 pub use operator_protocol::decode_operator_request;
 pub use operator_protocol::encode_operator_frame;
 pub use operator_protocol::encode_operator_request;
+pub use process::ProcessGroupChild;
+pub use process::ProcessGroupError;
+pub use router::ROUTER_SHUTDOWN_TIMEOUT;
+pub use router::RouterChild;
+pub use router::RouterOwnership;
+pub use router::RouterProbeError;
+pub use router::RouterProbeResult;
+pub use router::RouterShutdownError;
+pub use router::RouterShutdownOutcome;
+pub use router::probe_router;

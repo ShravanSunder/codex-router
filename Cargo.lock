@@ -322,6 +322,8 @@ version = "0.1.3"
 dependencies = [
  "codex-router-codex",
  "codex-router-core",
+ "codex-router-test-support",
+ "httparse",
  "rustix",
  "serde",
  "serde_json",
@@ -430,9 +432,12 @@ dependencies = [
  "codex-router-proxy",
  "codex-router-secret-store",
  "codex-router-state",
+ "futures-util",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
+ "tokio-tungstenite",
  "tungstenite 0.28.0",
 ]
 

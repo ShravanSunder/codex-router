@@ -11,8 +11,12 @@ workspace = true
 [dependencies]
 codex-router-codex.workspace = true
 codex-router-core.workspace = true
+httparse.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+codex-router-test-support = { path = "../codex-router-test-support", version = "0.1.3" }
