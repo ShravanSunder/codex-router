@@ -3,38 +3,8 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+pub use codex_router_codex::CodexRouterProfile;
 use thiserror::Error;
-
-/// Codex profile for routing the real Codex CLI through the local router.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CodexRouterProfile {
-    port: u16,
-}
-
-impl CodexRouterProfile {
-    /// Creates a profile renderer for a loopback router port.
-    #[must_use]
-    pub const fn new(port: u16) -> Self {
-        Self { port }
-    }
-
-    /// Renders the Codex custom-provider profile.
-    #[must_use]
-    pub fn render(&self) -> String {
-        format!(
-            r#"model_provider = "codex-router"
-
-[model_providers.codex-router]
-name = "codex-router"
-base_url = "http://127.0.0.1:{}/v1"
-wire_api = "responses"
-requires_openai_auth = false
-supports_websockets = true
-"#,
-            self.port
-        )
-    }
-}
 
 /// Preview of a Codex profile write.
 #[derive(Clone, Debug, Eq, PartialEq)]
