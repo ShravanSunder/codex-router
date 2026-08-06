@@ -7,6 +7,7 @@ pub mod error;
 pub mod ids;
 pub mod local_auth;
 pub mod redaction;
+pub mod router_compatibility;
 pub mod routes;
 
 /// Returns this crate's package name.
