@@ -1,6 +1,9 @@
 //! Permanent child-process fixtures for shared-host lifecycle proof.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use codex_router_core::router_compatibility::RouterCompatibility;
 use futures_util::SinkExt;
@@ -10,6 +13,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -42,6 +46,7 @@ fn append_event(event_file: &Path, event: &str) -> std::io::Result<()> {
 }
 
 /// One bounded loopback router-health response.
+#[derive(Clone, Copy)]
 pub enum RouterHealthFixtureResponse {
     /// Exact compatible static schema.
     Compatible,
@@ -51,6 +56,68 @@ pub enum RouterHealthFixtureResponse {
     Incompatible,
     /// Non-HTTP bytes from a socket squatter.
     Malformed,
+}
+
+/// Multi-request compatible router fixture stopped explicitly by its owner.
+pub struct PersistentRouterHealthFixture {
+    address: std::net::SocketAddr,
+    request_count: Arc<AtomicUsize>,
+    stop: oneshot::Sender<()>,
+    task: JoinHandle<std::io::Result<()>>,
+}
+
+impl PersistentRouterHealthFixture {
+    /// Starts a compatible loopback router until `finish` is called.
+    pub async fn start() -> std::io::Result<Self> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let task_request_count = Arc::clone(&request_count);
+        let (stop, mut stop_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stop_receiver => return Ok(()),
+                    accepted = listener.accept() => {
+                        let (mut stream, _peer) = accepted?;
+                        task_request_count.fetch_add(1, Ordering::Relaxed);
+                        let mut request = [0_u8; 1024];
+                        let _read_bytes = stream.read(&mut request).await?;
+                        let response = render_router_health_response(
+                            RouterHealthFixtureResponse::Compatible,
+                        )?;
+                        stream.write_all(&response).await?;
+                        stream.shutdown().await?;
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            request_count,
+            stop,
+            task,
+        })
+    }
+
+    /// Returns the kernel-assigned loopback address.
+    #[must_use]
+    pub const fn address(&self) -> std::net::SocketAddr {
+        self.address
+    }
+
+    /// Returns the number of bounded health requests served.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        self.request_count.load(Ordering::Relaxed)
+    }
+
+    /// Stops the fixture and waits for task completion.
+    pub async fn finish(self) -> Result<(), Box<dyn std::error::Error>> {
+        let _stop_result = self.stop.send(());
+        self.task.await??;
+        Ok(())
+    }
 }
 
 /// One-request loopback fixture for router compatibility probing.
@@ -119,9 +186,14 @@ fn render_router_health_response(
 pub async fn run_native_app_server_fixture(
     socket_path: &Path,
     running_version: &str,
+    process_log: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let _stale_cleanup = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
+    if let Some(process_log) = process_log {
+        append_event(process_log, &format!("{}\n", std::process::id()))?;
+    }
     let (stream, _peer) = listener.accept().await?;
     let mut websocket = tokio_tungstenite::accept_async(stream).await?;
 
@@ -165,7 +237,6 @@ pub async fn run_native_app_server_fixture(
         .await?;
     let _close_frame = websocket.next().await;
 
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let _signal = terminate.recv().await;
     drop(listener);
     let _socket_cleanup = std::fs::remove_file(socket_path);

@@ -10,19 +10,29 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use codex_router_host::AppServerCondition;
+use codex_router_host::AppServerLaunchPlan;
+use codex_router_host::ChildCommandSpec;
+use codex_router_host::ChildOutput;
 use codex_router_host::ExecutableRelation;
 use codex_router_host::HostConfig;
 use codex_router_host::HostConfigInputs;
 use codex_router_host::HostCoordinationPaths;
+use codex_router_host::HostDeadlineInputs;
+use codex_router_host::HostDeadlines;
+use codex_router_host::HostDependencies;
+use codex_router_host::HostDependenciesInputs;
 use codex_router_host::HostInstance;
 use codex_router_host::HostOperation;
 use codex_router_host::HostPhase;
+use codex_router_host::HostRuntime;
 use codex_router_host::HostSnapshot;
 use codex_router_host::HostSnapshotDimensions;
 use codex_router_host::HostedReadiness;
 use codex_router_host::InstanceAcquireError;
+use codex_router_host::MutationAdmission;
 use codex_router_host::OperatorFrame;
 use codex_router_host::OperatorProtocolError;
 use codex_router_host::OperatorRequest;
@@ -30,11 +40,15 @@ use codex_router_host::RecoveryBudget;
 use codex_router_host::RemoteControlCondition;
 use codex_router_host::RouterCondition;
 use codex_router_host::TerminalClassification;
+use codex_router_host::classify_operator_request;
 use codex_router_host::decode_operator_frame;
 use codex_router_host::decode_operator_request;
 use codex_router_host::encode_operator_frame;
 use codex_router_host::encode_operator_request;
 use codex_router_host::inherited_lock_marker;
+use codex_router_host::send_operator_request;
+use codex_router_test_support::shared_host::PersistentRouterHealthFixture;
+use codex_router_test_support::shared_host::run_native_app_server_fixture;
 
 const EXPECTED_PROTOCOL_VERSION: u16 = 1;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -89,6 +103,36 @@ fn request_mutability_supports_immediate_busy_classification() {
     assert!(OperatorRequest::RestartAppServer.is_mutating());
     assert!(OperatorRequest::UpdateCodex.is_mutating());
     assert!(OperatorRequest::RestartRouter.is_mutating());
+}
+
+#[test]
+fn runtime_busy_admission_keeps_status_read_only_during_mutation() {
+    assert_eq!(
+        classify_operator_request(
+            Some(HostOperation::RestartAppServer),
+            OperatorRequest::Status,
+        ),
+        MutationAdmission::ReadOnly
+    );
+    assert_eq!(
+        classify_operator_request(
+            Some(HostOperation::RestartAppServer),
+            OperatorRequest::UpdateCodex,
+        ),
+        MutationAdmission::Busy
+    );
+    assert_eq!(
+        classify_operator_request(None, OperatorRequest::RestartRouter),
+        MutationAdmission::StartMutation(HostOperation::RestartRouter)
+    );
+}
+
+#[test]
+fn runtime_startup_deadlines_compose_to_thirty_seconds() {
+    assert_eq!(
+        HostDeadlines::production().startup_total(),
+        Duration::from_secs(30)
+    );
 }
 
 #[test]
@@ -181,18 +225,21 @@ fn host_config_preserves_resolved_router_and_codex_boundaries() {
         router_endpoint,
         app_server_socket: app_server_socket.clone(),
         managed_executable: managed_executable.clone(),
+        deadlines: HostDeadlines::production(),
     });
     let installed = HostConfig::new(HostConfigInputs {
         coordination_paths: installed_paths,
         router_endpoint,
         app_server_socket: app_server_socket.clone(),
         managed_executable: managed_executable.clone(),
+        deadlines: HostDeadlines::production(),
     });
     let explicit = HostConfig::new(HostConfigInputs {
         coordination_paths: explicit_paths,
         router_endpoint,
         app_server_socket,
         managed_executable,
+        deadlines: HostDeadlines::production(),
     });
 
     assert_ne!(debug.coordination_paths(), installed.coordination_paths());
@@ -203,6 +250,200 @@ fn host_config_preserves_resolved_router_and_codex_boundaries() {
     assert_eq!(debug.app_server_socket(), installed.app_server_socket());
     assert_eq!(installed.app_server_socket(), explicit.app_server_socket());
     assert_eq!(debug.managed_executable(), installed.managed_executable());
+}
+
+#[tokio::test]
+async fn runtime_recovery_is_bounded_and_idle_is_event_driven()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new("runtime-recovery")?;
+    let router = PersistentRouterHealthFixture::start().await?;
+    let coordination_paths = HostCoordinationPaths::new(
+        directory.path().join("operator.sock"),
+        directory.path().join("instance.lock"),
+    );
+    let app_server_socket = directory.path().join("app-server.sock");
+    let process_log = directory.path().join("app-server-pids.log");
+    std::fs::write(&process_log, b"")?;
+    let current_executable = std::env::current_exe()?;
+    let identity = codex_router_codex::executable_identity(&current_executable).await?;
+    let command = ChildCommandSpec::new(current_executable)
+        .with_arguments([
+            "--exact",
+            "runtime_native_app_server_child_entrypoint",
+            "--nocapture",
+        ])
+        .with_environment(
+            "CODEX_ROUTER_HOST_RUNTIME_NATIVE_SOCKET",
+            &app_server_socket,
+        )
+        .with_environment("CODEX_ROUTER_HOST_RUNTIME_NATIVE_VERSION", "1.2.3")
+        .with_environment("CODEX_ROUTER_HOST_RUNTIME_PROCESS_LOG", &process_log)
+        .with_output(ChildOutput::Null);
+    let app_server = AppServerLaunchPlan::new(command, identity, "1.2.3".to_owned());
+    let deadlines = HostDeadlines::new(HostDeadlineInputs {
+        router_start: Duration::from_secs(2),
+        app_server_start: Duration::from_secs(2),
+        remote_control: Duration::from_secs(1),
+        endpoint_inspection: Duration::from_millis(200),
+        operator_request: Duration::from_secs(2),
+    })?;
+    let config = HostConfig::new(HostConfigInputs {
+        coordination_paths: coordination_paths.clone(),
+        router_endpoint: router.address(),
+        app_server_socket: app_server_socket.clone(),
+        managed_executable: directory.path().join("unused-managed-codex"),
+        deadlines,
+    });
+    let dependencies = HostDependencies::new(HostDependenciesInputs {
+        router_command: None,
+        app_server,
+    });
+
+    let runtime = tokio::spawn(HostRuntime::run(config, dependencies));
+    let initial_frames = send_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::AwaitHostStart,
+        Duration::from_secs(3),
+    )
+    .await?;
+    check_equal(
+        terminal_snapshot(&initial_frames)?.hosted_readiness(),
+        HostedReadiness::Ready,
+        "host startup must reach full readiness",
+    )?;
+    let router_probe_count = router.request_count();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    check_equal(
+        router.request_count(),
+        router_probe_count,
+        "idle runtime must not poll router health",
+    )?;
+
+    let first_processes = wait_for_process_ids(&process_log, 1).await?;
+    signal_process(
+        *first_processes
+            .first()
+            .ok_or("first app-server PID is missing")?,
+    )?;
+    let recovered_processes = wait_for_process_ids(&process_log, 2).await?;
+    let recovery_frames = send_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::Status,
+        Duration::from_secs(3),
+    )
+    .await?;
+    check_equal(
+        terminal_snapshot(&recovery_frames)?.recovery_budget(),
+        RecoveryBudget::Consumed,
+        "first unexpected exit must consume the one recovery attempt",
+    )?;
+    signal_process(
+        *recovered_processes
+            .last()
+            .ok_or("recovered app-server PID is missing")?,
+    )?;
+    let exhausted_snapshot =
+        wait_for_unavailable_status(coordination_paths.operator_socket(), Duration::from_secs(3))
+            .await?;
+    check_equal(
+        exhausted_snapshot.recovery_budget(),
+        RecoveryBudget::Consumed,
+        "second unexpected exit must leave recovery exhausted",
+    )?;
+    check(
+        matches!(
+            exhausted_snapshot.app_server(),
+            AppServerCondition::Absent | AppServerCondition::Failed
+        ),
+        "second unexpected exit must not start a third app-server",
+    )?;
+
+    runtime.abort();
+    let _runtime_result = runtime.await;
+    router.finish().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_native_app_server_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(socket_path) = std::env::var_os("CODEX_ROUTER_HOST_RUNTIME_NATIVE_SOCKET") else {
+        return Ok(());
+    };
+    let version = std::env::var("CODEX_ROUTER_HOST_RUNTIME_NATIVE_VERSION")?;
+    let process_log = std::env::var_os("CODEX_ROUTER_HOST_RUNTIME_PROCESS_LOG")
+        .ok_or("runtime fixture process log is missing")?;
+    run_native_app_server_fixture(
+        Path::new(&socket_path),
+        &version,
+        Some(Path::new(&process_log)),
+    )
+    .await
+}
+
+fn terminal_snapshot(
+    frames: &[OperatorFrame],
+) -> Result<&HostSnapshot, Box<dyn std::error::Error>> {
+    frames
+        .iter()
+        .find_map(|frame| match frame {
+            OperatorFrame::Terminal(response) => Some(response.snapshot()),
+            OperatorFrame::Progress(_) => None,
+        })
+        .ok_or_else(|| std::io::Error::other("operator response omitted its terminal frame").into())
+}
+
+async fn wait_for_process_ids(
+    process_log: &Path,
+    expected_count: usize,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let process_ids = std::fs::read_to_string(process_log)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            if process_ids.len() >= expected_count {
+                return process_ids;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
+}
+
+fn signal_process(process_id: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let signed_process_id = i32::try_from(process_id)?;
+    let process_id = rustix::process::Pid::from_raw(signed_process_id)
+        .ok_or("fixture process ID must be nonzero")?;
+    rustix::process::kill_process(process_id, rustix::process::Signal::KILL)?;
+    Ok(())
+}
+
+async fn wait_for_unavailable_status(
+    operator_socket: &Path,
+    deadline: Duration,
+) -> Result<HostSnapshot, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(deadline, async {
+        loop {
+            if let Ok(frames) = send_operator_request(
+                operator_socket,
+                OperatorRequest::Status,
+                Duration::from_millis(500),
+            )
+            .await
+                && let Ok(snapshot) = terminal_snapshot(&frames)
+                && matches!(
+                    snapshot.app_server(),
+                    AppServerCondition::Absent | AppServerCondition::Failed
+                )
+            {
+                return snapshot.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
 }
 
 #[tokio::test]
@@ -450,10 +691,8 @@ struct TestDirectory {
 impl TestDirectory {
     fn new(name: &str) -> std::io::Result<Self> {
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "codex-router-host-{name}-{}-{counter}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("crho-{name}-{}-{counter}", std::process::id()));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
     }

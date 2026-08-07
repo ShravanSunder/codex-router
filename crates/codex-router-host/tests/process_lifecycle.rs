@@ -303,7 +303,7 @@ async fn native_app_server_child_entrypoint() -> Result<(), Box<dyn std::error::
         return Ok(());
     };
     let version = std::env::var("CODEX_ROUTER_HOST_NATIVE_VERSION")?;
-    run_native_app_server_fixture(Path::new(&socket_path), &version).await
+    run_native_app_server_fixture(Path::new(&socket_path), &version, None).await
 }
 
 fn signal_fixture_command(

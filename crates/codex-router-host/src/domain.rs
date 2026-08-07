@@ -222,4 +222,10 @@ impl HostSnapshot {
     pub const fn recovery_budget(&self) -> RecoveryBudget {
         self.recovery_budget
     }
+
+    /// Returns the native app-server condition.
+    #[must_use]
+    pub const fn app_server(&self) -> &AppServerCondition {
+        &self.app_server
+    }
 }

@@ -8,6 +8,7 @@ use codex_router_codex::RemoteControlObservation;
 use codex_router_codex::observe_app_server;
 use thiserror::Error;
 
+use crate::ChildCommandSpec;
 use crate::ProcessGroupChild;
 use crate::ProcessGroupError;
 
@@ -169,6 +170,39 @@ pub struct AppServerChild {
     expected_version: Option<String>,
 }
 
+/// Cloneable managed app-server launch inputs retained for one recovery attempt.
+#[derive(Clone)]
+pub struct AppServerLaunchPlan {
+    command: ChildCommandSpec,
+    identity: ExecutableIdentity,
+    expected_version: String,
+}
+
+impl AppServerLaunchPlan {
+    /// Captures one exact managed executable, argv/environment, and version.
+    #[must_use]
+    pub const fn new(
+        command: ChildCommandSpec,
+        identity: ExecutableIdentity,
+        expected_version: String,
+    ) -> Self {
+        Self {
+            command,
+            identity,
+            expected_version,
+        }
+    }
+
+    pub(crate) fn spawn(&self) -> Result<AppServerChild, ProcessGroupError> {
+        let mut command = self.command.command();
+        AppServerChild::spawn(
+            &mut command,
+            self.identity.clone(),
+            self.expected_version.clone(),
+        )
+    }
+}
+
 impl AppServerChild {
     /// Creates ownership from an already-spawned isolated child.
     #[must_use]
@@ -324,6 +358,11 @@ impl AppServerChild {
             }
             Err(_elapsed) => Ok(ShutdownOutcome::TimedOutStillRunning),
         }
+    }
+
+    /// Waits for an unexpected or expected retained-child exit.
+    pub async fn wait_for_exit(&mut self) -> Result<std::process::ExitStatus, ProcessGroupError> {
+        self.process.wait().await
     }
 }
 

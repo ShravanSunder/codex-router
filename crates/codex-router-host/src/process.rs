@@ -1,12 +1,86 @@
 //! Safe Tokio child ownership and exact-PID Unix signal primitives.
 
+use std::ffi::OsStr;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitStatus;
+use std::process::Stdio;
 
 use rustix::process::Pid;
 use rustix::process::Signal;
 use thiserror::Error;
 use tokio::process::Child;
 use tokio::process::Command;
+
+/// Child stdout/stderr behavior selected by the composition root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChildOutput {
+    /// Preserve the foreground process's output streams.
+    Inherit,
+    /// Discard fixture or explicitly quiet child output.
+    Null,
+}
+
+/// Cloneable exact child command projection for restart/recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildCommandSpec {
+    executable: PathBuf,
+    arguments: Vec<OsString>,
+    environment: Vec<(OsString, OsString)>,
+    output: ChildOutput,
+}
+
+impl ChildCommandSpec {
+    /// Creates an exact executable projection without PATH re-resolution.
+    #[must_use]
+    pub fn new(executable: PathBuf) -> Self {
+        Self {
+            executable,
+            arguments: Vec::new(),
+            environment: Vec::new(),
+            output: ChildOutput::Inherit,
+        }
+    }
+
+    /// Replaces the complete child argument vector.
+    #[must_use]
+    pub fn with_arguments<TArguments, TArgument>(mut self, arguments: TArguments) -> Self
+    where
+        TArguments: IntoIterator<Item = TArgument>,
+        TArgument: Into<OsString>,
+    {
+        self.arguments = arguments.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Adds one explicit environment value required by the child projection.
+    #[must_use]
+    pub fn with_environment<TKey, TValue>(mut self, key: TKey, value: TValue) -> Self
+    where
+        TKey: Into<OsString>,
+        TValue: AsRef<OsStr>,
+    {
+        self.environment
+            .push((key.into(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Selects inherited or discarded child output.
+    #[must_use]
+    pub const fn with_output(mut self, output: ChildOutput) -> Self {
+        self.output = output;
+        self
+    }
+
+    pub(crate) fn command(&self) -> Command {
+        let mut command = Command::new(&self.executable);
+        command.args(&self.arguments).envs(self.environment.clone());
+        if self.output == ChildOutput::Null {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        command
+    }
+}
 
 /// Retained child started in a process group isolated from the foreground host.
 pub struct ProcessGroupChild {

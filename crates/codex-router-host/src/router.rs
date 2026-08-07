@@ -74,6 +74,11 @@ impl RouterChild {
             Err(_elapsed) => Ok(RouterShutdownOutcome::TimedOutStillRunning),
         }
     }
+
+    /// Waits for the retained router child to exit unexpectedly or intentionally.
+    pub async fn wait_for_exit(&mut self) -> Result<std::process::ExitStatus, ProcessGroupError> {
+        self.process.wait().await
+    }
 }
 
 /// Exact owned-router stop failure.
