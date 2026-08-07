@@ -51,4 +51,6 @@ unicode-width.workspace = true
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.3", features = ["sync-rusqlite-fixtures"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.3", features = ["sync-rusqlite-fixtures"] }
 futures-util.workspace = true
+rustix.workspace = true
+tokio-tungstenite.workspace = true
 tungstenite = "0.28.0"
