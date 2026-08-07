@@ -223,9 +223,39 @@ impl HostSnapshot {
         self.recovery_budget
     }
 
+    /// Returns the serialized lifecycle phase.
+    #[must_use]
+    pub const fn phase(&self) -> &HostPhase {
+        &self.phase
+    }
+
+    /// Returns router reachability and ownership.
+    #[must_use]
+    pub const fn router(&self) -> RouterCondition {
+        self.router
+    }
+
     /// Returns the native app-server condition.
     #[must_use]
     pub const fn app_server(&self) -> &AppServerCondition {
         &self.app_server
+    }
+
+    /// Returns the most recent Remote Control observation.
+    #[must_use]
+    pub const fn remote_control(&self) -> RemoteControlCondition {
+        self.remote_control
+    }
+
+    /// Returns installed-versus-running executable relation.
+    #[must_use]
+    pub const fn executable_relation(&self) -> ExecutableRelation {
+        self.executable_relation
+    }
+
+    /// Returns the most recent completed lifecycle outcome.
+    #[must_use]
+    pub const fn last_lifecycle_outcome(&self) -> Option<&LifecycleOutcome> {
+        self.last_lifecycle_outcome.as_ref()
     }
 }

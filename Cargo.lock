@@ -265,6 +265,7 @@ dependencies = [
  "codex-router-auth",
  "codex-router-codex",
  "codex-router-core",
+ "codex-router-host",
  "codex-router-proxy",
  "codex-router-secret-store",
  "codex-router-selection",

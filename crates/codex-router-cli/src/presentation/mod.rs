@@ -2,6 +2,7 @@
 
 use iocraft::prelude::*;
 
+pub(crate) mod host;
 pub(crate) mod quota;
 pub(crate) mod session_picker;
 

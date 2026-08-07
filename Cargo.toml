@@ -25,6 +25,7 @@ publish = false
 [workspace.dependencies]
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.3" }
 codex-router-codex = { path = "crates/codex-router-codex", version = "0.1.3" }
+codex-router-host = { path = "crates/codex-router-host", version = "0.1.3" }
 codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.3" }
 base64 = "0.22.1"
 bytes = "1.11.0"

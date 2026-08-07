@@ -108,6 +108,12 @@ impl HostTerminalResponse {
     pub const fn snapshot(&self) -> &HostSnapshot {
         &self.snapshot
     }
+
+    /// Returns the bounded human-readable terminal explanation.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 /// One progress or terminal frame on the operator connection.

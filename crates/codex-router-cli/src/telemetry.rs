@@ -3,6 +3,9 @@
 use std::env;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
@@ -27,6 +30,39 @@ const OBSERVABILITY_MARKER_ENV: &str = "CODEX_ROUTER_OBSERVABILITY_MARKER";
 pub(crate) struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TelemetryShutdownHandle {
+    tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
+    completed: Arc<AtomicBool>,
+}
+
+impl TelemetryShutdownHandle {
+    pub(crate) fn flush_and_shutdown(&self) {
+        if self.completed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(tracer_provider) = &self.tracer_provider {
+            let _ = tracer_provider.force_flush();
+            let _ = tracer_provider.shutdown();
+        }
+        if let Some(meter_provider) = &self.meter_provider {
+            let _ = meter_provider.force_flush();
+            let _ = meter_provider.shutdown();
+        }
+    }
+}
+
+impl TelemetryGuard {
+    pub(crate) fn shutdown_handle(&self) -> TelemetryShutdownHandle {
+        TelemetryShutdownHandle {
+            tracer_provider: self.tracer_provider.clone(),
+            meter_provider: self.meter_provider.clone(),
+            completed: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl Drop for TelemetryGuard {

@@ -269,7 +269,9 @@ pub fn run_sessions_command<W: Write>(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
-    let mut runner = ProcessSessionsCommandRunner;
+    let app_server_socket =
+        codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?).app_server_socket();
+    let mut runner = ProcessSessionsCommandRunner { app_server_socket };
     let mut picker = TerminalSessionsPicker::for_context(context);
     run_sessions_command_with_dependencies(stdout, command, context, &mut runner, &mut picker)
 }
@@ -282,11 +284,13 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
+    let app_server_socket =
+        codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?).app_server_socket();
     if command.new {
-        return run_new_session(stdout, command, runner);
+        return run_new_session(stdout, command, &app_server_socket, runner);
     }
     if command.last {
-        return run_last_session(stdout, command, context, runner);
+        return run_last_session(stdout, command, context, &app_server_socket, runner);
     }
     if !command.list {
         return run_interactive_session(command, context, runner, picker);
@@ -664,6 +668,7 @@ fn run_last_session<W: Write>(
     stdout: &mut W,
     command: SessionsCommand,
     context: &CliContext,
+    app_server_socket: &Path,
     runner: &mut impl SessionsCommandRunner,
 ) -> Result<(), SessionsCommandError> {
     let dry_run = command.dry_run;
@@ -679,7 +684,7 @@ fn run_last_session<W: Write>(
     validate_resume_session_id(&record.session_id)?;
 
     if dry_run {
-        write_codex_resume_dry_run(stdout, &codex_args, &record.session_id)?;
+        write_codex_resume_dry_run(stdout, app_server_socket, &codex_args, &record.session_id)?;
         return Ok(());
     }
 
@@ -689,10 +694,11 @@ fn run_last_session<W: Write>(
 fn run_new_session<W: Write>(
     stdout: &mut W,
     command: SessionsCommand,
+    app_server_socket: &Path,
     runner: &mut impl SessionsCommandRunner,
 ) -> Result<(), SessionsCommandError> {
     if command.dry_run {
-        write_codex_new_dry_run(stdout, &command.codex_args)?;
+        write_codex_new_dry_run(stdout, app_server_socket, &command.codex_args)?;
         return Ok(());
     }
 
@@ -701,21 +707,30 @@ fn run_new_session<W: Write>(
 
 fn write_codex_new_dry_run<W: Write>(
     stdout: &mut W,
+    app_server_socket: &Path,
     codex_args: &[OsString],
 ) -> Result<(), SessionsCommandError> {
-    write!(stdout, "codex --profile codex-router").map_err(SessionsCommandError::Stdout)?;
-    write_codex_args(stdout, codex_args)?;
+    write!(stdout, "codex").map_err(SessionsCommandError::Stdout)?;
+    write_codex_args(
+        stdout,
+        &codex_router_codex::SessionLaunch::new(app_server_socket, codex_args).arguments(),
+    )?;
     writeln!(stdout).map_err(SessionsCommandError::Stdout)
 }
 
 fn write_codex_resume_dry_run<W: Write>(
     stdout: &mut W,
+    app_server_socket: &Path,
     codex_args: &[OsString],
     session_id: &str,
 ) -> Result<(), SessionsCommandError> {
-    write!(stdout, "codex --profile codex-router").map_err(SessionsCommandError::Stdout)?;
-    write_codex_args(stdout, codex_args)?;
-    writeln!(stdout, " resume -- {session_id}").map_err(SessionsCommandError::Stdout)
+    write!(stdout, "codex").map_err(SessionsCommandError::Stdout)?;
+    write_codex_args(
+        stdout,
+        &codex_router_codex::SessionLaunch::resume(app_server_socket, codex_args, session_id)
+            .arguments(),
+    )?;
+    writeln!(stdout).map_err(SessionsCommandError::Stdout)
 }
 
 fn write_codex_args<W: Write>(
@@ -799,14 +814,15 @@ pub(crate) trait SessionsCommandRunner {
     ) -> Result<(), SessionsCommandError>;
 }
 
-struct ProcessSessionsCommandRunner;
+struct ProcessSessionsCommandRunner {
+    app_server_socket: PathBuf,
+}
 
 impl SessionsCommandRunner for ProcessSessionsCommandRunner {
     fn run_codex_new(&mut self, codex_args: &[OsString]) -> Result<(), SessionsCommandError> {
+        let launch = codex_router_codex::SessionLaunch::new(&self.app_server_socket, codex_args);
         let status = Command::new("codex")
-            .arg("--profile")
-            .arg("codex-router")
-            .args(codex_args)
+            .args(launch.arguments())
             .status()
             .map_err(SessionsCommandError::CodexLaunch)?;
         if !status.success() {
@@ -823,13 +839,13 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         codex_args: &[OsString],
         session_id: &str,
     ) -> Result<(), SessionsCommandError> {
+        let launch = codex_router_codex::SessionLaunch::resume(
+            &self.app_server_socket,
+            codex_args,
+            session_id,
+        );
         let status = Command::new("codex")
-            .arg("--profile")
-            .arg("codex-router")
-            .args(codex_args)
-            .arg("resume")
-            .arg("--")
-            .arg(session_id)
+            .args(launch.arguments())
             .status()
             .map_err(SessionsCommandError::CodexLaunch)?;
         if !status.success() {
