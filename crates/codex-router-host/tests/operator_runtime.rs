@@ -642,6 +642,37 @@ fn prepare_lock_for_exec_uses_stdin_without_unsafe_code() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[test]
+fn failed_exec_releases_prepared_singleton_authority() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new("failed-exec-lock")?;
+    let paths = HostCoordinationPaths::new(
+        directory.path().join("operator.sock"),
+        directory.path().join("instance.lock"),
+    );
+    let output = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("failed_exec_lock_release_child_entrypoint")
+        .arg("--nocapture")
+        .env("CODEX_ROUTER_HOST_TEST_FAILED_EXEC_CHILD", "1")
+        .env(
+            "CODEX_ROUTER_HOST_TEST_OPERATOR_SOCKET",
+            paths.operator_socket(),
+        )
+        .env(
+            "CODEX_ROUTER_HOST_TEST_INSTANCE_LOCK",
+            paths.instance_lock(),
+        )
+        .output()?;
+
+    check(
+        output.status.success(),
+        &format!(
+            "failed-exec lock child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 #[tokio::test]
 async fn inherited_lock_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("CODEX_ROUTER_HOST_TEST_INHERITED_CHILD").is_none() {
@@ -690,6 +721,22 @@ async fn prepare_lock_child_entrypoint() -> Result<(), Box<dyn std::error::Error
         !rustix::io::fcntl_getfd(rustix::stdio::stdin())?.contains(rustix::io::FdFlags::CLOEXEC),
         "prepared stdin descriptor must survive the immediate exec",
     )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_exec_lock_release_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CODEX_ROUTER_HOST_TEST_FAILED_EXEC_CHILD").is_none() {
+        return Ok(());
+    }
+    let paths = child_coordination_paths()?;
+    let instance = HostInstance::acquire(paths.clone())?;
+    instance.prepare_lock_for_exec()?;
+    instance.release_prepared_lock_after_exec_failure()?;
+    drop(instance);
+
+    let next_owner = HostInstance::acquire(paths)?;
+    drop(next_owner);
     Ok(())
 }
 

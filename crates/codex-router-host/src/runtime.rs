@@ -1,7 +1,5 @@
 //! Single-owner event loop for foreground host lifecycle authority.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -27,6 +25,7 @@ use crate::InstanceAcquireError;
 use crate::LifecycleOutcome;
 use crate::LifecycleOutcomeClassification;
 use crate::OperatorRequest;
+use crate::ProcessGroupChild;
 use crate::ProcessGroupError;
 use crate::RecoveryBudget;
 use crate::RemoteControlCondition;
@@ -39,8 +38,10 @@ use crate::TerminalClassification;
 use crate::probe_router;
 use crate::require_unowned_app_server_endpoint;
 
+mod lifecycle;
 mod operator;
 mod startup;
+mod update_flow;
 
 const OPERATOR_QUEUE_CAPACITY: usize = 8;
 const OPERATOR_CONNECTION_LIMIT: usize = 8;
@@ -57,6 +58,9 @@ pub struct HostDependenciesInputs {
 pub struct HostDependencies {
     router_command: Option<ChildCommandSpec>,
     app_server: AppServerLaunchPlan,
+    update_deadlines: crate::UpdateDeadlines,
+    replacement_command: Option<ChildCommandSpec>,
+    pre_exec_telemetry: Option<Arc<dyn PreExecTelemetry>>,
 }
 
 impl HostDependencies {
@@ -66,8 +70,38 @@ impl HostDependencies {
         Self {
             router_command: inputs.router_command,
             app_server: inputs.app_server,
+            update_deadlines: crate::UpdateDeadlines::production(),
+            replacement_command: None,
+            pre_exec_telemetry: None,
         }
     }
+
+    /// Replaces production update bounds for deterministic fixtures.
+    #[must_use]
+    pub const fn with_update_deadlines(mut self, deadlines: crate::UpdateDeadlines) -> Self {
+        self.update_deadlines = deadlines;
+        self
+    }
+
+    /// Supplies the exact current `codex-router host` foreground re-exec command.
+    #[must_use]
+    pub fn with_replacement_command(mut self, command: ChildCommandSpec) -> Self {
+        self.replacement_command = Some(command);
+        self
+    }
+
+    /// Supplies the CLI-owned provider flush adapter for changed-update exec.
+    #[must_use]
+    pub fn with_pre_exec_telemetry(mut self, telemetry: Arc<dyn PreExecTelemetry>) -> Self {
+        self.pre_exec_telemetry = Some(telemetry);
+        self
+    }
+}
+
+/// Provider-specific bounded blocking work run only at the terminal exec edge.
+pub trait PreExecTelemetry: Send + Sync + 'static {
+    /// Flushes and shuts down existing providers without exposing runtime authority.
+    fn flush_and_shutdown(&self);
 }
 
 /// Normal foreground runtime terminal reason.
@@ -115,6 +149,9 @@ pub enum HostError {
     /// Unix signal registration failed.
     #[error("failed registering foreground host signals: {0}")]
     Signal(#[source] std::io::Error),
+    /// Same-process foreground replacement returned instead of replacing the image.
+    #[error("failed replacing foreground shared Codex host: {0}")]
+    Exec(#[source] std::io::Error),
 }
 
 /// Foreground host composition and its single lifecycle owner task.
@@ -128,6 +165,27 @@ impl HostRuntime {
     ) -> Result<HostExit, HostError> {
         let startup_started_at = tokio::time::Instant::now();
         let instance = HostInstance::acquire(config.coordination_paths().clone())?;
+        Self::run_owned(config, dependencies, instance, startup_started_at).await
+    }
+
+    /// Consumes and validates singleton authority inherited across changed-update exec.
+    pub async fn run_inherited(
+        config: HostConfig,
+        dependencies: HostDependencies,
+        marker: &std::ffi::OsStr,
+    ) -> Result<HostExit, HostError> {
+        let startup_started_at = tokio::time::Instant::now();
+        let instance =
+            HostInstance::acquire_inherited(config.coordination_paths().clone(), marker)?;
+        Self::run_owned(config, dependencies, instance, startup_started_at).await
+    }
+
+    async fn run_owned(
+        config: HostConfig,
+        dependencies: HostDependencies,
+        instance: HostInstance,
+        startup_started_at: tokio::time::Instant,
+    ) -> Result<HostExit, HostError> {
         let (router_condition, mut router_child) =
             startup::start_router(&config, dependencies.router_command.as_ref()).await?;
         if let Err(endpoint_error) = require_unowned_app_server_endpoint(
@@ -159,10 +217,14 @@ impl HostRuntime {
         let mut connection_tasks = tokio::task::JoinSet::new();
         let connection_permits = Arc::new(Semaphore::new(OPERATOR_CONNECTION_LIMIT));
         let mut app_server = Some(app_server);
-        let mut recovery = None::<RecoveryFuture>;
+        let mut recovery = None::<lifecycle::RecoveryFuture>;
         let mut recovery_started_at = None::<tokio::time::Instant>;
         let mut active_restart = None::<operator::ActiveAppServerRestart>;
         let mut active_router_restart = None::<operator::ActiveRouterRestart>;
+        let mut active_update = None::<operator::ActiveUpdate>;
+        let mut active_update_activation = None::<operator::ActiveUpdateActivation>;
+        let mut pending_identity = None::<codex_router_codex::ExecutableIdentityTask>;
+        let mut retained_updater = None::<ProcessGroupChild>;
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
                 .map_err(HostError::Signal)?;
@@ -196,12 +258,14 @@ impl HostRuntime {
                         dependencies: &dependencies,
                         active_app_server_restart: &mut active_restart,
                         active_router_restart: &mut active_router_restart,
+                        active_update: &mut active_update,
+                        update_drain_active: pending_identity.is_some() || retained_updater.is_some(),
                     });
                 }
                 completed = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
                     let _completed_connection = completed;
                 }
-                restart_completion = wait_for_active_restart(&mut active_restart), if active_restart.is_some() => {
+                restart_completion = lifecycle::wait_for_active_restart(&mut active_restart), if active_restart.is_some() => {
                     let Some(active) = active_restart.take() else {
                         continue;
                     };
@@ -243,7 +307,7 @@ impl HostRuntime {
                         restart_completion.message,
                     );
                 }
-                router_restart_completion = wait_for_active_router_restart(&mut active_router_restart), if active_router_restart.is_some() => {
+                router_restart_completion = lifecycle::wait_for_active_router_restart(&mut active_router_restart), if active_router_restart.is_some() => {
                     let Some(active) = active_router_restart.take() else {
                         continue;
                     };
@@ -281,12 +345,53 @@ impl HostRuntime {
                         router_restart_completion.message,
                     );
                 }
-                exit = wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() && active_restart.is_none() => {
+                update_preparation = lifecycle::wait_for_active_update(&mut active_update), if active_update.is_some() => {
+                    let Some(active) = active_update.take() else {
+                        continue;
+                    };
+                    update_flow::apply_preparation(update_flow::PreparationContext {
+                        preparation: update_preparation,
+                        active,
+                        state: &mut state,
+                        dependencies: &dependencies,
+                        app_server: &mut app_server,
+                        router: &mut router_child,
+                        activation: &mut active_update_activation,
+                        pending_identity: &mut pending_identity,
+                        retained_updater: &mut retained_updater,
+                    });
+                }
+                activation_completion = lifecycle::wait_for_update_activation(&mut active_update_activation), if active_update_activation.is_some() => {
+                    let Some(active) = active_update_activation.take() else {
+                        continue;
+                    };
+                    update_flow::apply_activation(update_flow::ActivationContext {
+                        completion: activation_completion,
+                        active,
+                        state: &mut state,
+                        app_server: &mut app_server,
+                        router: &mut router_child,
+                        dependencies: &dependencies,
+                        instance: &instance,
+                    }).await?;
+                }
+                identity_result = lifecycle::wait_for_pending_identity(&mut pending_identity), if pending_identity.is_some() => {
+                    let _identity_result = identity_result;
+                    pending_identity = None;
+                }
+                updater_result = lifecycle::wait_for_retained_updater(&mut retained_updater), if retained_updater.is_some() => {
+                    let _updater_result = updater_result;
+                    retained_updater = None;
+                }
+                exit = lifecycle::wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() && active_restart.is_none() => {
                     let _exit_status = exit?;
                     app_server = None;
                     state.app_server = AppServerCondition::Absent;
                     state.remote_control = RemoteControlCondition::Unavailable;
-                    if state.recovery_budget == RecoveryBudget::Available && active_router_restart.is_none() {
+                    if state.recovery_budget == RecoveryBudget::Available
+                        && active_router_restart.is_none()
+                        && active_update.is_none()
+                    {
                         state.recovery_budget = RecoveryBudget::Consumed;
                         state.phase = HostPhase::Mutating {
                             operation: HostOperation::RestartAppServer,
@@ -294,7 +399,7 @@ impl HostRuntime {
                         };
                         state.app_server = AppServerCondition::Starting;
                         recovery_started_at = Some(tokio::time::Instant::now());
-                        recovery = Some(recovery_future(&config, dependencies.app_server.clone()));
+                        recovery = Some(lifecycle::recovery_future(&config, dependencies.app_server.clone()));
                     } else {
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
                             operation: HostOperation::RestartAppServer,
@@ -302,7 +407,7 @@ impl HostRuntime {
                         });
                     }
                 }
-                recovery_result = wait_for_recovery(&mut recovery), if recovery.is_some() => {
+                recovery_result = lifecycle::wait_for_recovery(&mut recovery), if recovery.is_some() => {
                     recovery = None;
                     match recovery_result {
                         Ok((recovered_child, recovered_readiness)) => {
@@ -341,38 +446,66 @@ impl HostRuntime {
                             .map_or(std::time::Duration::ZERO, |started_at| started_at.elapsed()),
                     );
                 }
-                router_exit = wait_for_router_exit(&mut router_child), if router_child.is_some() && active_router_restart.is_none() => {
+                router_exit = lifecycle::wait_for_router_exit(&mut router_child), if router_child.is_some() && active_router_restart.is_none() => {
                     let _exit_status = router_exit?;
                     state.router = RouterCondition::Unavailable;
                     state.phase = HostPhase::Stopping;
-                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
-                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
-                    settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
-                    shutdown_retained_children(&mut app_server, &mut router_child).await?;
+                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
+                        activation: &mut active_update_activation,
+                        active_update: &mut active_update,
+                        pending_identity: &mut pending_identity,
+                        retained_updater: &mut retained_updater,
+                        active_app_server_restart: &mut active_restart,
+                        active_router_restart: &mut active_router_restart,
+                        recovery: &mut recovery,
+                        app_server: &mut app_server,
+                        router: &mut router_child,
+                    }).await?;
                     return Ok(HostExit::OwnedRouterExited);
                 }
                 _ = interrupt.recv() => {
                     state.phase = HostPhase::Stopping;
-                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
-                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
-                    settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
-                    shutdown_retained_children(&mut app_server, &mut router_child).await?;
+                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
+                        activation: &mut active_update_activation,
+                        active_update: &mut active_update,
+                        pending_identity: &mut pending_identity,
+                        retained_updater: &mut retained_updater,
+                        active_app_server_restart: &mut active_restart,
+                        active_router_restart: &mut active_router_restart,
+                        recovery: &mut recovery,
+                        app_server: &mut app_server,
+                        router: &mut router_child,
+                    }).await?;
                     return Ok(HostExit::Signal);
                 }
                 _ = terminate.recv() => {
                     state.phase = HostPhase::Stopping;
-                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
-                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
-                    settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
-                    shutdown_retained_children(&mut app_server, &mut router_child).await?;
+                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
+                        activation: &mut active_update_activation,
+                        active_update: &mut active_update,
+                        pending_identity: &mut pending_identity,
+                        retained_updater: &mut retained_updater,
+                        active_app_server_restart: &mut active_restart,
+                        active_router_restart: &mut active_router_restart,
+                        recovery: &mut recovery,
+                        app_server: &mut app_server,
+                        router: &mut router_child,
+                    }).await?;
                     return Ok(HostExit::Signal);
                 }
                 _ = hangup.recv() => {
                     state.phase = HostPhase::Stopping;
-                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
-                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
-                    settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
-                    shutdown_retained_children(&mut app_server, &mut router_child).await?;
+                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
+                        activation: &mut active_update_activation,
+                        active_update: &mut active_update,
+                        pending_identity: &mut pending_identity,
+                        retained_updater: &mut retained_updater,
+                        active_app_server_restart: &mut active_restart,
+                        active_router_restart: &mut active_router_restart,
+                        recovery: &mut recovery,
+                        app_server: &mut app_server,
+                        router: &mut router_child,
+                    }).await?;
                     return Ok(HostExit::Signal);
                 }
             }
@@ -449,127 +582,4 @@ impl RuntimeState {
             self.executable_relation,
         );
     }
-}
-
-type RecoveryFuture = Pin<
-    Box<
-        dyn Future<Output = Result<(AppServerChild, AppServerReadiness), HostError>>
-            + Send
-            + 'static,
-    >,
->;
-
-fn recovery_future(config: &HostConfig, launch_plan: AppServerLaunchPlan) -> RecoveryFuture {
-    let socket_path = config.app_server_socket().to_owned();
-    let deadlines = config.deadlines();
-    Box::pin(async move {
-        require_unowned_app_server_endpoint(&socket_path, deadlines.endpoint_inspection()).await?;
-        let mut child = launch_plan.spawn()?;
-        let readiness = child
-            .await_readiness(
-                &socket_path,
-                deadlines.app_server_start(),
-                deadlines.remote_control(),
-            )
-            .await;
-        match readiness {
-            Ok(readiness) => Ok((child, readiness)),
-            Err(readiness_error) => {
-                let _shutdown_outcome = child.shutdown().await?;
-                Err(HostError::AppServerReadiness(readiness_error))
-            }
-        }
-    })
-}
-
-async fn wait_for_app_server_exit(
-    app_server: &mut Option<AppServerChild>,
-) -> Result<std::process::ExitStatus, ProcessGroupError> {
-    match app_server.as_mut() {
-        Some(child) => child.wait_for_exit().await,
-        None => std::future::pending().await,
-    }
-}
-
-async fn wait_for_router_exit(
-    router: &mut Option<RouterChild>,
-) -> Result<std::process::ExitStatus, ProcessGroupError> {
-    match router.as_mut() {
-        Some(child) => child.wait_for_exit().await,
-        None => std::future::pending().await,
-    }
-}
-
-async fn wait_for_recovery(
-    recovery: &mut Option<RecoveryFuture>,
-) -> Result<(AppServerChild, AppServerReadiness), HostError> {
-    match recovery.as_mut() {
-        Some(future) => future.await,
-        None => std::future::pending().await,
-    }
-}
-
-async fn wait_for_active_restart(
-    active_restart: &mut Option<operator::ActiveAppServerRestart>,
-) -> crate::restart::AppServerRestartCompletion {
-    match active_restart.as_mut() {
-        Some(active) => active.future.as_mut().await,
-        None => std::future::pending().await,
-    }
-}
-
-async fn wait_for_active_router_restart(
-    active_restart: &mut Option<operator::ActiveRouterRestart>,
-) -> crate::restart::RouterRestartCompletion {
-    match active_restart.as_mut() {
-        Some(active) => active.future.as_mut().await,
-        None => std::future::pending().await,
-    }
-}
-
-async fn shutdown_retained_children(
-    app_server: &mut Option<AppServerChild>,
-    router: &mut Option<RouterChild>,
-) -> Result<(), HostError> {
-    if let Some(child) = app_server.as_mut() {
-        let _app_server_outcome = child.shutdown().await?;
-    }
-    if let Some(child) = router.as_mut() {
-        let _router_outcome = child.shutdown().await?;
-    }
-    Ok(())
-}
-
-async fn settle_recovery_for_shutdown(
-    recovery: &mut Option<RecoveryFuture>,
-    app_server: &mut Option<AppServerChild>,
-) {
-    let Some(recovery_future) = recovery.take() else {
-        return;
-    };
-    if let Ok((recovered_child, _readiness)) = recovery_future.await {
-        *app_server = Some(recovered_child);
-    }
-}
-
-async fn settle_active_restart_for_shutdown(
-    active_restart: &mut Option<operator::ActiveAppServerRestart>,
-    app_server: &mut Option<AppServerChild>,
-) {
-    let Some(mut active) = active_restart.take() else {
-        return;
-    };
-    let completion = active.future.as_mut().await;
-    *app_server = completion.child;
-}
-
-async fn settle_active_router_restart_for_shutdown(
-    active_restart: &mut Option<operator::ActiveRouterRestart>,
-    router: &mut Option<RouterChild>,
-) {
-    let Some(mut active) = active_restart.take() else {
-        return;
-    };
-    let completion = active.future.as_mut().await;
-    *router = completion.child;
 }

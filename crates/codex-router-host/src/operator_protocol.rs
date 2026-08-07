@@ -341,6 +341,14 @@ pub async fn send_operator_request(
         terminal_seen = matches!(frame, OperatorFrame::Terminal(_));
         frames.push(frame);
     }
+    if !terminal_seen
+        && matches!(
+            frames.last(),
+            Some(OperatorFrame::Progress(HostProgress::ReplacementStarting))
+        )
+    {
+        return Ok(frames);
+    }
     if !terminal_seen {
         return Err(OperatorClientError::MissingTerminal);
     }
@@ -363,18 +371,22 @@ pub(crate) async fn read_request_from_stream(
     decode_operator_request(&payload).map_err(OperatorConnectionError::Protocol)
 }
 
-pub(crate) async fn write_frames_to_stream(
+pub(crate) async fn write_frame_to_stream(
     stream: &mut UnixStream,
-    frames: &[OperatorFrame],
+    frame: &OperatorFrame,
     deadline_at: tokio::time::Instant,
 ) -> Result<(), OperatorConnectionError> {
-    for frame in frames {
-        let encoded = encode_operator_frame(frame)?;
-        tokio::time::timeout_at(deadline_at, stream.write_all(&encoded))
-            .await
-            .map_err(|_elapsed| OperatorConnectionError::Timeout)?
-            .map_err(OperatorConnectionError::Io)?;
-    }
+    let encoded = encode_operator_frame(frame)?;
+    tokio::time::timeout_at(deadline_at, stream.write_all(&encoded))
+        .await
+        .map_err(|_elapsed| OperatorConnectionError::Timeout)?
+        .map_err(OperatorConnectionError::Io)
+}
+
+pub(crate) async fn shutdown_operator_stream(
+    stream: &mut UnixStream,
+    deadline_at: tokio::time::Instant,
+) -> Result<(), OperatorConnectionError> {
     tokio::time::timeout_at(deadline_at, stream.shutdown())
         .await
         .map_err(|_elapsed| OperatorConnectionError::Timeout)?

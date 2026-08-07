@@ -80,6 +80,15 @@ impl ChildCommandSpec {
         }
         command
     }
+
+    pub(crate) fn std_command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.executable);
+        command.args(&self.arguments).envs(self.environment.clone());
+        if self.output == ChildOutput::Null {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        command
+    }
 }
 
 /// Retained child started in a process group isolated from the foreground host.

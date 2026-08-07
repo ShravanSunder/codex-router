@@ -90,14 +90,34 @@ pub enum ExecutableIdentityError {
     VersionFormat,
 }
 
+/// Retained single-flight executable hash operation.
+pub struct ExecutableIdentityTask {
+    task: tokio::task::JoinHandle<Result<ExecutableIdentity, ExecutableIdentityError>>,
+}
+
+impl ExecutableIdentityTask {
+    /// Waits for and drains the retained blocking hash task.
+    pub async fn wait(&mut self) -> Result<ExecutableIdentity, ExecutableIdentityError> {
+        (&mut self.task)
+            .await
+            .map_err(ExecutableIdentityError::Join)?
+    }
+}
+
+/// Starts one retained hash operation on Tokio's bounded blocking pool.
+#[must_use]
+pub fn start_executable_identity(executable: &Path) -> ExecutableIdentityTask {
+    let executable = executable.to_path_buf();
+    ExecutableIdentityTask {
+        task: tokio::task::spawn_blocking(move || hash_executable(executable)),
+    }
+}
+
 /// Resolves and hashes the managed executable on Tokio's blocking pool.
 pub async fn executable_identity(
     executable: &Path,
 ) -> Result<ExecutableIdentity, ExecutableIdentityError> {
-    let executable = executable.to_path_buf();
-    tokio::task::spawn_blocking(move || hash_executable(executable))
-        .await
-        .map_err(ExecutableIdentityError::Join)?
+    start_executable_identity(executable).wait().await
 }
 
 /// Reads the installed version from the same resolved managed executable.
