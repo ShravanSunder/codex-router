@@ -6,6 +6,7 @@ mod domain;
 mod instance;
 mod operator_protocol;
 mod process;
+mod restart;
 mod router;
 mod runtime;
 mod telemetry;

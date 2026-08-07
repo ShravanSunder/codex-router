@@ -243,6 +243,31 @@ pub async fn run_native_app_server_fixture(
     Ok(())
 }
 
+/// Runs a compatible fixed-address router fixture until SIGTERM.
+pub async fn run_persistent_router_health_fixture(
+    address: std::net::SocketAddr,
+    process_log: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let listener = TcpListener::bind(address).await?;
+    append_event(process_log, &format!("{}\n", std::process::id()))?;
+    loop {
+        tokio::select! {
+            _ = terminate.recv() => return Ok(()),
+            accepted = listener.accept() => {
+                let (mut stream, _peer) = accepted?;
+                let mut request = [0_u8; 1024];
+                let _read_bytes = stream.read(&mut request).await?;
+                let response = render_router_health_response(
+                    RouterHealthFixtureResponse::Compatible,
+                )?;
+                stream.write_all(&response).await?;
+                stream.shutdown().await?;
+            }
+        }
+    }
+}
+
 async fn read_fixture_json(
     websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
 ) -> Result<Value, Box<dyn std::error::Error>> {

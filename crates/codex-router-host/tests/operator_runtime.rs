@@ -253,7 +253,7 @@ fn host_config_preserves_resolved_router_and_codex_boundaries() {
 }
 
 #[tokio::test]
-async fn runtime_recovery_is_bounded_and_idle_is_event_driven()
+async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new("runtime-recovery")?;
     let router = PersistentRouterHealthFixture::start().await?;
@@ -358,6 +358,47 @@ async fn runtime_recovery_is_bounded_and_idle_is_event_driven()
         "second unexpected exit must not start a third app-server",
     )?;
 
+    let restart_frames = send_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::RestartAppServer,
+        Duration::from_secs(3),
+    )
+    .await?;
+    check_equal(
+        terminal_classification(&restart_frames)?,
+        TerminalClassification::Succeeded,
+        "explicit native-ready restart must succeed after recovery exhaustion",
+    )?;
+    let explicitly_restarted_processes = wait_for_process_ids(&process_log, 3).await?;
+    check_equal(
+        terminal_snapshot(&restart_frames)?.recovery_budget(),
+        RecoveryBudget::Available,
+        "explicit native-ready restart must reset the recovery budget",
+    )?;
+
+    let external_router_restart = send_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::RestartRouter,
+        Duration::from_secs(3),
+    )
+    .await?;
+    check_equal(
+        terminal_classification(&external_router_restart)?,
+        TerminalClassification::Failed,
+        "external router restart must report not-owned without signalling it",
+    )?;
+    check_equal(
+        wait_for_process_ids(&process_log, 3).await?.last().copied(),
+        explicitly_restarted_processes.last().copied(),
+        "external router restart must not replace the app-server",
+    )?;
+
+    signal_process(
+        *explicitly_restarted_processes
+            .last()
+            .ok_or("explicitly restarted app-server PID is missing")?,
+    )?;
+
     runtime.abort();
     let _runtime_result = runtime.await;
     router.finish().await?;
@@ -387,6 +428,18 @@ fn terminal_snapshot(
         .iter()
         .find_map(|frame| match frame {
             OperatorFrame::Terminal(response) => Some(response.snapshot()),
+            OperatorFrame::Progress(_) => None,
+        })
+        .ok_or_else(|| std::io::Error::other("operator response omitted its terminal frame").into())
+}
+
+fn terminal_classification(
+    frames: &[OperatorFrame],
+) -> Result<TerminalClassification, Box<dyn std::error::Error>> {
+    frames
+        .iter()
+        .find_map(|frame| match frame {
+            OperatorFrame::Terminal(response) => Some(response.classification()),
             OperatorFrame::Progress(_) => None,
         })
         .ok_or_else(|| std::io::Error::other("operator response omitted its terminal frame").into())

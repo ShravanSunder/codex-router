@@ -5,10 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 
 use crate::AppServerChild;
 use crate::AppServerCondition;
@@ -25,11 +23,9 @@ use crate::HostOperation;
 use crate::HostPhase;
 use crate::HostSnapshot;
 use crate::HostSnapshotDimensions;
-use crate::HostTerminalResponse;
 use crate::InstanceAcquireError;
 use crate::LifecycleOutcome;
 use crate::LifecycleOutcomeClassification;
-use crate::OperatorFrame;
 use crate::OperatorRequest;
 use crate::ProcessGroupError;
 use crate::RecoveryBudget;
@@ -42,6 +38,9 @@ use crate::RouterShutdownError;
 use crate::TerminalClassification;
 use crate::probe_router;
 use crate::require_unowned_app_server_endpoint;
+
+mod operator;
+mod startup;
 
 const OPERATOR_QUEUE_CAPACITY: usize = 8;
 const OPERATOR_CONNECTION_LIMIT: usize = 8;
@@ -130,21 +129,21 @@ impl HostRuntime {
         let startup_started_at = tokio::time::Instant::now();
         let instance = HostInstance::acquire(config.coordination_paths().clone())?;
         let (router_condition, mut router_child) =
-            start_router(&config, dependencies.router_command.as_ref()).await?;
+            startup::start_router(&config, dependencies.router_command.as_ref()).await?;
         if let Err(endpoint_error) = require_unowned_app_server_endpoint(
             config.app_server_socket(),
             config.deadlines().endpoint_inspection(),
         )
         .await
         {
-            shutdown_owned_router_after_startup_failure(&mut router_child).await?;
+            startup::shutdown_owned_router_after_startup_failure(&mut router_child).await?;
             return Err(HostError::AppServerEndpoint(endpoint_error));
         }
         let (app_server, readiness) =
-            match start_app_server(&config, dependencies.app_server.clone()).await {
+            match startup::start_app_server(&config, dependencies.app_server.clone()).await {
                 Ok(started) => started,
                 Err(error) => {
-                    shutdown_owned_router_after_startup_failure(&mut router_child).await?;
+                    startup::shutdown_owned_router_after_startup_failure(&mut router_child).await?;
                     return Err(error);
                 }
             };
@@ -156,12 +155,14 @@ impl HostRuntime {
         );
 
         let (operator_sender, mut operator_receiver) =
-            mpsc::channel::<OperatorWork>(OPERATOR_QUEUE_CAPACITY);
+            mpsc::channel::<operator::OperatorWork>(OPERATOR_QUEUE_CAPACITY);
         let mut connection_tasks = tokio::task::JoinSet::new();
         let connection_permits = Arc::new(Semaphore::new(OPERATOR_CONNECTION_LIMIT));
         let mut app_server = Some(app_server);
         let mut recovery = None::<RecoveryFuture>;
         let mut recovery_started_at = None::<tokio::time::Instant>;
+        let mut active_restart = None::<operator::ActiveAppServerRestart>;
+        let mut active_router_restart = None::<operator::ActiveRouterRestart>;
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
                 .map_err(HostError::Signal)?;
@@ -177,7 +178,7 @@ impl HostRuntime {
                     if let Ok((stream, _peer)) = accepted
                         && let Ok(permit) = Arc::clone(&connection_permits).try_acquire_owned()
                     {
-                        spawn_operator_connection(
+                        operator::spawn_operator_connection(
                             &mut connection_tasks,
                             stream,
                             operator_sender.clone(),
@@ -187,17 +188,105 @@ impl HostRuntime {
                     }
                 }
                 Some(work) = operator_receiver.recv() => {
-                    handle_operator_work(work, &state);
+                    operator::handle_operator_work(work, operator::OperatorRuntimeContext {
+                        state: &mut state,
+                        app_server: &mut app_server,
+                        router_child: &mut router_child,
+                        config: &config,
+                        dependencies: &dependencies,
+                        active_app_server_restart: &mut active_restart,
+                        active_router_restart: &mut active_router_restart,
+                    });
                 }
                 completed = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
                     let _completed_connection = completed;
                 }
-                exit = wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() => {
+                restart_completion = wait_for_active_restart(&mut active_restart), if active_restart.is_some() => {
+                    let Some(active) = active_restart.take() else {
+                        continue;
+                    };
+                    app_server = restart_completion.child;
+                    let classification = if restart_completion.succeeded {
+                        if let Some(readiness) = restart_completion.readiness {
+                            state.apply_readiness(readiness);
+                        }
+                        state.recovery_budget = RecoveryBudget::Available;
+                        state.last_lifecycle_outcome = Some(LifecycleOutcome {
+                            operation: HostOperation::RestartAppServer,
+                            classification: LifecycleOutcomeClassification::Succeeded,
+                        });
+                        TerminalClassification::Succeeded
+                    } else {
+                        state.app_server = if app_server.is_some() {
+                            AppServerCondition::ShutdownTimedOut
+                        } else {
+                            AppServerCondition::Failed
+                        };
+                        state.remote_control = RemoteControlCondition::Unavailable;
+                        state.last_lifecycle_outcome = Some(LifecycleOutcome {
+                            operation: HostOperation::RestartAppServer,
+                            classification: LifecycleOutcomeClassification::Failed,
+                        });
+                        TerminalClassification::Failed
+                    };
+                    state.phase = HostPhase::Steady;
+                    state.record_lifecycle(
+                        HostOperation::RestartAppServer,
+                        if restart_completion.succeeded { "succeeded" } else { "failed" },
+                        active.started_at.elapsed(),
+                    );
+                    operator::send_terminal_response(
+                        active.response,
+                        OperatorRequest::RestartAppServer,
+                        classification,
+                        state.snapshot(),
+                        restart_completion.message,
+                    );
+                }
+                router_restart_completion = wait_for_active_router_restart(&mut active_router_restart), if active_router_restart.is_some() => {
+                    let Some(active) = active_router_restart.take() else {
+                        continue;
+                    };
+                    router_child = router_restart_completion.child;
+                    let classification = if router_restart_completion.succeeded {
+                        state.router = RouterCondition::OwnedReachable;
+                        state.last_lifecycle_outcome = Some(LifecycleOutcome {
+                            operation: HostOperation::RestartRouter,
+                            classification: LifecycleOutcomeClassification::Succeeded,
+                        });
+                        TerminalClassification::Succeeded
+                    } else {
+                        state.router = if router_child.is_some() {
+                            RouterCondition::OwnedTransitioning
+                        } else {
+                            RouterCondition::Unavailable
+                        };
+                        state.last_lifecycle_outcome = Some(LifecycleOutcome {
+                            operation: HostOperation::RestartRouter,
+                            classification: LifecycleOutcomeClassification::Failed,
+                        });
+                        TerminalClassification::Failed
+                    };
+                    state.phase = HostPhase::Steady;
+                    state.record_lifecycle(
+                        HostOperation::RestartRouter,
+                        if router_restart_completion.succeeded { "succeeded" } else { "failed" },
+                        active.started_at.elapsed(),
+                    );
+                    operator::send_terminal_response(
+                        active.response,
+                        OperatorRequest::RestartRouter,
+                        classification,
+                        state.snapshot(),
+                        router_restart_completion.message,
+                    );
+                }
+                exit = wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() && active_restart.is_none() => {
                     let _exit_status = exit?;
                     app_server = None;
                     state.app_server = AppServerCondition::Absent;
                     state.remote_control = RemoteControlCondition::Unavailable;
-                    if state.recovery_budget == RecoveryBudget::Available {
+                    if state.recovery_budget == RecoveryBudget::Available && active_router_restart.is_none() {
                         state.recovery_budget = RecoveryBudget::Consumed;
                         state.phase = HostPhase::Mutating {
                             operation: HostOperation::RestartAppServer,
@@ -252,28 +341,36 @@ impl HostRuntime {
                             .map_or(std::time::Duration::ZERO, |started_at| started_at.elapsed()),
                     );
                 }
-                router_exit = wait_for_router_exit(&mut router_child), if router_child.is_some() => {
+                router_exit = wait_for_router_exit(&mut router_child), if router_child.is_some() && active_router_restart.is_none() => {
                     let _exit_status = router_exit?;
                     state.router = RouterCondition::Unavailable;
                     state.phase = HostPhase::Stopping;
+                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
+                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
                     settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
                     shutdown_retained_children(&mut app_server, &mut router_child).await?;
                     return Ok(HostExit::OwnedRouterExited);
                 }
                 _ = interrupt.recv() => {
                     state.phase = HostPhase::Stopping;
+                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
+                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
                     settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
                     shutdown_retained_children(&mut app_server, &mut router_child).await?;
                     return Ok(HostExit::Signal);
                 }
                 _ = terminate.recv() => {
                     state.phase = HostPhase::Stopping;
+                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
+                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
                     settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
                     shutdown_retained_children(&mut app_server, &mut router_child).await?;
                     return Ok(HostExit::Signal);
                 }
                 _ = hangup.recv() => {
                     state.phase = HostPhase::Stopping;
+                    settle_active_restart_for_shutdown(&mut active_restart, &mut app_server).await;
+                    settle_active_router_restart_for_shutdown(&mut active_router_restart, &mut router_child).await;
                     settle_recovery_for_shutdown(&mut recovery, &mut app_server).await;
                     shutdown_retained_children(&mut app_server, &mut router_child).await?;
                     return Ok(HostExit::Signal);
@@ -354,147 +451,6 @@ impl RuntimeState {
     }
 }
 
-struct OperatorWork {
-    request: OperatorRequest,
-    response: oneshot::Sender<Vec<OperatorFrame>>,
-}
-
-fn spawn_operator_connection(
-    connection_tasks: &mut tokio::task::JoinSet<()>,
-    mut stream: UnixStream,
-    operator_sender: mpsc::Sender<OperatorWork>,
-    request_deadline: std::time::Duration,
-    permit: tokio::sync::OwnedSemaphorePermit,
-) {
-    connection_tasks.spawn(async move {
-        let _permit = permit;
-        let deadline_at = tokio::time::Instant::now() + request_deadline;
-        let Ok(request) =
-            crate::operator_protocol::read_request_from_stream(&mut stream, deadline_at).await
-        else {
-            return;
-        };
-        let (response_sender, response_receiver) = oneshot::channel();
-        if operator_sender
-            .send(OperatorWork {
-                request,
-                response: response_sender,
-            })
-            .await
-            .is_err()
-        {
-            return;
-        }
-        let Ok(frames) = response_receiver.await else {
-            return;
-        };
-        let _write_result =
-            crate::operator_protocol::write_frames_to_stream(&mut stream, &frames, deadline_at)
-                .await;
-    });
-}
-
-fn handle_operator_work(work: OperatorWork, state: &RuntimeState) {
-    let snapshot = state.snapshot();
-    let active_mutation = match &state.phase {
-        HostPhase::Mutating { operation, .. } => Some(*operation),
-        HostPhase::Starting | HostPhase::Steady | HostPhase::Stopping => None,
-    };
-    if matches!(
-        crate::classify_operator_request(active_mutation, work.request),
-        crate::MutationAdmission::Busy
-    ) {
-        let _send_result = work.response.send(vec![OperatorFrame::busy(
-            work.request,
-            snapshot,
-            "another lifecycle mutation is active".to_owned(),
-        )]);
-        return;
-    }
-    let (classification, message) = match work.request {
-        OperatorRequest::Status | OperatorRequest::AwaitHostStart => {
-            let classification = match snapshot.hosted_readiness() {
-                crate::HostedReadiness::Ready => TerminalClassification::Ready,
-                crate::HostedReadiness::LocalReadyRemoteDegraded => {
-                    TerminalClassification::LocalReadyRemoteDegraded
-                }
-                crate::HostedReadiness::Unavailable => TerminalClassification::Unavailable,
-            };
-            (classification, "shared Codex host status".to_owned())
-        }
-        OperatorRequest::RestartAppServer
-        | OperatorRequest::UpdateCodex
-        | OperatorRequest::RestartRouter => (
-            TerminalClassification::Failed,
-            "lifecycle operation is not available in this runtime slice".to_owned(),
-        ),
-    };
-    let response = HostTerminalResponse::new(work.request, classification, snapshot, message);
-    let _send_result = work.response.send(vec![OperatorFrame::terminal(response)]);
-}
-
-async fn start_router(
-    config: &HostConfig,
-    router_command: Option<&ChildCommandSpec>,
-) -> Result<(RouterCondition, Option<RouterChild>), HostError> {
-    match probe_router(config.router_endpoint(), config.deadlines().router_start()).await? {
-        RouterProbeResult::Compatible => Ok((RouterCondition::ExternalReachable, None)),
-        RouterProbeResult::AuthenticationRequired => Err(HostError::RouterAuthenticationRequired),
-        RouterProbeResult::Incompatible => Err(HostError::RouterIncompatible),
-        RouterProbeResult::Unavailable => {
-            let command = router_command.ok_or(HostError::RouterUnavailable)?;
-            let mut command = command.command();
-            let mut child = RouterChild::spawn(&mut command)?;
-            let probe_result =
-                match probe_router(config.router_endpoint(), config.deadlines().router_start())
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let _shutdown_outcome = child.shutdown().await?;
-                        return Err(HostError::RouterProbe(error));
-                    }
-                };
-            match probe_result {
-                RouterProbeResult::Compatible => Ok((RouterCondition::OwnedReachable, Some(child))),
-                RouterProbeResult::AuthenticationRequired => {
-                    let _shutdown_outcome = child.shutdown().await?;
-                    Err(HostError::RouterAuthenticationRequired)
-                }
-                RouterProbeResult::Incompatible => {
-                    let _shutdown_outcome = child.shutdown().await?;
-                    Err(HostError::RouterIncompatible)
-                }
-                RouterProbeResult::Unavailable => {
-                    let _shutdown_outcome = child.shutdown().await?;
-                    Err(HostError::RouterUnavailable)
-                }
-            }
-        }
-    }
-}
-
-async fn start_app_server(
-    config: &HostConfig,
-    launch_plan: AppServerLaunchPlan,
-) -> Result<(AppServerChild, AppServerReadiness), HostError> {
-    let mut child = launch_plan.spawn()?;
-    let readiness = child
-        .await_readiness(
-            config.app_server_socket(),
-            config.deadlines().app_server_start(),
-            config.deadlines().remote_control(),
-        )
-        .await;
-    match readiness {
-        Ok(readiness) => Ok((child, readiness)),
-        Err(readiness_error) => {
-            let _shutdown_outcome = child.shutdown().await?;
-            Err(HostError::AppServerReadiness(readiness_error))
-        }
-    }
-}
-
 type RecoveryFuture = Pin<
     Box<
         dyn Future<Output = Result<(AppServerChild, AppServerReadiness), HostError>>
@@ -553,6 +509,24 @@ async fn wait_for_recovery(
     }
 }
 
+async fn wait_for_active_restart(
+    active_restart: &mut Option<operator::ActiveAppServerRestart>,
+) -> crate::restart::AppServerRestartCompletion {
+    match active_restart.as_mut() {
+        Some(active) => active.future.as_mut().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_for_active_router_restart(
+    active_restart: &mut Option<operator::ActiveRouterRestart>,
+) -> crate::restart::RouterRestartCompletion {
+    match active_restart.as_mut() {
+        Some(active) => active.future.as_mut().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn shutdown_retained_children(
     app_server: &mut Option<AppServerChild>,
     router: &mut Option<RouterChild>,
@@ -578,11 +552,24 @@ async fn settle_recovery_for_shutdown(
     }
 }
 
-async fn shutdown_owned_router_after_startup_failure(
+async fn settle_active_restart_for_shutdown(
+    active_restart: &mut Option<operator::ActiveAppServerRestart>,
+    app_server: &mut Option<AppServerChild>,
+) {
+    let Some(mut active) = active_restart.take() else {
+        return;
+    };
+    let completion = active.future.as_mut().await;
+    *app_server = completion.child;
+}
+
+async fn settle_active_router_restart_for_shutdown(
+    active_restart: &mut Option<operator::ActiveRouterRestart>,
     router: &mut Option<RouterChild>,
-) -> Result<(), HostError> {
-    if let Some(child) = router.as_mut() {
-        let _shutdown_outcome = child.shutdown().await?;
-    }
-    Ok(())
+) {
+    let Some(mut active) = active_restart.take() else {
+        return;
+    };
+    let completion = active.future.as_mut().await;
+    *router = completion.child;
 }
