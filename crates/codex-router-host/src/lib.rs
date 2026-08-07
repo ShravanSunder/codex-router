@@ -48,6 +48,7 @@ pub use instance::HostInstance;
 pub use instance::InstanceAcquireError;
 pub use instance::inherited_lock_environment;
 pub use instance::inherited_lock_marker;
+pub use operator_protocol::HostProgress;
 pub use operator_protocol::HostTerminalResponse;
 pub use operator_protocol::MutationAdmission;
 pub use operator_protocol::OPERATOR_PROTOCOL_VERSION;

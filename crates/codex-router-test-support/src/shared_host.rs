@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use codex_router_core::router_compatibility::RouterCompatibility;
 use futures_util::SinkExt;
@@ -182,7 +183,7 @@ fn render_router_health_response(
     Ok(encoded)
 }
 
-/// Runs one native app-server websocket fixture until SIGTERM.
+/// Runs a multi-connection native app-server websocket fixture until SIGTERM.
 pub async fn run_native_app_server_fixture(
     socket_path: &Path,
     running_version: &str,
@@ -194,9 +195,25 @@ pub async fn run_native_app_server_fixture(
     if let Some(process_log) = process_log {
         append_event(process_log, &format!("{}\n", std::process::id()))?;
     }
-    let (stream, _peer) = listener.accept().await?;
-    let mut websocket = tokio_tungstenite::accept_async(stream).await?;
+    loop {
+        tokio::select! {
+            _ = terminate.recv() => break,
+            accepted = listener.accept() => {
+                let (stream, _peer) = accepted?;
+                serve_native_app_server_observation(stream, running_version).await?;
+            }
+        }
+    }
+    drop(listener);
+    let _socket_cleanup = std::fs::remove_file(socket_path);
+    Ok(())
+}
 
+async fn serve_native_app_server_observation(
+    stream: tokio::net::UnixStream,
+    running_version: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut websocket = tokio_tungstenite::accept_async(stream).await?;
     let initialize = read_fixture_json(&mut websocket).await?;
     let initialize_id = initialize
         .get("id")
@@ -236,11 +253,85 @@ pub async fn run_native_app_server_fixture(
         ))
         .await?;
     let _close_frame = websocket.next().await;
-
-    let _signal = terminate.recv().await;
-    drop(listener);
-    let _socket_cleanup = std::fs::remove_file(socket_path);
     Ok(())
+}
+
+/// Serves one observation with independently delayed native and Remote Control stages.
+pub async fn run_delayed_native_app_server_observation_fixture(
+    socket_path: &Path,
+    running_version: &str,
+    native_delay: Duration,
+    remote_control_delay: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let listener = UnixListener::bind(socket_path)?;
+    let (stream, _peer) = listener.accept().await?;
+    let mut websocket = tokio_tungstenite::accept_async(stream).await?;
+    let initialize = read_fixture_json_send(&mut websocket).await?;
+    let initialize_id = initialize
+        .get("id")
+        .cloned()
+        .ok_or("initialize request id is missing")?;
+    tokio::time::sleep(native_delay).await;
+    websocket
+        .send(Message::Text(
+            serde_json::json!({
+                "id": initialize_id,
+                "result": { "userAgent": format!("codex-cli/{running_version}") }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let _initialized = read_fixture_json_send(&mut websocket).await?;
+    let remote_status = read_fixture_json_send(&mut websocket).await?;
+    let remote_status_id = remote_status
+        .get("id")
+        .cloned()
+        .ok_or("Remote Control request id is missing")?;
+    websocket
+        .send(Message::Text(
+            serde_json::json!({
+                "id": remote_status_id,
+                "result": {
+                    "status": "connecting",
+                    "serverName": "fixture",
+                    "environmentId": "fixture"
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    tokio::time::sleep(remote_control_delay).await;
+    websocket
+        .send(Message::Text(
+            serde_json::json!({
+                "method": "remoteControl/status/changed",
+                "params": {
+                    "status": "connected",
+                    "serverName": "fixture",
+                    "environmentId": "fixture"
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn read_fixture_json_send(
+    websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        let message = websocket
+            .next()
+            .await
+            .ok_or("native websocket closed unexpectedly")??;
+        if let Message::Text(text) = message {
+            return Ok(serde_json::from_str(&text)?);
+        }
+    }
 }
 
 /// Runs a compatible fixed-address router fixture until SIGTERM.

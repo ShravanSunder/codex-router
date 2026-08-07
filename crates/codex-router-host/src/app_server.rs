@@ -256,13 +256,10 @@ impl AppServerChild {
             let Some(remaining) = startup_deadline.checked_sub(started_at.elapsed()) else {
                 return Err(AppServerReadinessError::StartupTimeout);
             };
-            let observation = tokio::time::timeout(
-                remaining,
-                observe_app_server(socket_path, remote_control_deadline),
-            )
-            .await;
+            let observation =
+                observe_app_server(socket_path, remaining, remote_control_deadline).await;
             match observation {
-                Ok(Ok(observation)) => {
+                Ok(observation) => {
                     if self.expected_version.as_deref() != Some(observation.running_version()) {
                         return Err(AppServerReadinessError::VersionMismatch);
                     }
@@ -291,12 +288,14 @@ impl AppServerChild {
                         }
                     });
                 }
-                Ok(Err(codex_router_codex::CodexProtocolError::Connect(_)))
-                | Ok(Err(codex_router_codex::CodexProtocolError::Timeout { stage: "connect" })) => {
+                Err(codex_router_codex::CodexProtocolError::Connect(_))
+                | Err(codex_router_codex::CodexProtocolError::Timeout { stage: "connect" }) => {
                     tokio::time::sleep(Duration::from_millis(20).min(remaining)).await;
                 }
-                Ok(Err(error)) => return Err(AppServerReadinessError::Protocol(error)),
-                Err(_elapsed) => return Err(AppServerReadinessError::StartupTimeout),
+                Err(codex_router_codex::CodexProtocolError::Timeout {
+                    stage: "native readiness",
+                }) => return Err(AppServerReadinessError::StartupTimeout),
+                Err(error) => return Err(AppServerReadinessError::Protocol(error)),
             }
         }
     }

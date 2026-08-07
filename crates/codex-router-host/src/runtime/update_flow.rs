@@ -27,6 +27,9 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
         }
         crate::update::UpdatePreparation::Changed => {
             context.state.executable_relation = ExecutableRelation::Drift;
+            let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
+                crate::operator_protocol::HostProgress::ReplacementStarting,
+            ));
             let Some(replacement_command) = context.dependencies.replacement_command.clone() else {
                 context.state.phase = HostPhase::Steady;
                 context.state.last_lifecycle_outcome = Some(LifecycleOutcome {
@@ -42,9 +45,6 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                 );
                 return;
             };
-            let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
-                crate::operator_protocol::HostProgress::ReplacementStarting,
-            ));
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::UpdateCodex,
                 phase: "changed-update-teardown".to_owned(),
@@ -125,7 +125,10 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         };
         context.state.last_lifecycle_outcome = Some(LifecycleOutcome {
             operation: HostOperation::UpdateCodex,
-            classification: LifecycleOutcomeClassification::Failed,
+            classification: state::restart_lifecycle_classification(
+                false,
+                context.completion.app_server_shutdown,
+            ),
         });
         operator::send_terminal_response(
             context.active.response,
@@ -139,7 +142,14 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
 
     context.state.record_lifecycle(
         HostOperation::UpdateCodex,
-        "replacement-starting",
+        if matches!(
+            context.completion.app_server_shutdown,
+            Some(crate::ShutdownOutcome::Forced)
+        ) {
+            "forced-replacement-starting"
+        } else {
+            "replacement-starting"
+        },
         context.active.started_at.elapsed(),
     );
     lifecycle::flush_pre_exec_telemetry(context.dependencies.pre_exec_telemetry.clone()).await;

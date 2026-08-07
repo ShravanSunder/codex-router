@@ -48,6 +48,7 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
         std::env::current_exe()?,
     )
     .env("CODEX_ROUTER_SHARED_HOST_APP_CHILD", "1")
+    .env("CODEX_ROUTER_SHARED_HOST_UPDATE_CHANGES", "1")
     .stdout(Stdio::null())
     .stderr(Stdio::null());
     let host = host.spawn()?;
@@ -72,6 +73,17 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     check(
         String::from_utf8(restart.stdout)?.contains("result: Succeeded"),
         "app-server restart did not report success",
+    )?;
+
+    let update = run_host_subcommand(&binary, &router_root, &codex_home, "update").await?;
+    check(
+        update.status.success(),
+        &String::from_utf8_lossy(&update.stderr),
+    )?;
+    let update_stdout = String::from_utf8(update.stdout)?;
+    check(
+        update_stdout.contains("update_result: updated and host restarted"),
+        &update_stdout,
     )?;
 
     let sessions = tokio::process::Command::new(&binary)
@@ -122,10 +134,29 @@ async fn shared_host_app_server_child_entrypoint() -> Result<(), Box<dyn std::er
     let _stale_cleanup = std::fs::remove_file(&socket_path);
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let (stream, _peer) = listener.accept().await?;
+    loop {
+        tokio::select! {
+            _ = terminate.recv() => break,
+            accepted = listener.accept() => {
+                let (stream, _peer) = accepted?;
+                serve_app_server_observation(stream).await?;
+            }
+        }
+    }
+    drop(listener);
+    let _cleanup = std::fs::remove_file(socket_path);
+    Ok(())
+}
+
+async fn serve_app_server_observation(
+    stream: tokio::net::UnixStream,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut websocket = tokio_tungstenite::accept_async(stream).await?;
     let initialize = read_json(&mut websocket).await?;
-    let initialize_id = initialize["id"].as_u64().ok_or("initialize id missing")?;
+    let initialize_id = initialize
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or("initialize id missing")?;
     websocket
         .send(Message::Text(
             serde_json::json!({
@@ -138,8 +169,9 @@ async fn shared_host_app_server_child_entrypoint() -> Result<(), Box<dyn std::er
         .await?;
     let _initialized = read_json(&mut websocket).await?;
     let remote_status = read_json(&mut websocket).await?;
-    let remote_status_id = remote_status["id"]
-        .as_u64()
+    let remote_status_id = remote_status
+        .get("id")
+        .and_then(Value::as_u64)
         .ok_or("remote status id missing")?;
     websocket
         .send(Message::Text(
@@ -156,9 +188,6 @@ async fn shared_host_app_server_child_entrypoint() -> Result<(), Box<dyn std::er
         ))
         .await?;
     let _closed = websocket.next().await;
-    let _terminate = terminate.recv().await;
-    drop(listener);
-    let _cleanup = std::fs::remove_file(socket_path);
     Ok(())
 }
 
@@ -197,7 +226,7 @@ async fn run_host_subcommand(
 fn install_managed_fixture(executable: &Path) -> std::io::Result<()> {
     std::fs::write(
         executable,
-        b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 1.2.3'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then exit 0; fi\nexec \"$CODEX_ROUTER_SHARED_HOST_TEST_BINARY\" --exact shared_host_app_server_child_entrypoint --nocapture\n",
+        b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 1.2.3'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then if [ \"$CODEX_ROUTER_SHARED_HOST_UPDATE_CHANGES\" = \"1\" ]; then printf '\\n# changed by update fixture\\n' >> \"$0\"; fi; exit 0; fi\nexec \"$CODEX_ROUTER_SHARED_HOST_TEST_BINARY\" --exact shared_host_app_server_child_entrypoint --nocapture\n",
     )?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
 }

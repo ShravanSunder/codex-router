@@ -31,6 +31,7 @@ use crate::RecoveryBudget;
 use crate::RemoteControlCondition;
 use crate::RouterChild;
 use crate::RouterCondition;
+use crate::RouterOwnership;
 use crate::RouterProbeError;
 use crate::RouterProbeResult;
 use crate::RouterShutdownError;
@@ -41,7 +42,12 @@ use crate::require_unowned_app_server_endpoint;
 mod lifecycle;
 mod operator;
 mod startup;
+mod state;
+mod status;
 mod update_flow;
+
+use state::RuntimeState;
+use state::restart_lifecycle_classification;
 
 const OPERATOR_QUEUE_CAPACITY: usize = 8;
 const OPERATOR_CONNECTION_LIMIT: usize = 8;
@@ -109,8 +115,6 @@ pub trait PreExecTelemetry: Send + Sync + 'static {
 pub enum HostExit {
     /// SIGINT, SIGTERM, or SIGHUP requested foreground shutdown.
     Signal,
-    /// A retained router child exited, so the host cannot keep serving.
-    OwnedRouterExited,
 }
 
 /// Startup or owner-loop failure.
@@ -180,12 +184,29 @@ impl HostRuntime {
         Self::run_owned(config, dependencies, instance, startup_started_at).await
     }
 
+    /// Starts lifecycle convergence with singleton authority already acquired.
+    pub async fn run_acquired(
+        config: HostConfig,
+        dependencies: HostDependencies,
+        instance: HostInstance,
+    ) -> Result<HostExit, HostError> {
+        Self::run_owned(config, dependencies, instance, tokio::time::Instant::now()).await
+    }
+
     async fn run_owned(
         config: HostConfig,
         dependencies: HostDependencies,
         instance: HostInstance,
         startup_started_at: tokio::time::Instant,
     ) -> Result<HostExit, HostError> {
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .map_err(HostError::Signal)?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(HostError::Signal)?;
+        let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .map_err(HostError::Signal)?;
         let (router_condition, mut router_child) =
             startup::start_router(&config, dependencies.router_command.as_ref()).await?;
         if let Err(endpoint_error) = require_unowned_app_server_endpoint(
@@ -223,17 +244,9 @@ impl HostRuntime {
         let mut active_router_restart = None::<operator::ActiveRouterRestart>;
         let mut active_update = None::<operator::ActiveUpdate>;
         let mut active_update_activation = None::<operator::ActiveUpdateActivation>;
+        let mut active_status = None::<operator::ActiveStatusObservation>;
         let mut pending_identity = None::<codex_router_codex::ExecutableIdentityTask>;
         let mut retained_updater = None::<ProcessGroupChild>;
-        let mut interrupt =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .map_err(HostError::Signal)?;
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(HostError::Signal)?;
-        let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            .map_err(HostError::Signal)?;
-
         loop {
             tokio::select! {
                 accepted = instance.listener().accept() => {
@@ -250,6 +263,9 @@ impl HostRuntime {
                     }
                 }
                 Some(work) = operator_receiver.recv() => {
+                    let update_drain_active = pending_identity.is_some()
+                        || retained_updater.is_some()
+                        || active_status.is_some();
                     operator::handle_operator_work(work, operator::OperatorRuntimeContext {
                         state: &mut state,
                         app_server: &mut app_server,
@@ -259,7 +275,8 @@ impl HostRuntime {
                         active_app_server_restart: &mut active_restart,
                         active_router_restart: &mut active_router_restart,
                         active_update: &mut active_update,
-                        update_drain_active: pending_identity.is_some() || retained_updater.is_some(),
+                        active_status: &mut active_status,
+                        update_drain_active,
                     });
                 }
                 completed = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
@@ -277,7 +294,10 @@ impl HostRuntime {
                         state.recovery_budget = RecoveryBudget::Available;
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
                             operation: HostOperation::RestartAppServer,
-                            classification: LifecycleOutcomeClassification::Succeeded,
+                            classification: restart_lifecycle_classification(
+                                true,
+                                restart_completion.shutdown_outcome,
+                            ),
                         });
                         TerminalClassification::Succeeded
                     } else {
@@ -289,7 +309,10 @@ impl HostRuntime {
                         state.remote_control = RemoteControlCondition::Unavailable;
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
                             operation: HostOperation::RestartAppServer,
-                            classification: LifecycleOutcomeClassification::Failed,
+                            classification: restart_lifecycle_classification(
+                                false,
+                                restart_completion.shutdown_outcome,
+                            ),
                         });
                         TerminalClassification::Failed
                     };
@@ -383,6 +406,31 @@ impl HostRuntime {
                     let _updater_result = updater_result;
                     retained_updater = None;
                 }
+                status_observation = lifecycle::wait_for_status_observation(&mut active_status), if active_status.is_some() => {
+                    let Some(active) = active_status.take() else {
+                        continue;
+                    };
+                    let (snapshot, status_identity) = status_observation.snapshot(&state);
+                    if pending_identity.is_none() {
+                        pending_identity = status_identity;
+                    }
+                    let classification = match snapshot.hosted_readiness() {
+                        crate::HostedReadiness::Ready => TerminalClassification::Ready,
+                        crate::HostedReadiness::LocalReadyRemoteDegraded => {
+                            TerminalClassification::LocalReadyRemoteDegraded
+                        }
+                        crate::HostedReadiness::Unavailable => TerminalClassification::Unavailable,
+                    };
+                    for (request, response) in active.responses {
+                        operator::send_terminal_response(
+                            response,
+                            request,
+                            classification,
+                            snapshot.clone(),
+                            "shared Codex host status",
+                        );
+                    }
+                }
                 exit = lifecycle::wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() && active_restart.is_none() => {
                     let _exit_status = exit?;
                     app_server = None;
@@ -448,20 +496,12 @@ impl HostRuntime {
                 }
                 router_exit = lifecycle::wait_for_router_exit(&mut router_child), if router_child.is_some() && active_router_restart.is_none() => {
                     let _exit_status = router_exit?;
+                    router_child = None;
                     state.router = RouterCondition::Unavailable;
-                    state.phase = HostPhase::Stopping;
-                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
-                        activation: &mut active_update_activation,
-                        active_update: &mut active_update,
-                        pending_identity: &mut pending_identity,
-                        retained_updater: &mut retained_updater,
-                        active_app_server_restart: &mut active_restart,
-                        active_router_restart: &mut active_router_restart,
-                        recovery: &mut recovery,
-                        app_server: &mut app_server,
-                        router: &mut router_child,
-                    }).await?;
-                    return Ok(HostExit::OwnedRouterExited);
+                    state.last_lifecycle_outcome = Some(LifecycleOutcome {
+                        operation: HostOperation::RestartRouter,
+                        classification: LifecycleOutcomeClassification::Failed,
+                    });
                 }
                 _ = interrupt.recv() => {
                     state.phase = HostPhase::Stopping;
@@ -510,76 +550,5 @@ impl HostRuntime {
                 }
             }
         }
-    }
-}
-
-struct RuntimeState {
-    phase: HostPhase,
-    router: RouterCondition,
-    app_server: AppServerCondition,
-    remote_control: RemoteControlCondition,
-    executable_relation: ExecutableRelation,
-    recovery_budget: RecoveryBudget,
-    last_lifecycle_outcome: Option<LifecycleOutcome>,
-}
-
-impl RuntimeState {
-    fn ready(router: RouterCondition, readiness: AppServerReadiness) -> Self {
-        let mut state = Self {
-            phase: HostPhase::Steady,
-            router,
-            app_server: AppServerCondition::Starting,
-            remote_control: RemoteControlCondition::Unavailable,
-            executable_relation: ExecutableRelation::Match,
-            recovery_budget: RecoveryBudget::Available,
-            last_lifecycle_outcome: None,
-        };
-        state.apply_readiness(readiness);
-        state
-    }
-
-    fn apply_readiness(&mut self, readiness: AppServerReadiness) {
-        match readiness {
-            AppServerReadiness::Ready { running_version } => {
-                self.app_server = AppServerCondition::NativeReady { running_version };
-                self.remote_control = RemoteControlCondition::Connected;
-            }
-            AppServerReadiness::LocalReadyRemoteDegraded {
-                running_version,
-                remote_control,
-            } => {
-                self.app_server = AppServerCondition::NativeReady { running_version };
-                self.remote_control = remote_control;
-            }
-        }
-    }
-
-    fn snapshot(&self) -> HostSnapshot {
-        HostSnapshot::new(HostSnapshotDimensions {
-            phase: self.phase.clone(),
-            router: self.router,
-            app_server: self.app_server.clone(),
-            remote_control: self.remote_control,
-            executable_relation: self.executable_relation,
-            recovery_budget: self.recovery_budget,
-            last_lifecycle_outcome: self.last_lifecycle_outcome.clone(),
-        })
-    }
-
-    fn record_lifecycle(
-        &self,
-        operation: HostOperation,
-        result: &'static str,
-        duration: std::time::Duration,
-    ) {
-        crate::telemetry::record_lifecycle(
-            operation,
-            result,
-            duration,
-            self.router,
-            self.snapshot().hosted_readiness(),
-            self.recovery_budget,
-            self.executable_relation,
-        );
     }
 }

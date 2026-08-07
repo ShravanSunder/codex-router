@@ -14,12 +14,14 @@ pub(super) struct OperatorWork {
 
 pub(super) struct ActiveAppServerRestart {
     pub(super) future: crate::restart::AppServerRestartFuture,
+    pub(super) stop_intent: crate::restart::StopIntent,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
 }
 
 pub(super) struct ActiveRouterRestart {
     pub(super) future: crate::restart::RouterRestartFuture,
+    pub(super) stop_intent: crate::restart::StopIntent,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
 }
@@ -37,6 +39,11 @@ pub(super) struct ActiveUpdateActivation {
     pub(super) started_at: tokio::time::Instant,
 }
 
+pub(super) struct ActiveStatusObservation {
+    pub(super) future: crate::runtime::status::StatusObservationFuture,
+    pub(super) responses: Vec<(OperatorRequest, mpsc::Sender<OperatorFrame>)>,
+}
+
 pub(super) struct OperatorRuntimeContext<'a> {
     pub(super) state: &'a mut RuntimeState,
     pub(super) app_server: &'a mut Option<AppServerChild>,
@@ -46,6 +53,7 @@ pub(super) struct OperatorRuntimeContext<'a> {
     pub(super) active_app_server_restart: &'a mut Option<ActiveAppServerRestart>,
     pub(super) active_router_restart: &'a mut Option<ActiveRouterRestart>,
     pub(super) active_update: &'a mut Option<ActiveUpdate>,
+    pub(super) active_status: &'a mut Option<ActiveStatusObservation>,
     pub(super) update_drain_active: bool,
 }
 
@@ -77,16 +85,23 @@ pub(super) fn spawn_operator_connection(
         }
         while let Some(frame) = response_receiver.recv().await {
             let terminal = matches!(frame, OperatorFrame::Terminal(_));
-            if crate::operator_protocol::write_frame_to_stream(&mut stream, &frame, deadline_at)
-                .await
-                .is_err()
+            let write_deadline_at = tokio::time::Instant::now() + request_deadline;
+            if crate::operator_protocol::write_frame_to_stream(
+                &mut stream,
+                &frame,
+                write_deadline_at,
+            )
+            .await
+            .is_err()
             {
                 return;
             }
             if terminal {
-                let _shutdown_result =
-                    crate::operator_protocol::shutdown_operator_stream(&mut stream, deadline_at)
-                        .await;
+                let _shutdown_result = crate::operator_protocol::shutdown_operator_stream(
+                    &mut stream,
+                    tokio::time::Instant::now() + request_deadline,
+                )
+                .await;
                 return;
             }
         }
@@ -132,20 +147,25 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
     }
     match work.request {
         OperatorRequest::Status | OperatorRequest::AwaitHostStart => {
-            let classification = match snapshot.hosted_readiness() {
-                crate::HostedReadiness::Ready => TerminalClassification::Ready,
-                crate::HostedReadiness::LocalReadyRemoteDegraded => {
-                    TerminalClassification::LocalReadyRemoteDegraded
-                }
-                crate::HostedReadiness::Unavailable => TerminalClassification::Unavailable,
-            };
-            send_terminal_response(
-                work.response,
-                work.request,
-                classification,
-                snapshot,
-                "shared Codex host status",
-            );
+            if let Some(active) = context.active_status.as_mut() {
+                active.responses.push((work.request, work.response));
+                return;
+            }
+            let running_identity = context
+                .app_server
+                .as_ref()
+                .map(|child| child.identity().clone());
+            *context.active_status = Some(ActiveStatusObservation {
+                future: crate::runtime::status::observe_status(
+                    context.config.clone(),
+                    context.state.router_ownership,
+                    context.router_child.is_some(),
+                    running_identity,
+                    context.dependencies.update_deadlines.identity(),
+                    !context.update_drain_active,
+                ),
+                responses: vec![(work.request, work.response)],
+            });
         }
         OperatorRequest::RestartAppServer => {
             let current_child = context.app_server.take();
@@ -159,17 +179,22 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 AppServerCondition::Starting
             };
             context.state.remote_control = RemoteControlCondition::Unavailable;
+            let stop_intent = crate::restart::StopIntent::default();
             *context.active_app_server_restart = Some(ActiveAppServerRestart {
                 future: crate::restart::restart_app_server(
                     context.config.clone(),
                     context.dependencies.app_server.clone(),
                     current_child,
+                    stop_intent.clone(),
                 ),
+                stop_intent,
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
             });
         }
-        OperatorRequest::RestartRouter if context.router_child.is_none() => {
+        OperatorRequest::RestartRouter
+            if context.state.router_ownership == crate::RouterOwnership::External =>
+        {
             send_terminal_response(
                 work.response,
                 work.request,
@@ -179,18 +204,9 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             );
         }
         OperatorRequest::RestartRouter => {
-            let Some(current_child) = context.router_child.take() else {
-                send_terminal_response(
-                    work.response,
-                    work.request,
-                    TerminalClassification::Failed,
-                    snapshot,
-                    "owned router child is unavailable",
-                );
-                return;
-            };
+            let current_child = context.router_child.take();
             let Some(router_command) = context.dependencies.router_command.clone() else {
-                *context.router_child = Some(current_child);
+                *context.router_child = current_child;
                 send_terminal_response(
                     work.response,
                     work.request,
@@ -205,12 +221,15 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 phase: "stopping-owned-router".to_owned(),
             };
             context.state.router = RouterCondition::OwnedTransitioning;
+            let stop_intent = crate::restart::StopIntent::default();
             *context.active_router_restart = Some(ActiveRouterRestart {
                 future: crate::restart::restart_router(
                     context.config.clone(),
                     router_command,
                     current_child,
+                    stop_intent.clone(),
                 ),
+                stop_intent,
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
             });
@@ -241,4 +260,80 @@ pub(super) fn send_terminal_response(
 ) {
     let response = HostTerminalResponse::new(request, classification, snapshot, message.to_owned());
     let _send_result = response_sender.try_send(OperatorFrame::terminal(response));
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn response_write_deadline_starts_after_long_lifecycle_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, server) = UnixStream::pair()?;
+        let (operator_sender, mut operator_receiver) = mpsc::channel(1);
+        let mut connection_tasks = tokio::task::JoinSet::new();
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.clone().try_acquire_owned()?;
+        spawn_operator_connection(
+            &mut connection_tasks,
+            server,
+            operator_sender,
+            std::time::Duration::from_millis(20),
+            permit,
+        );
+        client
+            .write_all(&crate::encode_operator_request(
+                &OperatorRequest::RestartAppServer,
+            )?)
+            .await?;
+        client.shutdown().await?;
+        let work = operator_receiver
+            .recv()
+            .await
+            .ok_or("operator work was not admitted")?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        work.response
+            .send(OperatorFrame::terminal(HostTerminalResponse::new(
+                OperatorRequest::RestartAppServer,
+                TerminalClassification::Succeeded,
+                fixture_snapshot(),
+                "restart completed".to_owned(),
+            )))
+            .await?;
+        drop(work.response);
+
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.read_to_end(&mut response),
+        )
+        .await??;
+        if !matches!(
+            crate::decode_operator_frame(&response)?,
+            OperatorFrame::Terminal(terminal)
+                if terminal.classification() == TerminalClassification::Succeeded
+        ) {
+            return Err("delayed lifecycle response was not delivered".into());
+        }
+        let _completed = connection_tasks.join_next().await;
+        Ok(())
+    }
+
+    fn fixture_snapshot() -> HostSnapshot {
+        HostSnapshot::new(HostSnapshotDimensions {
+            phase: HostPhase::Steady,
+            router: RouterCondition::OwnedReachable,
+            app_server: AppServerCondition::NativeReady {
+                running_version: "1.2.3".to_owned(),
+            },
+            remote_control: RemoteControlCondition::Connected,
+            executable_relation: ExecutableRelation::Match,
+            recovery_budget: RecoveryBudget::Available,
+            last_lifecycle_outcome: None,
+        })
+    }
 }

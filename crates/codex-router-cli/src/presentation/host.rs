@@ -4,6 +4,7 @@ use std::io::Write;
 
 use codex_router_host::HostSnapshot;
 use codex_router_host::OperatorFrame;
+use codex_router_host::UpdateResult;
 
 pub(crate) fn render_frames<W: Write>(
     stdout: &mut W,
@@ -20,6 +21,31 @@ pub(crate) fn render_frames<W: Write>(
         }?;
     }
     Ok(())
+}
+
+pub(crate) fn render_update_result<W: Write>(
+    stdout: &mut W,
+    result: &UpdateResult,
+) -> std::io::Result<()> {
+    match result {
+        UpdateResult::NoChange => writeln!(stdout, "update_result: no change"),
+        UpdateResult::FailedWithoutRestart { message } => {
+            writeln!(stdout, "update_result: update failed without restart")?;
+            writeln!(stdout, "message: {message}")
+        }
+        UpdateResult::UpdatedAndHostRestarted { snapshot } => {
+            writeln!(stdout, "update_result: updated and host restarted")?;
+            render_snapshot(stdout, snapshot)
+        }
+        UpdateResult::UpdatedButReplacementFailed {
+            message,
+            recovery_action,
+        } => {
+            writeln!(stdout, "update_result: updated but replacement host failed")?;
+            writeln!(stdout, "message: {message}")?;
+            writeln!(stdout, "recovery_action: {recovery_action}")
+        }
+    }
 }
 
 fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io::Result<()> {
@@ -99,6 +125,22 @@ mod tests {
             assert!(rendered.contains(field), "missing {field}");
         }
         assert!(!rendered.contains("PROMPT_CANARY"));
+        Ok(())
+    }
+
+    #[test]
+    fn replacement_failure_renders_the_required_manual_recovery_action() -> std::io::Result<()> {
+        let mut output = Vec::new();
+        render_update_result(
+            &mut output,
+            &UpdateResult::UpdatedButReplacementFailed {
+                message: "replacement unavailable".to_owned(),
+                recovery_action: "codex-router host".to_owned(),
+            },
+        )?;
+        let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
+        assert!(rendered.contains("updated but replacement host failed"));
+        assert!(rendered.contains("recovery_action: codex-router host"));
         Ok(())
     }
 }

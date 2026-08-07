@@ -264,8 +264,10 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
     let app_server_socket = directory.path().join("app-server.sock");
     let process_log = directory.path().join("app-server-pids.log");
     std::fs::write(&process_log, b"")?;
+    let managed_executable = directory.path().join("managed-codex");
+    std::fs::write(&managed_executable, b"managed-codex-v1")?;
     let current_executable = std::env::current_exe()?;
-    let identity = codex_router_codex::executable_identity(&current_executable).await?;
+    let identity = codex_router_codex::executable_identity(&managed_executable).await?;
     let command = ChildCommandSpec::new(current_executable)
         .with_arguments([
             "--exact",
@@ -291,7 +293,7 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         coordination_paths: coordination_paths.clone(),
         router_endpoint: router.address(),
         app_server_socket: app_server_socket.clone(),
-        managed_executable: directory.path().join("unused-managed-codex"),
+        managed_executable: managed_executable.clone(),
         deadlines,
     });
     let dependencies = HostDependencies::new(HostDependenciesInputs {
@@ -311,12 +313,41 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         HostedReadiness::Ready,
         "host startup must reach full readiness",
     )?;
+    std::fs::write(&managed_executable, b"managed-codex-v2")?;
+    let drift_frames = send_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::Status,
+        Duration::from_secs(3),
+    )
+    .await?;
+    check_equal(
+        terminal_snapshot(&drift_frames)?.executable_relation(),
+        ExecutableRelation::Drift,
+        "status must compare the running child identity with the installed executable",
+    )?;
     let router_probe_count = router.request_count();
     tokio::time::sleep(Duration::from_millis(100)).await;
     check_equal(
         router.request_count(),
         router_probe_count,
         "idle runtime must not poll router health",
+    )?;
+    router.finish().await?;
+    let router_unavailable = send_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::Status,
+        Duration::from_secs(3),
+    )
+    .await?;
+    check_equal(
+        terminal_snapshot(&router_unavailable)?.router(),
+        RouterCondition::Unavailable,
+        "status must observe that an external router stopped after startup",
+    )?;
+    check_equal(
+        terminal_snapshot(&router_unavailable)?.hosted_readiness(),
+        HostedReadiness::Unavailable,
+        "status must not report hosted readiness after router loss",
     )?;
 
     let first_processes = wait_for_process_ids(&process_log, 1).await?;
@@ -326,12 +357,9 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
             .ok_or("first app-server PID is missing")?,
     )?;
     let recovered_processes = wait_for_process_ids(&process_log, 2).await?;
-    let recovery_frames = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::Status,
-        Duration::from_secs(3),
-    )
-    .await?;
+    let recovery_frames =
+        wait_for_steady_status(coordination_paths.operator_socket(), Duration::from_secs(3))
+            .await?;
     check_equal(
         terminal_snapshot(&recovery_frames)?.recovery_budget(),
         RecoveryBudget::Consumed,
@@ -401,8 +429,30 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
 
     runtime.abort();
     let _runtime_result = runtime.await;
-    router.finish().await?;
     Ok(())
+}
+
+async fn wait_for_steady_status(
+    operator_socket: &Path,
+    deadline: Duration,
+) -> Result<Vec<OperatorFrame>, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(deadline, async {
+        loop {
+            if let Ok(frames) = send_operator_request(
+                operator_socket,
+                OperatorRequest::Status,
+                Duration::from_secs(1),
+            )
+            .await
+                && terminal_snapshot(&frames)
+                    .is_ok_and(|snapshot| matches!(snapshot.phase(), HostPhase::Steady))
+            {
+                return frames;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
 }
 
 #[tokio::test]
@@ -687,11 +737,38 @@ async fn inherited_lock_child_entrypoint() -> Result<(), Box<dyn std::error::Err
         paths.operator_socket().exists(),
         "inherited owner must publish the operator socket",
     )?;
+    let status = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("inherited_lock_descriptor_probe_child_entrypoint")
+        .arg("--nocapture")
+        .env("CODEX_ROUTER_HOST_TEST_INHERITED_DESCRIPTOR_PROBE", "1")
+        .status()?;
+    check(
+        status.success(),
+        "ordinary child spawn must not inherit singleton authority",
+    )?;
     drop(instance);
     check(
         !paths.operator_socket().exists(),
         "inherited owner drop must remove the operator socket",
     )?;
+    Ok(())
+}
+
+#[test]
+fn inherited_lock_descriptor_probe_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CODEX_ROUTER_HOST_TEST_INHERITED_DESCRIPTOR_PROBE").is_none() {
+        return Ok(());
+    }
+    let lock_path = std::env::var_os("CODEX_ROUTER_HOST_TEST_INSTANCE_LOCK")
+        .ok_or("inherited lock artifact path is missing")?;
+    let lock_stat = rustix::fs::stat(Path::new(&lock_path))?;
+    if let Ok(stdin_stat) = rustix::fs::fstat(rustix::stdio::stdin()) {
+        check(
+            stdin_stat.st_dev != lock_stat.st_dev || stdin_stat.st_ino != lock_stat.st_ino,
+            "inherited lock descriptor remained open across ordinary child exec",
+        )?;
+    }
     Ok(())
 }
 

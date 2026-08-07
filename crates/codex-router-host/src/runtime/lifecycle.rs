@@ -120,6 +120,15 @@ pub(super) async fn wait_for_active_update(
     }
 }
 
+pub(super) async fn wait_for_status_observation(
+    active_status: &mut Option<operator::ActiveStatusObservation>,
+) -> status::StatusObservation {
+    match active_status.as_mut() {
+        Some(active) => active.future.as_mut().await,
+        None => std::future::pending().await,
+    }
+}
+
 pub(super) async fn wait_for_update_activation(
     activation: &mut Option<operator::ActiveUpdateActivation>,
 ) -> crate::update::UpdateActivationCompletion {
@@ -179,6 +188,7 @@ pub(super) async fn settle_active_restart_for_shutdown(
     let Some(mut active) = active_restart.take() else {
         return;
     };
+    active.stop_intent.request();
     let completion = active.future.as_mut().await;
     *app_server = completion.child;
 }
@@ -190,6 +200,7 @@ pub(super) async fn settle_active_router_restart_for_shutdown(
     let Some(mut active) = active_restart.take() else {
         return;
     };
+    active.stop_intent.request();
     let completion = active.future.as_mut().await;
     *router = completion.child;
 }

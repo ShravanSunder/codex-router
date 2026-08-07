@@ -15,11 +15,11 @@ use codex_router_host::HostDeadlineInputs;
 use codex_router_host::HostDeadlines;
 use codex_router_host::HostDependencies;
 use codex_router_host::HostDependenciesInputs;
-use codex_router_host::HostExit;
 use codex_router_host::HostRuntime;
 use codex_router_host::OperatorFrame;
 use codex_router_host::OperatorRequest;
 use codex_router_host::RecoveryBudget;
+use codex_router_host::RouterCondition;
 use codex_router_host::TerminalClassification;
 use codex_router_host::send_operator_request;
 use codex_router_test_support::shared_host::run_native_app_server_fixture;
@@ -134,12 +134,58 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
     )?;
 
     terminate_process(restarted_router_pids[1])?;
+    let unavailable = wait_for_router_condition(
+        coordination_paths.operator_socket(),
+        RouterCondition::Unavailable,
+    )
+    .await?;
     check_equal(
-        runtime.await??,
-        HostExit::OwnedRouterExited,
-        "unexpected owned-router exit must stop the foreground host",
+        terminal_snapshot(&unavailable)?.app_server().clone(),
+        codex_router_host::AppServerCondition::NativeReady {
+            running_version: "1.2.3".to_owned(),
+        },
+        "owned-router exit must preserve the healthy app-server",
     )?;
+    let recovery_restart = send_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::RestartRouter,
+        Duration::from_secs(4),
+    )
+    .await?;
+    check_equal(
+        terminal_classification(&recovery_restart)?,
+        TerminalClassification::Succeeded,
+        "explicit router restart must recover an owned unavailable router",
+    )?;
+    let recovered_router_pids = wait_for_process_ids(&router_process_log, 3).await?;
+
+    runtime.abort();
+    let _runtime_result = runtime.await;
+    terminate_process(recovered_router_pids[2])?;
+    terminate_process(initial_app_server_pid)?;
     Ok(())
+}
+
+async fn wait_for_router_condition(
+    operator_socket: &Path,
+    expected: RouterCondition,
+) -> Result<Vec<OperatorFrame>, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if let Ok(frames) = send_operator_request(
+                operator_socket,
+                OperatorRequest::Status,
+                Duration::from_secs(1),
+            )
+            .await
+                && terminal_snapshot(&frames).is_ok_and(|snapshot| snapshot.router() == expected)
+            {
+                return frames;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
 }
 
 #[tokio::test]

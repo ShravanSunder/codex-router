@@ -83,6 +83,10 @@ impl UpdateDeadlines {
             force_wait,
         })
     }
+
+    pub(crate) const fn identity(self) -> Duration {
+        self.identity
+    }
 }
 
 /// Invalid updater deadline configuration.
@@ -148,7 +152,7 @@ pub(crate) async fn prepare_update(
             return failed("official Codex updater wait failed", None, Some(updater));
         }
         Err(_elapsed) => {
-            if updater.send_terminate().is_err() {
+            if updater.send_group_terminate().is_err() {
                 return failed(
                     "official Codex updater containment failed",
                     None,
@@ -162,7 +166,7 @@ pub(crate) async fn prepare_update(
                 }
                 Err(_elapsed) => {}
             }
-            if updater.send_kill().is_err() {
+            if updater.send_group_kill().is_err() {
                 return failed(
                     "official Codex updater containment failed",
                     None,
@@ -222,6 +226,7 @@ pub(crate) type UpdateActivationFuture =
 pub(crate) struct UpdateActivationCompletion {
     pub(crate) app_server: Option<AppServerChild>,
     pub(crate) router: Option<RouterChild>,
+    pub(crate) app_server_shutdown: Option<ShutdownOutcome>,
     pub(crate) succeeded: bool,
     pub(crate) message: &'static str,
 }
@@ -231,15 +236,27 @@ pub(crate) fn activate_changed_update(
     mut router: Option<RouterChild>,
 ) -> UpdateActivationFuture {
     Box::pin(async move {
+        let mut app_server_shutdown = None;
         if let Some(child) = app_server.as_mut() {
             match child.shutdown().await {
-                Ok(ShutdownOutcome::Graceful | ShutdownOutcome::Forced) => {
+                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Forced)) => {
+                    app_server_shutdown = Some(outcome);
                     app_server = None;
                 }
-                Ok(ShutdownOutcome::TimedOutStillRunning) | Err(_) => {
+                Ok(ShutdownOutcome::TimedOutStillRunning) => {
                     return UpdateActivationCompletion {
                         app_server,
                         router,
+                        app_server_shutdown: Some(ShutdownOutcome::TimedOutStillRunning),
+                        succeeded: false,
+                        message: "updated Codex but app-server teardown failed",
+                    };
+                }
+                Err(_) => {
+                    return UpdateActivationCompletion {
+                        app_server,
+                        router,
+                        app_server_shutdown: None,
                         succeeded: false,
                         message: "updated Codex but app-server teardown failed",
                     };
@@ -255,6 +272,7 @@ pub(crate) fn activate_changed_update(
                     return UpdateActivationCompletion {
                         app_server,
                         router,
+                        app_server_shutdown,
                         succeeded: false,
                         message: "updated Codex but router teardown failed",
                     };
@@ -264,6 +282,7 @@ pub(crate) fn activate_changed_update(
         UpdateActivationCompletion {
             app_server,
             router,
+            app_server_shutdown,
             succeeded: true,
             message: "updated Codex and starting replacement host",
         }

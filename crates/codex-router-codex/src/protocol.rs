@@ -111,8 +111,39 @@ pub enum CodexProtocolError {
 /// Observes native readiness and one bounded Remote Control convergence window.
 pub async fn observe_app_server(
     socket_path: &Path,
+    native_readiness_wait: Duration,
     remote_control_wait: Duration,
 ) -> Result<AppServerObservation, CodexProtocolError> {
+    let (mut websocket, running_version) =
+        tokio::time::timeout(native_readiness_wait, initialize_app_server(socket_path))
+            .await
+            .map_err(|_elapsed| CodexProtocolError::Timeout {
+                stage: "native readiness",
+            })??;
+
+    let remote_control = match tokio::time::timeout(
+        remote_control_wait,
+        observe_remote_control(&mut websocket, remote_control_wait),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_elapsed) => RemoteControlObservation::Connecting {
+            server_name: "unknown".to_owned(),
+            environment_id: None,
+        },
+    };
+    let _close_result = websocket.close(None).await;
+
+    Ok(AppServerObservation {
+        running_version,
+        remote_control,
+    })
+}
+
+async fn initialize_app_server(
+    socket_path: &Path,
+) -> Result<(WebSocketStream<UnixStream>, String), CodexProtocolError> {
     let stream = tokio::time::timeout(CONTROL_RESPONSE_TIMEOUT, UnixStream::connect(socket_path))
         .await
         .map_err(|_elapsed| CodexProtocolError::Timeout { stage: "connect" })?
@@ -153,39 +184,33 @@ pub async fn observe_app_server(
         })?;
     let running_version = parse_user_agent_version(&initialize_result.user_agent)?;
 
+    Ok((websocket, running_version))
+}
+
+async fn observe_remote_control(
+    websocket: &mut WebSocketStream<UnixStream>,
+    remote_control_wait: Duration,
+) -> Result<RemoteControlObservation, CodexProtocolError> {
+    send_json(websocket, &serde_json::json!({ "method": "initialized" })).await?;
     send_json(
-        &mut websocket,
-        &serde_json::json!({ "method": "initialized" }),
-    )
-    .await?;
-    send_json(
-        &mut websocket,
+        websocket,
         &serde_json::json!({
             "id": REMOTE_STATUS_REQUEST_ID,
             "method": "remoteControl/status/read",
         }),
     )
     .await?;
-    let status_result = read_response(
-        &mut websocket,
-        REMOTE_STATUS_REQUEST_ID,
-        "Remote Control status",
-    )
-    .await
-    .and_then(|result| {
-        serde_json::from_value::<RemoteStatus>(result).map_err(CodexProtocolError::Json)
-    })?;
+    let status_result = read_response(websocket, REMOTE_STATUS_REQUEST_ID, "Remote Control status")
+        .await
+        .and_then(|result| {
+            serde_json::from_value::<RemoteStatus>(result).map_err(CodexProtocolError::Json)
+        })?;
     let remote_control = if status_result.status == RemoteStatusKind::Connecting {
-        wait_for_remote_status_change(&mut websocket, status_result, remote_control_wait).await?
+        wait_for_remote_status_change(websocket, status_result, remote_control_wait).await?
     } else {
         status_result.into_observation()
     };
-    let _close_result = websocket.close(None).await;
-
-    Ok(AppServerObservation {
-        running_version,
-        remote_control,
-    })
+    Ok(remote_control)
 }
 
 async fn send_json(

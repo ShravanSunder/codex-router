@@ -1,7 +1,7 @@
 # Shared Codex App-Server Host V1
 
-Status: Draft for spec review  
-Date: 2026-07-12  
+Status: Draft for spec review
+Date: 2026-07-12
 Scope: Three trusted personal macOS computers
 
 ## Product Intent

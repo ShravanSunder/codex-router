@@ -1,10 +1,10 @@
 # Shared Codex App-Server Host V1 — Specification
 
-Status: Draft for independent specification review; not implementation-ready  
-Date: 2026-07-31  
-Router source anchor: `31bb7a408225e69c5e98a36be6735c6f0b769553`  
-Codex source anchor: `aea26afaee177d3fe40721ef261a29f89879d505`  
-Requirements source: [User requirements](./2026-07-12-shared-codex-app-server-host-v1-user-requirements.md)  
+Status: Draft for independent specification review; not implementation-ready
+Date: 2026-07-31
+Router source anchor: `31bb7a408225e69c5e98a36be6735c6f0b769553`
+Codex source anchor: `aea26afaee177d3fe40721ef261a29f89879d505`
+Requirements source: [User requirements](./2026-07-12-shared-codex-app-server-host-v1-user-requirements.md)
 Replaces as authority: the untracked July 12 single-document draft; that file remains research input only
 
 ## 1. Purpose and authority
@@ -87,38 +87,38 @@ state outside the same public lifecycle contract available to the owner.
 
 ## 4. Terms
 
-**Approved Mac**  
+**Approved Mac**
 An explicitly allowlisted personal macOS computer operated by the owner.
 
-**Environment**  
+**Environment**
 The one product-visible Mac-local composition that provides a shared Codex host
 and mandatory local router path. The term does not imply cross-Mac replication.
 
-**Shared host**  
+**Shared host**
 The one active Codex app-server instance admitted clients join on an approved
 Mac.
 
-**Admitted client**  
+**Admitted client**
 A named client class and exact compatible version authorized to connect to the
 shared host.
 
-**Router-only egress**  
+**Router-only egress**
 Every model-provider HTTP, SSE, and WebSocket request emitted by the shared host
 reaches the model service through the local `codex-router`; no client-selected,
 saved, built-in, or fallback provider path bypasses it.
 
-**Durable-thread continuity**  
+**Durable-thread continuity**
 Saved Codex threads remain available after a compatible host restart and may be
 rejoined by a new client connection.
 
-**Live-connection continuity**  
+**Live-connection continuity**
 An already attached client remains connected through host restart. V1 does not
 promise this.
 
-**Core capability**  
+**Core capability**
 Shared local host usability plus proven router-only egress.
 
-**Optional capability**  
+**Optional capability**
 A capability, such as Remote Control connectivity, whose failure need not make
 the core local environment unusable.
 
@@ -477,62 +477,62 @@ this product contract.
 
 ### FO-01 — Provider admission unavailable
 
-Condition: no supported authority can prevent client/saved-provider bypass.  
+Condition: no supported authority can prevent client/saved-provider bypass.
 Required outcome: `incompatible`; no shared-host model work; direct statement
 that router-only routing cannot be guaranteed; no fallback.
 
 ### FO-02 — Foreign or ambiguous endpoint/owner
 
 Condition: the expected endpoint or lifecycle identity is active but cannot be
-proved to belong to this environment.  
+proved to belong to this environment.
 Required outcome: non-ready refusal; zero adoption, replacement, deletion, or
 signal based only on location or process ID.
 
 ### FO-03 — Router unavailable
 
-Condition: the shared host cannot use the local router.  
+Condition: the shared host cannot use the local router.
 Required outcome: core environment unavailable; no direct provider fallback.
 
 ### FO-04 — App-server unavailable
 
-Condition: native initialization or required host behavior fails.  
+Condition: native initialization or required host behavior fails.
 Required outcome: core environment unavailable; clients do not silently create
 a private competing host.
 
 ### FO-05 — Remote Control unavailable
 
-Condition: core local environment works but relay/mobile does not.  
+Condition: core local environment works but relay/mobile does not.
 Required outcome: `degraded`; local clients remain usable; status identifies
 the remote capability and recovery action.
 
 ### FO-06 — Client incompatible
 
-Condition: a named client version cannot use the pinned native host contract.  
+Condition: a named client version cannot use the pinned native host contract.
 Required outcome: reject or report that client as unsupported; do not broaden
 the entire environment's readiness claim to include it.
 
 ### FO-07 — Invalid resume directory
 
-Condition: a saved thread directory is missing, invalid, or unusable.  
+Condition: a saved thread directory is missing, invalid, or unusable.
 Required outcome: require an explicit valid directory or fail visibly; never run
 in an unrelated implicit directory.
 
 ### FO-08 — Interrupted restart
 
-Condition: restart interrupts live connections or in-flight work.  
+Condition: restart interrupts live connections or in-flight work.
 Required outcome: host converges to one terminal condition; clients see an
 honest disconnect; durable work remains resumable if Codex committed it; no
 zero-downtime claim.
 
 ### FO-09 — Update incompatible
 
-Condition: installed versions differ or have not passed compatibility proof.  
+Condition: installed versions differ or have not passed compatibility proof.
 Required outcome: running accepted release remains identifiable; new release is
 not called supported or activated implicitly; status gives a next action.
 
 ### FO-10 — Secret-bearing or unsafe diagnostic input
 
-Condition: child output or protocol errors contain private values.  
+Condition: child output or protocol errors contain private values.
 Required outcome: structured status uses bounded safe codes and redacted
 messages; opaque diagnostic material stays outside public result contracts.
 

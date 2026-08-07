@@ -1,8 +1,8 @@
 # Shared Codex Host V1 — User Requirements
 
-Status: Proposed user requirements  
-Date: 2026-07-31  
-Audience: the owner of one or more trusted personal Macs  
+Status: Proposed user requirements
+Date: 2026-07-31
+Audience: the owner of one or more trusted personal Macs
 Scope: user needs and observable outcomes; implementation choices belong in the sibling specification and program design
 
 ## The need

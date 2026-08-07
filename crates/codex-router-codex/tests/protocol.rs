@@ -80,9 +80,13 @@ async fn native_probe_initializes_experimental_api_and_waits_for_remote_connecti
             .unwrap_or_else(|error| panic!("status notification should send: {error}"));
     });
 
-    let observation = observe_app_server(socket.path(), Duration::from_secs(1))
-        .await
-        .unwrap_or_else(|error| panic!("native app-server should be observed: {error}"));
+    let observation = observe_app_server(
+        socket.path(),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("native app-server should be observed: {error}"));
 
     assert_eq!(observation.running_version(), "1.2.3");
     assert_eq!(
