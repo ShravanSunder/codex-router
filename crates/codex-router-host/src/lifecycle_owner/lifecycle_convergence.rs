@@ -95,7 +95,7 @@ pub(super) async fn wait_for_recovery(
 
 pub(super) async fn wait_for_active_restart(
     active_restart: &mut Option<request_admission::ActiveAppServerRestart>,
-) -> crate::restart::AppServerRestartCompletion {
+) -> crate::explicit_app_server_restart::AppServerRestartCompletion {
     match active_restart.as_mut() {
         Some(active) => active.future.as_mut().await,
         None => std::future::pending().await,
@@ -104,7 +104,7 @@ pub(super) async fn wait_for_active_restart(
 
 pub(super) async fn wait_for_active_router_restart(
     active_restart: &mut Option<request_admission::ActiveRouterRestart>,
-) -> crate::restart::RouterRestartCompletion {
+) -> crate::explicit_router_restart::RouterRestartCompletion {
     match active_restart.as_mut() {
         Some(active) => active.future.as_mut().await,
         None => std::future::pending().await,
@@ -113,7 +113,7 @@ pub(super) async fn wait_for_active_router_restart(
 
 pub(super) async fn wait_for_active_update(
     active_update: &mut Option<request_admission::ActiveUpdate>,
-) -> crate::update::UpdatePreparation {
+) -> crate::codex_update_preparation::UpdatePreparation {
     match active_update.as_mut() {
         Some(active) => active.future.as_mut().await,
         None => std::future::pending().await,
@@ -131,7 +131,7 @@ pub(super) async fn wait_for_status_observation(
 
 pub(super) async fn wait_for_update_activation(
     activation: &mut Option<request_admission::ActiveUpdateActivation>,
-) -> crate::update::UpdateActivationCompletion {
+) -> crate::changed_update_activation::UpdateActivationCompletion {
     match activation.as_mut() {
         Some(active) => active.future.as_mut().await,
         None => std::future::pending().await,
@@ -213,7 +213,9 @@ pub(super) async fn settle_active_update_for_shutdown(
     let Some(mut active) = active_update.take() else {
         return;
     };
-    if let crate::update::UpdatePreparation::Failed(failure) = active.future.as_mut().await {
+    if let crate::codex_update_preparation::UpdatePreparation::Failed(failure) =
+        active.future.as_mut().await
+    {
         *pending_identity = failure.pending_identity;
         *retained_updater = failure.retained_updater;
     }

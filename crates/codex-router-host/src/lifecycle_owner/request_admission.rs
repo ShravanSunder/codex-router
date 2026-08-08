@@ -13,27 +13,27 @@ pub(super) struct OperatorWork {
 }
 
 pub(super) struct ActiveAppServerRestart {
-    pub(super) future: crate::restart::AppServerRestartFuture,
-    pub(super) stop_intent: crate::restart::StopIntent,
+    pub(super) future: crate::explicit_app_server_restart::AppServerRestartFuture,
+    pub(super) stop_intent: crate::explicit_app_server_restart::StopIntent,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
 }
 
 pub(super) struct ActiveRouterRestart {
-    pub(super) future: crate::restart::RouterRestartFuture,
-    pub(super) stop_intent: crate::restart::StopIntent,
+    pub(super) future: crate::explicit_router_restart::RouterRestartFuture,
+    pub(super) stop_intent: crate::explicit_app_server_restart::StopIntent,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
 }
 
 pub(super) struct ActiveUpdate {
-    pub(super) future: crate::update::UpdateFuture,
+    pub(super) future: crate::codex_update_preparation::UpdateFuture,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
 }
 
 pub(super) struct ActiveUpdateActivation {
-    pub(super) future: crate::update::UpdateActivationFuture,
+    pub(super) future: crate::changed_update_activation::UpdateActivationFuture,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) replacement_command: ChildCommandSpec,
     pub(super) started_at: tokio::time::Instant,
@@ -179,9 +179,9 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 AppServerCondition::Starting
             };
             context.state.remote_control = RemoteControlCondition::Unavailable;
-            let stop_intent = crate::restart::StopIntent::default();
+            let stop_intent = crate::explicit_app_server_restart::StopIntent::default();
             *context.active_app_server_restart = Some(ActiveAppServerRestart {
-                future: crate::restart::restart_app_server(
+                future: crate::explicit_app_server_restart::restart_app_server(
                     context.config.clone(),
                     context.dependencies.app_server.clone(),
                     current_child,
@@ -221,9 +221,9 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 phase: "stopping-owned-router".to_owned(),
             };
             context.state.router = RouterCondition::OwnedTransitioning;
-            let stop_intent = crate::restart::StopIntent::default();
+            let stop_intent = crate::explicit_app_server_restart::StopIntent::default();
             *context.active_router_restart = Some(ActiveRouterRestart {
-                future: crate::restart::restart_router(
+                future: crate::explicit_router_restart::restart_router(
                     context.config.clone(),
                     router_command,
                     current_child,
@@ -240,7 +240,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 phase: "running-official-updater".to_owned(),
             };
             *context.active_update = Some(ActiveUpdate {
-                future: crate::update::start_update(
+                future: crate::codex_update_preparation::start_update(
                     context.config.managed_executable().to_owned(),
                     context.dependencies.update_deadlines,
                 ),

@@ -2,6 +2,10 @@
 
 mod app_server_endpoint_guard;
 mod app_server_shutdown;
+mod changed_update_activation;
+mod codex_update_preparation;
+mod explicit_app_server_restart;
+mod explicit_router_restart;
 mod host_configuration;
 mod host_singleton_authority;
 mod lifecycle_owner;
@@ -12,9 +16,7 @@ mod operator_connection;
 mod operator_messages;
 mod owned_router;
 mod process_group_child;
-mod restart;
 mod router_compatibility;
-mod update;
 
 pub use app_server_endpoint_guard::AppServerEndpointError;
 pub use app_server_endpoint_guard::require_unowned_app_server_endpoint;
@@ -30,6 +32,9 @@ pub use managed_app_server::AppServerLaunchPlan;
 pub use managed_app_server::AppServerReadiness;
 pub use managed_app_server::AppServerReadinessError;
 
+pub use codex_update_preparation::UpdateDeadlineError;
+pub use codex_update_preparation::UpdateDeadlines;
+pub use codex_update_preparation::UpdateResult;
 pub use host_configuration::HostConfig;
 pub use host_configuration::HostConfigInputs;
 pub use host_configuration::HostCoordinationPaths;
@@ -84,6 +89,3 @@ pub use process_group_child::ProcessGroupError;
 pub use router_compatibility::RouterProbeError;
 pub use router_compatibility::RouterProbeResult;
 pub use router_compatibility::probe_router;
-pub use update::UpdateDeadlineError;
-pub use update::UpdateDeadlines;
-pub use update::UpdateResult;

@@ -4,7 +4,7 @@ use super::*;
 use crate::OperatorFrame;
 
 pub(super) struct PreparationContext<'a> {
-    pub(super) preparation: crate::update::UpdatePreparation,
+    pub(super) preparation: crate::codex_update_preparation::UpdatePreparation,
     pub(super) active: request_admission::ActiveUpdate,
     pub(super) state: &'a mut RuntimeState,
     pub(super) dependencies: &'a HostDependencies,
@@ -17,7 +17,7 @@ pub(super) struct PreparationContext<'a> {
 
 pub(super) fn apply_preparation(context: PreparationContext<'_>) {
     let (classification, result, message) = match context.preparation {
-        crate::update::UpdatePreparation::NoChange => {
+        crate::codex_update_preparation::UpdatePreparation::NoChange => {
             context.state.executable_relation = ExecutableRelation::Match;
             (
                 TerminalClassification::Succeeded,
@@ -25,7 +25,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                 "managed Codex is already current",
             )
         }
-        crate::update::UpdatePreparation::Changed => {
+        crate::codex_update_preparation::UpdatePreparation::Changed => {
             context.state.executable_relation = ExecutableRelation::Drift;
             let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
                 crate::operator_messages::HostProgress::ReplacementStarting,
@@ -54,7 +54,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                 context.state.router = RouterCondition::OwnedTransitioning;
             }
             *context.activation = Some(request_admission::ActiveUpdateActivation {
-                future: crate::update::activate_changed_update(
+                future: crate::changed_update_activation::activate_changed_update(
                     context.app_server.take(),
                     context.router.take(),
                 ),
@@ -64,7 +64,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
             });
             return;
         }
-        crate::update::UpdatePreparation::Failed(failure) => {
+        crate::codex_update_preparation::UpdatePreparation::Failed(failure) => {
             context.state.executable_relation = ExecutableRelation::Unknown;
             *context.pending_identity = failure.pending_identity;
             *context.retained_updater = failure.retained_updater;
@@ -99,7 +99,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
 }
 
 pub(super) struct ActivationContext<'a> {
-    pub(super) completion: crate::update::UpdateActivationCompletion,
+    pub(super) completion: crate::changed_update_activation::UpdateActivationCompletion,
     pub(super) active: request_admission::ActiveUpdateActivation,
     pub(super) state: &'a mut RuntimeState,
     pub(super) app_server: &'a mut Option<AppServerChild>,

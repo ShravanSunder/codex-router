@@ -28,7 +28,6 @@ use codex_router_secret_store::file_backend::FileSecretStore;
 pub mod account;
 mod credential_runtime;
 pub mod doctor;
-mod host;
 mod host_command;
 mod live;
 mod presentation;
@@ -42,8 +41,8 @@ pub mod token;
 
 use account::AccountCommand;
 use account::AccountCommandError;
-use host::HostCommand;
-use host::HostCommandError;
+use host_command::HostCommand;
+use host_command::HostCommandError;
 use live::LiveCommand;
 use profile::CodexRouterProfile;
 use profile::CodexRouterProfileWriter;
@@ -201,7 +200,7 @@ where
             stderr.flush().map_err(CliError::Stderr)
         }
         CliCommand::Host(command) => {
-            host::run_host_command(stdout, command, context, telemetry_shutdown).await?;
+            host_command::run_host_command(stdout, command, context, telemetry_shutdown).await?;
             stderr.flush().map_err(CliError::Stderr)
         }
         _ => run_with_io(args, context, stdout, stderr),
@@ -1458,7 +1457,7 @@ mod tests {
             Err(error) => panic!("host status should parse: {error}"),
         };
 
-        assert_eq!(command.action(), crate::host::HostAction::Status);
+        assert_eq!(command.action(), crate::host_command::HostAction::Status);
         assert_eq!(command.router_root(), Some(router_root.as_path()));
     }
     use tungstenite::connect;
