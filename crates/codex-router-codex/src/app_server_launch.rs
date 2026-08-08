@@ -1,6 +1,7 @@
 //! Managed app-server launch projection.
 
 use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::CodexPaths;
@@ -16,7 +17,7 @@ pub struct AppServerCommandSpec {
 impl AppServerCommandSpec {
     /// Builds the native app-server command from the shared router projection.
     #[must_use]
-    pub fn new(paths: &CodexPaths, profile: &CodexRouterProfile) -> Self {
+    pub fn new(paths: &CodexPaths, profile: &CodexRouterProfile, app_server_socket: &Path) -> Self {
         let mut arguments = Vec::new();
         for root_override in profile.root_overrides() {
             arguments.push(OsString::from("-c"));
@@ -26,7 +27,7 @@ impl AppServerCommandSpec {
             OsString::from("app-server"),
             OsString::from("--remote-control"),
             OsString::from("--listen"),
-            OsString::from("unix://"),
+            OsString::from(format!("unix://{}", app_server_socket.display())),
         ]);
         Self {
             executable: paths.managed_executable(),

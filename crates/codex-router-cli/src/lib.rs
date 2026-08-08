@@ -63,6 +63,8 @@ const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
 const DEBUG_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_DEBUG_ROUTER_ROOT";
 #[cfg(all(debug_assertions, not(test)))]
+const DEBUG_APP_SERVER_SOCKET_ENV: &str = "CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET";
+#[cfg(all(debug_assertions, not(test)))]
 const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
 const DEFAULT_DEBUG_ROUTER_ROOT_DIR: &str = ".codex-router-debug";
 
@@ -422,6 +424,37 @@ fn default_router_root_from_environment(
 
 fn debug_default_router_root_for_home(home: &Path) -> PathBuf {
     home.join(DEFAULT_DEBUG_ROUTER_ROOT_DIR)
+}
+
+pub(crate) fn app_server_socket_or_default(
+    context: &CliContext,
+    paths: &codex_router_codex::CodexPaths,
+) -> Result<PathBuf, &'static str> {
+    #[cfg(all(debug_assertions, not(test)))]
+    if context.env_var(USE_HOME_DEFAULT_ENV).is_none()
+        && let Some(debug_socket) = context.env_var(DEBUG_APP_SERVER_SOCKET_ENV)
+    {
+        return validate_debug_app_server_socket(PathBuf::from(debug_socket));
+    }
+
+    #[cfg(not(all(debug_assertions, not(test))))]
+    let _ = context;
+
+    Ok(paths.app_server_socket())
+}
+
+fn validate_debug_app_server_socket(debug_socket: PathBuf) -> Result<PathBuf, &'static str> {
+    if !debug_socket.is_absolute() {
+        return Err("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET must be an absolute path");
+    }
+    let Some(parent) = debug_socket.parent() else {
+        return Err("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET must have a dedicated parent directory");
+    };
+    if parent == Path::new("/") || parent == std::env::temp_dir() {
+        return Err("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET must be inside a dedicated directory");
+    }
+
+    Ok(debug_socket)
 }
 
 fn write_websocket_registry_report_file(
@@ -1730,6 +1763,30 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("home-default escape should resolve: {error}")),
             home.join(".codex-router")
+        );
+    }
+
+    #[test]
+    fn debug_app_server_socket_requires_absolute_dedicated_parent() {
+        assert!(
+            super::validate_debug_app_server_socket(PathBuf::from("relative/app-server.sock"))
+                .is_err()
+        );
+        assert!(
+            super::validate_debug_app_server_socket(std::env::temp_dir().join("app-server.sock"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn debug_app_server_socket_accepts_absolute_dedicated_parent() {
+        let socket = std::env::temp_dir()
+            .join("codex-router-debug-app-server")
+            .join("app-server.sock");
+
+        assert_eq!(
+            super::validate_debug_app_server_socket(socket.clone()),
+            Ok(socket)
         );
     }
 

@@ -19,10 +19,7 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     let directory = TestDirectory::new()?;
     let router_root = directory.path().join("router");
     let codex_home = directory.path().join("codex");
-    let socket_path = codex_home
-        .join("app-server-control")
-        .join("app-server-control.sock");
-    std::fs::create_dir_all(socket_path.parent().ok_or("socket parent is missing")?)?;
+    let socket_path = directory.path().join("debug-app-server.sock");
     let managed_executable = codex_home.join("packages/standalone/current/codex");
     std::fs::create_dir_all(
         managed_executable
@@ -42,6 +39,7 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
         &port.to_string(),
     ])
     .env("CODEX_HOME", &codex_home)
+    .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", &socket_path)
     .env("HOME", directory.path())
     .env(
         "CODEX_ROUTER_COMPILED_CLI_TEST_BINARY",
@@ -54,7 +52,8 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     let host = host.spawn()?;
     wait_for_operator_socket(&router_root.join("host.sock")).await?;
 
-    let status = run_host_subcommand(&binary, &router_root, &codex_home, "status").await?;
+    let status =
+        run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, "status").await?;
     check(
         status.status.success(),
         &String::from_utf8_lossy(&status.stderr),
@@ -66,7 +65,8 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
         &status_stdout,
     )?;
 
-    let restart = run_host_subcommand(&binary, &router_root, &codex_home, "restart").await?;
+    let restart =
+        run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, "restart").await?;
     check(
         restart.status.success(),
         &String::from_utf8_lossy(&restart.stderr),
@@ -76,7 +76,8 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
         "app-server restart did not report success",
     )?;
 
-    let update = run_host_subcommand(&binary, &router_root, &codex_home, "update").await?;
+    let update =
+        run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, "update").await?;
     check(
         update.status.success(),
         &String::from_utf8_lossy(&update.stderr),
@@ -90,6 +91,7 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     let sessions = tokio::process::Command::new(&binary)
         .args(["sessions", "--new", "--dry-run"])
         .env("CODEX_HOME", &codex_home)
+        .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", &socket_path)
         .env("HOME", directory.path())
         .output()
         .await?;
@@ -130,8 +132,10 @@ async fn compiled_cli_app_server_child_entrypoint() -> Result<(), Box<dyn std::e
     if std::env::var_os("CODEX_ROUTER_COMPILED_CLI_APP_CHILD").is_none() {
         return Ok(());
     }
-    let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME missing")?);
-    let socket_path = codex_home.join("app-server-control/app-server-control.sock");
+    let socket_path = PathBuf::from(
+        std::env::var_os("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
+            .ok_or("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET missing")?,
+    );
     let _stale_cleanup = std::fs::remove_file(&socket_path);
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -207,6 +211,7 @@ async fn run_host_subcommand(
     binary: &Path,
     router_root: &Path,
     codex_home: &Path,
+    app_server_socket: &Path,
     subcommand: &str,
 ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
     Ok(tokio::time::timeout(
@@ -219,6 +224,7 @@ async fn run_host_subcommand(
                 router_root.to_str().ok_or("router root is not UTF-8")?,
             ])
             .env("CODEX_HOME", codex_home)
+            .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", app_server_socket)
             .output(),
     )
     .await??)

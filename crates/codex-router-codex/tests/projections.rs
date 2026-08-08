@@ -52,7 +52,8 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
 #[test]
 fn app_server_command_uses_managed_executable_profile_and_native_contract() {
     let paths = CodexPaths::from_codex_home(PathBuf::from("/Users/owner/.codex"));
-    let command = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(8787));
+    let socket = paths.app_server_socket();
+    let command = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(8787), &socket);
 
     assert_eq!(command.executable(), paths.managed_executable());
     assert_eq!(
@@ -73,7 +74,7 @@ fn app_server_command_uses_managed_executable_profile_and_native_contract() {
             OsString::from("app-server"),
             OsString::from("--remote-control"),
             OsString::from("--listen"),
-            OsString::from("unix://"),
+            OsString::from("unix:///Users/owner/.codex/app-server-control/app-server-control.sock",),
         ]
     );
 }

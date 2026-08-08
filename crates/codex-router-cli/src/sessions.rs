@@ -269,8 +269,9 @@ pub fn run_sessions_command<W: Write>(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
-    let app_server_socket =
-        codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?).app_server_socket();
+    let codex_paths = codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?);
+    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
+        .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
     let mut runner = ProcessSessionsCommandRunner { app_server_socket };
     let mut picker = TerminalSessionsPicker::for_context(context);
     run_sessions_command_with_dependencies(stdout, command, context, &mut runner, &mut picker)
@@ -284,8 +285,9 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
-    let app_server_socket =
-        codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?).app_server_socket();
+    let codex_paths = codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?);
+    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
+        .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
     if command.new {
         return run_new_session(stdout, command, &app_server_socket, runner);
     }
@@ -1836,6 +1838,9 @@ pub enum SessionsCommandError {
     /// CODEX_HOME and HOME were both unavailable.
     #[error("could not locate Codex home; set CODEX_HOME or HOME")]
     CodexHomeUnavailable,
+    /// Debug app-server socket override is unsafe or ambiguous.
+    #[error("invalid debug app-server socket: {0}")]
+    AppServerSocket(String),
     /// Failed to initialize async runtime.
     #[error("failed to initialize sessions runtime: {0}")]
     Runtime(std::io::Error),

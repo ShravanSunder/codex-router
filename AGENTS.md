@@ -15,6 +15,11 @@
 - The debug Codex profile lives in normal Codex home as
   `$HOME/.codex/codex-router-debug.config.toml` and points Codex at the debug
   router port. Keep this profile/config separate from router-owned state.
+- `CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET` is a debug-build-only override for
+  real app-server acceptance. It must be an absolute socket path inside a
+  dedicated owner-controlled directory because upstream Codex makes the socket
+  parent private. It isolates the endpoint, not Codex home: upstream still
+  serializes app-server startup per `CODEX_HOME`.
 
 ## Terminal UI Layout
 

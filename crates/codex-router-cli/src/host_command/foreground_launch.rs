@@ -48,8 +48,10 @@ pub(super) async fn run_foreground_host(
     }
     .map_err(codex_router_host::HostError::from)?;
     let codex_paths = CodexPaths::from_codex_home(resolve_codex_home(context)?);
+    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
+        .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
     let profile = CodexRouterProfile::new(port);
-    let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile);
+    let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile, &app_server_socket);
     let running_identity =
         codex_router_codex::executable_identity(&codex_paths.managed_executable()).await?;
     let running_version =
@@ -80,7 +82,7 @@ pub(super) async fn run_foreground_host(
     let config = HostConfig::new(HostConfigInputs {
         coordination_paths,
         router_endpoint: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
-        app_server_socket: codex_paths.app_server_socket(),
+        app_server_socket,
         managed_executable: codex_paths.managed_executable(),
         deadlines: HostDeadlines::production(),
     });

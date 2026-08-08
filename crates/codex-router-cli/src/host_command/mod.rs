@@ -139,6 +139,8 @@ pub enum HostCommandError {
     RouterRoot(String),
     #[error("HOME and CODEX_HOME are unavailable")]
     CodexHomeUnavailable,
+    #[error("invalid debug app-server socket: {0}")]
+    AppServerSocket(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
