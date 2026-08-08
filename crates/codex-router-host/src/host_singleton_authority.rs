@@ -69,8 +69,10 @@ impl HostInstance {
             rustix::io::dup(inherited).map_err(InstanceAcquireError::DuplicateInheritedLock)?;
         rustix::io::fcntl_setfd(&authority, rustix::io::FdFlags::CLOEXEC)
             .map_err(InstanceAcquireError::RestoreCloseOnExec)?;
-        rustix::io::fcntl_setfd(inherited, rustix::io::FdFlags::CLOEXEC)
-            .map_err(InstanceAcquireError::RestoreCloseOnExec)?;
+        let null_input =
+            File::open("/dev/null").map_err(InstanceAcquireError::RestoreStandardInput)?;
+        rustix::stdio::dup2_stdin(&null_input)
+            .map_err(|error| InstanceAcquireError::RestoreStandardInput(error.into()))?;
         let lock_file = File::from(authority);
 
         Self::bind_with_lock(paths, lock_file)
@@ -190,6 +192,9 @@ pub enum InstanceAcquireError {
     /// Close-on-exec could not be restored before child spawning.
     #[error("failed restoring close-on-exec for host authority: {0}")]
     RestoreCloseOnExec(#[source] rustix::io::Errno),
+    /// Replacement bootstrap could not restore a safe standard-input descriptor.
+    #[error("failed restoring standard input after retaining inherited host authority: {0}")]
+    RestoreStandardInput(#[source] std::io::Error),
     /// Singleton authority could not be placed on stdin for re-exec.
     #[error("failed preparing inherited host lock: {0}")]
     PrepareInheritedLock(#[source] rustix::io::Errno),

@@ -44,14 +44,15 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     .env("CODEX_HOME", &codex_home)
     .env("HOME", directory.path())
     .env(
-        "CODEX_ROUTER_SHARED_HOST_TEST_BINARY",
+        "CODEX_ROUTER_COMPILED_CLI_TEST_BINARY",
         std::env::current_exe()?,
     )
-    .env("CODEX_ROUTER_SHARED_HOST_APP_CHILD", "1")
-    .env("CODEX_ROUTER_SHARED_HOST_UPDATE_CHANGES", "1")
+    .env("CODEX_ROUTER_COMPILED_CLI_APP_CHILD", "1")
+    .env("CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES", "1")
     .stdout(Stdio::null())
     .stderr(Stdio::null());
     let host = host.spawn()?;
+    wait_for_operator_socket(&router_root.join("host.sock")).await?;
 
     let status = run_host_subcommand(&binary, &router_root, &codex_home, "status").await?;
     check(
@@ -125,8 +126,8 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
 }
 
 #[tokio::test]
-async fn shared_host_app_server_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os("CODEX_ROUTER_SHARED_HOST_APP_CHILD").is_none() {
+async fn compiled_cli_app_server_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CODEX_ROUTER_COMPILED_CLI_APP_CHILD").is_none() {
         return Ok(());
     }
     let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME missing")?);
@@ -223,10 +224,20 @@ async fn run_host_subcommand(
     .await??)
 }
 
+async fn wait_for_operator_socket(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !socket.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 fn install_managed_fixture(executable: &Path) -> std::io::Result<()> {
     std::fs::write(
         executable,
-        b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 1.2.3'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then if [ \"$CODEX_ROUTER_SHARED_HOST_UPDATE_CHANGES\" = \"1\" ]; then printf '\\n# changed by update fixture\\n' >> \"$0\"; fi; exit 0; fi\nexec \"$CODEX_ROUTER_SHARED_HOST_TEST_BINARY\" --exact shared_host_app_server_child_entrypoint --nocapture\n",
+        b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 1.2.3'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then if [ \"$CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES\" = \"1\" ]; then printf '\\n# changed by update fixture\\n' >> \"$0\"; fi; exit 0; fi\nexec \"$CODEX_ROUTER_COMPILED_CLI_TEST_BINARY\" --exact compiled_cli_app_server_child_entrypoint --nocapture\n",
     )?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
 }

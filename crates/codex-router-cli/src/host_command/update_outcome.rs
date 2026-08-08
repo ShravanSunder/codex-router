@@ -8,7 +8,7 @@ use codex_router_host::OperatorRequest;
 use codex_router_host::TerminalClassification;
 use codex_router_host::UpdateResult;
 
-use super::operator_client::send_operator_request;
+use super::operator_client::send_replacement_operator_request;
 
 pub(super) const REPLACEMENT_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(40);
 const REPLACEMENT_RECOVERY_ACTION: &str = "codex-router host";
@@ -54,7 +54,7 @@ async fn complete_update_result_with_deadline(
         };
     }
 
-    match send_operator_request(
+    match send_replacement_operator_request(
         coordination_paths.operator_socket(),
         OperatorRequest::AwaitHostStart,
         replacement_deadline,

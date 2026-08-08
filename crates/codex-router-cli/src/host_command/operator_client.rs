@@ -18,6 +18,9 @@ use tokio::net::UnixStream;
 /// Bounded operator-client transport or protocol failure.
 #[derive(Debug, Error)]
 pub enum OperatorClientError {
+    /// No foreground owner has published the private operator socket.
+    #[error("no shared Codex host is running; run `codex-router host`")]
+    HostNotRunning,
     /// Connecting to the owner-only operator socket failed.
     #[error("failed connecting to shared Codex host: {0}")]
     Connect(#[source] std::io::Error),
@@ -47,6 +50,24 @@ pub(crate) async fn send_operator_request(
     request: OperatorRequest,
     deadline: Duration,
 ) -> Result<Vec<OperatorFrame>, OperatorClientError> {
+    send_operator_request_with_connect_retry(socket, request, deadline, false).await
+}
+
+/// Runs the post-reexec exchange, retrying only while the replacement publishes its socket.
+pub(super) async fn send_replacement_operator_request(
+    socket: &Path,
+    request: OperatorRequest,
+    deadline: Duration,
+) -> Result<Vec<OperatorFrame>, OperatorClientError> {
+    send_operator_request_with_connect_retry(socket, request, deadline, true).await
+}
+
+async fn send_operator_request_with_connect_retry(
+    socket: &Path,
+    request: OperatorRequest,
+    deadline: Duration,
+    retry_unpublished_socket: bool,
+) -> Result<Vec<OperatorFrame>, OperatorClientError> {
     let deadline_at = tokio::time::Instant::now() + deadline;
     let mut stream = loop {
         match tokio::time::timeout_at(deadline_at, UnixStream::connect(socket)).await {
@@ -57,6 +78,9 @@ pub(crate) async fn send_operator_request(
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
                 ) =>
             {
+                if !retry_unpublished_socket {
+                    return Err(OperatorClientError::HostNotRunning);
+                }
                 if tokio::time::Instant::now() >= deadline_at {
                     return Err(OperatorClientError::Timeout);
                 }
@@ -135,4 +159,25 @@ async fn read_bounded_to_end(
         return Err(BoundedReadError::TooLarge);
     }
     Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_connect_reports_missing_host_without_waiting_for_lifecycle_deadline() {
+        let socket = std::env::temp_dir().join(format!(
+            "codex-router-missing-host-{}-{}.sock",
+            std::process::id(),
+            tokio::time::Instant::now().elapsed().as_nanos()
+        ));
+        let started_at = tokio::time::Instant::now();
+
+        let result =
+            send_operator_request(&socket, OperatorRequest::Status, Duration::from_secs(40)).await;
+
+        assert!(matches!(result, Err(OperatorClientError::HostNotRunning)));
+        assert!(started_at.elapsed() < Duration::from_secs(1));
+    }
 }

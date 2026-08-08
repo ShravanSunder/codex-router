@@ -21,6 +21,10 @@ pub(super) struct StatusObservation {
 }
 
 impl StatusObservation {
+    pub(super) const fn executable_relation(&self) -> ExecutableRelation {
+        self.executable_relation
+    }
+
     pub(super) fn snapshot(
         self,
         state: &RuntimeState,

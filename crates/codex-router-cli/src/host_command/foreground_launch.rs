@@ -16,10 +16,10 @@ use codex_router_host::HostConfig;
 use codex_router_host::HostConfigInputs;
 use codex_router_host::HostCoordinationPaths;
 use codex_router_host::HostDeadlines;
-use codex_router_host::HostDependencies;
-use codex_router_host::HostDependenciesInputs;
 use codex_router_host::HostInstance;
 use codex_router_host::HostRuntime;
+use codex_router_host::ManagedChildLaunchPlans;
+use codex_router_host::ManagedUpdateInputs;
 use codex_router_host::PreExecTelemetry;
 
 use super::HostCommandError;
@@ -84,16 +84,14 @@ pub(super) async fn run_foreground_host(
         managed_executable: codex_paths.managed_executable(),
         deadlines: HostDeadlines::production(),
     });
-    let mut dependencies = HostDependencies::new(HostDependenciesInputs {
-        router_command: Some(router_command),
-        app_server,
-    })
-    .with_replacement_command(replacement_command);
+    let child_launch_plans = ManagedChildLaunchPlans::new(Some(router_command), app_server);
+    let mut update_inputs =
+        ManagedUpdateInputs::production().with_replacement_command(replacement_command);
     if let Some(telemetry) = telemetry {
-        dependencies =
-            dependencies.with_pre_exec_telemetry(Arc::new(HostPreExecTelemetry(telemetry)));
+        update_inputs =
+            update_inputs.with_pre_exec_telemetry(Arc::new(HostPreExecTelemetry(telemetry)));
     }
-    HostRuntime::run_acquired(config, dependencies, instance).await?;
+    HostRuntime::run_acquired(config, child_launch_plans, update_inputs, instance).await?;
     Ok(())
 }
 

@@ -3,8 +3,10 @@
 
 pub mod installed_codex;
 pub mod mock_upstream;
+pub mod native_app_server;
 pub mod route_native;
-pub mod shared_host;
+pub mod router_health;
+pub mod signal_recording;
 pub mod transcript;
 
 /// Returns this crate's package name.

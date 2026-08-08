@@ -69,6 +69,17 @@ impl AppServerLaunchPlan {
             self.expected_version.clone(),
         )
     }
+
+    /// Re-resolves the installed executable identity and version before a later spawn.
+    pub(crate) async fn refreshed(
+        &self,
+        managed_executable: &Path,
+    ) -> Result<Self, codex_router_codex::ExecutableIdentityError> {
+        let identity = codex_router_codex::executable_identity(managed_executable).await?;
+        let expected_version =
+            codex_router_codex::managed_executable_version(managed_executable).await?;
+        Ok(Self::new(self.command.clone(), identity, expected_version))
+    }
 }
 
 impl AppServerChild {
@@ -181,4 +192,38 @@ pub enum AppServerReadinessError {
     /// Reachable endpoint violated the pinned native protocol.
     #[error("managed app-server native protocol failed: {0}")]
     Protocol(#[source] codex_router_codex::CodexProtocolError),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn later_launch_refreshes_installed_identity_and_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let executable =
+            std::env::temp_dir().join(format!("codex-router-refresh-plan-{}", std::process::id()));
+        std::fs::write(&executable, "#!/bin/sh\necho 'codex-cli 1.2.3'\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let original_identity = codex_router_codex::executable_identity(&executable).await?;
+        let launch_plan = AppServerLaunchPlan::new(
+            ChildCommandSpec::new(executable.clone()),
+            original_identity.clone(),
+            "1.2.3".to_owned(),
+        );
+        std::fs::write(&executable, "#!/bin/sh\necho 'codex-cli 2.0.0'\n")?;
+
+        let refreshed = launch_plan.refreshed(&executable).await?;
+
+        let _cleanup_result = std::fs::remove_file(&executable);
+        if refreshed.identity == original_identity {
+            return Err("refreshed launch plan retained the previous executable identity".into());
+        }
+        if refreshed.expected_version != "2.0.0" {
+            return Err("refreshed launch plan retained the previous executable version".into());
+        }
+        Ok(())
+    }
 }

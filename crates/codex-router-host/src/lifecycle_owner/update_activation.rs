@@ -7,7 +7,7 @@ pub(super) struct PreparationContext<'a> {
     pub(super) preparation: crate::codex_update_preparation::UpdatePreparation,
     pub(super) active: request_admission::ActiveUpdate,
     pub(super) state: &'a mut RuntimeState,
-    pub(super) dependencies: &'a HostDependencies,
+    pub(super) update_inputs: &'a ManagedUpdateInputs,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
     pub(super) activation: &'a mut Option<request_admission::ActiveUpdateActivation>,
@@ -30,7 +30,8 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
             let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
                 crate::operator_messages::HostProgress::ReplacementStarting,
             ));
-            let Some(replacement_command) = context.dependencies.replacement_command.clone() else {
+            let Some(replacement_command) = context.update_inputs.replacement_command.clone()
+            else {
                 context.state.phase = HostPhase::Steady;
                 context.state.last_lifecycle_outcome = Some(LifecycleOutcome {
                     operation: HostOperation::UpdateCodex,
@@ -104,7 +105,7 @@ pub(super) struct ActivationContext<'a> {
     pub(super) state: &'a mut RuntimeState,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
-    pub(super) dependencies: &'a HostDependencies,
+    pub(super) update_inputs: &'a ManagedUpdateInputs,
     pub(super) instance: &'a HostInstance,
 }
 
@@ -153,7 +154,7 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         context.active.started_at.elapsed(),
     );
     lifecycle_convergence::flush_pre_exec_telemetry(
-        context.dependencies.pre_exec_telemetry.clone(),
+        context.update_inputs.pre_exec_telemetry.clone(),
     )
     .await;
     context.instance.remove_operator_socket_for_exec()?;

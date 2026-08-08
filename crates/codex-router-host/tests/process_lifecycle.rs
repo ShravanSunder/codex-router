@@ -23,12 +23,12 @@ use codex_router_host::ShutdownAction;
 use codex_router_host::ShutdownOutcome;
 use codex_router_host::probe_router;
 use codex_router_host::require_unowned_app_server_endpoint;
-use codex_router_test_support::shared_host::RouterHealthFixture;
-use codex_router_test_support::shared_host::RouterHealthFixtureResponse;
-use codex_router_test_support::shared_host::SignalFixtureMode;
-use codex_router_test_support::shared_host::run_delayed_native_app_server_observation_fixture;
-use codex_router_test_support::shared_host::run_native_app_server_fixture;
-use codex_router_test_support::shared_host::run_signal_fixture;
+use codex_router_test_support::native_app_server::run_delayed_native_app_server_observation_fixture;
+use codex_router_test_support::native_app_server::run_native_app_server_fixture;
+use codex_router_test_support::router_health::RouterHealthFixture;
+use codex_router_test_support::router_health::RouterHealthFixtureResponse;
+use codex_router_test_support::signal_recording::SignalFixtureMode;
+use codex_router_test_support::signal_recording::run_signal_fixture;
 use tokio::process::Command;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

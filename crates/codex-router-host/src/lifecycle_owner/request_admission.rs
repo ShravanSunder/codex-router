@@ -7,6 +7,38 @@ use super::*;
 use crate::HostTerminalResponse;
 use crate::OperatorFrame;
 
+/// Admission decision made synchronously from current mutation ownership.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MutationAdmission {
+    /// Read-only work remains available during lifecycle mutation.
+    ReadOnly,
+    /// The request acquires lifecycle mutation ownership.
+    StartMutation(HostOperation),
+    /// Another lifecycle mutation already owns serialization.
+    Busy,
+}
+
+/// Classifies one request without awaiting or mutating runtime state.
+#[must_use]
+const fn classify_operator_request(
+    active_mutation: Option<HostOperation>,
+    request: OperatorRequest,
+) -> MutationAdmission {
+    if !request.is_mutating() {
+        return MutationAdmission::ReadOnly;
+    }
+    if active_mutation.is_some() {
+        return MutationAdmission::Busy;
+    }
+    let operation = match request {
+        OperatorRequest::RestartAppServer => HostOperation::RestartAppServer,
+        OperatorRequest::UpdateCodex => HostOperation::UpdateCodex,
+        OperatorRequest::RestartRouter => HostOperation::RestartRouter,
+        OperatorRequest::Status | OperatorRequest::AwaitHostStart => HostOperation::Status,
+    };
+    MutationAdmission::StartMutation(operation)
+}
+
 pub(super) struct OperatorWork {
     pub(super) request: OperatorRequest,
     pub(super) response: mpsc::Sender<OperatorFrame>,
@@ -49,7 +81,8 @@ pub(super) struct OperatorRuntimeContext<'a> {
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router_child: &'a mut Option<RouterChild>,
     pub(super) config: &'a HostConfig,
-    pub(super) dependencies: &'a HostDependencies,
+    pub(super) child_launch_plans: &'a ManagedChildLaunchPlans,
+    pub(super) update_inputs: &'a ManagedUpdateInputs,
     pub(super) active_app_server_restart: &'a mut Option<ActiveAppServerRestart>,
     pub(super) active_router_restart: &'a mut Option<ActiveRouterRestart>,
     pub(super) active_update: &'a mut Option<ActiveUpdate>,
@@ -130,13 +163,14 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 .as_ref()
                 .map(|_active| HostOperation::UpdateCodex)
         })
-        .or(context
-            .update_drain_active
-            .then_some(HostOperation::UpdateCodex))
+        .or(
+            (context.update_drain_active && work.request == OperatorRequest::UpdateCodex)
+                .then_some(HostOperation::UpdateCodex),
+        )
         .or(phase_mutation);
     if matches!(
-        crate::classify_operator_request(active_mutation, work.request),
-        crate::MutationAdmission::Busy
+        classify_operator_request(active_mutation, work.request),
+        MutationAdmission::Busy
     ) {
         let _send_result = work.response.try_send(OperatorFrame::busy(
             work.request,
@@ -161,7 +195,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                     context.state.router_ownership,
                     context.router_child.is_some(),
                     running_identity,
-                    context.dependencies.update_deadlines.identity(),
+                    context.update_inputs.update_deadlines.identity(),
                     !context.update_drain_active,
                 ),
                 responses: vec![(work.request, work.response)],
@@ -183,7 +217,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             *context.active_app_server_restart = Some(ActiveAppServerRestart {
                 future: crate::explicit_app_server_restart::restart_app_server(
                     context.config.clone(),
-                    context.dependencies.app_server.clone(),
+                    context.child_launch_plans.app_server.clone(),
                     current_child,
                     stop_intent.clone(),
                 ),
@@ -205,7 +239,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
         }
         OperatorRequest::RestartRouter => {
             let current_child = context.router_child.take();
-            let Some(router_command) = context.dependencies.router_command.clone() else {
+            let Some(router_command) = context.child_launch_plans.router_command.clone() else {
                 *context.router_child = current_child;
                 send_terminal_response(
                     work.response,
@@ -242,7 +276,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             *context.active_update = Some(ActiveUpdate {
                 future: crate::codex_update_preparation::start_update(
                     context.config.managed_executable().to_owned(),
-                    context.dependencies.update_deadlines,
+                    context.update_inputs.update_deadlines,
                 ),
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
@@ -268,6 +302,28 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[test]
+    fn operator_request_admission_classifies_read_only_busy_and_new_mutation() {
+        assert_eq!(
+            classify_operator_request(
+                Some(HostOperation::RestartAppServer),
+                OperatorRequest::Status,
+            ),
+            MutationAdmission::ReadOnly
+        );
+        assert_eq!(
+            classify_operator_request(
+                Some(HostOperation::RestartAppServer),
+                OperatorRequest::UpdateCodex,
+            ),
+            MutationAdmission::Busy
+        );
+        assert_eq!(
+            classify_operator_request(None, OperatorRequest::RestartRouter),
+            MutationAdmission::StartMutation(HostOperation::RestartRouter)
+        );
+    }
 
     #[tokio::test]
     async fn response_write_deadline_starts_after_long_lifecycle_work()

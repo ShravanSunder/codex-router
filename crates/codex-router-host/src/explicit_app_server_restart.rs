@@ -44,6 +44,32 @@ pub(crate) fn restart_app_server(
     stop_intent: StopIntent,
 ) -> AppServerRestartFuture {
     Box::pin(async move {
+        let launch_plan = match tokio::time::timeout(
+            config.deadlines().app_server_start(),
+            launch_plan.refreshed(config.managed_executable()),
+        )
+        .await
+        {
+            Ok(Ok(launch_plan)) => launch_plan,
+            Ok(Err(_error)) => {
+                return AppServerRestartCompletion {
+                    child: current_child,
+                    readiness: None,
+                    shutdown_outcome: None,
+                    succeeded: false,
+                    message: "managed Codex executable could not be resolved for restart",
+                };
+            }
+            Err(_elapsed) => {
+                return AppServerRestartCompletion {
+                    child: current_child,
+                    readiness: None,
+                    shutdown_outcome: None,
+                    succeeded: false,
+                    message: "managed Codex executable could not be resolved for restart",
+                };
+            }
+        };
         let mut shutdown_outcome = None;
         if let Some(mut child) = current_child {
             match child.shutdown().await {

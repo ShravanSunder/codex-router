@@ -13,16 +13,16 @@ use codex_router_host::HostConfigInputs;
 use codex_router_host::HostCoordinationPaths;
 use codex_router_host::HostDeadlineInputs;
 use codex_router_host::HostDeadlines;
-use codex_router_host::HostDependencies;
-use codex_router_host::HostDependenciesInputs;
 use codex_router_host::HostRuntime;
+use codex_router_host::ManagedChildLaunchPlans;
+use codex_router_host::ManagedUpdateInputs;
 use codex_router_host::OperatorFrame;
 use codex_router_host::OperatorRequest;
 use codex_router_host::RecoveryBudget;
 use codex_router_host::RouterCondition;
 use codex_router_host::TerminalClassification;
-use codex_router_test_support::shared_host::run_native_app_server_fixture;
-use codex_router_test_support::shared_host::run_persistent_router_health_fixture;
+use codex_router_test_support::native_app_server::run_native_app_server_fixture;
+use codex_router_test_support::router_health::run_persistent_router_health_fixture;
 
 #[path = "support/operator_client.rs"]
 mod operator_client;
@@ -89,10 +89,8 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
     });
     let runtime = tokio::spawn(HostRuntime::run(
         config,
-        HostDependencies::new(HostDependenciesInputs {
-            router_command: Some(router_command),
-            app_server,
-        }),
+        ManagedChildLaunchPlans::new(Some(router_command), app_server),
+        ManagedUpdateInputs::production(),
     ));
 
     let startup = send_operator_request(

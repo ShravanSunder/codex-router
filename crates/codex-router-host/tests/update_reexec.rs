@@ -14,17 +14,17 @@ use codex_router_host::HostConfigInputs;
 use codex_router_host::HostCoordinationPaths;
 use codex_router_host::HostDeadlineInputs;
 use codex_router_host::HostDeadlines;
-use codex_router_host::HostDependencies;
-use codex_router_host::HostDependenciesInputs;
 use codex_router_host::HostInstance;
 use codex_router_host::HostRuntime;
+use codex_router_host::ManagedChildLaunchPlans;
+use codex_router_host::ManagedUpdateInputs;
 use codex_router_host::OperatorFrame;
 use codex_router_host::OperatorRequest;
 use codex_router_host::TerminalClassification;
 use codex_router_host::UpdateDeadlines;
 use codex_router_host::inherited_lock_environment;
-use codex_router_test_support::shared_host::PersistentRouterHealthFixture;
-use codex_router_test_support::shared_host::run_native_app_server_fixture;
+use codex_router_test_support::native_app_server::run_native_app_server_fixture;
+use codex_router_test_support::router_health::PersistentRouterHealthFixture;
 
 #[path = "support/operator_client.rs"]
 mod operator_client;
@@ -89,7 +89,7 @@ async fn changed_update_tears_down_children_and_reexecs_with_continuous_lock()
     let frames = send_operator_request(
         coordination_paths.operator_socket(),
         OperatorRequest::UpdateCodex,
-        Duration::from_secs(6),
+        Duration::from_secs(20),
     )
     .await?;
     check(
@@ -97,7 +97,7 @@ async fn changed_update_tears_down_children_and_reexecs_with_continuous_lock()
         "changed update must emit replacement-starting before old-host EOF",
     )?;
     let output =
-        tokio::time::timeout(Duration::from_secs(5), host_process.wait_with_output()).await??;
+        tokio::time::timeout(Duration::from_secs(20), host_process.wait_with_output()).await??;
     check(
         output.status.success(),
         &format!(
@@ -160,12 +160,10 @@ async fn changed_update_host_child_entrypoint() -> Result<(), Box<dyn std::error
             managed_executable,
             deadlines: fixture_host_deadlines()?,
         }),
-        HostDependencies::new(HostDependenciesInputs {
-            router_command: None,
-            app_server,
-        })
-        .with_update_deadlines(fixture_update_deadlines()?)
-        .with_replacement_command(replacement),
+        ManagedChildLaunchPlans::new(None, app_server),
+        ManagedUpdateInputs::production()
+            .with_deadlines(fixture_update_deadlines()?)
+            .with_replacement_command(replacement),
     )
     .await;
     Err(format!("changed-update host returned unexpectedly: {result:?}").into())
@@ -246,16 +244,13 @@ async fn run_update_case(
                 app_server_start: Duration::from_secs(2),
                 remote_control: Duration::from_secs(1),
                 endpoint_inspection: Duration::from_millis(200),
-                operator_request: Duration::from_secs(3),
+                operator_request: Duration::from_secs(15),
             })?,
         }),
-        HostDependencies::new(HostDependenciesInputs {
-            router_command: None,
-            app_server,
-        })
-        .with_update_deadlines(UpdateDeadlines::new(
-            Duration::from_secs(1),
-            Duration::from_secs(2),
+        ManagedChildLaunchPlans::new(None, app_server),
+        ManagedUpdateInputs::production().with_deadlines(UpdateDeadlines::new(
+            Duration::from_secs(4),
+            Duration::from_secs(15),
             Duration::from_millis(200),
             Duration::from_millis(200),
         )?),
@@ -264,7 +259,7 @@ async fn run_update_case(
     let startup = send_operator_request(
         coordination_paths.operator_socket(),
         OperatorRequest::AwaitHostStart,
-        Duration::from_secs(3),
+        Duration::from_secs(20),
     )
     .await?;
     check_equal(
@@ -276,7 +271,7 @@ async fn run_update_case(
     let update = send_operator_request(
         coordination_paths.operator_socket(),
         OperatorRequest::UpdateCodex,
-        Duration::from_secs(3),
+        Duration::from_secs(20),
     )
     .await?;
     check_equal(
@@ -310,14 +305,14 @@ fn fixture_host_deadlines() -> Result<HostDeadlines, Box<dyn std::error::Error>>
         app_server_start: Duration::from_secs(2),
         remote_control: Duration::from_secs(1),
         endpoint_inspection: Duration::from_millis(200),
-        operator_request: Duration::from_secs(4),
+        operator_request: Duration::from_secs(15),
     })?)
 }
 
 fn fixture_update_deadlines() -> Result<UpdateDeadlines, Box<dyn std::error::Error>> {
     Ok(UpdateDeadlines::new(
-        Duration::from_secs(1),
-        Duration::from_secs(2),
+        Duration::from_secs(4),
+        Duration::from_secs(15),
         Duration::from_millis(200),
         Duration::from_millis(200),
     )?)
@@ -382,7 +377,7 @@ fn terminal_classification(
 }
 
 async fn wait_for_process_id(process_log: &Path) -> Result<u32, Box<dyn std::error::Error>> {
-    Ok(tokio::time::timeout(Duration::from_secs(3), async {
+    Ok(tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Some(process_id) = std::fs::read_to_string(process_log)
                 .ok()

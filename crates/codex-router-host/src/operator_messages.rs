@@ -4,7 +4,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::HostOperation;
 use crate::HostSnapshot;
 
 /// Current private operator protocol version.
@@ -137,38 +136,6 @@ impl OperatorFrame {
             message,
         })
     }
-}
-
-/// Admission decision made synchronously from current mutation ownership.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MutationAdmission {
-    /// Read-only work remains available during lifecycle mutation.
-    ReadOnly,
-    /// The request acquires lifecycle mutation ownership.
-    StartMutation(HostOperation),
-    /// Another lifecycle mutation already owns serialization.
-    Busy,
-}
-
-/// Classifies one request without awaiting or mutating runtime state.
-#[must_use]
-pub const fn classify_operator_request(
-    active_mutation: Option<HostOperation>,
-    request: OperatorRequest,
-) -> MutationAdmission {
-    if !request.is_mutating() {
-        return MutationAdmission::ReadOnly;
-    }
-    if active_mutation.is_some() {
-        return MutationAdmission::Busy;
-    }
-    let operation = match request {
-        OperatorRequest::RestartAppServer => HostOperation::RestartAppServer,
-        OperatorRequest::UpdateCodex => HostOperation::UpdateCodex,
-        OperatorRequest::RestartRouter => HostOperation::RestartRouter,
-        OperatorRequest::Status | OperatorRequest::AwaitHostStart => HostOperation::Status,
-    };
-    MutationAdmission::StartMutation(operation)
 }
 
 /// Bounded operator request decoding failure.

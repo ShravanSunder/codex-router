@@ -35,6 +35,7 @@ use crate::RouterOwnership;
 use crate::RouterProbeError;
 use crate::RouterProbeResult;
 use crate::RouterShutdownError;
+use crate::ShutdownOutcome;
 use crate::TerminalClassification;
 use crate::probe_router;
 use crate::require_unowned_app_server_endpoint;
@@ -52,30 +53,40 @@ use retained_lifecycle::restart_lifecycle_classification;
 const OPERATOR_QUEUE_CAPACITY: usize = 8;
 const OPERATOR_CONNECTION_LIMIT: usize = 8;
 
-/// Runtime-owned launch inputs that can be reused for bounded lifecycle work.
-pub struct HostDependenciesInputs {
+/// Managed-child launch projections retained by the lifecycle owner.
+pub struct ManagedChildLaunchPlans {
     /// Optional router command used only when no compatible external router exists.
-    pub router_command: Option<ChildCommandSpec>,
+    router_command: Option<ChildCommandSpec>,
     /// Exact managed app-server launch projection.
-    pub app_server: AppServerLaunchPlan,
+    app_server: AppServerLaunchPlan,
 }
 
-/// Validated runtime dependency projections.
-pub struct HostDependencies {
-    router_command: Option<ChildCommandSpec>,
-    app_server: AppServerLaunchPlan,
+impl ManagedChildLaunchPlans {
+    /// Captures already-resolved managed-child launch projections.
+    #[must_use]
+    pub const fn new(
+        router_command: Option<ChildCommandSpec>,
+        app_server: AppServerLaunchPlan,
+    ) -> Self {
+        Self {
+            router_command,
+            app_server,
+        }
+    }
+}
+
+/// Inputs owned only by conditional update preparation and changed-update activation.
+pub struct ManagedUpdateInputs {
     update_deadlines: crate::UpdateDeadlines,
     replacement_command: Option<ChildCommandSpec>,
     pre_exec_telemetry: Option<Arc<dyn PreExecTelemetry>>,
 }
 
-impl HostDependencies {
-    /// Captures already-resolved runtime launch projections.
+impl ManagedUpdateInputs {
+    /// Creates production update inputs with no replacement command or telemetry adapter.
     #[must_use]
-    pub fn new(inputs: HostDependenciesInputs) -> Self {
+    pub fn production() -> Self {
         Self {
-            router_command: inputs.router_command,
-            app_server: inputs.app_server,
             update_deadlines: crate::UpdateDeadlines::production(),
             replacement_command: None,
             pre_exec_telemetry: None,
@@ -84,7 +95,7 @@ impl HostDependencies {
 
     /// Replaces production update bounds for deterministic fixtures.
     #[must_use]
-    pub const fn with_update_deadlines(mut self, deadlines: crate::UpdateDeadlines) -> Self {
+    pub const fn with_deadlines(mut self, deadlines: crate::UpdateDeadlines) -> Self {
         self.update_deadlines = deadlines;
         self
     }
@@ -165,37 +176,62 @@ impl HostRuntime {
     /// Acquires authority, converges startup, then owns all retained handles.
     pub async fn run(
         config: HostConfig,
-        dependencies: HostDependencies,
+        child_launch_plans: ManagedChildLaunchPlans,
+        update_inputs: ManagedUpdateInputs,
     ) -> Result<HostExit, HostError> {
         let startup_started_at = tokio::time::Instant::now();
         let instance = HostInstance::acquire(config.coordination_paths().clone())?;
-        Self::run_owned(config, dependencies, instance, startup_started_at).await
+        Self::run_owned(
+            config,
+            child_launch_plans,
+            update_inputs,
+            instance,
+            startup_started_at,
+        )
+        .await
     }
 
     /// Consumes and validates singleton authority inherited across changed-update exec.
     pub async fn run_inherited(
         config: HostConfig,
-        dependencies: HostDependencies,
+        child_launch_plans: ManagedChildLaunchPlans,
+        update_inputs: ManagedUpdateInputs,
         marker: &std::ffi::OsStr,
     ) -> Result<HostExit, HostError> {
         let startup_started_at = tokio::time::Instant::now();
         let instance =
             HostInstance::acquire_inherited(config.coordination_paths().clone(), marker)?;
-        Self::run_owned(config, dependencies, instance, startup_started_at).await
+        Self::run_owned(
+            config,
+            child_launch_plans,
+            update_inputs,
+            instance,
+            startup_started_at,
+        )
+        .await
     }
 
     /// Starts lifecycle convergence with singleton authority already acquired.
     pub async fn run_acquired(
         config: HostConfig,
-        dependencies: HostDependencies,
+        child_launch_plans: ManagedChildLaunchPlans,
+        update_inputs: ManagedUpdateInputs,
         instance: HostInstance,
     ) -> Result<HostExit, HostError> {
-        Self::run_owned(config, dependencies, instance, tokio::time::Instant::now()).await
+        Self::run_owned(
+            config,
+            child_launch_plans,
+            update_inputs,
+            instance,
+            tokio::time::Instant::now(),
+        )
+        .await
     }
 
     async fn run_owned(
         config: HostConfig,
-        dependencies: HostDependencies,
+        child_launch_plans: ManagedChildLaunchPlans,
+        update_inputs: ManagedUpdateInputs,
         instance: HostInstance,
         startup_started_at: tokio::time::Instant,
     ) -> Result<HostExit, HostError> {
@@ -208,7 +244,7 @@ impl HostRuntime {
         let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
             .map_err(HostError::Signal)?;
         let (router_condition, mut router_child) =
-            startup_convergence::start_router(&config, dependencies.router_command.as_ref())
+            startup_convergence::start_router(&config, child_launch_plans.router_command.as_ref())
                 .await?;
         if let Err(endpoint_error) = require_unowned_app_server_endpoint(
             config.app_server_socket(),
@@ -220,19 +256,19 @@ impl HostRuntime {
                 .await?;
             return Err(HostError::AppServerEndpoint(endpoint_error));
         }
-        let (app_server, readiness) =
-            match startup_convergence::start_app_server(&config, dependencies.app_server.clone())
-                .await
-            {
-                Ok(started) => started,
-                Err(error) => {
-                    startup_convergence::shutdown_owned_router_after_startup_failure(
-                        &mut router_child,
-                    )
+        let (app_server, readiness) = match startup_convergence::start_app_server(
+            &config,
+            child_launch_plans.app_server.clone(),
+        )
+        .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                startup_convergence::shutdown_owned_router_after_startup_failure(&mut router_child)
                     .await?;
-                    return Err(error);
-                }
-            };
+                return Err(error);
+            }
+        };
         let mut state = RuntimeState::ready(router_condition, readiness);
         state.record_lifecycle(
             HostOperation::Start,
@@ -278,7 +314,8 @@ impl HostRuntime {
                         app_server: &mut app_server,
                         router_child: &mut router_child,
                         config: &config,
-                        dependencies: &dependencies,
+                        child_launch_plans: &child_launch_plans,
+                        update_inputs: &update_inputs,
                         active_app_server_restart: &mut active_restart,
                         active_router_restart: &mut active_router_restart,
                         active_update: &mut active_update,
@@ -383,7 +420,7 @@ impl HostRuntime {
                         preparation: update_preparation,
                         active,
                         state: &mut state,
-                        dependencies: &dependencies,
+                        update_inputs: &update_inputs,
                         app_server: &mut app_server,
                         router: &mut router_child,
                         activation: &mut active_update_activation,
@@ -401,7 +438,7 @@ impl HostRuntime {
                         state: &mut state,
                         app_server: &mut app_server,
                         router: &mut router_child,
-                        dependencies: &dependencies,
+                        update_inputs: &update_inputs,
                         instance: &instance,
                     }).await?;
                 }
@@ -417,6 +454,7 @@ impl HostRuntime {
                     let Some(active) = active_status.take() else {
                         continue;
                     };
+                    state.executable_relation = status_observation.executable_relation();
                     let (snapshot, status_identity) = status_observation.snapshot(&state);
                     if pending_identity.is_none() {
                         pending_identity = status_identity;
@@ -439,11 +477,13 @@ impl HostRuntime {
                     }
                 }
                 exit = lifecycle_convergence::wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() && active_restart.is_none() => {
-                    let _exit_status = exit?;
+                    let exit = exit?;
+                    let _exit_status = exit.status;
                     app_server = None;
                     state.app_server = AppServerCondition::Absent;
                     state.remote_control = RemoteControlCondition::Unavailable;
-                    if state.recovery_budget == RecoveryBudget::Available
+                    if !exit.expected
+                        && state.recovery_budget == RecoveryBudget::Available
                         && active_router_restart.is_none()
                         && active_update.is_none()
                     {
@@ -454,18 +494,18 @@ impl HostRuntime {
                         };
                         state.app_server = AppServerCondition::Starting;
                         recovery_started_at = Some(tokio::time::Instant::now());
-                        recovery = Some(lifecycle_convergence::recovery_future(&config, dependencies.app_server.clone()));
-                    } else {
+                        recovery = Some(lifecycle_convergence::recovery_future(&config, child_launch_plans.app_server.clone()));
+                    } else if !exit.expected {
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
                             operation: HostOperation::RestartAppServer,
                             classification: LifecycleOutcomeClassification::Failed,
                         });
                     }
                 }
-                recovery_result = lifecycle_convergence::wait_for_recovery(&mut recovery), if recovery.is_some() => {
+                recovery_result = lifecycle_convergence::wait_for_recovery_completion(&mut recovery), if recovery.is_some() => {
                     recovery = None;
                     match recovery_result {
-                        Ok((recovered_child, recovered_readiness)) => {
+                        lifecycle_convergence::RecoveryCompletion::Ready(recovered_child, recovered_readiness) => {
                             app_server = Some(recovered_child);
                             state.apply_readiness(recovered_readiness);
                             state.last_lifecycle_outcome = Some(LifecycleOutcome {
@@ -473,12 +513,17 @@ impl HostRuntime {
                                 classification: LifecycleOutcomeClassification::Succeeded,
                             });
                         }
-                        Err(_error) => {
-                            state.app_server = AppServerCondition::Failed;
+                        lifecycle_convergence::RecoveryCompletion::Failed { retained_child, shutdown_outcome } => {
+                            app_server = retained_child;
+                            state.app_server = if app_server.is_some() {
+                                AppServerCondition::ShutdownTimedOut
+                            } else {
+                                AppServerCondition::Failed
+                            };
                             state.remote_control = RemoteControlCondition::Unavailable;
                             state.last_lifecycle_outcome = Some(LifecycleOutcome {
                                 operation: HostOperation::RestartAppServer,
-                                classification: LifecycleOutcomeClassification::Failed,
+                                classification: restart_lifecycle_classification(false, shutdown_outcome),
                             });
                         }
                     }

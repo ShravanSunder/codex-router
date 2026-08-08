@@ -32,23 +32,62 @@ pub(super) async fn settle_for_shutdown(context: ShutdownContext<'_>) -> Result<
     shutdown_retained_children(context.app_server, context.router).await
 }
 
-pub(super) type RecoveryFuture = Pin<
-    Box<
-        dyn Future<Output = Result<(AppServerChild, AppServerReadiness), HostError>>
-            + Send
-            + 'static,
-    >,
->;
+pub(super) enum RecoveryCompletion {
+    Ready(AppServerChild, AppServerReadiness),
+    Failed {
+        retained_child: Option<AppServerChild>,
+        shutdown_outcome: Option<ShutdownOutcome>,
+    },
+}
+
+pub(super) type RecoveryFuture = Pin<Box<dyn Future<Output = RecoveryCompletion> + Send + 'static>>;
 
 pub(super) fn recovery_future(
     config: &HostConfig,
     launch_plan: AppServerLaunchPlan,
 ) -> RecoveryFuture {
     let socket_path = config.app_server_socket().to_owned();
+    let managed_executable = config.managed_executable().to_owned();
     let deadlines = config.deadlines();
     Box::pin(async move {
-        require_unowned_app_server_endpoint(&socket_path, deadlines.endpoint_inspection()).await?;
-        let mut child = launch_plan.spawn()?;
+        let launch_plan = match tokio::time::timeout(
+            deadlines.app_server_start(),
+            launch_plan.refreshed(&managed_executable),
+        )
+        .await
+        {
+            Ok(Ok(launch_plan)) => launch_plan,
+            Ok(Err(_error)) => {
+                return RecoveryCompletion::Failed {
+                    retained_child: None,
+                    shutdown_outcome: None,
+                };
+            }
+            Err(_elapsed) => {
+                return RecoveryCompletion::Failed {
+                    retained_child: None,
+                    shutdown_outcome: None,
+                };
+            }
+        };
+        if require_unowned_app_server_endpoint(&socket_path, deadlines.endpoint_inspection())
+            .await
+            .is_err()
+        {
+            return RecoveryCompletion::Failed {
+                retained_child: None,
+                shutdown_outcome: None,
+            };
+        }
+        let mut child = match launch_plan.spawn() {
+            Ok(child) => child,
+            Err(_error) => {
+                return RecoveryCompletion::Failed {
+                    retained_child: None,
+                    shutdown_outcome: None,
+                };
+            }
+        };
         let readiness = child
             .await_readiness(
                 &socket_path,
@@ -57,20 +96,44 @@ pub(super) fn recovery_future(
             )
             .await;
         match readiness {
-            Ok(readiness) => Ok((child, readiness)),
+            Ok(readiness) => RecoveryCompletion::Ready(child, readiness),
             Err(readiness_error) => {
-                let _shutdown_outcome = child.shutdown().await?;
-                Err(HostError::AppServerReadiness(readiness_error))
+                let _readiness_error = readiness_error;
+                match child.shutdown().await {
+                    Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Forced)) => {
+                        RecoveryCompletion::Failed {
+                            retained_child: None,
+                            shutdown_outcome: Some(outcome),
+                        }
+                    }
+                    Ok(ShutdownOutcome::TimedOutStillRunning) => RecoveryCompletion::Failed {
+                        retained_child: Some(child),
+                        shutdown_outcome: Some(ShutdownOutcome::TimedOutStillRunning),
+                    },
+                    Err(_error) => RecoveryCompletion::Failed {
+                        retained_child: Some(child),
+                        shutdown_outcome: None,
+                    },
+                }
             }
         }
     })
 }
 
+pub(super) struct AppServerExit {
+    pub(super) status: std::process::ExitStatus,
+    pub(super) expected: bool,
+}
+
 pub(super) async fn wait_for_app_server_exit(
     app_server: &mut Option<AppServerChild>,
-) -> Result<std::process::ExitStatus, ProcessGroupError> {
+) -> Result<AppServerExit, ProcessGroupError> {
     match app_server.as_mut() {
-        Some(child) => child.wait_for_exit().await,
+        Some(child) => {
+            let expected = child.expected_exit().is_some();
+            let status = child.wait_for_exit().await?;
+            Ok(AppServerExit { status, expected })
+        }
         None => std::future::pending().await,
     }
 }
@@ -84,9 +147,9 @@ pub(super) async fn wait_for_router_exit(
     }
 }
 
-pub(super) async fn wait_for_recovery(
+pub(super) async fn wait_for_recovery_completion(
     recovery: &mut Option<RecoveryFuture>,
-) -> Result<(AppServerChild, AppServerReadiness), HostError> {
+) -> RecoveryCompletion {
     match recovery.as_mut() {
         Some(future) => future.await,
         None => std::future::pending().await,
@@ -176,8 +239,13 @@ pub(super) async fn settle_recovery_for_shutdown(
     let Some(recovery_future) = recovery.take() else {
         return;
     };
-    if let Ok((recovered_child, _readiness)) = recovery_future.await {
-        *app_server = Some(recovered_child);
+    match recovery_future.await {
+        RecoveryCompletion::Ready(recovered_child, _readiness) => {
+            *app_server = Some(recovered_child);
+        }
+        RecoveryCompletion::Failed { retained_child, .. } => {
+            *app_server = retained_child;
+        }
     }
 }
 
