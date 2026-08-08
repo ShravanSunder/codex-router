@@ -21,9 +21,12 @@ use codex_router_host::OperatorRequest;
 use codex_router_host::RecoveryBudget;
 use codex_router_host::RouterCondition;
 use codex_router_host::TerminalClassification;
-use codex_router_host::send_operator_request;
 use codex_router_test_support::shared_host::run_native_app_server_fixture;
 use codex_router_test_support::shared_host::run_persistent_router_health_fixture;
+
+#[path = "support/operator_client.rs"]
+mod operator_client;
+use operator_client::send_operator_request;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 

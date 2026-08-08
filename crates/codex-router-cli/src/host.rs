@@ -34,6 +34,8 @@ use codex_router_host::UpdateResult;
 use thiserror::Error;
 
 use crate::CliContext;
+use crate::host_command::operator_client::OperatorClientError;
+use crate::host_command::operator_client::send_operator_request;
 
 const DEFAULT_HOST_PORT: u16 = 8787;
 const STATUS_REQUEST_DEADLINE: Duration = Duration::from_secs(40);
@@ -123,7 +125,7 @@ pub(crate) async fn run_host_command<W: Write>(
             HostAction::RestartRouter => OperatorRequest::RestartRouter,
             HostAction::Update => OperatorRequest::UpdateCodex,
         };
-        let frames = codex_router_host::send_operator_request(
+        let frames = send_operator_request(
             coordination_paths.operator_socket(),
             request,
             operator_request_deadline(command.action()),
@@ -245,7 +247,7 @@ async fn complete_update_result_with_deadline(
         };
     }
 
-    match codex_router_host::send_operator_request(
+    match send_operator_request(
         coordination_paths.operator_socket(),
         OperatorRequest::AwaitHostStart,
         replacement_deadline,
@@ -301,7 +303,7 @@ pub enum HostCommandError {
     #[error(transparent)]
     Codex(#[from] codex_router_codex::ExecutableIdentityError),
     #[error(transparent)]
-    Operator(#[from] codex_router_host::OperatorClientError),
+    Operator(#[from] OperatorClientError),
     #[error(transparent)]
     Runtime(#[from] codex_router_host::HostError),
 }

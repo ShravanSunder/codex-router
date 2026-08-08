@@ -46,9 +46,12 @@ use codex_router_host::decode_operator_request;
 use codex_router_host::encode_operator_frame;
 use codex_router_host::encode_operator_request;
 use codex_router_host::inherited_lock_marker;
-use codex_router_host::send_operator_request;
 use codex_router_test_support::shared_host::PersistentRouterHealthFixture;
 use codex_router_test_support::shared_host::run_native_app_server_fixture;
+
+#[path = "support/operator_client.rs"]
+mod operator_client;
+use operator_client::send_operator_request;
 
 const EXPECTED_PROTOCOL_VERSION: u16 = 1;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

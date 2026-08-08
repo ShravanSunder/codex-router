@@ -28,7 +28,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
         crate::update::UpdatePreparation::Changed => {
             context.state.executable_relation = ExecutableRelation::Drift;
             let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
-                crate::operator_protocol::HostProgress::ReplacementStarting,
+                crate::operator_messages::HostProgress::ReplacementStarting,
             ));
             let Some(replacement_command) = context.dependencies.replacement_command.clone() else {
                 context.state.phase = HostPhase::Steady;

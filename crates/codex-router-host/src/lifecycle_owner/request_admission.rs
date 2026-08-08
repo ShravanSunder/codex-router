@@ -68,7 +68,7 @@ pub(super) fn spawn_operator_connection(
         let _permit = permit;
         let deadline_at = tokio::time::Instant::now() + request_deadline;
         let Ok(request) =
-            crate::operator_protocol::read_request_from_stream(&mut stream, deadline_at).await
+            crate::operator_connection::read_request_from_stream(&mut stream, deadline_at).await
         else {
             return;
         };
@@ -86,7 +86,7 @@ pub(super) fn spawn_operator_connection(
         while let Some(frame) = response_receiver.recv().await {
             let terminal = matches!(frame, OperatorFrame::Terminal(_));
             let write_deadline_at = tokio::time::Instant::now() + request_deadline;
-            if crate::operator_protocol::write_frame_to_stream(
+            if crate::operator_connection::write_frame_to_stream(
                 &mut stream,
                 &frame,
                 write_deadline_at,
@@ -97,7 +97,7 @@ pub(super) fn spawn_operator_connection(
                 return;
             }
             if terminal {
-                let _shutdown_result = crate::operator_protocol::shutdown_operator_stream(
+                let _shutdown_result = crate::operator_connection::shutdown_operator_stream(
                     &mut stream,
                     tokio::time::Instant::now() + request_deadline,
                 )

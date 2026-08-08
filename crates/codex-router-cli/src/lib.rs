@@ -29,6 +29,7 @@ pub mod account;
 mod credential_runtime;
 pub mod doctor;
 mod host;
+mod host_command;
 mod live;
 mod presentation;
 pub mod profile;
