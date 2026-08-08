@@ -1,4 +1,4 @@
-//! Managed app-server child command projection.
+//! Managed app-server launch projection.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

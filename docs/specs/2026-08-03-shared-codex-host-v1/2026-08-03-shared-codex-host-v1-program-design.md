@@ -4,9 +4,16 @@ Date: 2026-08-03
 
 Governing specification: [Shared Codex Host V1 specification](./2026-08-03-shared-codex-host-v1-specification.md)
 
-Current router source: `add19a34bf06eeb7d69f166e369f6d43ff8b5fd1`
+Pre-Shared-Host router baseline: `add19a34bf06eeb7d69f166e369f6d43ff8b5fd1`
+
+Current implementation evidence: `a19d11ab3829a17abd77dd18bb23bced553c315e`
 
 Current upstream Codex source: `2b5bdcf67547860f2e5c5a605009a70026796b2b`
+
+The governing August Requirements and Specification are the only normative
+inputs to this design. Earlier host-design trials may provide historical
+observations, but they do not define this composition, its ownership, or its
+runtime behavior.
 
 ## Integrated design
 
@@ -121,7 +128,7 @@ Codex home or make a debug host contend for the installed host's operator
 authority.
 
 Host status and progress follow the existing CLI presentation boundary rather
-than creating another terminal stack. `codex-router-host` returns typed domain
+than creating another terminal stack. `codex-router-host` returns typed lifecycle
 snapshots and progress events with no terminal-library dependency.
 `codex-router-cli::presentation` owns the host-facing view models, components,
 and renderers that turn those values into operator output. Lifecycle truth,
@@ -135,7 +142,264 @@ filesystem boundaries return typed errors. Tokio owns process, signal, socket,
 timeout, and channel waits; no blocking process wait or unbounded queue runs on
 the async host owner task.
 
-### Host command boundary
+### Responsibility-based internal composition
+
+The crate boundaries above are necessary but not sufficient. Each internal
+component has one job, one reason to change, and consumers that do not need to
+learn its policy. The target composition is:
+
+```text
+codex-router-cli
+  Host Command Adapter
+    owns: command parsing and action selection
+    consumes: Operator Client, Foreground Launch Composer,
+              Update Outcome Observer, Host Command Presenter
+    changes when: the owner-facing host command contract changes
+
+  Foreground Launch Composer
+    owns: resolved router-root/Codex-home projection and typed launch inputs
+    consumed by: Host Command Adapter
+    consumes: Host Singleton Authority, Codex Runtime Paths,
+              Router Profile Projection, Lifecycle Owner Task entrypoint
+    changes when: CLI composition or environment projection changes
+
+  Operator Client
+    owns: bounded client-side connect/retry/write/read for one exchange
+    consumed by: Host Command Adapter and Update Outcome Observer
+    changes when: the internal operator transport contract changes
+
+  Update Outcome Observer
+    owns: old-connection EOF, replacement endpoint convergence, and final
+          four-way update classification for the invoking CLI
+    consumed by: Host Command Adapter
+    changes when: the cross-exec caller-observation contract changes
+
+  Host Command Presenter
+    owns: deterministic non-interactive output and any established
+          iocraft/indicatif adapter
+    consumed by: Host Command Adapter
+    changes when: terminal presentation changes
+
+codex-router-codex
+  Codex Runtime Paths
+    owns: normal Codex-home, managed executable, and native socket projection
+
+  Router Profile Projection
+    owns: the single model-provider configuration rendered for Codex
+
+  Managed Executable Identity
+    owns: canonical executable resolution, content identity, and version read
+
+  Official Updater Command
+    owns: the exact managed-executable updater argv projection
+
+  App-server Launch Projection
+    owns: native app-server argv including router overrides, socket, and
+          Remote Control enablement
+
+  App-server Control Protocol
+    owns: bounded native initialize/capability negotiation, framing, and
+          version observation
+
+  Remote Control Observation
+    owns: one short-lived status read and bounded connecting-to-terminal wait
+    consumes: App-server Control Protocol initialized experimental exchange
+
+  Direct Session Launch Projection
+    owns: new/resume argv that attaches to the native Unix endpoint
+
+  change rule: each component changes only when its corresponding supported
+               upstream Codex contract changes
+
+codex-router-host
+  Host Singleton Authority
+    owns: exclusive lock, stale operator-socket replacement, and inherited
+          authority validation across same-process exec
+    returns: one authority handle containing the retained lock and listener
+             to the Lifecycle Owner Task
+
+  Operator Message Contract
+    owns: versioned requests, progress and terminal envelopes,
+          terminal classifications, codecs, and serialization of the
+          lifecycle-owned snapshot type
+
+  Operator Connection Boundary
+    owns: accepted-stream decode/response I/O, finite connection capacity,
+          bounded per-connection transport tasks, and backpressure
+
+  Process-group Child
+    owns: Tokio child retention plus exact-child/group signal primitives
+
+  Router Compatibility Observer
+    owns: static health probing and compatible/incompatible classification
+
+  Owned Router Child
+    owns: only the retained router child and its bounded SIGTERM shutdown
+
+  Managed App-server Child
+    owns: only the retained app-server child and its spawn identity
+
+  App-server Endpoint Guard
+    owns: fail-closed foreign endpoint exclusion before launch/replacement
+
+  App-server Shutdown Progression
+    owns: expected-exit identity, one-signal invariant, pinned escalation,
+          retained progress, and terminal shutdown classification
+
+  Explicit App-server Restart
+    owns: stop/guard/start/readiness sequence and recovery-budget reset result
+
+  Explicit Router Restart
+    owns: owned-only stop/start/readiness sequence
+
+  Managed Codex Update Preparation
+    owns: identity-before, official updater containment, identity-after, and
+          changed/no-change/failure result before child teardown
+
+  Changed-update Activation
+    owns: post-change child teardown and same-process exec preparation
+
+  Lifecycle Owner Task
+    owns: all retained handles, in-memory lifecycle truth, total mutation
+          ordering, listener-accept selection, signals, and event selection
+    runs operations: startup convergence, lifecycle request admission,
+                     operation completion, automatic recovery,
+                     status observation, shutdown convergence
+
+  Host Lifecycle State
+    owns: orthogonal phase/condition/budget/outcome transitions, snapshot
+          fields and invariants, and hosted-readiness derivation
+
+  Lifecycle Telemetry
+    owns: low-cardinality redacted lifecycle observations only
+```
+
+Startup convergence, lifecycle request admission, operation completion,
+automatic recovery, status observation, and shutdown convergence are named
+operations inside the one Lifecycle Owner Task. They are not components,
+source-module requirements, background tasks, interfaces, or additional
+authorities. Lifecycle request admission owns read-versus-mutation
+classification, `busy`, and mutation serialization; it is distinct from the
+Operator Connection Boundary's finite transport-connection capacity.
+
+The component consumers and reasons to change are explicit so a later source
+map cannot substitute generic layer buckets:
+
+| Component | Primary consumers | Changes when |
+| --- | --- | --- |
+| Codex Runtime Paths | Foreground Launch Composer, App-server Launch Projection, Direct Session Launch Projection | supported Codex home, managed executable, or native socket conventions change |
+| Router Profile Projection | existing profile rendering and App-server Launch Projection | the supported Codex model-provider projection changes |
+| Managed Executable Identity | Managed Codex Update Preparation and the Lifecycle Owner Task's status-observation operation | executable resolution, hashing, or version observation changes |
+| Official Updater Command | Managed Codex Update Preparation | the supported official updater invocation changes |
+| App-server Launch Projection | Managed App-server Child | supported app-server argv, router overrides, socket, or Remote Control enablement changes |
+| App-server Control Protocol | Remote Control Observation, the Lifecycle Owner Task's startup-convergence, automatic-recovery, and status-observation operations, and Explicit App-server Restart | supported native initialization, capability negotiation, framing, or version observation changes |
+| Remote Control Observation | the Lifecycle Owner Task's startup-convergence, automatic-recovery, and status-observation operations plus Explicit App-server Restart | supported upstream remote-status observation changes |
+| Direct Session Launch Projection | existing sessions runner | supported new/resume native-attachment argv changes |
+| Host Singleton Authority | Foreground Launch Composer, Lifecycle Owner Task, and Changed-update Activation | exclusive ownership, stale-socket replacement, inherited exec authority, or listener capability changes |
+| Operator Message Contract | Operator Client and Operator Connection Boundary | internal request, progress or terminal envelope, classification, codec, or lifecycle-owned snapshot serialization changes |
+| Operator Connection Boundary | Lifecycle Owner Task | accepted-stream codec, finite connection capacity, or backpressure behavior changes |
+| Process-group Child | Owned Router Child, Managed App-server Child, Managed Codex Update Preparation | retained-child or exact-process/group signalling primitives change |
+| Router Compatibility Observer | the Lifecycle Owner Task's startup-convergence and status-observation operations plus Explicit Router Restart | router compatibility schema or classification changes |
+| Owned Router Child | Lifecycle Owner Task and Explicit Router Restart | retained router-child start/stop semantics change |
+| Managed App-server Child | the Lifecycle Owner Task's startup-convergence and automatic-recovery operations, Explicit App-server Restart, App-server Shutdown Progression | retained app-server child launch or identity semantics change |
+| App-server Endpoint Guard | the Lifecycle Owner Task's startup-convergence and automatic-recovery operations plus Explicit App-server Restart | foreign endpoint exclusion or same-path replacement preconditions change |
+| App-server Shutdown Progression | Explicit App-server Restart, Changed-update Activation, and the Lifecycle Owner Task's shutdown-convergence operation | expected-exit, one-signal, escalation, or retained-progress semantics change |
+| Explicit App-server Restart | Lifecycle Owner Task | the owner-requested stop/guard/start/readiness operation changes |
+| Explicit Router Restart | Lifecycle Owner Task | the owned-only router restart operation changes |
+| Managed Codex Update Preparation | Lifecycle Owner Task | identity comparison, updater containment, or pre-activation classification changes |
+| Changed-update Activation | Lifecycle Owner Task and Update Outcome Observer | proved-change teardown or same-process exec activation changes |
+| Lifecycle Owner Task | Foreground Launch Composer, Operator Connection Boundary, Unix signals, child-exit events | mutation ordering, retained authority, or event arbitration changes |
+| Host Lifecycle State | Lifecycle Owner Task, including its status-observation operation | phase, condition, budget, outcome, snapshot-field, snapshot-invariant, or hosted-readiness semantics change |
+| Lifecycle Telemetry | Lifecycle Owner Task and Changed-update Activation | redacted lifecycle observations or pre-exec shutdown integration changes |
+
+The tree describes semantic owners, not a requirement to create one source
+file per type. Closely coupled low-volume values may share one
+responsibility-named module when they have the same reason to change. The
+inverse is also mandatory: unrelated responsibilities may not be collected
+under generic feature or layer buckets such as `host`, `runtime`, `process`,
+`domain`, `state`, `operator`, `protocol`, or `shared_host`.
+
+Conventional Rust crate and namespace façades may remain, but they contain only
+module declarations, narrow re-exports, or short dispatch glue. They do not
+also accumulate parsing, policy, lifecycle transitions, transport, rendering,
+and proof fixtures. A pass-through module whose deletion merely moves no policy
+is collapsed. A source unit created or materially restructured for Shared Host
+that approaches 600 lines triggers responsibility review and is split unless
+one cohesive owner loop requires the code to remain visible together. Such a
+Shared Host source unit may not exceed 900 lines without revisiting the
+component boundary. Existing unrelated responsibilities encountered in a
+larger CLI, presentation, session, or test-support file are outside this
+structural correction.
+
+Shared Host tests and permanent fixtures follow the same rule. Integration
+tests created or materially restructured by this correction are named for the
+invariant or boundary they prove—singleton authority, app-server shutdown,
+update re-exec, direct attachment—not for the entire Shared Host feature.
+Signal-recording children, router-health servers, and native app-server
+protocol fixtures remain separate fixture owners rather than one shared-host
+test-support bucket. Unrelated existing tests and fixtures are not pulled into
+this refactor.
+
+This decomposition introduces no new process, task, queue, protocol, state, or
+runtime hop. It partitions existing responsibilities so a reader can locate
+policy and proof without learning an umbrella module. The Lifecycle Owner Task
+remains the sole mutation owner; extracting helpers never creates additional
+lifecycle authority or shared mutable state.
+
+### Structural correction from the current implementation
+
+The current implementation already realizes the accepted process topology,
+observable commands, state transitions, failure classifications, and direct
+client-to-app-server traffic path. The target composition above changes only
+source ownership and dependency visibility. It adds or removes no accepted
+lifecycle-semantic caller/callee edge, state transition, external effect,
+result, or error edge.
+
+The Lifecycle Owner Task remains the sole authority for retained handles and
+mutable lifecycle state. Extracted components receive bounded inputs and return
+typed decisions or effects to that owner; they do not become background tasks,
+shared mutable services, or parallel lifecycle coordinators. Proof seams are
+repartitioned by the invariant they observe—singleton authority, shutdown,
+update activation, direct attachment, and presentation—without weakening or
+replacing the accepted proof boundary.
+
+### Current-to-target responsibility disposition
+
+The table below disposes the current mixed Shared Host responsibility clusters
+without prescribing future filenames or one file per type. `Preserve` keeps a
+cohesive responsibility, `narrow` removes unrelated policy, `split` assigns
+different reasons to change to their named owners, `move` changes the owning
+crate, and `collapse` removes an umbrella or pass-through boundary.
+
+| Current responsibility cluster and evidence | Disposition | Target owner or owners | Preserved invariant |
+| --- | --- | --- | --- |
+| CLI host parsing, root resolution, foreground composition, operator exchange, replacement observation, and output in current `crates/codex-router-cli/src/host.rs` | split | Host Command Adapter, Foreground Launch Composer, Operator Client, Update Outcome Observer; presentation moves only through Host Command Presenter | CLI remains the composition root; lifecycle policy stays below it |
+| Host output in current `crates/codex-router-cli/src/presentation/host.rs` | narrow | Host Command Presenter | typed lifecycle snapshots/events remain presentation inputs; no lifecycle mutation enters presentation |
+| Shared attachment added to the existing sessions runner | narrow | Direct Session Launch Projection; existing session selection remains unchanged | sessions continues to own discovery/selection while native attachment stays version-bounded |
+| Current Codex path, profile, app-server argv, and session argv projections | preserve and narrow | Codex Runtime Paths, Router Profile Projection, App-server Launch Projection, Direct Session Launch Projection | each upstream projection has one version-bounded reason to change |
+| Executable resolution, hashing, version read, and updater argv in current Codex executable integration | split | Managed Executable Identity and Official Updater Command | updater and before/after identity refer to the same managed installation |
+| Initialize, framing, version, Remote Control methods, and convergence in current Codex protocol integration | split | App-server Control Protocol and Remote Control Observation through the typed initialized experimental exchange | framing/capability policy is not duplicated; remote semantics remain independently testable |
+| Coordination paths, router/app-server endpoints, managed executable, and all deadlines in current host configuration aggregate | split | Foreground Launch Composer constructs immutable inputs; Host Singleton Authority, Codex Runtime Paths, Router Compatibility Observer, Managed App-server Child, and each operation owner consume only their fields | configuration values remain immutable inputs rather than a new policy owner or catch-all config layer |
+| Phase, router/app-server/remote conditions, recovery budget, lifecycle outcomes, snapshots, terminal classifications, and component errors in current host domain aggregate | split | Host Lifecycle State owns lifecycle dimensions, snapshot fields/invariants, and hosted-readiness derivation; Operator Message Contract owns wire-visible progress/terminal envelopes, classifications, codecs, and serialization of the lifecycle-owned snapshot; each component owns its local result and error types | no generic domain or error bucket becomes a second source of truth |
+| Lock, stale socket, inherited descriptor, and listener binding in current instance boundary | preserve and narrow | Host Singleton Authority | one retained authority handle reaches the one Lifecycle Owner Task before any child/probe |
+| Message schema, codecs, client connect/retry, accepted-stream I/O, and mutation classification in current operator-protocol aggregate | split and move | Operator Message Contract and Operator Connection Boundary remain in the host crate; Operator Client moves to the CLI; lifecycle request admission remains an operation of Lifecycle Owner Task | client/server transport share only the message contract; mutation policy has one owner |
+| Tokio child retention and exact process/group signalling in the current process aggregate | preserve and narrow | Process-group Child | process authority stays in retained handles and signal semantics remain caller-specific |
+| Router probing, compatibility classification, retained child, and shutdown in the current router aggregate | split | Router Compatibility Observer and Owned Router Child | compatible external routers are observed but never signalled; only retained children restart |
+| App-server launch state, endpoint exclusion, readiness, expected exit, and shutdown progression in the current app-server aggregate | split | Managed App-server Child, App-server Endpoint Guard, App-server Control Protocol, Remote Control Observation, App-server Shutdown Progression | exact-child ownership, one-signal shutdown, and native-versus-remote readiness remain distinct |
+| App-server and router restart orchestration in the current restart aggregate | split | Explicit App-server Restart and Explicit Router Restart | each operation owns one stop/guard/start/result sequence and neither creates another owner task |
+| Identity comparison, updater containment, teardown, telemetry boundary, and re-exec in the current update aggregate | split | Managed Codex Update Preparation, Changed-update Activation, Lifecycle Telemetry | children remain untouched until change is proved; activation preserves singleton authority |
+| Router command, app-server launch input, update deadlines, replacement command, and telemetry in current `HostDependencies` | split and collapse | the corresponding Owned Router Child, Managed App-server Child, Managed Codex Update Preparation, Changed-update Activation, and Lifecycle Telemetry inputs | the Lifecycle Owner Task receives explicit typed component inputs instead of a catch-all dependency bag |
+| Current runtime loop and its startup, lifecycle, operator, status, state, and update-flow helpers | preserve owner; split policy | Lifecycle Owner Task remains the only loop; Host Lifecycle State and the named restart/update/child/observation components own extracted policy; startup, admission, completion, recovery, status, and shutdown remain owner-task operations | no second task, queue, shared mutex, or lifecycle authority appears |
+| Current lifecycle telemetry adapter | preserve and narrow | Lifecycle Telemetry | low-cardinality redacted observations and bounded pre-exec shutdown stay separate from lifecycle decisions |
+| Current host crate root and public re-exports | narrow and collapse | thin crate façade over the named behavioral entrypoints and cross-crate types | the façade owns no parsing, state, transport, process, or lifecycle policy |
+| Current Shared Host umbrella integration tests and test-support fixtures | split | invariant-oriented proof owners for singleton authority, operator transport/admission, app-server shutdown, direct attachment, update activation/re-exec, presentation, and upstream protocol fixtures | proof is partitioned by observation boundary without replacing required real-runtime acceptance |
+
+Fields, results, and errors that remain closely coupled to one target owner may
+share a responsibility-named module. This ledger does not require a separate
+module for each row or type; it prevents an existing mixed aggregate from
+surviving merely under a new generic name.
+
+### Host command adapter
 
 Owner: existing `codex-router` CLI dispatch.
 
@@ -150,7 +414,7 @@ Responsibilities:
 
 It does not interpret Codex protocol messages or own lifecycle policy.
 
-### Host runtime
+### Lifecycle owner task
 
 Owner: one foreground `codex-router host` process.
 
@@ -202,9 +466,12 @@ host but cannot also become an app-server shutdown signal. Host SIGTERM and
 SIGHUP handlers likewise latch stop intent without relying on group-wide signal
 delivery. The runtime is the only component that signals retained children.
 
-### Router child owner
+### Router compatibility and owned-child boundaries
 
-Owner: host runtime when it started `codex-router serve`.
+The Router Compatibility Observer owns the static compatibility probe and its
+compatible, incompatible, authentication-required, and absent classifications.
+The Owned Router Child owns only a `codex-router serve` child retained by the
+Lifecycle Owner Task, including its bounded shutdown and restart result.
 
 On launch, it first probes the configured router endpoint using the static
 router compatibility contract. If a compatible router responds, the host
@@ -228,7 +495,7 @@ router it returns `not owned` with a recovery instruction. This preserves the
 repository rule against replacing a production router based only on endpoint
 or PID observations.
 
-### Router configuration projection
+### Router profile projection
 
 Owner: the typed `CodexRouterProfile` in `codex-router-codex`, extracted from
 its current CLI-owned location without changing its observable rendering.
@@ -249,10 +516,15 @@ The endpoint port is the same configured value used by router readiness and
 child ownership. A schema change in either projection changes this one owner,
 not two independent configuration paths.
 
-### App-server child owner
+### App-server launch, ownership, and observation boundaries
 
-Owner: `codex-router-host`; native integration supplied by
-`codex-router-codex`.
+The App-server Launch Projection owns supported upstream argv and router
+overrides. The App-server Endpoint Guard owns the fail-closed foreign-endpoint
+check. The Managed App-server Child owns only the retained child and its spawn
+identity. The App-server Control Protocol owns native initialize/version
+observation, and Remote Control Observation owns the bounded remote-status
+read. The Lifecycle Owner Task composes these boundaries but does not absorb
+their upstream protocol or endpoint policy.
 
 The owner resolves the standalone managed Codex executable, starts
 `app-server` on the conventional `unix://` endpoint, enables Remote Control,
@@ -260,16 +532,17 @@ and obtains the router model-provider root overrides from the typed router
 configuration projection. It retains the child handle and is the only
 component allowed to signal or restart that process.
 
-Native readiness reuses the public `codex app-server daemon version` probe
-against the native socket and requires the reported running version to match
-the child identity recorded at spawn. A second short-lived native connection
-enables the experimental API and reads `remoteControl/status/read`. If Remote
-Control is `connecting`, the probe waits up to the upstream 10-second readiness
-window for `remoteControl/status/changed`; it never polls in the background.
-`connected` is fully ready. `connecting` at timeout, `errored`, or `disabled`
-leaves the owned app-server available to local clients but returns a distinct
-Remote Control degraded result and next action. A later explicit status request
-performs a fresh observation.
+App-server Control Protocol opens one bounded native WebSocket connection,
+initializes it with the experimental capability, extracts the reported running
+version, and requires that version to match the child identity recorded at
+spawn. It then hands that same initialized exchange to Remote Control
+Observation for `remoteControl/status/read`. If Remote Control is `connecting`,
+the observation waits up to the upstream 10-second readiness window for
+`remoteControl/status/changed`; it never polls in the background. `connected`
+is fully ready. `connecting` at timeout, `errored`, or `disabled` leaves the
+owned app-server available to local clients but returns a distinct Remote
+Control degraded result and next action. A later explicit status request opens
+one fresh bounded observation exchange.
 
 The conventional native socket is derived from normal Codex home independently
 of the router root. Debug host runs therefore continue to see normal Codex
@@ -280,22 +553,28 @@ A pre-existing reachable app-server at the conventional socket is not adopted;
 host launch fails with an ownership conflict rather than killing or shadowing
 it.
 
-### Update coordinator
+### Managed update preparation and changed-update activation
 
-Owner: host runtime, invoked through the operator control boundary.
+Managed Codex Update Preparation owns executable identity-before, the official
+updater child, identity-after, and the decision that the installation failed,
+did not change, or changed. It does not own downloading logic; the official
+Codex updater is a true external child process. Its adapter invokes `update` on
+the same pre-update resolved managed Codex executable whose content identity
+was captured for comparison; it never resolves a separate `codex` through
+`PATH`. The post-update identity resolves that same managed executable path, so
+updater execution and before/after comparison refer to one installation.
 
-It owns the ordering of installer execution, executable identity comparison,
-conditional whole-host shutdown, foreground host re-exec, and result
-classification. It does not own downloading logic; the official Codex updater
-is a true external child process. The updater adapter invokes `update` on the
-same pre-update resolved managed Codex executable whose content identity was
-captured for comparison; it never resolves a separate `codex` through `PATH`.
-The post-update identity resolves that same managed executable path, so updater
-execution and before/after comparison refer to one installation.
+Changed-update Activation starts only after preparation proves a changed
+identity. It owns conditional whole-host shutdown, pre-exec convergence, and
+same-process foreground re-exec. Update Outcome Observer remains in the CLI and
+owns reconnecting to the replacement operator endpoint and classifying the
+four caller-visible results; neither component becomes another lifecycle
+authority.
 
-### Sessions attachment
+### Direct session launch projection
 
-Owner: existing `codex-router sessions` runner.
+Owner: Direct Session Launch Projection, consumed by the existing
+`codex-router sessions` runner.
 
 Its current profile and session-selection behavior remain authoritative. The
 launch edge changes by adding the pinned app-server remote endpoint to new and
@@ -305,24 +584,37 @@ resume invocations. It never routes through the host control socket.
 
 Allowed:
 
-- host CLI → host operator socket;
-- host runtime → router and app-server child-process boundaries;
-- host runtime → `codex-router-codex` typed integration boundaries;
-- host runtime and router serving → `codex-router-core` compatibility schema;
-- host runtime → official Codex updater;
-- host runtime → static router compatibility and native app-server readiness
-  probes;
-- sessions runner → native app-server socket;
+- Host Command Adapter → Operator Client or Foreground Launch Composer;
+- Foreground Launch Composer → Host Singleton Authority and Lifecycle Owner
+  Task entrypoint;
+- Host Singleton Authority → Lifecycle Owner Task with the retained lock and
+  listener authority handle;
+- Operator Client → Operator Message Contract;
+- Lifecycle Owner Task → Operator Connection Boundary for accepted-stream
+  transport work;
+- Operator Connection Boundary → Operator Message Contract;
+- Lifecycle Owner Task → Owned Router Child and Managed App-server Child;
+- Lifecycle Owner Task → `codex-router-codex` typed integration boundaries;
+- Router Compatibility Observer and router serving → `codex-router-core`
+  compatibility schema;
+- Managed Codex Update Preparation → Official Updater Command;
+- Lifecycle Owner Task → Router Compatibility Observer, App-server Control
+  Protocol, and Remote Control Observation;
+- Remote Control Observation → App-server Control Protocol initialized
+  experimental exchange;
+- sessions runner → Direct Session Launch Projection → native app-server socket;
 - app-server → router model endpoint;
 - local clients → native app-server socket.
 
 Forbidden:
 
 - local or remote Codex clients → host operator socket;
-- host runtime → Codex thread, turn, approval, pairing, or session stores;
-- host runtime → periodic Codex connection or thread polling;
+- Lifecycle Owner Task → Codex thread, turn, approval, pairing, or session
+  stores;
+- Lifecycle Owner Task → periodic Codex connection or thread polling;
 - sessions runner → host lifecycle policy;
-- host runtime → an external router PID or pre-existing app-server process;
+- Lifecycle Owner Task → an external router PID or pre-existing app-server
+  process;
 - updater → automatic scheduling or unattended activation;
 - app-server and host → shared writable lifecycle state;
 - host crate → CLI, proxy, state, auth, quota, selection, or secret-store
@@ -343,8 +635,9 @@ The host is a native asynchronous command within the existing Tokio CLI
 runtime. The current binary already enters through `#[tokio::main]`, while
 `run_async` sends commands without native async dispatch through a synchronous
 worker thread. `codex-router host` must join the native async dispatch set and
-await the host runtime directly; it must not wrap a synchronous lifecycle loop
-in `std::thread::spawn`, `tokio::task::spawn_blocking`, or a private runtime.
+await the Lifecycle Owner Task directly; it must not wrap a synchronous
+lifecycle loop in `std::thread::spawn`, `tokio::task::spawn_blocking`, or a
+private runtime.
 Existing synchronous commands do not need to change as part of this design.
 
 The long-lived runtime is one Tokio owner task. Its event loop uses async waits
@@ -457,6 +750,53 @@ operator socket, waiting within the existing host-start bound when the owner
 has not published it yet, or returns `owner present, operator unavailable`.
 Socket bind failure closes the descriptor and releases authority.
 
+The Foreground Launch Composer passes resolved coordination paths and an
+optional inherited-lock marker to Host Singleton Authority before any child
+spawn or executable/version probe. Host Singleton Authority either acquires
+ordinary ownership or consumes and validates the inherited descriptor,
+restores `CLOEXEC`, binds the operator listener, and returns the authority
+handle that enters the Lifecycle Owner Task. The CLI never implements lock,
+stale-socket, or descriptor policy itself.
+
+The Lifecycle Owner Task retains that authority handle and selects listener
+accept alongside child, signal, operation-completion, and shutdown events. For
+an accepted stream it invokes Operator Connection Boundary, which applies the
+finite transport-connection capacity, decodes one bounded Operator Message
+Contract request, and returns a decoded work event. The owner task alone
+classifies that event as read-only or mutating and decides `busy` or mutation
+admission. The boundary encodes bounded progress/terminal responses but never
+owns the listener pathname, singleton lock, lifecycle phase, or mutation
+policy. The returned work/result edges do not introduce a reverse component
+dependency, second accept loop, or second owner task.
+
+```text
+Foreground Launch Composer
+  → Host Singleton Authority
+  ← retained lock + listener authority handle
+  → Lifecycle Owner Task retains handle
+
+Operator Client
+  → Operator Message Contract encode
+  → owner-private Unix socket
+  → Lifecycle Owner Task selects listener accept
+  → Operator Connection Boundary admits one bounded transport task
+      → Operator Message Contract decode
+      ← decoded request event over the existing bounded owner channel
+  → Lifecycle Owner Task performs lifecycle request admission
+      ├─ read-only observation
+      ├─ busy
+      └─ one serialized mutation
+  ← typed progress/terminal event over the bounded response channel
+  ← Operator Connection Boundary encodes and writes response
+  ← Operator Client decodes terminal result
+```
+
+The arrows returning decoded work and responses are data/result edges through
+the shared message types and bounded channels, not reverse policy ownership.
+Host Singleton Authority alone owns bind/unlink/lock policy, Lifecycle Owner
+Task alone owns accept selection and lifecycle admission, and Operator
+Connection Boundary alone owns accepted-stream transport work.
+
 Requests are a small versioned internal enum: status, await current-host
 startup, restart app-server, update Codex, and restart owned router. Exactly one
 mutating request executes at a time; status may observe the current operation
@@ -469,10 +809,12 @@ immediately; V1 does not queue mutating commands. Router readiness is bounded
 to 10 seconds. Native app-server startup is bounded to 10 seconds, with each
 individual native probe bounded to 2 seconds. Remote Control convergence may
 then consume its pinned 10-second window, giving one 30-second host-start
-deadline. After old-connection EOF, the update CLI allows 10 seconds for the
-replacement operator socket and at most 40 seconds total for socket publication
-plus `await-host-start`. These host-owned deadlines compose with, rather than
-replace, the updater and child-shutdown deadlines below.
+deadline. After old-connection EOF, Update Outcome Observer allows one
+40-second total bound for connecting to the replacement operator socket,
+sending `await-host-start`, and receiving its terminal response. There is no
+separate socket-publication cutoff inside that bound. These host-owned
+deadlines compose with, rather than replace, the updater and child-shutdown
+deadlines below.
 
 Each terminal response carries the requested operation, terminal
 classification, live router/app-server observations, the separately observed
@@ -489,9 +831,8 @@ changed, and before it begins child shutdown. The update CLI retains only that
 progress classification in its own memory and continues reading the old
 connection. A pre-reexec shutdown failure returns a terminal
 replacement-failed response on that connection. EOF after successful teardown
-tells the CLI to reconnect to the replacement operator socket within its
-10-second publication bound and 40-second total post-EOF
-replacement-convergence bound.
+tells the CLI to reconnect to the replacement operator socket within the
+40-second total post-EOF replacement-convergence bound.
 
 After reconnecting, the CLI sends `await-host-start`; socket publication alone
 is not treated as readiness. The response carries the terminal ready, degraded,
@@ -517,6 +858,15 @@ conventional socket, its configured model path points at the router, and Remote
 Control reports `connected`. Native readiness with Remote Control still
 `connecting`, `errored`, or `disabled` is a visible partial result, not full
 success; the child remains owned and locally usable.
+
+App-server Control Protocol owns opening and bounding the native observation
+connection, initialization with experimental-capability negotiation, frame
+limits, request/response correlation, and version extraction. It returns that
+same typed initialized experimental exchange to Remote Control Observation.
+Remote Control Observation owns only `remoteControl/status/read`,
+`remoteControl/status/changed`, the connecting wait, and terminal remote
+classification; it neither opens another connection, duplicates framing, nor
+retains a background observer.
 
 One shutdown routine is shared by explicit restart, changed-version update,
 host cancellation, and cleanup after a failed launch. It signals only the
@@ -652,9 +1002,9 @@ no-socket result, after which the documented manual launch can acquire the
 lock.
 
 The short-lived caller sees EOF when the old operator connection closes,
-retries the operator socket within the 10-second publication and 40-second
-total convergence bounds, sends `await-host-start`, and returns its terminal
-snapshot. Continuous lock ownership and pre-exec socket removal make an old-host
+uses one 40-second bound to connect to the replacement operator socket, send
+`await-host-start`, and receive its terminal snapshot. Continuous lock
+ownership and pre-exec socket removal make an old-host
 response after EOF impossible. If automatic replacement fails but the owner
 manually launches a ready host within the same bound, the resulting `updated
 and host restarted` classification remains accurate. If teardown fails before
@@ -707,19 +1057,46 @@ Foreground Ctrl-C or termination latches stop intent in the same runtime. It
 rejects new mutations and changes the next transition of the active mutation;
 it is distinct from an operator subcommand connection closing.
 
-## Current and proposed call-path deltas
+## Historical baseline to accepted behavior call paths
+
+The detailed call paths in this section compare the pre-Shared-Host router
+baseline (`add19a34bf06eeb7d69f166e369f6d43ff8b5fd1`) with the accepted Shared
+Host behavior that is already present at the current implementation evidence
+commit (`a19d11ab3829a17abd77dd18bb23bced553c315e`). `CURRENT` below therefore
+means the historical pre-Shared-Host baseline, and `ACCEPTED` means behavior
+already implemented at current HEAD. These diagrams are behavioral history and
+acceptance references; they are not a list of runtime features still to build.
+
+The remaining current-HEAD-to-target work is responsibility-only. For every
+path below, runtime effects, results, error classifications, process topology,
+and caller-visible behavior remain unchanged:
+
+| Current-HEAD call path | Target responsibility edge | Disposition |
+| --- | --- | --- |
+| Router serving | existing CLI serve dispatch → existing router runtime; host observation → Router Compatibility Observer; owned start/stop → Owned Router Child | preserve serving; split observation from child ownership |
+| Sessions | existing session selection/runner → direct native attachment inputs | narrow attachment projection into Direct Session Launch Projection; preserve selection and child-exit behavior |
+| App-server launch and observation | lifecycle loop → mixed launch/protocol helpers → retained child and readiness result | Lifecycle Owner Task → App-server Endpoint Guard → Managed App-server Child → App-server Control Protocol → Remote Control Observation; split policy without another connection or owner task |
+| Status | operator exchange → lifecycle loop → mixed snapshot/probe helpers → typed status result | Operator Client → Operator Connection Boundary → Lifecycle Owner Task → Host Lifecycle State plus bounded observers → lifecycle-owned snapshot serialized by Operator Message Contract |
+| App-server restart | operator mutation → lifecycle loop → mixed restart/shutdown/launch helpers | Lifecycle Owner Task → Explicit App-server Restart → App-server Shutdown Progression / Endpoint Guard / Managed App-server Child / existing observation components |
+| Conditional update | operator mutation → lifecycle loop → mixed updater/teardown/re-exec helpers | Lifecycle Owner Task → Managed Codex Update Preparation → Changed-update Activation, with Update Outcome Observer on the caller side |
+| Router restart | operator mutation → lifecycle loop → mixed router restart helpers | Lifecycle Owner Task → Explicit Router Restart → Owned Router Child and Router Compatibility Observer |
+| Foreground stop | signal → lifecycle loop → mixed mutation arbitration and child cleanup helpers | Lifecycle Owner Task shutdown-convergence operation → active operation owner, App-server Shutdown Progression, and Owned Router Child |
+
+Only ownership and dependency visibility move, split, narrow, or collapse. No
+row adds a process, runtime hop, task, queue, state transition, result, error, or
+fallback.
 
 ### Router serving
 
 ```text
-CURRENT — model-serving path preserved
+CURRENT — pre-Shared-Host model-serving baseline
 codex-router serve
   → CLI parse
   → LoopbackRouterRuntime::start
   → loopback HTTP/SSE/WebSocket effects
   ← startup/runtime error or serving lifetime
 
-PROPOSED — compatibility route and owner edge added
+ACCEPTED — compatibility route and owner edge present at current HEAD
 codex-router serve
   → LoopbackRouterRuntime::start                  [unchanged]
   → GET /healthz
@@ -727,11 +1104,11 @@ codex-router serve
       ← identity/revision/version/auth-mode only [added result]
 
 codex-router host
-  → HostRuntime
-  → [probe configured router endpoint]
+  → Lifecycle Owner Task
+  → Router Compatibility Observer [probe configured router endpoint]
       ├─ compatible: record external, no process mutation
       ├─ incompatible listener: fail conflict, no process mutation
-      └─ absent: spawn current executable with `serve`
+      └─ absent: Owned Router Child spawns current executable with `serve`
                  → existing model Serve path above
                  → require compatible /healthz response
                  ← retain child handle and readiness/error
@@ -739,20 +1116,22 @@ codex-router host
 
 Evidence: current router CLI `crates/codex-router-cli/src/lib.rs`, serve dispatch
 near line 192 and current routes in `crates/codex-router-proxy/src/routes.rs`.
-The model-serving implementation is preservation-critical; current source has
-no health route, so the compatibility route is an explicit added edge.
+The model-serving implementation is preservation-critical; the named
+Pre-Shared-Host router baseline has no health route, so the compatibility route
+is an explicit added edge relative to that baseline and already exists in the
+current implementation evidence.
 
 ### Session launch
 
 ```text
-CURRENT
+CURRENT — pre-Shared-Host session launch
 codex-router sessions
   → session selection
   → ProcessSessionsCommandRunner
   → codex --profile codex-router [resume]
   ← child exit status
 
-PROPOSED — changed launch edge
+ACCEPTED — direct attachment present at current HEAD
 codex-router sessions
   → session selection                         [unchanged]
   → ProcessSessionsCommandRunner              [unchanged owner]
@@ -776,7 +1155,7 @@ an exact-installed-version external feasibility and acceptance edge, not a
 router implementation path:
 
 ```text
-PROPOSED — external client gate; no router-side predecessor
+ACCEPTED — external client gate; no router-side predecessor
 installed Codex Desktop
   → attempt native attachment to the conventional hosted Unix endpoint
       ├─ same hosted app-server/process observed
@@ -797,23 +1176,26 @@ either response would exceed the accepted ownership boundary.
 ### App-server lifecycle
 
 ```text
-CURRENT — no router-owned host predecessor
+CURRENT — pre-Shared-Host; no router-owned host predecessor
 manual/upstream daemon command
   → upstream lifecycle owner
   → detached app-server --listen unix://
   ← JSON lifecycle result
 
-PROPOSED
+ACCEPTED — hosted lifecycle present at current HEAD
 codex-router host
-  → HostRuntime
+  → Lifecycle Owner Task
   → validate router configuration and socket ownership
-  → CodexRouterProfile typed configuration
+  → Router Profile Projection
       → exact app-server root-override projection
-  → spawn managed codex app-server with those router overrides,
+  → App-server Launch Projection
+  → Managed App-server Child spawns managed codex app-server with those router overrides,
        --remote-control, --listen unix://
   → retain child handle
-  → public daemon-version readiness probe
-  → short-lived Remote Control status observation
+  → App-server Control Protocol opens one initialized experimental exchange
+      → extract and validate running version
+      → hand the same exchange to Remote Control Observation
+          → short-lived status read and bounded connecting wait
   ← full ready, local-ready/remote-degraded, or bounded launch error
 ```
 
@@ -822,37 +1204,42 @@ process only. Upstream app-server runtime behavior remains unchanged.
 
 ### Status observation
 
-There is no router-owned host-status predecessor for this path.
+The pre-Shared-Host baseline has no router-owned host-status predecessor for
+this accepted current-HEAD path.
 
 ```text
 codex-router host status
-  → CLI sends typed read-only request over operator socket
-  → HostRuntime snapshots current phase, child identities, budget, last outcome
-  → GET router /healthz ───────────────► compatible / incompatible / absent
-  → native app-server version probe ──► running identity / unavailable
-  → resolve installed managed Codex ──► installed identity / unavailable
+  → Operator Client sends typed read-only request over operator socket
+  → Lifecycle Owner Task asks Host Lifecycle State for the current snapshot
+  → Router Compatibility Observer /healthz ─► compatible / incompatible / absent
+  → App-server Control Protocol version ────► running identity / unavailable
+  → Managed Executable Identity ────────────► installed identity / unavailable
   → compare identities ───────────────► match / drift / unknown
-  → short-lived Remote Control read ──► connected / degraded / unavailable
-  ← derived status and next action; no lifecycle-state mutation
+  → Remote Control Observation ───────► connected / degraded / unavailable
+  ← Lifecycle Owner Task returns the status-observation result and next action;
+     no lifecycle-state mutation
 ```
 
 ### Explicit app-server restart
 
-There is no router-owned host-restart predecessor for this path.
+The pre-Shared-Host baseline has no router-owned host-restart predecessor for
+this accepted current-HEAD path.
 
 ```text
 codex-router host restart
-  → CLI sends typed mutation over operator socket
-  → HostRuntime serializes mutation
+  → Operator Client sends typed mutation over operator socket
+  → Lifecycle Owner Task serializes mutation
+  → Explicit App-server Restart owns the stop/guard/start sequence
   → current app-server child present?
       ├─ yes, prior shutdown timed out
-      │   → observe/reap retained handle without another signal
+      │   → App-server Shutdown Progression observes/reaps without another signal
       │       ├─ still running
       │       │     ──► blocked/manual cleanup; no replacement;
       │       │         budget unchanged
       │       └─ exited ──► clear token and progress; continue
       ├─ yes, not previously signalled
-      │   → install expected-exit token immediately before SIGTERM
+      │   → App-server Shutdown Progression installs expected-exit token
+      │     immediately before SIGTERM
       │   → run pinned 60/70-second shutdown routine
       │       ├─ old child still observed at timeout
       │       │     ──► retain signal progress; no replacement;
@@ -862,9 +1249,10 @@ codex-router host restart
   → foreground stop latched?
       ├─ yes ──► no replacement; no budget reset; finish host stop
       └─ no
-          → resolve currently installed managed executable
-          → spawn exactly one replacement on the conventional socket
-          → native and Remote Control probes
+          → Managed Executable Identity resolves the installed executable
+          → App-server Endpoint Guard rejects a foreign endpoint owner
+          → Managed App-server Child spawns exactly one replacement
+          → App-server Control Protocol and Remote Control Observation
               ├─ native ready + connected
               │     ──► full restart success; reset recovery budget
               ├─ native ready + remote degraded
@@ -889,15 +1277,15 @@ nested recovery.
 
 ### Conditional update
 
-There is no router-owned host-update predecessor for this path. Existing CLI
-telemetry initialization and normal-return flushing are preservation-critical;
-the proposed exec path adds the explicit pre-exec flush that normal RAII
-cleanup cannot provide.
+The pre-Shared-Host baseline has no router-owned host-update predecessor for
+this accepted current-HEAD path. Existing CLI telemetry initialization,
+normal-return flushing, and the current explicit pre-exec flush are
+preservation-critical because normal RAII cleanup cannot run across exec.
 
 ```text
 host update request
-  → serialize in HostRuntime
-  → record running executable identity
+  → Lifecycle Owner Task serializes the mutation
+  → Managed Codex Update Preparation records running executable identity
       ├─ failure or hash deadline
       │     ─► update failed without restart; relation unknown;
       │         keep current host/app-server running; retain and drain hash
@@ -921,7 +1309,8 @@ host update request
                       └─ changed ─► proved changed identity
 
 proved changed identity
-  → latch whole-host replacement; reject new mutations
+  → Changed-update Activation latches whole-host replacement;
+    Lifecycle Owner Task rejects new mutations
   → send `replacement-starting` to caller
   → stop app-server through the shared 60/70-second routine
       ├─ timeout ─► no re-exec; return replacement-failed on old connection;
@@ -967,13 +1356,14 @@ binary copy and provides no rollback path.
 
 ### Owned router restart
 
-There is no router-owned router-restart predecessor for this path.
+The pre-Shared-Host baseline has no router-owned router-restart predecessor for
+this accepted current-HEAD path.
 
 ```text
 codex-router host restart-router
-  → CLI sends typed request over operator socket
-  → HostRuntime serializes mutation
-  → RouterChildOwner examines retained ownership
+  → Operator Client sends typed request over operator socket
+  → Lifecycle Owner Task serializes mutation
+  → Explicit Router Restart asks Owned Router Child for retained ownership
       ├─ external router ──────► not-owned; no signal
       ├─ owned child running
       │   → SIGTERM exact child → bounded wait
@@ -981,7 +1371,7 @@ codex-router host restart-router
       │       └─ exited ───────► start once
       └─ owned child unavailable ─► start once
           → spawn current executable's `serve`
-          → probe configured endpoint
+          → Router Compatibility Observer probes the configured endpoint
           ← owned-running or owned-unavailable
 
 app-server condition and crash-recovery budget: intentionally unchanged
@@ -989,11 +1379,12 @@ app-server condition and crash-recovery budget: intentionally unchanged
 
 ### Foreground host stop
 
-There is no router-owned host predecessor for this path.
+The pre-Shared-Host baseline has no router-owned host predecessor for this
+accepted current-HEAD path.
 
 ```text
 terminal SIGINT, or host SIGTERM/SIGHUP
-  → HostRuntime only; owned children are in separate process groups
+  → Lifecycle Owner Task only; owned children are in separate process groups
   → latch stop intent; reject new mutations
   → active mutation arbitration
       ├─ updater active ─────► await exit or contain at existing deadline;
@@ -1126,16 +1517,16 @@ launchd, both outside this boundary.
 
 | User need | Requirement | Realization owner and boundary | Proof | Proof seam |
 | --- | --- | --- | --- | --- |
-| U1, U4, U6 | R1 | `codex-router-cli` dispatch, separate router-root/Codex-home projection, and existing presentation boundary plus `codex-router-host` foreground runtime; typed snapshots/events keep lifecycle state outside iocraft and indicatif | V1 | command transcript showing distinct `serve`, `sessions`, `host` jobs; debug/installed/explicit-root projection evidence; deterministic non-interactive output and interactive presentation evidence where used; crate dependency inspection |
-| U2, U10 | R2 | `codex-router-host` app-server owner using `codex-router-codex`; clients use upstream socket directly; runtime remains event-driven while idle | V2, V10 | process/socket observation proving no host traffic hop plus bounded idle-load observation |
-| U2, U4, U5 | R3 | Sessions runner remote launch; Desktop is an external exact-version native-attachment gate with no router fallback; Remote Control flag on child | V2, V4, V9 | socket/process correlation plus exact-version real CLI/Desktop/Remote Control acceptance |
-| U1, U3, U10 | R4 | `codex-router-host` router owner, `codex-router-core` compatibility schema, and `codex-router-codex` typed `CodexRouterProfile` root-override projection | V3 | projection equality, compatible/incompatible/auth-required/absent router cases, static/prohibited-data compatibility-response checks, router-condition transitions, router-restart isolation, and router request observation |
-| U5, U10 | R5 | AppServerChildOwner launch flag plus short-lived upstream status observation; Codex owns remote state | V4 | Connected/degraded fixture cases plus one real Remote Control attachment or operation against the same app-server before/after restart |
-| U6 | R6 | lock-authoritative operator-socket bootstrap, non-inheritable authority during ordinary child spawns, immediate busy result for overlapping mutations, 10-second router readiness, 10-second native startup with 2-second probes, 10-second Remote Control convergence, isolated child process groups, exact-child lifecycle tokens with retained shutdown progress, explicit app-server restart, one pinned 60/70-second app-server shutdown routine, and isolated router restart | V5 | pinned-upstream source verification for shutdown constants and signal semantics; fake-clock and real-Unix integration evidence for host policy, singleton, stale-socket recovery, child descriptor exclusion, and host-death relaunch; exact-release native restart evidence; immediate busy serialization, each startup bound, one-signal foreground cancellation, graceful/forced/timeout classification, no second signal after timeout, reaping after later exit, router-restart success/failure, cleanup order, status, and owned-router transition cases |
-| U7 | R7 | Four-outcome UpdateCoordinator, same-managed-executable updater invocation and identity comparison, single-flight retained executable hashing, retained/reaped updater ownership after timeout, no activation when identity comparison is unknown, transient pre-reexec caller progress, bounded exact-child cleanup, failed-steady pre-exec recovery, bounded best-effort pre-exec telemetry shutdown, narrowly inheritable and validated singleton lock, exec-failure release, foreground re-exec, 10-second operator-socket reconnect, 40-second total replacement convergence, and terminal `await-host-start` | V6 | four-result update matrix covering exact updater executable/argv despite differing PATH, initial/post-updater identity failure or timeout with hash drainage and child preservation, updater failure/no-change preservation, timeout reap and single-flight exclusion, teardown-failure retained authority and explicit restart, no second signal after teardown timeout, telemetry failure/timeout without a fifth result or blocked activation, continuous exclusion through clear/exec/restore descriptor handling, inherited-lock consumption, induced exec failure with later manual acquisition, socket-before-readiness convergence, and every replacement bound |
-| U8 | R8 | HostRuntime steady-state child-exit event, expected-exit token, one in-memory budget, no nested recovery during lifecycle operations, and native-ready reset independent of Remote Control status | V7 | deterministic child fixture proving one steady-state recovery, visible exhaustion, lifecycle-operation failure without nested recovery, and explicit restart reset for both Remote Control connected and degraded outcomes |
-| U3, U6–U10 | R9 | live derived mandatory status, optional U9 enrichments, typed host snapshots/progress rendered only by the existing CLI presentation layer, transient update-caller terminal classification, privacy filtering, and existing OTel export with bounded best-effort pre-exec shutdown | V8 | mandatory live availability/recovery status, deterministic non-interactive rendering plus iocraft/indicatif presentation coverage where used, optional match/drift/unknown and current-lifetime outcome comparison, update-caller result, Victoria trace/metric observation when exported, pre-exec telemetry success/failure/timeout observation, and secret/private-content canaries |
-| U10 | R10 | crate dependency prohibitions, separate router-root coordination and normal-Codex-home state projections, native Tokio CLI dispatch and async process/socket/signal/timeout boundaries, bounded channels, single-flight retained blocking and updater-child ownership, inert state-free stable lock artifact with authority excluded from ordinary children, and absence of host SQLx/state dependencies, replacement Codex APIs, lifecycle persistence/adoption, Codex-state mirrors, registries/databases, lifecycle polling, launchd, multi-generation handoff, routing policy, or cross-Mac machinery | V2, V8–V10 | Cargo/dependency and lifecycle-call-path inspection, debug/installed/explicit-root isolation, async-dispatch and bounded-channel enforcement, deterministic blocking work that outlives its caller deadline and proves single-flight ownership plus drainage or terminal process replacement, updater timeout reap and overlap exclusion, checks that blocking work is isolated and no guard crosses an await, stable-artifact content and child-descriptor checks, workspace-lint enforcement, direct upstream integration proof, and bounded idle observation |
+| U1, U4, U6 | R1 | Host Command Adapter and Foreground Launch Composer enter the Lifecycle Owner Task; Host Command Presenter consumes typed lifecycle snapshots/events outside iocraft and indicatif | V1 | command transcript showing distinct `serve`, `sessions`, `host` jobs; debug/installed/explicit-root projection evidence; deterministic non-interactive output and interactive presentation evidence where used; crate dependency inspection |
+| U2, U10 | R2 | App-server Launch Projection, App-server Endpoint Guard, and Managed App-server Child expose the native upstream socket directly; Lifecycle Owner Task remains event-driven while idle | V2, V10 | process/socket observation proving no host traffic hop plus bounded idle-load observation |
+| U2, U4, U5 | R3 | Direct Session Launch Projection attaches CLI; Desktop remains an external exact-version native-attachment gate; App-server Launch Projection enables Remote Control on the same child | V2, V4, V9 | socket/process correlation plus exact-version real CLI/Desktop/Remote Control acceptance |
+| U1, U3, U10 | R4 | Router Compatibility Observer and Owned Router Child consume the `codex-router-core` schema; Router Profile Projection supplies the app-server model path | V3 | projection equality, compatible/incompatible/auth-required/absent router cases, static/prohibited-data compatibility-response checks, router-condition transitions, router-restart isolation, and router request observation |
+| U5, U10 | R5 | App-server Launch Projection enables Remote Control; Remote Control Observation consumes App-server Control Protocol's initialized experimental exchange for the short-lived upstream read; Codex owns remote state | V4 | Connected/degraded fixture cases plus one real Remote Control attachment or operation against the same app-server before/after restart |
+| U6 | R6 | Host Singleton Authority, Operator Connection Boundary, Lifecycle Owner Task, Process-group Child, App-server Shutdown Progression, Explicit App-server Restart, and Explicit Router Restart own the bounded lifecycle | V5 | pinned-upstream source verification for shutdown constants and signal semantics; fake-clock and real-Unix integration evidence for host policy, singleton, stale-socket recovery, child descriptor exclusion, and host-death relaunch; exact-release native restart evidence; immediate busy serialization, each startup bound, one-signal foreground cancellation, graceful/forced/timeout classification, no second signal after timeout, reaping after later exit, router-restart success/failure, cleanup order, status, and owned-router transition cases |
+| U7 | R7 | Managed Codex Update Preparation owns identity/updater comparison; Changed-update Activation owns teardown and re-exec; Update Outcome Observer owns the one bounded post-EOF exchange and four caller-visible outcomes | V6 | four-result update matrix covering exact updater executable/argv despite differing PATH, initial/post-updater identity failure or timeout with hash drainage and child preservation, updater failure/no-change preservation, timeout reap and single-flight exclusion, teardown-failure retained authority and explicit restart, no second signal after teardown timeout, telemetry failure/timeout without a fifth result or blocked activation, continuous exclusion through clear/exec/restore descriptor handling, inherited-lock consumption, induced exec failure with later manual acquisition, socket-before-readiness convergence, and the 40-second total replacement bound |
+| U8 | R8 | Lifecycle Owner Task handles steady-state child-exit events and its automatic-recovery operation performs the single permitted replacement; Host Lifecycle State owns the one-attempt budget; App-server Shutdown Progression owns expected exits | V7 | deterministic child fixture proving one steady-state recovery, visible exhaustion, lifecycle-operation failure without nested recovery, and explicit restart reset for both Remote Control connected and degraded outcomes |
+| U3, U6, U7, U8, U9, U10 | R9 | the Lifecycle Owner Task's status-observation operation derives mandatory and optional fields; Host Command Presenter renders snapshots/progress; Update Outcome Observer reports cross-exec results; Lifecycle Telemetry owns redaction and existing OTel export | V8 | mandatory live availability/recovery status, deterministic non-interactive rendering plus iocraft/indicatif presentation coverage where used, optional match/drift/unknown and current-lifetime outcome comparison, update-caller result, Victoria trace/metric observation when exported, pre-exec telemetry success/failure/timeout observation, and secret/private-content canaries |
+| U10 | R10 | crate dependency prohibitions; Codex Runtime Paths separation; Lifecycle Owner Task native Tokio dispatch; Operator Connection Boundary bounded channels; retained Managed Executable Identity and updater ownership; Host Singleton Authority with child descriptor exclusion; no host SQLx/state dependency or prohibited subsystem | V2, V8–V10 | Cargo/dependency and lifecycle-call-path inspection, debug/installed/explicit-root isolation, async-dispatch and bounded-channel enforcement, deterministic blocking work that outlives its caller deadline and proves single-flight ownership plus drainage or terminal process replacement, updater timeout reap and overlap exclusion, checks that blocking work is isolated and no guard crosses an await, stable-artifact content and child-descriptor checks, workspace-lint enforcement, direct upstream integration proof, and bounded idle observation |
 
 Unit seams may replace process launch, executable identity, updater execution,
 clock/timeout, router compatibility, and app-server probes through narrow
