@@ -1,4 +1,4 @@
-//! Orthogonal in-memory lifecycle state owned by the runtime loop.
+//! Lifecycle-owner retained handles and transition bookkeeping.
 
 use super::*;
 
@@ -83,7 +83,7 @@ impl RuntimeState {
         result: &'static str,
         duration: std::time::Duration,
     ) {
-        crate::telemetry::record_lifecycle(
+        crate::lifecycle_telemetry::record_lifecycle(
             operation,
             result,
             duration,

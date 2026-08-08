@@ -1,4 +1,4 @@
-//! Exclusive host authority and owner-only operator socket binding.
+//! Exclusive host singleton authority and owner-only operator socket binding.
 
 use std::ffi::OsStr;
 use std::fs::File;

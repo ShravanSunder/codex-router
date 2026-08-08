@@ -1,4 +1,4 @@
-//! Bounded connection tasks and synchronous owner-loop request admission.
+//! Bounded connection tasks and synchronous lifecycle-request admission.
 
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -40,7 +40,7 @@ pub(super) struct ActiveUpdateActivation {
 }
 
 pub(super) struct ActiveStatusObservation {
-    pub(super) future: crate::runtime::status::StatusObservationFuture,
+    pub(super) future: crate::lifecycle_owner::status_observation::StatusObservationFuture,
     pub(super) responses: Vec<(OperatorRequest, mpsc::Sender<OperatorFrame>)>,
 }
 
@@ -156,7 +156,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 .as_ref()
                 .map(|child| child.identity().clone());
             *context.active_status = Some(ActiveStatusObservation {
-                future: crate::runtime::status::observe_status(
+                future: crate::lifecycle_owner::status_observation::observe_status(
                     context.config.clone(),
                     context.state.router_ownership,
                     context.router_child.is_some(),

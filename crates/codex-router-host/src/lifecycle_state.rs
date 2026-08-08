@@ -1,4 +1,4 @@
-//! Typed lifecycle dimensions and derived hosted readiness.
+//! Orthogonal lifecycle state, snapshot invariants, and readiness derivation.
 
 use serde::Deserialize;
 use serde::Serialize;

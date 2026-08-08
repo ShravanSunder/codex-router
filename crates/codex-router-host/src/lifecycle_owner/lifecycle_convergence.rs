@@ -1,4 +1,4 @@
-//! Retained lifecycle waits and cancellation-safe foreground convergence.
+//! Retained child waits and cancellation-safe lifecycle convergence.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -6,12 +6,12 @@ use std::pin::Pin;
 use super::*;
 
 pub(super) struct ShutdownContext<'a> {
-    pub(super) activation: &'a mut Option<operator::ActiveUpdateActivation>,
-    pub(super) active_update: &'a mut Option<operator::ActiveUpdate>,
+    pub(super) activation: &'a mut Option<request_admission::ActiveUpdateActivation>,
+    pub(super) active_update: &'a mut Option<request_admission::ActiveUpdate>,
     pub(super) pending_identity: &'a mut Option<codex_router_codex::ExecutableIdentityTask>,
     pub(super) retained_updater: &'a mut Option<ProcessGroupChild>,
-    pub(super) active_app_server_restart: &'a mut Option<operator::ActiveAppServerRestart>,
-    pub(super) active_router_restart: &'a mut Option<operator::ActiveRouterRestart>,
+    pub(super) active_app_server_restart: &'a mut Option<request_admission::ActiveAppServerRestart>,
+    pub(super) active_router_restart: &'a mut Option<request_admission::ActiveRouterRestart>,
     pub(super) recovery: &'a mut Option<RecoveryFuture>,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
@@ -94,7 +94,7 @@ pub(super) async fn wait_for_recovery(
 }
 
 pub(super) async fn wait_for_active_restart(
-    active_restart: &mut Option<operator::ActiveAppServerRestart>,
+    active_restart: &mut Option<request_admission::ActiveAppServerRestart>,
 ) -> crate::restart::AppServerRestartCompletion {
     match active_restart.as_mut() {
         Some(active) => active.future.as_mut().await,
@@ -103,7 +103,7 @@ pub(super) async fn wait_for_active_restart(
 }
 
 pub(super) async fn wait_for_active_router_restart(
-    active_restart: &mut Option<operator::ActiveRouterRestart>,
+    active_restart: &mut Option<request_admission::ActiveRouterRestart>,
 ) -> crate::restart::RouterRestartCompletion {
     match active_restart.as_mut() {
         Some(active) => active.future.as_mut().await,
@@ -112,7 +112,7 @@ pub(super) async fn wait_for_active_router_restart(
 }
 
 pub(super) async fn wait_for_active_update(
-    active_update: &mut Option<operator::ActiveUpdate>,
+    active_update: &mut Option<request_admission::ActiveUpdate>,
 ) -> crate::update::UpdatePreparation {
     match active_update.as_mut() {
         Some(active) => active.future.as_mut().await,
@@ -121,8 +121,8 @@ pub(super) async fn wait_for_active_update(
 }
 
 pub(super) async fn wait_for_status_observation(
-    active_status: &mut Option<operator::ActiveStatusObservation>,
-) -> status::StatusObservation {
+    active_status: &mut Option<request_admission::ActiveStatusObservation>,
+) -> status_observation::StatusObservation {
     match active_status.as_mut() {
         Some(active) => active.future.as_mut().await,
         None => std::future::pending().await,
@@ -130,7 +130,7 @@ pub(super) async fn wait_for_status_observation(
 }
 
 pub(super) async fn wait_for_update_activation(
-    activation: &mut Option<operator::ActiveUpdateActivation>,
+    activation: &mut Option<request_admission::ActiveUpdateActivation>,
 ) -> crate::update::UpdateActivationCompletion {
     match activation.as_mut() {
         Some(active) => active.future.as_mut().await,
@@ -182,7 +182,7 @@ pub(super) async fn settle_recovery_for_shutdown(
 }
 
 pub(super) async fn settle_active_restart_for_shutdown(
-    active_restart: &mut Option<operator::ActiveAppServerRestart>,
+    active_restart: &mut Option<request_admission::ActiveAppServerRestart>,
     app_server: &mut Option<AppServerChild>,
 ) {
     let Some(mut active) = active_restart.take() else {
@@ -194,7 +194,7 @@ pub(super) async fn settle_active_restart_for_shutdown(
 }
 
 pub(super) async fn settle_active_router_restart_for_shutdown(
-    active_restart: &mut Option<operator::ActiveRouterRestart>,
+    active_restart: &mut Option<request_admission::ActiveRouterRestart>,
     router: &mut Option<RouterChild>,
 ) {
     let Some(mut active) = active_restart.take() else {
@@ -206,7 +206,7 @@ pub(super) async fn settle_active_router_restart_for_shutdown(
 }
 
 pub(super) async fn settle_active_update_for_shutdown(
-    active_update: &mut Option<operator::ActiveUpdate>,
+    active_update: &mut Option<request_admission::ActiveUpdate>,
     pending_identity: &mut Option<codex_router_codex::ExecutableIdentityTask>,
     retained_updater: &mut Option<ProcessGroupChild>,
 ) {
@@ -220,7 +220,7 @@ pub(super) async fn settle_active_update_for_shutdown(
 }
 
 pub(super) async fn settle_update_activation_for_shutdown(
-    activation: &mut Option<operator::ActiveUpdateActivation>,
+    activation: &mut Option<request_admission::ActiveUpdateActivation>,
     app_server: &mut Option<AppServerChild>,
     router: &mut Option<RouterChild>,
 ) {

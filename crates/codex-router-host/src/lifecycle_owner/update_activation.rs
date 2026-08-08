@@ -1,16 +1,16 @@
-//! Changed-update state transitions applied by the single runtime owner.
+//! Changed-update activation transitions applied by the single lifecycle owner.
 
 use super::*;
 use crate::OperatorFrame;
 
 pub(super) struct PreparationContext<'a> {
     pub(super) preparation: crate::update::UpdatePreparation,
-    pub(super) active: operator::ActiveUpdate,
+    pub(super) active: request_admission::ActiveUpdate,
     pub(super) state: &'a mut RuntimeState,
     pub(super) dependencies: &'a HostDependencies,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
-    pub(super) activation: &'a mut Option<operator::ActiveUpdateActivation>,
+    pub(super) activation: &'a mut Option<request_admission::ActiveUpdateActivation>,
     pub(super) pending_identity: &'a mut Option<codex_router_codex::ExecutableIdentityTask>,
     pub(super) retained_updater: &'a mut Option<ProcessGroupChild>,
 }
@@ -36,7 +36,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                     operation: HostOperation::UpdateCodex,
                     classification: LifecycleOutcomeClassification::Failed,
                 });
-                operator::send_terminal_response(
+                request_admission::send_terminal_response(
                     context.active.response,
                     OperatorRequest::UpdateCodex,
                     TerminalClassification::Failed,
@@ -53,7 +53,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
             if context.router.is_some() {
                 context.state.router = RouterCondition::OwnedTransitioning;
             }
-            *context.activation = Some(operator::ActiveUpdateActivation {
+            *context.activation = Some(request_admission::ActiveUpdateActivation {
                 future: crate::update::activate_changed_update(
                     context.app_server.take(),
                     context.router.take(),
@@ -89,7 +89,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
         },
         context.active.started_at.elapsed(),
     );
-    operator::send_terminal_response(
+    request_admission::send_terminal_response(
         context.active.response,
         OperatorRequest::UpdateCodex,
         classification,
@@ -100,7 +100,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
 
 pub(super) struct ActivationContext<'a> {
     pub(super) completion: crate::update::UpdateActivationCompletion,
-    pub(super) active: operator::ActiveUpdateActivation,
+    pub(super) active: request_admission::ActiveUpdateActivation,
     pub(super) state: &'a mut RuntimeState,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
@@ -125,12 +125,12 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         };
         context.state.last_lifecycle_outcome = Some(LifecycleOutcome {
             operation: HostOperation::UpdateCodex,
-            classification: state::restart_lifecycle_classification(
+            classification: retained_lifecycle::restart_lifecycle_classification(
                 false,
                 context.completion.app_server_shutdown,
             ),
         });
-        operator::send_terminal_response(
+        request_admission::send_terminal_response(
             context.active.response,
             OperatorRequest::UpdateCodex,
             TerminalClassification::Failed,
@@ -152,7 +152,10 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         },
         context.active.started_at.elapsed(),
     );
-    lifecycle::flush_pre_exec_telemetry(context.dependencies.pre_exec_telemetry.clone()).await;
+    lifecycle_convergence::flush_pre_exec_telemetry(
+        context.dependencies.pre_exec_telemetry.clone(),
+    )
+    .await;
     context.instance.remove_operator_socket_for_exec()?;
     context.instance.prepare_lock_for_exec()?;
     let replacement_command = context.active.replacement_command.with_environment(

@@ -1,4 +1,4 @@
-//! Ordered router and app-server startup with retained-child cleanup on failure.
+//! Ordered router and app-server startup convergence with retained-child cleanup.
 
 use super::*;
 

@@ -1,4 +1,4 @@
-//! Single-owner event loop for foreground host lifecycle authority.
+//! Single lifecycle-owner task and foreground event loop.
 
 use std::sync::Arc;
 
@@ -39,15 +39,15 @@ use crate::TerminalClassification;
 use crate::probe_router;
 use crate::require_unowned_app_server_endpoint;
 
-mod lifecycle;
-mod operator;
-mod startup;
-mod state;
-mod status;
-mod update_flow;
+mod lifecycle_convergence;
+mod request_admission;
+mod retained_lifecycle;
+mod startup_convergence;
+mod status_observation;
+mod update_activation;
 
-use state::RuntimeState;
-use state::restart_lifecycle_classification;
+use retained_lifecycle::RuntimeState;
+use retained_lifecycle::restart_lifecycle_classification;
 
 const OPERATOR_QUEUE_CAPACITY: usize = 8;
 const OPERATOR_CONNECTION_LIMIT: usize = 8;
@@ -208,21 +208,28 @@ impl HostRuntime {
         let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
             .map_err(HostError::Signal)?;
         let (router_condition, mut router_child) =
-            startup::start_router(&config, dependencies.router_command.as_ref()).await?;
+            startup_convergence::start_router(&config, dependencies.router_command.as_ref())
+                .await?;
         if let Err(endpoint_error) = require_unowned_app_server_endpoint(
             config.app_server_socket(),
             config.deadlines().endpoint_inspection(),
         )
         .await
         {
-            startup::shutdown_owned_router_after_startup_failure(&mut router_child).await?;
+            startup_convergence::shutdown_owned_router_after_startup_failure(&mut router_child)
+                .await?;
             return Err(HostError::AppServerEndpoint(endpoint_error));
         }
         let (app_server, readiness) =
-            match startup::start_app_server(&config, dependencies.app_server.clone()).await {
+            match startup_convergence::start_app_server(&config, dependencies.app_server.clone())
+                .await
+            {
                 Ok(started) => started,
                 Err(error) => {
-                    startup::shutdown_owned_router_after_startup_failure(&mut router_child).await?;
+                    startup_convergence::shutdown_owned_router_after_startup_failure(
+                        &mut router_child,
+                    )
+                    .await?;
                     return Err(error);
                 }
             };
@@ -234,17 +241,17 @@ impl HostRuntime {
         );
 
         let (operator_sender, mut operator_receiver) =
-            mpsc::channel::<operator::OperatorWork>(OPERATOR_QUEUE_CAPACITY);
+            mpsc::channel::<request_admission::OperatorWork>(OPERATOR_QUEUE_CAPACITY);
         let mut connection_tasks = tokio::task::JoinSet::new();
         let connection_permits = Arc::new(Semaphore::new(OPERATOR_CONNECTION_LIMIT));
         let mut app_server = Some(app_server);
-        let mut recovery = None::<lifecycle::RecoveryFuture>;
+        let mut recovery = None::<lifecycle_convergence::RecoveryFuture>;
         let mut recovery_started_at = None::<tokio::time::Instant>;
-        let mut active_restart = None::<operator::ActiveAppServerRestart>;
-        let mut active_router_restart = None::<operator::ActiveRouterRestart>;
-        let mut active_update = None::<operator::ActiveUpdate>;
-        let mut active_update_activation = None::<operator::ActiveUpdateActivation>;
-        let mut active_status = None::<operator::ActiveStatusObservation>;
+        let mut active_restart = None::<request_admission::ActiveAppServerRestart>;
+        let mut active_router_restart = None::<request_admission::ActiveRouterRestart>;
+        let mut active_update = None::<request_admission::ActiveUpdate>;
+        let mut active_update_activation = None::<request_admission::ActiveUpdateActivation>;
+        let mut active_status = None::<request_admission::ActiveStatusObservation>;
         let mut pending_identity = None::<codex_router_codex::ExecutableIdentityTask>;
         let mut retained_updater = None::<ProcessGroupChild>;
         loop {
@@ -253,7 +260,7 @@ impl HostRuntime {
                     if let Ok((stream, _peer)) = accepted
                         && let Ok(permit) = Arc::clone(&connection_permits).try_acquire_owned()
                     {
-                        operator::spawn_operator_connection(
+                        request_admission::spawn_operator_connection(
                             &mut connection_tasks,
                             stream,
                             operator_sender.clone(),
@@ -266,7 +273,7 @@ impl HostRuntime {
                     let update_drain_active = pending_identity.is_some()
                         || retained_updater.is_some()
                         || active_status.is_some();
-                    operator::handle_operator_work(work, operator::OperatorRuntimeContext {
+                    request_admission::handle_operator_work(work, request_admission::OperatorRuntimeContext {
                         state: &mut state,
                         app_server: &mut app_server,
                         router_child: &mut router_child,
@@ -282,7 +289,7 @@ impl HostRuntime {
                 completed = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
                     let _completed_connection = completed;
                 }
-                restart_completion = lifecycle::wait_for_active_restart(&mut active_restart), if active_restart.is_some() => {
+                restart_completion = lifecycle_convergence::wait_for_active_restart(&mut active_restart), if active_restart.is_some() => {
                     let Some(active) = active_restart.take() else {
                         continue;
                     };
@@ -322,7 +329,7 @@ impl HostRuntime {
                         if restart_completion.succeeded { "succeeded" } else { "failed" },
                         active.started_at.elapsed(),
                     );
-                    operator::send_terminal_response(
+                    request_admission::send_terminal_response(
                         active.response,
                         OperatorRequest::RestartAppServer,
                         classification,
@@ -330,7 +337,7 @@ impl HostRuntime {
                         restart_completion.message,
                     );
                 }
-                router_restart_completion = lifecycle::wait_for_active_router_restart(&mut active_router_restart), if active_router_restart.is_some() => {
+                router_restart_completion = lifecycle_convergence::wait_for_active_router_restart(&mut active_router_restart), if active_router_restart.is_some() => {
                     let Some(active) = active_router_restart.take() else {
                         continue;
                     };
@@ -360,7 +367,7 @@ impl HostRuntime {
                         if router_restart_completion.succeeded { "succeeded" } else { "failed" },
                         active.started_at.elapsed(),
                     );
-                    operator::send_terminal_response(
+                    request_admission::send_terminal_response(
                         active.response,
                         OperatorRequest::RestartRouter,
                         classification,
@@ -368,11 +375,11 @@ impl HostRuntime {
                         router_restart_completion.message,
                     );
                 }
-                update_preparation = lifecycle::wait_for_active_update(&mut active_update), if active_update.is_some() => {
+                update_preparation = lifecycle_convergence::wait_for_active_update(&mut active_update), if active_update.is_some() => {
                     let Some(active) = active_update.take() else {
                         continue;
                     };
-                    update_flow::apply_preparation(update_flow::PreparationContext {
+                    update_activation::apply_preparation(update_activation::PreparationContext {
                         preparation: update_preparation,
                         active,
                         state: &mut state,
@@ -384,11 +391,11 @@ impl HostRuntime {
                         retained_updater: &mut retained_updater,
                     });
                 }
-                activation_completion = lifecycle::wait_for_update_activation(&mut active_update_activation), if active_update_activation.is_some() => {
+                activation_completion = lifecycle_convergence::wait_for_update_activation(&mut active_update_activation), if active_update_activation.is_some() => {
                     let Some(active) = active_update_activation.take() else {
                         continue;
                     };
-                    update_flow::apply_activation(update_flow::ActivationContext {
+                    update_activation::apply_activation(update_activation::ActivationContext {
                         completion: activation_completion,
                         active,
                         state: &mut state,
@@ -398,15 +405,15 @@ impl HostRuntime {
                         instance: &instance,
                     }).await?;
                 }
-                identity_result = lifecycle::wait_for_pending_identity(&mut pending_identity), if pending_identity.is_some() => {
+                identity_result = lifecycle_convergence::wait_for_pending_identity(&mut pending_identity), if pending_identity.is_some() => {
                     let _identity_result = identity_result;
                     pending_identity = None;
                 }
-                updater_result = lifecycle::wait_for_retained_updater(&mut retained_updater), if retained_updater.is_some() => {
+                updater_result = lifecycle_convergence::wait_for_retained_updater(&mut retained_updater), if retained_updater.is_some() => {
                     let _updater_result = updater_result;
                     retained_updater = None;
                 }
-                status_observation = lifecycle::wait_for_status_observation(&mut active_status), if active_status.is_some() => {
+                status_observation = lifecycle_convergence::wait_for_status_observation(&mut active_status), if active_status.is_some() => {
                     let Some(active) = active_status.take() else {
                         continue;
                     };
@@ -422,7 +429,7 @@ impl HostRuntime {
                         crate::HostedReadiness::Unavailable => TerminalClassification::Unavailable,
                     };
                     for (request, response) in active.responses {
-                        operator::send_terminal_response(
+                        request_admission::send_terminal_response(
                             response,
                             request,
                             classification,
@@ -431,7 +438,7 @@ impl HostRuntime {
                         );
                     }
                 }
-                exit = lifecycle::wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() && active_restart.is_none() => {
+                exit = lifecycle_convergence::wait_for_app_server_exit(&mut app_server), if app_server.is_some() && recovery.is_none() && active_restart.is_none() => {
                     let _exit_status = exit?;
                     app_server = None;
                     state.app_server = AppServerCondition::Absent;
@@ -447,7 +454,7 @@ impl HostRuntime {
                         };
                         state.app_server = AppServerCondition::Starting;
                         recovery_started_at = Some(tokio::time::Instant::now());
-                        recovery = Some(lifecycle::recovery_future(&config, dependencies.app_server.clone()));
+                        recovery = Some(lifecycle_convergence::recovery_future(&config, dependencies.app_server.clone()));
                     } else {
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
                             operation: HostOperation::RestartAppServer,
@@ -455,7 +462,7 @@ impl HostRuntime {
                         });
                     }
                 }
-                recovery_result = lifecycle::wait_for_recovery(&mut recovery), if recovery.is_some() => {
+                recovery_result = lifecycle_convergence::wait_for_recovery(&mut recovery), if recovery.is_some() => {
                     recovery = None;
                     match recovery_result {
                         Ok((recovered_child, recovered_readiness)) => {
@@ -494,7 +501,7 @@ impl HostRuntime {
                             .map_or(std::time::Duration::ZERO, |started_at| started_at.elapsed()),
                     );
                 }
-                router_exit = lifecycle::wait_for_router_exit(&mut router_child), if router_child.is_some() && active_router_restart.is_none() => {
+                router_exit = lifecycle_convergence::wait_for_router_exit(&mut router_child), if router_child.is_some() && active_router_restart.is_none() => {
                     let _exit_status = router_exit?;
                     router_child = None;
                     state.router = RouterCondition::Unavailable;
@@ -505,7 +512,7 @@ impl HostRuntime {
                 }
                 _ = interrupt.recv() => {
                     state.phase = HostPhase::Stopping;
-                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
+                    lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_update_activation,
                         active_update: &mut active_update,
                         pending_identity: &mut pending_identity,
@@ -520,7 +527,7 @@ impl HostRuntime {
                 }
                 _ = terminate.recv() => {
                     state.phase = HostPhase::Stopping;
-                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
+                    lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_update_activation,
                         active_update: &mut active_update,
                         pending_identity: &mut pending_identity,
@@ -535,7 +542,7 @@ impl HostRuntime {
                 }
                 _ = hangup.recv() => {
                     state.phase = HostPhase::Stopping;
-                    lifecycle::settle_for_shutdown(lifecycle::ShutdownContext {
+                    lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_update_activation,
                         active_update: &mut active_update,
                         pending_identity: &mut pending_identity,

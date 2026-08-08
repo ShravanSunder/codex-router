@@ -1,4 +1,4 @@
-//! Safe Tokio child ownership and exact-PID Unix signal primitives.
+//! Safe retained Tokio child and exact Unix process-group signal primitives.
 
 use std::ffi::OsStr;
 use std::ffi::OsString;

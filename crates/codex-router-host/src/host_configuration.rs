@@ -1,4 +1,4 @@
-//! Already-resolved paths and endpoints consumed by the host runtime.
+//! Validated immutable host paths, endpoints, and deadline inputs.
 
 use std::net::SocketAddr;
 use std::path::Path;
