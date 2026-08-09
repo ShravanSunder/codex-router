@@ -1121,7 +1121,10 @@ where
             } else {
                 None
             };
-            let session_affinity = match session_id {
+            let session_affinity = match session_affinity_lookup_session_id(
+                session_id,
+                affinity_owner_account_id.is_some(),
+            ) {
                 Some(session_id) => {
                     AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                         self.state_repository,
@@ -1190,7 +1193,7 @@ where
                 );
             }
 
-            if let Some(session_affinity) = session_affinity
+            if let Some(session_affinity) = session_affinity.as_ref()
                 && assessment_account_is_available(&assessment, session_affinity.account_id())
             {
                 let selected = select_affinity_owner(
@@ -1243,6 +1246,16 @@ where
             )
         })
     }
+}
+
+fn session_affinity_lookup_session_id(
+    session_id: Option<&str>,
+    previous_response_owner_resolved: bool,
+) -> Option<&str> {
+    if previous_response_owner_resolved {
+        return None;
+    }
+    session_id
 }
 
 fn account_id_from_affinity_owner_lookup(
@@ -2379,6 +2392,14 @@ mod tests {
     use crate::test_log_capture::capture_log_output;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn previous_response_owner_skips_lower_priority_session_affinity_lookup() {
+        assert_eq!(
+            super::session_affinity_lookup_session_id(Some("session-id"), true),
+            None
+        );
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum LeaseEvent {

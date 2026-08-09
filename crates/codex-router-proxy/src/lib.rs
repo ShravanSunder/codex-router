@@ -9942,6 +9942,7 @@ mod tests {
         )
         .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
 
+        tokio::time::pause();
         router
             .route_first_frame(
                 WebSocketHandshakeRequest::new()
@@ -9956,6 +9957,9 @@ mod tests {
             resolver.take_recorded(),
             vec![mapped.account_id().as_str().to_owned()]
         );
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tokio::time::resume();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let affinity = async_state
