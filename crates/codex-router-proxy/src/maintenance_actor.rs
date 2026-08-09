@@ -38,6 +38,8 @@ pub enum MaintenanceEnqueueResult {
 /// Coalescible maintenance hint.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MaintenanceHint {
+    /// Cleanup session-account affinities last observed before the cutoff.
+    CleanupStaleSessionAccountAffinities { stale_before_unix_seconds: u64 },
     /// Cleanup active-client leases older than the cutoff for one route band.
     CleanupStaleActiveClients {
         route_band: RouteBand,
@@ -70,6 +72,9 @@ struct QueuedMaintenanceHint {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum MaintenanceCoalescingKey {
+    GlobalClass {
+        maintenance_class: &'static str,
+    },
     RouteBandClass {
         route_band: RouteBand,
         maintenance_class: &'static str,
@@ -136,6 +141,12 @@ impl MaintenanceRepository for AsyncSqliteStateStore {
     ) -> BoxFuture<'a, Result<(), MaintenanceRepositoryError>> {
         Box::pin(async move {
             match hint {
+                MaintenanceHint::CleanupStaleSessionAccountAffinities {
+                    stale_before_unix_seconds,
+                } => {
+                    self.purge_session_account_affinities_before(stale_before_unix_seconds)
+                        .await?;
+                }
                 MaintenanceHint::CleanupStaleActiveClients {
                     route_band,
                     stale_before_unix_seconds,
@@ -359,6 +370,11 @@ impl MaintenanceActor {
 impl MaintenanceHint {
     fn coalescing_key(&self) -> MaintenanceCoalescingKey {
         match self {
+            Self::CleanupStaleSessionAccountAffinities { .. } => {
+                MaintenanceCoalescingKey::GlobalClass {
+                    maintenance_class: self.maintenance_class(),
+                }
+            }
             Self::RefreshActiveSessionRollups {
                 route_band,
                 interval_start_unix_seconds,
@@ -383,6 +399,9 @@ impl MaintenanceHint {
 
     const fn maintenance_class(&self) -> &'static str {
         match self {
+            Self::CleanupStaleSessionAccountAffinities { .. } => {
+                "stale_session_account_affinity_cleanup"
+            }
             Self::CleanupStaleActiveClients { .. } => "stale_active_client_cleanup",
             Self::RefreshActiveSessionRollups { .. } => "active_session_rollup_refresh",
             Self::ApplyActiveSessionRetention { .. } => "active_session_retention",
@@ -392,6 +411,7 @@ impl MaintenanceHint {
 
     const fn route_band_label(&self) -> &'static str {
         match self {
+            Self::CleanupStaleSessionAccountAffinities { .. } => "all",
             Self::CleanupStaleActiveClients { route_band, .. }
             | Self::RefreshActiveSessionRollups { route_band, .. }
             | Self::ApplyActiveSessionRetention { route_band, .. }
@@ -478,7 +498,10 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
+    use codex_router_core::ids::AccountId;
     use codex_router_core::routes::RouteBand;
+    use codex_router_state::session_account_affinity::SessionAccountAffinity;
+    use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
     use futures_util::future::BoxFuture;
     use tokio::sync::Notify;
@@ -584,6 +607,96 @@ mod tests {
 
         repository.release.notify_waiters();
         actor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_affinity_cleanup_hints_coalesce_without_cutoff_timestamp() {
+        let repository = Arc::new(BlockingMaintenanceRepository::default());
+        let actor = MaintenanceActor::start(repository.clone(), 8);
+
+        assert_eq!(
+            actor.try_enqueue(MaintenanceHint::CleanupStaleSessionAccountAffinities {
+                stale_before_unix_seconds: 1_000,
+            }),
+            MaintenanceEnqueueResult::Enqueued
+        );
+        tokio::time::timeout(Duration::from_secs(1), repository.entered.notified())
+            .await
+            .unwrap_or_else(|_elapsed| panic!("actor should begin session affinity cleanup"));
+        assert_eq!(
+            actor.try_enqueue(MaintenanceHint::CleanupStaleSessionAccountAffinities {
+                stale_before_unix_seconds: 2_000,
+            }),
+            MaintenanceEnqueueResult::Coalesced
+        );
+
+        repository.release.notify_waiters();
+        actor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_affinity_cleanup_hint_deletes_old_sqlite_rows() {
+        let database_path = test_database_path("session_affinity_cleanup_hint");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("test state store should open: {error}"));
+        let old_affinity = SessionAccountAffinity::new(
+            "session-old",
+            AccountId::new("acct_old")
+                .unwrap_or_else(|error| panic!("test account should validate: {error}")),
+            999,
+        );
+        let cutoff_affinity = SessionAccountAffinity::new(
+            "session-cutoff",
+            AccountId::new("acct_cutoff")
+                .unwrap_or_else(|error| panic!("test account should validate: {error}")),
+            1_000,
+        );
+        for affinity in [&old_affinity, &cutoff_affinity] {
+            AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(
+                &store, affinity,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("test affinity should persist: {error}"));
+        }
+        let actor = MaintenanceActor::start(store.clone(), 8);
+
+        assert_eq!(
+            actor.try_enqueue(MaintenanceHint::CleanupStaleSessionAccountAffinities {
+                stale_before_unix_seconds: 1_000,
+            }),
+            MaintenanceEnqueueResult::Enqueued
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let old = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+                    &store,
+                    old_affinity.session_id(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("old affinity lookup should succeed: {error}"));
+                if old.is_none() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("maintenance actor should delete the old affinity"));
+
+        assert_eq!(
+            AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+                &store,
+                cutoff_affinity.session_id(),
+            )
+            .await,
+            Ok(Some(cutoff_affinity))
+        );
+        actor.shutdown().await;
+        store
+            .close()
+            .await
+            .unwrap_or_else(|error| panic!("test state store should close: {error}"));
     }
 
     #[tokio::test]
