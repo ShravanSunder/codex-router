@@ -1543,6 +1543,9 @@ launchd, both outside this boundary.
   router ownership, recovery budget, readiness, and the low-cardinality
   installed-versus-running relation. Remote Control observation events carry
   its bounded server name and environment identifier.
+- Routine periodic router maintenance updates low-cardinality metrics without
+  emitting logs. Maintenance logs are reserved for explicit degraded states;
+  normal processing and coalescing remain silent.
 - Managed app-server stderr has one reader owned by the child-process adapter.
   It classifies known OAuth, model-schema, and Remote Control failures, emits
   only the child source and bounded class, and discards every raw line. These

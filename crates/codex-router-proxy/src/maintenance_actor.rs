@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::telemetry::emit_maintenance_lag_observed;
+use crate::telemetry::record_maintenance_lag_observed;
 
 /// Default bounded capacity for coalesced maintenance hints.
 pub const MAINTENANCE_QUEUE_CAPACITY: usize = 32;
@@ -260,7 +260,7 @@ impl MaintenanceActor {
     pub fn try_enqueue(&self, hint: MaintenanceHint) -> MaintenanceEnqueueResult {
         let enqueued_at = Instant::now();
         if self.closed.load(Ordering::Acquire) {
-            emit_maintenance_lag_observed(
+            record_maintenance_lag_observed(
                 hint.maintenance_class(),
                 hint.route_band_label(),
                 "degraded",
@@ -279,7 +279,7 @@ impl MaintenanceActor {
                         error.message = %error,
                         "codex_router.maintenance_pending_set_lock_poisoned"
                     );
-                    emit_maintenance_lag_observed(
+                    record_maintenance_lag_observed(
                         hint.maintenance_class(),
                         hint.route_band_label(),
                         "degraded",
@@ -289,7 +289,7 @@ impl MaintenanceActor {
                 }
             };
             if let Some(existing_enqueued_at) = pending.get(&coalescing_key) {
-                emit_maintenance_lag_observed(
+                record_maintenance_lag_observed(
                     hint.maintenance_class(),
                     hint.route_band_label(),
                     "coalesced",
@@ -307,7 +307,7 @@ impl MaintenanceActor {
             Ok(()) => MaintenanceEnqueueResult::Enqueued,
             Err(mpsc::error::TrySendError::Full(_hint)) => {
                 self.remove_pending_key(&coalescing_key);
-                emit_maintenance_lag_observed(
+                record_maintenance_lag_observed(
                     hint.maintenance_class(),
                     hint.route_band_label(),
                     "degraded",
@@ -318,7 +318,7 @@ impl MaintenanceActor {
             Err(mpsc::error::TrySendError::Closed(_hint)) => {
                 self.remove_pending_key(&coalescing_key);
                 self.closed.store(true, Ordering::Release);
-                emit_maintenance_lag_observed(
+                record_maintenance_lag_observed(
                     hint.maintenance_class(),
                     hint.route_band_label(),
                     "degraded",
@@ -440,7 +440,7 @@ async fn run_maintenance_actor(
                 let QueuedMaintenanceHint { hint, enqueued_at } = queued_hint;
                 let hint_for_cleanup = hint.clone();
                 let coalescing_key = hint.coalescing_key();
-                emit_maintenance_lag_observed(
+                record_maintenance_lag_observed(
                     hint.maintenance_class(),
                     hint.route_band_label(),
                     "processing",
@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maintenance_hint_coalescing_emits_scrubbed_telemetry() {
+    async fn maintenance_hint_coalescing_does_not_emit_a_warning_log() {
         let repository = Arc::new(BlockingMaintenanceRepository::default());
         let actor = MaintenanceActor::start(repository.clone(), 8);
         let hint = refresh_rollups_hint();
@@ -563,10 +563,10 @@ mod tests {
             assert_eq!(actor.try_enqueue(hint), MaintenanceEnqueueResult::Coalesced);
         });
 
-        assert!(rendered_log.contains("codex_router.maintenance_lag_observed"));
-        assert!(rendered_log.contains("active_session_rollup_refresh"));
-        assert!(rendered_log.contains("responses"));
-        assert!(rendered_log.contains("coalesced"));
+        assert!(
+            rendered_log.is_empty(),
+            "normal coalescing emitted a warning log: {rendered_log}"
+        );
         assert!(!rendered_log.contains("raw-provider-body-canary"));
         assert!(!rendered_log.contains("sk-live-token-canary"));
         assert!(!rendered_log.contains("Authorization"));
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coalesced_maintenance_lag_uses_original_enqueue_age() {
+    async fn coalesced_maintenance_remains_silent_after_waiting() {
         let repository = Arc::new(BlockingMaintenanceRepository::default());
         let actor = MaintenanceActor::start(repository.clone(), 8);
         let hint = refresh_rollups_hint();
@@ -718,10 +718,9 @@ mod tests {
             assert_eq!(actor.try_enqueue(hint), MaintenanceEnqueueResult::Coalesced);
         });
 
-        assert!(rendered_log.contains("codex_router.maintenance_lag_observed"));
         assert!(
-            !rendered_log.contains("maintenance.lag_millis=0"),
-            "coalesced maintenance lag must be measured from original enqueue time: {rendered_log}"
+            rendered_log.is_empty(),
+            "normal coalescing emitted a warning log: {rendered_log}"
         );
 
         repository.release.notify_waiters();
@@ -812,7 +811,7 @@ mod tests {
             );
         });
 
-        assert!(rendered_log.contains("codex_router.maintenance_lag_observed"));
+        assert!(rendered_log.contains("codex_router.maintenance_degraded"));
         assert!(rendered_log.contains("active_session_history_compaction"));
         assert!(rendered_log.contains("responses"));
         assert!(rendered_log.contains("degraded"));

@@ -283,8 +283,8 @@ pub fn emit_snapshot_freshness_observed(
     );
 }
 
-/// Records and emits a scrubbed maintenance lag observation.
-pub fn emit_maintenance_lag_observed(
+/// Records maintenance lag and logs only explicit degradation.
+pub fn record_maintenance_lag_observed(
     maintenance_class: &'static str,
     route_band: &'static str,
     maintenance_state: &'static str,
@@ -302,13 +302,15 @@ pub fn emit_maintenance_lag_observed(
                 KeyValue::new("maintenance.state", maintenance_state),
             ],
         );
-    tracing::warn!(
-        maintenance.class = maintenance_class,
-        route_band = route_band,
-        maintenance.state = maintenance_state,
-        maintenance.lag_millis = lag_millis,
-        "codex_router.maintenance_lag_observed"
-    );
+    if maintenance_state == "degraded" {
+        tracing::warn!(
+            maintenance.class = maintenance_class,
+            route_band = route_band,
+            maintenance.state = maintenance_state,
+            maintenance.lag_millis = lag_millis,
+            "codex_router.maintenance_degraded"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -505,7 +507,7 @@ mod tests {
     #[test]
     fn emitted_maintenance_lag_log_excludes_forbidden_values() {
         let rendered_log = capture_log_output(|| {
-            super::emit_maintenance_lag_observed(
+            super::record_maintenance_lag_observed(
                 "active_session_rollup_refresh",
                 "responses",
                 "degraded",
@@ -513,7 +515,7 @@ mod tests {
             );
         });
 
-        assert!(rendered_log.contains("codex_router.maintenance_lag_observed"));
+        assert!(rendered_log.contains("codex_router.maintenance_degraded"));
         assert!(rendered_log.contains("active_session_rollup_refresh"));
         assert!(rendered_log.contains("responses"));
         assert!(rendered_log.contains("degraded"));
@@ -524,5 +526,24 @@ mod tests {
         assert!(!rendered_log.contains("friendly account label"));
         assert!(!rendered_log.contains("reservation_raw_canary"));
         assert!(!rendered_log.contains("/Users/shravansunder"));
+    }
+
+    #[test]
+    fn healthy_maintenance_observations_do_not_emit_logs() {
+        for maintenance_state in ["processing", "coalesced"] {
+            let rendered_log = capture_log_output(|| {
+                super::record_maintenance_lag_observed(
+                    "active_session_rollup_refresh",
+                    "responses",
+                    maintenance_state,
+                    7,
+                );
+            });
+
+            assert!(
+                rendered_log.is_empty(),
+                "healthy {maintenance_state} observation emitted a log: {rendered_log}"
+            );
+        }
     }
 }
