@@ -5908,9 +5908,43 @@ exit 42
         assert_eq!(command.format, crate::sessions::SessionsFormat::Table);
         assert!(!command.last);
         assert!(!command.new);
+        assert!(!command.local);
         assert_eq!(command.limit, 100);
         assert!(!command.dry_run);
         assert!(command.codex_args.is_empty());
+    }
+
+    #[test]
+    fn sessions_local_new_dry_run_keeps_router_profile_without_remote_attachment() {
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--local"),
+            OsString::from("--new"),
+            OsString::from("--dry-run"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.6-luna"),
+            OsString::from("--yolo"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new_start_new();
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &CliContext::new(vec![]),
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert_eq!(
+            String::from_utf8(stdout).unwrap_or_else(|error| panic!("stdout utf8: {error}")),
+            "codex --profile codex-router --model gpt-5.6-luna --yolo\n"
+        );
     }
 
     #[test]
@@ -6517,6 +6551,51 @@ exit 42
                     .join("app-server-control/app-server-control.sock")
                     .display()
             )
+        );
+    }
+
+    #[test]
+    fn sessions_local_last_dry_run_reads_codex_state_without_remote_attachment() {
+        let test_root = TestRoot::new("sessions-local-last-dry-run");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "LOCAL_SESSION",
+            &[CodexStateThreadFixture::new(
+                "thread-local",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                2000,
+            )],
+        );
+
+        let output = run_cli(
+            [
+                "sessions",
+                "--local",
+                "--any",
+                "--provider",
+                "codex-router",
+                "--last",
+                "--dry-run",
+            ],
+            CliContext::new(vec![
+                ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+                ("HOME".to_owned(), test_root.path().display().to_string()),
+            ])
+            .with_current_dir(project),
+        );
+
+        assert_eq!(
+            output.stdout,
+            "codex --profile codex-router resume -- thread-local\n"
         );
     }
 

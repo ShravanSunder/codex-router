@@ -133,6 +133,8 @@ pub struct SessionsCommand {
     pub last: bool,
     /// Launch a new Codex session instead of resuming one.
     pub new: bool,
+    /// Launch Codex locally instead of attaching to the hosted app-server.
+    pub local: bool,
     /// Maximum matching sessions to load.
     pub limit: usize,
     /// Print the command that would be launched instead of executing it.
@@ -196,6 +198,7 @@ impl SessionsCommand {
             format: parsed.format,
             last: parsed.last,
             new: parsed.new,
+            local: parsed.local,
             limit: parsed.limit.unwrap_or(DEFAULT_SESSION_RECORD_LIMIT),
             dry_run: parsed.dry_run,
             codex_args: parsed.codex_args,
@@ -244,6 +247,8 @@ struct ClapSessionsCommand {
     #[arg(long, conflicts_with_all = ["list", "last"])]
     new: bool,
     #[arg(long)]
+    local: bool,
+    #[arg(long)]
     limit: Option<usize>,
     #[arg(long)]
     dry_run: bool,
@@ -269,10 +274,8 @@ pub fn run_sessions_command<W: Write>(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
-    let codex_paths = codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?);
-    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
-        .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
-    let mut runner = ProcessSessionsCommandRunner { app_server_socket };
+    let launch_target = sessions_launch_target(&command, context)?;
+    let mut runner = ProcessSessionsCommandRunner { launch_target };
     let mut picker = TerminalSessionsPicker::for_context(context);
     run_sessions_command_with_dependencies(stdout, command, context, &mut runner, &mut picker)
 }
@@ -285,14 +288,12 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
-    let codex_paths = codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?);
-    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
-        .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
+    let launch_target = sessions_launch_target(&command, context)?;
     if command.new {
-        return run_new_session(stdout, command, &app_server_socket, runner);
+        return run_new_session(stdout, command, &launch_target, runner);
     }
     if command.last {
-        return run_last_session(stdout, command, context, &app_server_socket, runner);
+        return run_last_session(stdout, command, context, &launch_target, runner);
     }
     if !command.list {
         return run_interactive_session(command, context, runner, picker);
@@ -301,6 +302,49 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
         SessionsFormat::Json => write_sessions_json(stdout, command, context),
         SessionsFormat::Table => write_sessions_table(stdout, command, context),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionsLaunchTarget {
+    Hosted(PathBuf),
+    Local,
+}
+
+impl SessionsLaunchTarget {
+    fn new_launch(&self, codex_args: &[OsString]) -> codex_router_codex::SessionLaunch {
+        match self {
+            Self::Hosted(app_server_socket) => {
+                codex_router_codex::SessionLaunch::new(app_server_socket, codex_args)
+            }
+            Self::Local => codex_router_codex::SessionLaunch::local(codex_args),
+        }
+    }
+
+    fn resume_launch(
+        &self,
+        codex_args: &[OsString],
+        session_id: &str,
+    ) -> codex_router_codex::SessionLaunch {
+        match self {
+            Self::Hosted(app_server_socket) => {
+                codex_router_codex::SessionLaunch::resume(app_server_socket, codex_args, session_id)
+            }
+            Self::Local => codex_router_codex::SessionLaunch::resume_local(codex_args, session_id),
+        }
+    }
+}
+
+fn sessions_launch_target(
+    command: &SessionsCommand,
+    context: &CliContext,
+) -> Result<SessionsLaunchTarget, SessionsCommandError> {
+    if command.local {
+        return Ok(SessionsLaunchTarget::Local);
+    }
+    let codex_paths = codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?);
+    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
+        .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
+    Ok(SessionsLaunchTarget::Hosted(app_server_socket))
 }
 
 fn write_sessions_json<W: Write>(
@@ -670,7 +714,7 @@ fn run_last_session<W: Write>(
     stdout: &mut W,
     command: SessionsCommand,
     context: &CliContext,
-    app_server_socket: &Path,
+    launch_target: &SessionsLaunchTarget,
     runner: &mut impl SessionsCommandRunner,
 ) -> Result<(), SessionsCommandError> {
     let dry_run = command.dry_run;
@@ -686,7 +730,7 @@ fn run_last_session<W: Write>(
     validate_resume_session_id(&record.session_id)?;
 
     if dry_run {
-        write_codex_resume_dry_run(stdout, app_server_socket, &codex_args, &record.session_id)?;
+        write_codex_resume_dry_run(stdout, launch_target, &codex_args, &record.session_id)?;
         return Ok(());
     }
 
@@ -696,11 +740,11 @@ fn run_last_session<W: Write>(
 fn run_new_session<W: Write>(
     stdout: &mut W,
     command: SessionsCommand,
-    app_server_socket: &Path,
+    launch_target: &SessionsLaunchTarget,
     runner: &mut impl SessionsCommandRunner,
 ) -> Result<(), SessionsCommandError> {
     if command.dry_run {
-        write_codex_new_dry_run(stdout, app_server_socket, &command.codex_args)?;
+        write_codex_new_dry_run(stdout, launch_target, &command.codex_args)?;
         return Ok(());
     }
 
@@ -709,27 +753,25 @@ fn run_new_session<W: Write>(
 
 fn write_codex_new_dry_run<W: Write>(
     stdout: &mut W,
-    app_server_socket: &Path,
+    launch_target: &SessionsLaunchTarget,
     codex_args: &[OsString],
 ) -> Result<(), SessionsCommandError> {
     write!(stdout, "codex").map_err(SessionsCommandError::Stdout)?;
-    write_codex_args(
-        stdout,
-        &codex_router_codex::SessionLaunch::new(app_server_socket, codex_args).arguments(),
-    )?;
+    write_codex_args(stdout, &launch_target.new_launch(codex_args).arguments())?;
     writeln!(stdout).map_err(SessionsCommandError::Stdout)
 }
 
 fn write_codex_resume_dry_run<W: Write>(
     stdout: &mut W,
-    app_server_socket: &Path,
+    launch_target: &SessionsLaunchTarget,
     codex_args: &[OsString],
     session_id: &str,
 ) -> Result<(), SessionsCommandError> {
     write!(stdout, "codex").map_err(SessionsCommandError::Stdout)?;
     write_codex_args(
         stdout,
-        &codex_router_codex::SessionLaunch::resume(app_server_socket, codex_args, session_id)
+        &launch_target
+            .resume_launch(codex_args, session_id)
             .arguments(),
     )?;
     writeln!(stdout).map_err(SessionsCommandError::Stdout)
@@ -817,12 +859,12 @@ pub(crate) trait SessionsCommandRunner {
 }
 
 struct ProcessSessionsCommandRunner {
-    app_server_socket: PathBuf,
+    launch_target: SessionsLaunchTarget,
 }
 
 impl SessionsCommandRunner for ProcessSessionsCommandRunner {
     fn run_codex_new(&mut self, codex_args: &[OsString]) -> Result<(), SessionsCommandError> {
-        let launch = codex_router_codex::SessionLaunch::new(&self.app_server_socket, codex_args);
+        let launch = self.launch_target.new_launch(codex_args);
         let status = Command::new("codex")
             .args(launch.arguments())
             .status()
@@ -841,11 +883,7 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         codex_args: &[OsString],
         session_id: &str,
     ) -> Result<(), SessionsCommandError> {
-        let launch = codex_router_codex::SessionLaunch::resume(
-            &self.app_server_socket,
-            codex_args,
-            session_id,
-        );
+        let launch = self.launch_target.resume_launch(codex_args, session_id);
         let status = Command::new("codex")
             .args(launch.arguments())
             .status()
