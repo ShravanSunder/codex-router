@@ -452,7 +452,7 @@ mod tests {
         );
         assert_eq!(
             endpoint.url_for_path("/v1/models"),
-            "https://chatgpt.com/backend-api/models"
+            "https://chatgpt.com/backend-api/codex/models"
         );
         assert_eq!(
             endpoint.websocket_url_for_path("/v1/responses"),
