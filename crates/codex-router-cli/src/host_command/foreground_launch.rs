@@ -10,6 +10,7 @@ use std::sync::Arc;
 use codex_router_codex::AppServerCommandSpec;
 use codex_router_codex::CodexPaths;
 use codex_router_codex::CodexRouterProfile;
+use codex_router_codex::DesktopLaunchPolicyCommand;
 use codex_router_host::AppServerLaunchPlan;
 use codex_router_host::ChildCommandSpec;
 use codex_router_host::HostConfig;
@@ -41,6 +42,9 @@ pub(super) async fn run_foreground_host(
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
 ) -> Result<(), HostCommandError> {
     tokio::fs::create_dir_all(&router_root).await?;
+    DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
+        .apply()
+        .await?;
     let inherited_marker = std::env::var_os(codex_router_host::inherited_lock_environment());
     let instance = match inherited_marker.as_deref() {
         Some(marker) => HostInstance::acquire_inherited(coordination_paths.clone(), marker),
@@ -95,6 +99,19 @@ pub(super) async fn run_foreground_host(
     }
     HostRuntime::run_acquired(config, child_launch_plans, update_inputs, instance).await?;
     Ok(())
+}
+
+fn launchctl_executable(context: &CliContext) -> Result<PathBuf, HostCommandError> {
+    #[cfg(debug_assertions)]
+    if let Some(debug_executable) = context.env_var("CODEX_ROUTER_DEBUG_LAUNCHCTL") {
+        let debug_executable = PathBuf::from(debug_executable);
+        if !debug_executable.is_absolute() {
+            return Err(HostCommandError::LaunchctlExecutable);
+        }
+        return Ok(debug_executable);
+    }
+
+    Ok(PathBuf::from("/bin/launchctl"))
 }
 
 fn resolve_codex_home(context: &CliContext) -> Result<PathBuf, HostCommandError> {

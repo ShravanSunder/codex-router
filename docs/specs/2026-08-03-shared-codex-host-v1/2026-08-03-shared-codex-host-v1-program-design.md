@@ -159,7 +159,7 @@ codex-router-cli
   Foreground Launch Composer
     owns: resolved router-root/Codex-home projection and typed launch inputs
     consumed by: Host Command Adapter
-    consumes: Host Singleton Authority, Codex Runtime Paths,
+    consumes: Desktop Launch Policy, Host Singleton Authority, Codex Runtime Paths,
               Router Profile Projection, Lifecycle Owner Task entrypoint
     changes when: CLI composition or environment projection changes
 
@@ -183,6 +183,11 @@ codex-router-cli
 codex-router-codex
   Codex Runtime Paths
     owns: normal Codex-home, managed executable, and native socket projection
+
+  Desktop Launch Policy
+    owns: the exact macOS login-session mutation that makes Desktop reuse the
+          conventional local app-server daemon
+    consumed by: Foreground Launch Composer
 
   Router Profile Projection
     owns: the single model-provider configuration rendered for Codex
@@ -288,6 +293,7 @@ map cannot substitute generic layer buckets:
 | Component | Primary consumers | Changes when |
 | --- | --- | --- |
 | Codex Runtime Paths | Foreground Launch Composer, App-server Launch Projection, Direct Session Launch Projection | supported Codex home, managed executable, or native socket conventions change |
+| Desktop Launch Policy | Foreground Launch Composer | the supported Codex Desktop local-daemon launch-session contract changes |
 | Router Profile Projection | existing profile rendering and App-server Launch Projection | the supported Codex model-provider projection changes |
 | Managed Executable Identity | Managed Codex Update Preparation and the Lifecycle Owner Task's status-observation operation | executable resolution, hashing, or version observation changes |
 | Official Updater Command | Managed Codex Update Preparation | the supported official updater invocation changes |
@@ -585,8 +591,8 @@ resume invocations. It never routes through the host control socket.
 Allowed:
 
 - Host Command Adapter → Operator Client or Foreground Launch Composer;
-- Foreground Launch Composer → Host Singleton Authority and Lifecycle Owner
-  Task entrypoint;
+- Foreground Launch Composer → Desktop Launch Policy, then Host Singleton
+  Authority and Lifecycle Owner Task entrypoint;
 - Host Singleton Authority → Lifecycle Owner Task with the retained lock and
   listener authority handle;
 - Operator Client → Operator Message Contract;
@@ -742,17 +748,20 @@ host runtime independently testable through typed snapshots and events.
 
 ### Operator control
 
-Bootstrap opens the stable instance-lock artifact and first acquires its
-exclusive OS lock. Only that lock owner may unlink a stale configured operator
+Bootstrap first asks Desktop Launch Policy to apply
+`launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1` and waits for its
+terminal result. Only after that succeeds does it open the stable instance-lock
+artifact and acquire its exclusive OS lock. Only that lock owner may unlink a stale configured operator
 socket pathname and bind the new owner-only socket. A contender that cannot
 acquire the lock never unlinks either artifact; it connects to the existing
 operator socket, waiting within the existing host-start bound when the owner
 has not published it yet, or returns `owner present, operator unavailable`.
 Socket bind failure closes the descriptor and releases authority.
 
-The Foreground Launch Composer passes resolved coordination paths and an
-optional inherited-lock marker to Host Singleton Authority before any child
-spawn or executable/version probe. Host Singleton Authority either acquires
+The Foreground Launch Composer applies Desktop Launch Policy before exposing
+any host authority, then passes resolved coordination paths and an optional
+inherited-lock marker to Host Singleton Authority before any child spawn or
+executable/version probe. Host Singleton Authority either acquires
 ordinary ownership or consumes and validates the inherited descriptor,
 restores `CLOEXEC`, binds the operator listener, and returns the authority
 handle that enters the Lifecycle Owner Task. The CLI never implements lock,
@@ -771,6 +780,9 @@ dependency, second accept loop, or second owner task.
 
 ```text
 Foreground Launch Composer
+  → Desktop Launch Policy
+      → /bin/launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1
+      ← success or typed startup failure
   → Host Singleton Authority
   ← retained lock + listener authority handle
   → Lifecycle Owner Task retains handle
@@ -818,9 +830,11 @@ deadlines below.
 
 Each terminal response carries the requested operation, terminal
 classification, live router/app-server observations, the separately observed
-Remote Control status, the installed-versus-running executable relation,
-recovery-budget condition, the current operation, the most recent completed
-lifecycle outcome, and a redacted message. Cancellation closes the caller
+Remote Control status and its upstream `serverName`/optional `environmentId`,
+the successful startup attachment-policy result and Desktop relaunch guidance,
+the installed-versus-running executable relation, recovery-budget condition,
+the current operation, the most recent completed lifecycle outcome, and a
+redacted message. Cancellation closes the caller
 connection but does not implicitly cancel a mutation that has already crossed
 an external side-effect boundary.
 
@@ -1073,6 +1087,7 @@ and caller-visible behavior remain unchanged:
 
 | Current-HEAD call path | Target responsibility edge | Disposition |
 | --- | --- | --- |
+| Foreground startup | CLI foreground composition → singleton acquisition → lifecycle owner | Foreground Launch Composer → Desktop Launch Policy → Host Singleton Authority → Lifecycle Owner Task; add the launch-session prerequisite before any reachable host endpoint |
 | Router serving | existing CLI serve dispatch → existing router runtime; host observation → Router Compatibility Observer; owned start/stop → Owned Router Child | preserve serving; split observation from child ownership |
 | Sessions | existing session selection/runner → direct native attachment inputs | narrow attachment projection into Direct Session Launch Projection; preserve selection and child-exit behavior |
 | App-server launch and observation | lifecycle loop → mixed launch/protocol helpers → retained child and readiness result | Lifecycle Owner Task → App-server Endpoint Guard → Managed App-server Child → App-server Control Protocol → Remote Control Observation; split policy without another connection or owner task |
@@ -1148,30 +1163,45 @@ noninteractive commands.
 
 ### Desktop attachment
 
-There is no router-owned Desktop launch or configuration predecessor in the
-current repository, and the pinned open-source Codex checkout does not contain
-the installed Desktop client's attachment implementation. Desktop is therefore
-an exact-installed-version external feasibility and acceptance edge, not a
-router implementation path:
+The router does not launch Desktop or implement its attachment protocol. It
+does own the login-session prerequisite that tells an installed Desktop release
+to reuse Codex's conventional local daemon. Foreground Launch Composer applies
+that policy before singleton acquisition publishes the operator endpoint; a
+failure aborts startup before the host can be observed as available. The
+Desktop process itself remains an exact-installed-version external acceptance
+edge:
 
 ```text
-ACCEPTED — external client gate; no router-side predecessor
+PROPOSED — startup prerequisite plus external client gate
+codex-router host
+  → Foreground Launch Composer
+  → Desktop Launch Policy
+  → /bin/launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1
+      ├─ nonzero/spawn failure ──► typed startup failure; no operator endpoint
+      └─ success ────────────────► continue singleton acquisition and startup
+
 installed Codex Desktop
+  → relaunch if it was already running when the login-session value changed
   → attempt native attachment to the conventional hosted Unix endpoint
       ├─ same hosted app-server/process observed
       │     ──► admitted shared client
       └─ competing app-server, different endpoint, or no supported attachment
             ──► incompatible; fail the Desktop acceptance claim
 
-host/router mutation: none
+host mutation: one idempotent login-session environment assignment at startup
+host-exit restoration: none; the value belongs to the current macOS login session
 fallback/proxy/attachment shim: none
-proof: V2 socket/process correlation plus V9 exact-version acceptance
+proof: command-projection and ordering evidence, V2 socket/process correlation,
+       plus V9 exact-version acceptance
 ```
 
 An installed Desktop release that fails this gate is reported incompatible for
 Shared Host V1. The host does not detect or terminate a competing
 Desktop-launched process and does not add an alternate attachment mechanism;
-either response would exceed the accepted ownership boundary.
+either response would exceed the accepted ownership boundary. Status reports
+that the startup policy was configured and that an already-running Desktop must
+be relaunched; it does not claim to introspect Desktop process state or re-read
+the launch-session environment after startup.
 
 ### App-server lifecycle
 
@@ -1216,8 +1246,10 @@ codex-router host status
   → Managed Executable Identity ────────────► installed identity / unavailable
   → compare identities ───────────────► match / drift / unknown
   → Remote Control Observation ───────► connected / degraded / unavailable
+                                      + serverName / optional environmentId
   ← Lifecycle Owner Task returns the status-observation result and next action;
-     no lifecycle-state mutation
+     presenter also reports startup attachment configured and Desktop relaunch
+     guidance; no lifecycle-state mutation
 ```
 
 ### Explicit app-server restart
@@ -1519,13 +1551,13 @@ launchd, both outside this boundary.
 | --- | --- | --- | --- | --- |
 | U1, U4, U6 | R1 | Host Command Adapter and Foreground Launch Composer enter the Lifecycle Owner Task; Host Command Presenter consumes typed lifecycle snapshots/events outside iocraft and indicatif | V1 | command transcript showing distinct `serve`, `sessions`, `host` jobs; debug/installed/explicit-root projection evidence; deterministic non-interactive output and interactive presentation evidence where used; crate dependency inspection |
 | U2, U10 | R2 | App-server Launch Projection, App-server Endpoint Guard, and Managed App-server Child expose the native upstream socket directly; Lifecycle Owner Task remains event-driven while idle | V2, V10 | process/socket observation proving no host traffic hop plus bounded idle-load observation |
-| U2, U4, U5 | R3 | Direct Session Launch Projection attaches CLI; Desktop remains an external exact-version native-attachment gate; App-server Launch Projection enables Remote Control on the same child | V2, V4, V9 | socket/process correlation plus exact-version real CLI/Desktop/Remote Control acceptance |
+| U2, U4, U5 | R3 | Direct Session Launch Projection attaches CLI; Foreground Launch Composer applies Desktop Launch Policy before host authority is exposed; Desktop remains an external exact-version native-attachment gate; App-server Launch Projection enables Remote Control on the same child | V2, V4, V9 | exact launch-session command and pre-publication ordering, socket/process correlation, plus exact-version real CLI/Desktop/Remote Control acceptance |
 | U1, U3, U10 | R4 | Router Compatibility Observer and Owned Router Child consume the `codex-router-core` schema; Router Profile Projection supplies the app-server model path | V3 | projection equality, compatible/incompatible/auth-required/absent router cases, static/prohibited-data compatibility-response checks, router-condition transitions, router-restart isolation, and router request observation |
-| U5, U10 | R5 | App-server Launch Projection enables Remote Control; Remote Control Observation consumes App-server Control Protocol's initialized experimental exchange for the short-lived upstream read; Codex owns remote state | V4 | Connected/degraded fixture cases plus one real Remote Control attachment or operation against the same app-server before/after restart |
+| U5, U10 | R5 | App-server Launch Projection enables Remote Control; Remote Control Observation consumes App-server Control Protocol's initialized experimental exchange and preserves observed server/environment identity for the short-lived upstream read; Codex owns remote state | V4 | Connected/degraded fixture and identity-projection cases plus one real Remote Control attachment or operation against the same app-server before/after restart |
 | U6 | R6 | Host Singleton Authority, Operator Connection Boundary, Lifecycle Owner Task, Process-group Child, App-server Shutdown Progression, Explicit App-server Restart, and Explicit Router Restart own the bounded lifecycle | V5 | pinned-upstream source verification for shutdown constants and signal semantics; fake-clock and real-Unix integration evidence for host policy, singleton, stale-socket recovery, child descriptor exclusion, and host-death relaunch; exact-release native restart evidence; immediate busy serialization, each startup bound, one-signal foreground cancellation, graceful/forced/timeout classification, no second signal after timeout, reaping after later exit, router-restart success/failure, cleanup order, status, and owned-router transition cases |
 | U7 | R7 | Managed Codex Update Preparation owns identity/updater comparison; Changed-update Activation owns teardown and re-exec; Update Outcome Observer owns the one bounded post-EOF exchange and four caller-visible outcomes | V6 | four-result update matrix covering exact updater executable/argv despite differing PATH, initial/post-updater identity failure or timeout with hash drainage and child preservation, updater failure/no-change preservation, timeout reap and single-flight exclusion, teardown-failure retained authority and explicit restart, no second signal after teardown timeout, telemetry failure/timeout without a fifth result or blocked activation, continuous exclusion through clear/exec/restore descriptor handling, inherited-lock consumption, induced exec failure with later manual acquisition, socket-before-readiness convergence, and the 40-second total replacement bound |
 | U8 | R8 | Lifecycle Owner Task handles steady-state child-exit events and its automatic-recovery operation performs the single permitted replacement; Host Lifecycle State owns the one-attempt budget; App-server Shutdown Progression owns expected exits | V7 | deterministic child fixture proving one steady-state recovery, visible exhaustion, lifecycle-operation failure without nested recovery, and explicit restart reset for both Remote Control connected and degraded outcomes |
-| U3, U6, U7, U8, U9, U10 | R9 | the Lifecycle Owner Task's status-observation operation derives mandatory and optional fields; Host Command Presenter renders snapshots/progress; Update Outcome Observer reports cross-exec results; Lifecycle Telemetry owns redaction and existing OTel export | V8 | mandatory live availability/recovery status, deterministic non-interactive rendering plus iocraft/indicatif presentation coverage where used, optional match/drift/unknown and current-lifetime outcome comparison, update-caller result, Victoria trace/metric observation when exported, pre-exec telemetry success/failure/timeout observation, and secret/private-content canaries |
+| U3, U5, U6, U7, U8, U9, U10 | R9 | the Lifecycle Owner Task's status-observation operation derives mandatory and optional fields including observed Remote identity; Host Command Presenter renders snapshots, Desktop attachment/relaunch guidance, and progress; Update Outcome Observer reports cross-exec results; Lifecycle Telemetry owns redaction and existing OTel export | V8 | mandatory live availability/recovery/Remote-identity and Desktop-guidance status, deterministic non-interactive rendering plus iocraft/indicatif presentation coverage where used, optional match/drift/unknown and current-lifetime outcome comparison, update-caller result, Victoria trace/metric observation when exported, pre-exec telemetry success/failure/timeout observation, and secret/private-content canaries |
 | U10 | R10 | crate dependency prohibitions; Codex Runtime Paths separation; Lifecycle Owner Task native Tokio dispatch; Operator Connection Boundary bounded channels; retained Managed Executable Identity and updater ownership; Host Singleton Authority with child descriptor exclusion; no host SQLx/state dependency or prohibited subsystem | V2, V8–V10 | Cargo/dependency and lifecycle-call-path inspection, debug/installed/explicit-root isolation, async-dispatch and bounded-channel enforcement, deterministic blocking work that outlives its caller deadline and proves single-flight ownership plus drainage or terminal process replacement, updater timeout reap and overlap exclusion, checks that blocking work is isolated and no guard crosses an await, stable-artifact content and child-descriptor checks, workspace-lint enforcement, direct upstream integration proof, and bounded idle observation |
 
 Unit seams may replace process launch, executable identity, updater execution,

@@ -62,6 +62,7 @@ pub use lifecycle_state::LifecycleOutcome;
 pub use lifecycle_state::LifecycleOutcomeClassification;
 pub use lifecycle_state::RecoveryBudget;
 pub use lifecycle_state::RemoteControlCondition;
+pub use lifecycle_state::RemoteControlIdentity;
 pub use lifecycle_state::RouterCondition;
 pub use operator_messages::HostProgress;
 pub use operator_messages::HostTerminalResponse;

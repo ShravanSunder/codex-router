@@ -54,6 +54,19 @@ fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io
     writeln!(stdout, "router: {:?}", snapshot.router())?;
     writeln!(stdout, "app_server: {:?}", snapshot.app_server())?;
     writeln!(stdout, "remote_control: {:?}", snapshot.remote_control())?;
+    if let Some(identity) = snapshot.remote_control_identity() {
+        writeln!(stdout, "remote_server_name: {}", identity.server_name())?;
+        writeln!(
+            stdout,
+            "remote_environment_id: {}",
+            identity.environment_id().unwrap_or("unassigned")
+        )?;
+    } else {
+        writeln!(stdout, "remote_server_name: unavailable")?;
+        writeln!(stdout, "remote_environment_id: unavailable")?;
+    }
+    writeln!(stdout, "desktop_attachment: Configured")?;
+    writeln!(stdout, "desktop_relaunch: required_if_running")?;
     writeln!(
         stdout,
         "executable_relation: {:?}",
@@ -94,6 +107,7 @@ mod tests {
                 running_version: "1.2.3".to_owned(),
             },
             remote_control: RemoteControlCondition::Connected,
+            remote_control_identity: None,
             executable_relation: ExecutableRelation::Match,
             recovery_budget: RecoveryBudget::Available,
             last_lifecycle_outcome: Some(LifecycleOutcome {

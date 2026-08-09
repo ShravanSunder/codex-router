@@ -71,6 +71,7 @@ impl RuntimeState {
             router: self.router,
             app_server: self.app_server.clone(),
             remote_control: self.remote_control,
+            remote_control_identity: None,
             executable_relation: self.executable_relation,
             recovery_budget: self.recovery_budget,
             last_lifecycle_outcome: self.last_lifecycle_outcome.clone(),

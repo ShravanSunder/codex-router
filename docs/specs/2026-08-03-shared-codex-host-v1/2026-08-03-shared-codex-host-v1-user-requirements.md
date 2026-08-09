@@ -22,8 +22,9 @@ they do not authorize requirements for this design.
 The owner wants one small `codex-router host` operating surface that keeps the
 existing router and one upstream Codex app-server usable together. Local Codex
 clients connect directly to the app-server's conventional Unix socket; the
-host is never a client-traffic proxy. `codex-router serve` remains the model
-router and `codex-router sessions` remains session discovery and launch.
+host configures the macOS login session so Codex Desktop reuses that local
+daemon and is never a client-traffic proxy. `codex-router serve` remains the
+model router and `codex-router sessions` remains session discovery and launch.
 
 The missing behavior is explicit shared-app-server startup, bounded crash
 recovery, Remote Control enablement, session attachment, status, and a manual
@@ -42,10 +43,10 @@ complexity budget and requires a new owner decision.
 | ID | Affected class | Need or outcome | Evidence and authority | Priority |
 | --- | --- | --- | --- | --- |
 | U1 | Owner/operator | I can launch one local shared Codex environment through `codex-router host`; it uses the existing `codex-router serve` model router and one upstream app-server. | Owner-authorized in the 2026-08-02 to 2026-08-03 design conversation. | Must — owner |
-| U2 | Local Codex user | CLI and Desktop connect directly to the same app-server through its stable native Unix socket. The host is not in their protocol or data path. | Owner-authorized correction rejecting a host proxy and selecting direct socket attachment. | Must — owner |
+| U2 | Local Codex user | CLI and Desktop connect directly to the same app-server through its stable native Unix socket. Host startup configures the macOS login session for Desktop to reuse the conventional local daemon, and status tells me when a running Desktop must be relaunched. The host is not in their protocol or data path. | Owner-authorized correction rejecting a host proxy, selecting the conventional socket, and requiring automatic Desktop launch-session configuration. | Must — owner |
 | U3 | Local and remote Codex user | Model traffic produced by the managed app-server uses the local `codex-router`; loss of the router is visible rather than silently treated as a healthy hosted environment. | Owner-authorized statement that the app-server talks to `codex-router`. | Must — owner |
 | U4 | Local Codex user | `codex-router sessions` remains the session picker/launcher and starts or resumes interactive work against the shared app-server. | Owner-authorized command-boundary correction. | Must — owner |
-| U5 | Remote Codex user | Remote Control is enabled on the same managed app-server and returns after an ordinary restart without a router-owned pairing or relay implementation. | Owner-authorized requirement to start app-server with Remote Control; upstream Codex retains ownership. | Must — owner |
+| U5 | Remote Codex user | Remote Control is enabled on the same managed app-server and returns after an ordinary restart without a router-owned pairing or relay implementation. Status identifies the upstream Remote server and environment that this host actually serves. | Owner-authorized requirement to start app-server with Remote Control and expose its observed identity; upstream Codex retains ownership. | Must — owner |
 | U6 | Owner/operator | I can launch the host manually and invoke explicit app-server restart, update, status, and router-restart operations without launchd in V1. Restart uses upstream Codex's native Unix graceful restart behavior. Stopping the foreground host is an ordinary CLI cancellation, not a separate service-manager product. | Owner-authorized manual-operation boundary and command discussions. | Must — owner |
 | U7 | Owner/operator and connected clients | `codex-router host update` runs the official Codex updater first. If Codex did not change, the running host, app-server, and clients are untouched. If Codex changed, the current host gracefully stops its children and restarts itself; the replacement host starts the updated app-server on the same socket. If updating fails, the current host and app-server keep running. | Explicitly owner-confirmed on 2026-08-03 and clarified as a whole-host restart on 2026-08-04. | Must — owner |
 | U8 | Owner/operator | While the manually launched host is in steady operation, one ordinary unexpected app-server exit receives one restart attempt; another failure is reported and left for manual recovery. A failure during an explicit launch, restart, update, or stop belongs to that operation and does not start nested recovery. Host-process death itself has no V1 continuity guarantee. | Owner selected the bounded one-restart option and rejected combinatorial lifecycle handling for V1. | Must — owner |

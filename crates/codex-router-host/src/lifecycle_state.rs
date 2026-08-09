@@ -101,6 +101,36 @@ pub enum RemoteControlCondition {
     Unavailable,
 }
 
+/// Upstream identity of the Remote Control environment served by this app-server.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoteControlIdentity {
+    server_name: String,
+    environment_id: Option<String>,
+}
+
+impl RemoteControlIdentity {
+    /// Captures the upstream server display name and optional environment identity.
+    #[must_use]
+    pub fn new(server_name: String, environment_id: Option<String>) -> Self {
+        Self {
+            server_name,
+            environment_id,
+        }
+    }
+
+    /// Returns the upstream server display name.
+    #[must_use]
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Returns the upstream Remote Control environment identity when assigned.
+    #[must_use]
+    pub fn environment_id(&self) -> Option<&str> {
+        self.environment_id.as_deref()
+    }
+}
+
 /// Derived hosted usability without changing lifecycle state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -167,6 +197,7 @@ pub struct HostSnapshot {
     router: RouterCondition,
     app_server: AppServerCondition,
     remote_control: RemoteControlCondition,
+    remote_control_identity: Option<RemoteControlIdentity>,
     executable_relation: ExecutableRelation,
     recovery_budget: RecoveryBudget,
     last_lifecycle_outcome: Option<LifecycleOutcome>,
@@ -182,6 +213,8 @@ pub struct HostSnapshotDimensions {
     pub app_server: AppServerCondition,
     /// Short-lived Remote Control observation.
     pub remote_control: RemoteControlCondition,
+    /// Upstream identity observed from the same Remote Control status exchange.
+    pub remote_control_identity: Option<RemoteControlIdentity>,
     /// Running-versus-installed executable relation.
     pub executable_relation: ExecutableRelation,
     /// One-attempt automatic recovery budget.
@@ -199,6 +232,7 @@ impl HostSnapshot {
             router: dimensions.router,
             app_server: dimensions.app_server,
             remote_control: dimensions.remote_control,
+            remote_control_identity: dimensions.remote_control_identity,
             executable_relation: dimensions.executable_relation,
             recovery_budget: dimensions.recovery_budget,
             last_lifecycle_outcome: dimensions.last_lifecycle_outcome,
@@ -245,6 +279,12 @@ impl HostSnapshot {
     #[must_use]
     pub const fn remote_control(&self) -> RemoteControlCondition {
         self.remote_control
+    }
+
+    /// Returns the upstream Remote Control environment identity when observable.
+    #[must_use]
+    pub const fn remote_control_identity(&self) -> Option<&RemoteControlIdentity> {
+        self.remote_control_identity.as_ref()
     }
 
     /// Returns installed-versus-running executable relation.

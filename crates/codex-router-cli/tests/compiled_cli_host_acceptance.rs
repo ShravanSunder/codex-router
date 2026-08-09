@@ -14,6 +14,46 @@ use tokio_tungstenite::tungstenite::Message;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test]
+async fn compiled_cli_rejects_host_start_before_socket_publication_when_launchctl_fails()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new()?;
+    let router_root = directory.path().join("router");
+    let codex_home = directory.path().join("codex");
+    let socket_path = directory.path().join("debug-app-server.sock");
+    let launchctl_executable = directory.path().join("launchctl");
+    install_rejected_launchctl_fixture(&launchctl_executable)?;
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(12),
+        tokio::process::Command::new(&binary)
+            .args([
+                "host",
+                "--router-root",
+                router_root.to_str().ok_or("router root is not UTF-8")?,
+            ])
+            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", &socket_path)
+            .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
+            .env("HOME", directory.path())
+            .output(),
+    )
+    .await??;
+
+    check(!output.status.success(), "host unexpectedly started")?;
+    check(
+        String::from_utf8(output.stderr)?
+            .contains("launchctl rejected Codex Desktop local-daemon attachment"),
+        "host did not report the launch-session policy failure",
+    )?;
+    check(
+        !router_root.join("host.sock").exists(),
+        "operator socket was published before launch-session policy succeeded",
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
@@ -21,12 +61,15 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     let codex_home = directory.path().join("codex");
     let socket_path = directory.path().join("debug-app-server.sock");
     let managed_executable = codex_home.join("packages/standalone/current/codex");
+    let launchctl_executable = directory.path().join("launchctl");
+    let launchctl_log = directory.path().join("launchctl.log");
     std::fs::create_dir_all(
         managed_executable
             .parent()
             .ok_or("managed executable parent is missing")?,
     )?;
     install_managed_fixture(&managed_executable)?;
+    install_launchctl_fixture(&launchctl_executable)?;
     let port = reserve_loopback_port()?;
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
 
@@ -40,6 +83,8 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     ])
     .env("CODEX_HOME", &codex_home)
     .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", &socket_path)
+    .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
+    .env("CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG", &launchctl_log)
     .env("HOME", directory.path())
     .env(
         "CODEX_ROUTER_COMPILED_CLI_TEST_BINARY",
@@ -51,6 +96,11 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     .stderr(Stdio::null());
     let host = host.spawn()?;
     wait_for_operator_socket(&router_root.join("host.sock")).await?;
+    check(
+        std::fs::read_to_string(&launchctl_log)?.trim()
+            == "setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1",
+        "foreground host did not configure Desktop local-daemon attachment",
+    )?;
 
     let status =
         run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, "status").await?;
@@ -62,6 +112,22 @@ async fn compiled_cli_runs_status_restart_and_direct_session_attachment()
     check(status_stdout.contains("readiness: Ready"), &status_stdout)?;
     check(
         status_stdout.contains("remote_control: Connected"),
+        &status_stdout,
+    )?;
+    check(
+        status_stdout.contains("remote_server_name: cli-smoke"),
+        &status_stdout,
+    )?;
+    check(
+        status_stdout.contains("remote_environment_id: cli-smoke"),
+        &status_stdout,
+    )?;
+    check(
+        status_stdout.contains("desktop_attachment: Configured"),
+        &status_stdout,
+    )?;
+    check(
+        status_stdout.contains("desktop_relaunch: required_if_running"),
         &status_stdout,
     )?;
 
@@ -231,7 +297,7 @@ async fn run_host_subcommand(
 }
 
 async fn wait_for_operator_socket(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(12), async {
         while !socket.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -245,6 +311,19 @@ fn install_managed_fixture(executable: &Path) -> std::io::Result<()> {
         executable,
         b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 1.2.3'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then if [ \"$CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES\" = \"1\" ]; then printf '\\n# changed by update fixture\\n' >> \"$0\"; fi; exit 0; fi\nexec \"$CODEX_ROUTER_COMPILED_CLI_TEST_BINARY\" --exact compiled_cli_app_server_child_entrypoint --nocapture\n",
     )?;
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
+}
+
+fn install_launchctl_fixture(executable: &Path) -> std::io::Result<()> {
+    std::fs::write(
+        executable,
+        b"#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG\"\n",
+    )?;
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
+}
+
+fn install_rejected_launchctl_fixture(executable: &Path) -> std::io::Result<()> {
+    std::fs::write(executable, b"#!/bin/sh\nexit 1\n")?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
 }
 
