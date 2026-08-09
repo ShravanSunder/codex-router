@@ -193,9 +193,21 @@ lifetime's update result.
 Status SHOULD also identify whether the running managed executable matches,
 differs from, or cannot be compared with the currently installed managed
 executable, the most recent restart or recovery outcome in the current host
-lifetime, and a useful next action. Operational traces and metrics SHOULD be
-exportable through the repository's existing OpenTelemetry path. V1 does not
-require a dashboard, history product, or metrics warehouse.
+lifetime, and a useful next action. Foreground-host operational logs, traces,
+and metrics MUST default to the shared loopback OTLP/HTTP collector and remain
+overrideable by the standard OTLP endpoint environment variable. The owned
+router child MUST receive that same endpoint; the upstream Codex app-server
+MUST NOT receive router-owned telemetry configuration. Export failure MUST
+remain fail-open for host operation. V1 does not require a dashboard, history
+product, or metrics warehouse.
+
+Managed app-server stderr MUST be reduced to bounded diagnostic classes before
+it enters telemetry. Diagnostic telemetry MAY include the child source and
+class, but MUST NOT include the original stderr line. Lifecycle metrics MUST
+use bounded operation, result, ownership, readiness, recovery-budget, and
+executable-relation dimensions. Remote Control observations MAY include its
+bounded server name and environment identifier so operators can identify the
+forwarding system.
 
 Any status or telemetry output MUST NOT expose credentials, prompts, tool
 inputs, model payloads, pairing secrets, or raw protocol frames.
@@ -335,8 +347,10 @@ attach, launch fails visibly rather than silently claiming shared operation.
   after reconnecting. For the U9 `SHOULD` capabilities delivered in V1, compare
   installed-versus-running version and current-lifetime restart/recovery
   observations and observe lifecycle and readiness dimensions through the
-  existing OpenTelemetry export path. Verify secret and private-content
-  canaries do not appear in every delivered status and telemetry surface.
+  existing OpenTelemetry export path. Observe logs, traces, and metrics in the
+  shared Victoria stack, including classified child failures and Remote Control
+  identity. Verify secret and private-content canaries do not appear in every
+  delivered status and telemetry surface or in the classified child event.
 - **V9 — Version-bound client acceptance:** exercise the exact installed CLI
   and Desktop releases; source inspection alone does not prove attachment.
 - **V10 — Complexity and idle-overhead evidence:** inspect the delivered

@@ -10,9 +10,11 @@ use std::sync::atomic::Ordering;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::Protocol;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use sha2::Digest;
@@ -25,11 +27,19 @@ const DEFAULT_LOG_FILTER: &str = "warn,codex_router_cli=info,codex_router_proxy=
 const SERVICE_NAME: &str = "codex-router";
 const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 const OBSERVABILITY_MARKER_ENV: &str = "CODEX_ROUTER_OBSERVABILITY_MARKER";
+const SHARED_LOCAL_OTLP_ENDPOINT: &str = "http://127.0.0.1:4318";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TelemetryMode {
+    EnvironmentOnly,
+    ForegroundHost,
+}
 
 #[derive(Debug)]
 pub(crate) struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
     completed: Arc<AtomicBool>,
 }
 
@@ -37,6 +47,7 @@ pub(crate) struct TelemetryGuard {
 pub(crate) struct TelemetryShutdownHandle {
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
     completed: Arc<AtomicBool>,
 }
 
@@ -53,6 +64,10 @@ impl TelemetryShutdownHandle {
             let _ = meter_provider.force_flush();
             let _ = meter_provider.shutdown();
         }
+        if let Some(logger_provider) = &self.logger_provider {
+            let _ = logger_provider.force_flush();
+            let _ = logger_provider.shutdown();
+        }
     }
 }
 
@@ -61,6 +76,7 @@ impl TelemetryGuard {
         TelemetryShutdownHandle {
             tracer_provider: self.tracer_provider.clone(),
             meter_provider: self.meter_provider.clone(),
+            logger_provider: self.logger_provider.clone(),
             completed: self.completed.clone(),
         }
     }
@@ -79,12 +95,16 @@ impl Drop for TelemetryGuard {
             let _ = meter_provider.force_flush();
             let _ = meter_provider.shutdown();
         }
+        if let Some(logger_provider) = self.logger_provider.take() {
+            let _ = logger_provider.force_flush();
+            let _ = logger_provider.shutdown();
+        }
     }
 }
 
-pub(crate) fn init_from_env() -> TelemetryGuard {
+pub(crate) fn init_from_env(mode: TelemetryMode) -> TelemetryGuard {
     let filter = env::var("RUST_LOG").unwrap_or_else(|_error| DEFAULT_LOG_FILTER.to_owned());
-    let Some(endpoint) = otlp_endpoint() else {
+    let Some(endpoint) = otlp_endpoint(mode) else {
         let _ = tracing_subscriber::registry()
             .with(EnvFilter::new(filter))
             .try_init();
@@ -96,48 +116,44 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
         return TelemetryGuard {
             tracer_provider: None,
             meter_provider: None,
+            logger_provider: None,
             completed: Arc::new(AtomicBool::new(false)),
         };
     };
 
-    let tracer_provider = match build_tracer_provider(&endpoint) {
-        Ok(provider) => provider,
-        Err(error) => {
-            let _ = tracing_subscriber::registry()
-                .with(EnvFilter::new(filter))
-                .try_init();
-            tracing::warn!(
-                error.kind = "otel_init_failed",
-                error = %sanitize_error(&error.to_string()),
-                "codex_router.telemetry_init_failed"
-            );
-            return TelemetryGuard {
-                tracer_provider: None,
-                meter_provider: None,
-                completed: Arc::new(AtomicBool::new(false)),
-            };
-        }
-    };
-    let meter_provider = match build_meter_provider(&endpoint) {
-        Ok(provider) => Some(provider),
-        Err(error) => {
-            tracing::warn!(
-                error.kind = "otel_metrics_init_failed",
-                error = %sanitize_error(&error.to_string()),
-                "codex_router.telemetry_metrics_init_failed"
-            );
-            None
-        }
-    };
+    let tracer_provider_result = build_tracer_provider(&endpoint);
+    let meter_provider_result = build_meter_provider(&endpoint);
+    let logger_provider_result = build_logger_provider(&endpoint);
+    let tracer_provider = tracer_provider_result.as_ref().ok().cloned();
+    let meter_provider = meter_provider_result.as_ref().ok().cloned();
     if let Some(meter_provider) = meter_provider.clone() {
         global::set_meter_provider(meter_provider);
     }
-    let tracer = tracer_provider.tracer(SERVICE_NAME);
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let logger_provider = logger_provider_result.as_ref().ok().cloned();
+    let otel_layer = tracer_provider.as_ref().map(|provider| {
+        let tracer = provider.tracer(SERVICE_NAME);
+        tracing_opentelemetry::layer().with_tracer(tracer)
+    });
+    let log_layer = logger_provider
+        .as_ref()
+        .map(OpenTelemetryTracingBridge::new);
     let _ = tracing_subscriber::registry()
         .with(EnvFilter::new(filter))
         .with(otel_layer)
+        .with(log_layer)
         .try_init();
+    record_exporter_initialization_failure(
+        "traces",
+        tracer_provider_result.as_ref().err().map(Box::as_ref),
+    );
+    record_exporter_initialization_failure(
+        "metrics",
+        meter_provider_result.as_ref().err().map(Box::as_ref),
+    );
+    record_exporter_initialization_failure(
+        "logs",
+        logger_provider_result.as_ref().err().map(Box::as_ref),
+    );
     tracing::info!(
         service.name = SERVICE_NAME,
         service.version = env!("CARGO_PKG_VERSION"),
@@ -146,9 +162,25 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
     );
 
     TelemetryGuard {
-        tracer_provider: Some(tracer_provider),
+        tracer_provider,
         meter_provider,
+        logger_provider,
         completed: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+fn record_exporter_initialization_failure(
+    signal: &'static str,
+    error: Option<&(dyn std::error::Error + Send + Sync)>,
+) {
+    if let Some(error) = error {
+        tracing::warn!(
+            event.name = "codex_router.telemetry_exporter_initialization_failed",
+            error.kind = "otel_exporter_initialization_failed",
+            otel.signal = signal,
+            error = %sanitize_error(&error.to_string()),
+            "failed to initialize an OTLP exporter"
+        );
     }
 }
 
@@ -161,14 +193,28 @@ pub(crate) fn run_span() -> tracing::Span {
     )
 }
 
-fn otlp_endpoint() -> Option<String> {
-    let endpoint = env::var(OTLP_ENDPOINT_ENV).ok()?;
-    let endpoint = endpoint.trim();
-    if endpoint.is_empty() {
-        None
-    } else {
-        Some(endpoint.to_owned())
-    }
+fn otlp_endpoint(mode: TelemetryMode) -> Option<String> {
+    let explicit = env::var(OTLP_ENDPOINT_ENV).ok();
+    resolve_otlp_endpoint(explicit.as_deref(), mode)
+}
+
+pub(crate) fn foreground_host_otlp_endpoint(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .unwrap_or(SHARED_LOCAL_OTLP_ENDPOINT)
+        .to_owned()
+}
+
+fn resolve_otlp_endpoint(explicit: Option<&str>, mode: TelemetryMode) -> Option<String> {
+    explicit
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| match mode {
+            TelemetryMode::EnvironmentOnly => None,
+            TelemetryMode::ForegroundHost => Some(SHARED_LOCAL_OTLP_ENDPOINT.to_owned()),
+        })
 }
 
 fn build_tracer_provider(
@@ -196,6 +242,20 @@ fn build_meter_provider(
     Ok(SdkMeterProvider::builder()
         .with_resource(telemetry_resource())
         .with_periodic_exporter(exporter)
+        .build())
+}
+
+fn build_logger_provider(
+    endpoint: &str,
+) -> Result<SdkLoggerProvider, Box<dyn std::error::Error + Send + Sync>> {
+    let exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .with_endpoint(log_endpoint(endpoint))
+        .with_protocol(Protocol::HttpBinary)
+        .build()?;
+    Ok(SdkLoggerProvider::builder()
+        .with_resource(telemetry_resource())
+        .with_batch_exporter(exporter)
         .build())
 }
 
@@ -229,6 +289,15 @@ fn metric_endpoint(endpoint: &str) -> String {
         endpoint.to_owned()
     } else {
         format!("{endpoint}/v1/metrics")
+    }
+}
+
+fn log_endpoint(endpoint: &str) -> String {
+    let endpoint = endpoint.trim_end_matches('/');
+    if endpoint.ends_with("/v1/logs") {
+        endpoint.to_owned()
+    } else {
+        format!("{endpoint}/v1/logs")
     }
 }
 
@@ -309,10 +378,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn foreground_host_defaults_to_the_shared_loopback_collector() {
+        assert_eq!(
+            resolve_otlp_endpoint(None, TelemetryMode::ForegroundHost),
+            Some("http://127.0.0.1:4318".to_owned())
+        );
+        assert_eq!(
+            resolve_otlp_endpoint(None, TelemetryMode::EnvironmentOnly),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_otlp_endpoint_overrides_the_foreground_host_default() {
+        assert_eq!(
+            resolve_otlp_endpoint(
+                Some("http://127.0.0.1:14318/"),
+                TelemetryMode::ForegroundHost
+            ),
+            Some("http://127.0.0.1:14318/".to_owned())
+        );
+        assert_eq!(
+            foreground_host_otlp_endpoint(Some("http://127.0.0.1:14318/")),
+            "http://127.0.0.1:14318/"
+        );
+    }
+
+    #[test]
+    fn signal_endpoints_append_only_their_own_otlp_path() {
+        let endpoint = "http://127.0.0.1:4318";
+
+        assert_eq!(trace_endpoint(endpoint), format!("{endpoint}/v1/traces"));
+        assert_eq!(metric_endpoint(endpoint), format!("{endpoint}/v1/metrics"));
+        assert_eq!(log_endpoint(endpoint), format!("{endpoint}/v1/logs"));
+    }
+
+    #[test]
     fn telemetry_shutdown_completion_is_shared_across_guard_and_handles() {
         let guard = TelemetryGuard {
             tracer_provider: None,
             meter_provider: None,
+            logger_provider: None,
             completed: Arc::new(AtomicBool::new(false)),
         };
         let first_handle = guard.shutdown_handle();

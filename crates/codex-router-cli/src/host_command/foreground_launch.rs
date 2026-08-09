@@ -13,6 +13,7 @@ use codex_router_codex::CodexRouterProfile;
 use codex_router_codex::DesktopLaunchPolicyCommand;
 use codex_router_host::AppServerLaunchPlan;
 use codex_router_host::ChildCommandSpec;
+use codex_router_host::ChildOutput;
 use codex_router_host::HostConfig;
 use codex_router_host::HostConfigInputs;
 use codex_router_host::HostCoordinationPaths;
@@ -62,20 +63,27 @@ pub(super) async fn run_foreground_host(
         codex_router_codex::managed_executable_version(&codex_paths.managed_executable()).await?;
     let app_server = AppServerLaunchPlan::new(
         ChildCommandSpec::new(app_server_spec.executable())
-            .with_arguments(app_server_spec.arguments()),
+            .with_arguments(app_server_spec.arguments())
+            .with_output(ChildOutput::Telemetry),
         running_identity,
         running_version,
     );
     let current_executable = std::env::current_exe()?;
-    let router_command = ChildCommandSpec::new(current_executable.clone()).with_arguments([
-        OsString::from("serve"),
-        OsString::from("--port"),
-        OsString::from(port.to_string()),
-        OsString::from("--state-db"),
-        router_root.join("state.sqlite").into_os_string(),
-        OsString::from("--secret-root"),
-        router_root.join("secrets").into_os_string(),
-    ]);
+    let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
+        context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
+    );
+    let router_command = ChildCommandSpec::new(current_executable.clone())
+        .with_arguments([
+            OsString::from("serve"),
+            OsString::from("--port"),
+            OsString::from(port.to_string()),
+            OsString::from("--state-db"),
+            router_root.join("state.sqlite").into_os_string(),
+            OsString::from("--secret-root"),
+            router_root.join("secrets").into_os_string(),
+        ])
+        .with_environment("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint)
+        .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
     let replacement_command = ChildCommandSpec::new(current_executable).with_arguments([
         OsString::from("host"),
         OsString::from("--router-root"),

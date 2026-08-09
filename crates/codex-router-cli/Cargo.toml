@@ -33,6 +33,7 @@ crossterm.workspace = true
 indicatif.workspace = true
 iocraft.workspace = true
 opentelemetry.workspace = true
+opentelemetry-appender-tracing.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 reqwest.workspace = true

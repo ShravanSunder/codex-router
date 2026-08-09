@@ -19,6 +19,8 @@ pub enum ChildOutput {
     Inherit,
     /// Discard fixture or explicitly quiet child output.
     Null,
+    /// Capture stderr for producer-side classification and discard stdout.
+    Telemetry,
 }
 
 /// Cloneable exact child command projection for restart/recovery.
@@ -75,8 +77,14 @@ impl ChildCommandSpec {
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new(&self.executable);
         command.args(&self.arguments).envs(self.environment.clone());
-        if self.output == ChildOutput::Null {
-            command.stdout(Stdio::null()).stderr(Stdio::null());
+        match self.output {
+            ChildOutput::Inherit => {}
+            ChildOutput::Null => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+            ChildOutput::Telemetry => {
+                command.stdout(Stdio::null()).stderr(Stdio::piped());
+            }
         }
         command
     }
@@ -84,10 +92,14 @@ impl ChildCommandSpec {
     pub(crate) fn std_command(&self) -> std::process::Command {
         let mut command = std::process::Command::new(&self.executable);
         command.args(&self.arguments).envs(self.environment.clone());
-        if self.output == ChildOutput::Null {
+        if self.output != ChildOutput::Inherit {
             command.stdout(Stdio::null()).stderr(Stdio::null());
         }
         command
+    }
+
+    pub(crate) fn captures_stderr_telemetry(&self) -> bool {
+        self.output == ChildOutput::Telemetry
     }
 }
 
@@ -101,8 +113,25 @@ pub struct ProcessGroupChild {
 impl ProcessGroupChild {
     /// Spawns one child as the leader of its own process group.
     pub fn spawn(command: &mut Command) -> Result<Self, ProcessGroupError> {
+        Self::spawn_inner(command, None)
+    }
+
+    pub(crate) fn spawn_with_stderr_telemetry(
+        command: &mut Command,
+        source: &'static str,
+    ) -> Result<Self, ProcessGroupError> {
+        Self::spawn_inner(command, Some(source))
+    }
+
+    fn spawn_inner(
+        command: &mut Command,
+        diagnostic_source: Option<&'static str>,
+    ) -> Result<Self, ProcessGroupError> {
         command.process_group(0);
-        let child = command.spawn().map_err(ProcessGroupError::Spawn)?;
+        let mut child = command.spawn().map_err(ProcessGroupError::Spawn)?;
+        if let (Some(source), Some(stderr)) = (diagnostic_source, child.stderr.take()) {
+            crate::child_diagnostics::spawn_child_stderr_reader(source, stderr);
+        }
         let raw_process_id = child.id().ok_or(ProcessGroupError::MissingProcessId)?;
         let signed_process_id = i32::try_from(raw_process_id)
             .map_err(|_error| ProcessGroupError::InvalidProcessId(raw_process_id))?;
