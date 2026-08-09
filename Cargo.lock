@@ -243,7 +243,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64",
  "chrono",
@@ -276,6 +276,7 @@ dependencies = [
  "indicatif",
  "iocraft",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "reqwest",
@@ -296,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-codex"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "futures-util",
  "serde",
@@ -309,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "hmac",
  "serde",
@@ -321,12 +322,13 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "codex-router-codex",
  "codex-router-core",
  "codex-router-test-support",
  "httparse",
+ "opentelemetry",
  "rustix",
  "serde",
  "serde_json",
@@ -337,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -369,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -377,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -390,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -401,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -415,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -428,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "codex-router-cli",
  "codex-router-codex",
@@ -447,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "iocraft",
 ]
@@ -1493,6 +1495,18 @@ dependencies = [
  "pin-project-lite",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef6a1ac5ca3accf562b8c306fa8483c85f4390f768185ab775f242f7fe8fdcc2"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

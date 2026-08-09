@@ -116,6 +116,9 @@ pub(super) fn observe_status(
                 None,
             ),
         };
+        if let Some(identity) = &remote_control_identity {
+            crate::lifecycle_telemetry::record_remote_control_observation(remote_control, identity);
+        }
         let (installed_identity, pending_identity) = match installed_identity {
             IdentityObservation::Resolved(identity) => (identity.ok(), None),
             IdentityObservation::TimedOut(task) => (None, Some(task)),

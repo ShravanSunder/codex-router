@@ -63,11 +63,17 @@ impl AppServerLaunchPlan {
 
     pub(crate) fn spawn(&self) -> Result<AppServerChild, ProcessGroupError> {
         let mut command = self.command.command();
-        AppServerChild::spawn(
-            &mut command,
-            self.identity.clone(),
-            self.expected_version.clone(),
-        )
+        let process = if self.command.captures_stderr_telemetry() {
+            ProcessGroupChild::spawn_with_stderr_telemetry(&mut command, "app_server")?
+        } else {
+            ProcessGroupChild::spawn(&mut command)?
+        };
+        Ok(AppServerChild {
+            process,
+            identity: self.identity.clone(),
+            expected_exit: None,
+            expected_version: Some(self.expected_version.clone()),
+        })
     }
 
     /// Re-resolves the installed executable identity and version before a later spawn.

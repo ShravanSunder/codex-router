@@ -1534,16 +1534,31 @@ launchd, both outside this boundary.
   host does not add a reduced-trust client tier.
 - Codex home, sessions, pairing, approvals, and credentials remain exclusively
   upstream-owned. Host reads no such records.
-- OTel spans and metrics attach to lifecycle operation, child identity class,
-  duration, result class, recovery budget, readiness, and the low-cardinality
-  installed-versus-running relation. They exclude executable paths or hashes,
-  command environment, updater output, protocol frames, prompts, and secrets.
+- Foreground host startup initializes OTLP/HTTP log, trace, and metric
+  exporters against the shared loopback collector by default. A standard OTLP
+  endpoint override replaces that default and is projected into the owned
+  router child. The upstream Codex app-server receives no router-owned OTel
+  environment.
+- OTel lifecycle events and metrics attach to operation, duration, result,
+  router ownership, recovery budget, readiness, and the low-cardinality
+  installed-versus-running relation. Remote Control observation events carry
+  its bounded server name and environment identifier.
+- Routine periodic router maintenance updates low-cardinality metrics without
+  emitting logs. Maintenance logs are reserved for explicit degraded states;
+  normal processing and coalescing remain silent.
+- Managed app-server stderr has one reader owned by the child-process adapter.
+  It classifies known OAuth, model-schema, and Remote Control failures, emits
+  only the child source and bounded class, and discards every raw line. These
+  surfaces exclude executable paths or hashes, command environment, updater
+  output, protocol frames, prompts, payloads, and secrets.
 - The host event loop waits on child and operator events when idle. Readiness
   probes are lifecycle- or status-triggered, and telemetry is not emitted per
   Codex protocol message. A bounded idle observation detects accidental polling
   or a busy loop without creating a benchmark service.
-- Existing Victoria export is the operational proof boundary. No new database,
-  dashboard, or retained lifecycle history is introduced.
+- Existing VictoriaLogs, VictoriaMetrics, and VictoriaTraces ingestion is the
+  operational proof boundary. Export is fail-open and the host neither starts
+  nor owns that external stack. No new database, dashboard, or retained
+  lifecycle history is introduced.
 
 ## How each requirement is realized and proved
 

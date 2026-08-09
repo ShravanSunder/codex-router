@@ -70,7 +70,7 @@ const DEFAULT_DEBUG_ROUTER_ROOT_DIR: &str = ".codex-router-debug";
 
 /// Runs the process CLI.
 pub fn run() -> i32 {
-    let _telemetry_guard = telemetry::init_from_env();
+    let _telemetry_guard = telemetry::init_from_env(telemetry::TelemetryMode::EnvironmentOnly);
     let run_span = telemetry::run_span();
     let _run_span_guard = run_span.enter();
     let context = CliContext::from_process();
@@ -96,7 +96,13 @@ pub async fn run_async() -> i32 {
             .join()
             .unwrap_or(2);
     }
-    let telemetry_guard = telemetry::init_from_env();
+    let telemetry_mode = match &parsed_command {
+        Ok(CliCommand::Host(command)) if command.runs_foreground() => {
+            telemetry::TelemetryMode::ForegroundHost
+        }
+        _ => telemetry::TelemetryMode::EnvironmentOnly,
+    };
+    let telemetry_guard = telemetry::init_from_env(telemetry_mode);
     let telemetry_shutdown = telemetry_guard.shutdown_handle();
     let run_span = telemetry::run_span();
     let _run_span_guard = run_span.enter();
@@ -151,7 +157,7 @@ pub fn run_sessions_picker_test_harness() -> i32 {
 }
 
 fn run_sync_process_args(args: Vec<OsString>) -> i32 {
-    let _telemetry_guard = telemetry::init_from_env();
+    let _telemetry_guard = telemetry::init_from_env(telemetry::TelemetryMode::EnvironmentOnly);
     let run_span = telemetry::run_span();
     let _run_span_guard = run_span.enter();
     let context = CliContext::from_process();

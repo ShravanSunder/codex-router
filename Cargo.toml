@@ -17,16 +17,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-codex-router-core = { path = "crates/codex-router-core", version = "0.1.5" }
-codex-router-codex = { path = "crates/codex-router-codex", version = "0.1.5" }
-codex-router-host = { path = "crates/codex-router-host", version = "0.1.5" }
-codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.5" }
+codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
+codex-router-codex = { path = "crates/codex-router-codex", version = "0.1.6" }
+codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
+codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.6" }
 base64 = "0.22.1"
 bytes = "1.11.0"
 chrono = "0.4.45"
@@ -44,9 +44,10 @@ hyper-rustls = { version = "0.27.7", default-features = false, features = ["http
 hyper-util = { version = "0.1.19", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
 indicatif = "0.18.3"
 iocraft = "0.8.3"
-opentelemetry = { version = "0.31.0", features = ["metrics", "trace"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["http-proto", "metrics", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
-opentelemetry_sdk = { version = "0.31.0", features = ["metrics", "rt-tokio", "trace"] }
+opentelemetry = { version = "0.31.0", features = ["logs", "metrics", "trace"] }
+opentelemetry-appender-tracing = "0.31.1"
+opentelemetry-otlp = { version = "0.31.0", features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["logs", "metrics", "rt-tokio", "trace"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "stdio"] }
 rusqlite = { version = "0.37.0", default-features = false, features = ["bundled"] }

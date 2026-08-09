@@ -12,6 +12,7 @@ workspace = true
 codex-router-codex.workspace = true
 codex-router-core.workspace = true
 httparse.workspace = true
+opentelemetry.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

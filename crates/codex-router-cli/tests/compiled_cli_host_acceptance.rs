@@ -198,6 +198,12 @@ async fn compiled_cli_app_server_child_entrypoint() -> Result<(), Box<dyn std::e
     if std::env::var_os("CODEX_ROUTER_COMPILED_CLI_APP_CHILD").is_none() {
         return Ok(());
     }
+    if std::env::var_os("CODEX_ROUTER_COMPILED_CLI_EMIT_CHILD_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "OAuth refresh token was rejected: invalid_grant: CODEX_ROUTER_CHILD_SECRET_CANARY"
+        );
+        eprintln!("failed to refresh available models: missing field `display_name`");
+    }
     let socket_path = PathBuf::from(
         std::env::var_os("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
             .ok_or("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET missing")?,
