@@ -1,5 +1,19 @@
 # AGENTS.md
 
+## Release And Homebrew Distribution
+
+- Before merging a user-facing code change, advance the workspace package
+  version to the next unused semantic version and update `Cargo.lock`. Do not
+  merge releasable code while leaving Homebrew on an older version.
+- After the versioned change reaches `main`, publish the matching `v<version>`
+  tag and require `.github/workflows/release.yml` to publish the GitHub release
+  artifact, update `ShravanSunder/homebrew-taps`, and verify the Homebrew
+  installation. A local `cargo install` is not a release and does not satisfy
+  this requirement.
+- Keep release publication separate from production process replacement.
+  Publishing or installing a new binary never authorizes restarting the
+  running production router.
+
 ## Local Debug Boundaries
 
 - Never stop, restart, or replace the production Codex router process unless
