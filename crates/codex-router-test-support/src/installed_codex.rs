@@ -38,12 +38,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 use codex_router_cli::CliContext;
-use codex_router_cli::profile::CodexRouterProfile;
 use codex_router_cli::profile::CodexRouterProfileWriter;
 use codex_router_cli::run_with_io;
 use codex_router_cli::token::LocalRouterTokenService;
 use codex_router_cli::token::Shell;
 use codex_router_cli::token::export_token_assignment;
+use codex_router_codex::CodexRouterProfile;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;

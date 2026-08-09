@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "crates/codex-router-auth",
     "crates/codex-router-cli",
+    "crates/codex-router-codex",
     "crates/codex-router-core",
+    "crates/codex-router-host",
     "crates/codex-router-quota-reset-test-harness",
     "crates/codex-router-proxy",
     "crates/codex-router-quota",
@@ -22,6 +24,8 @@ publish = false
 
 [workspace.dependencies]
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.3" }
+codex-router-codex = { path = "crates/codex-router-codex", version = "0.1.3" }
+codex-router-host = { path = "crates/codex-router-host", version = "0.1.3" }
 codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.3" }
 base64 = "0.22.1"
 bytes = "1.11.0"
@@ -44,13 +48,14 @@ opentelemetry = { version = "0.31.0", features = ["metrics", "trace"] }
 opentelemetry-otlp = { version = "0.31.0", features = ["http-proto", "metrics", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["metrics", "rt-tokio", "trace"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
+rustix = { version = "1.1.4", features = ["fs", "process", "stdio"] }
 rusqlite = { version = "0.37.0", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.18"
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "io-util"] }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
 tracing = "0.1.44"

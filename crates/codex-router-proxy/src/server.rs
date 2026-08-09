@@ -55,6 +55,7 @@ use codex_router_core::audit::TransportKind;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
+use codex_router_core::router_compatibility::RouterCompatibility;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
@@ -464,6 +465,7 @@ pub struct LoopbackRouterRuntime {
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
     websocket_revocations: WebSocketRevocationRegistry,
@@ -500,6 +502,7 @@ impl LoopbackRouterRuntime {
         let selection_state_store = runtime.block_on(AsyncSqliteStateStore::open_read_only(
             &config.state_database_path,
         ))?;
+        let local_model_authentication_required = config.local_token.is_some();
         let auth_gate = match config.local_token {
             Some(local_token) => crate::local_auth::ProxyLocalAuthGate::new(LocalRouterAuth::new(
                 local_token,
@@ -539,6 +542,7 @@ impl LoopbackRouterRuntime {
             affinity_secret_provider,
             affinity_owner_recorder,
             auth_gate,
+            local_model_authentication_required,
             upstream,
             upstream_endpoint,
             websocket_revocations,
@@ -759,6 +763,7 @@ impl LoopbackRouterRuntime {
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
             affinity_record_tasks,
             auth_gate: self.auth_gate.clone(),
+            local_model_authentication_required: self.local_model_authentication_required,
             upstream: self.upstream.clone(),
             upstream_endpoint: self.upstream_endpoint.clone(),
             websocket_revocations: self.websocket_revocations.clone(),
@@ -1002,6 +1007,7 @@ struct LoopbackProtocolConnectionHandler {
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     affinity_record_tasks: TaskTracker,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
     websocket_revocations: WebSocketRevocationRegistry,
@@ -1059,6 +1065,13 @@ impl LoopbackProtocolConnectionHandler {
         upgrade_tasks: SharedUpgradeTasks,
         local_peer_addr: Option<SocketAddr>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        if let Some(response) = router_compatibility_response(
+            request.method(),
+            request.uri(),
+            self.local_model_authentication_required,
+        ) {
+            return response;
+        }
         match HyperProtocolSwitchpoint::classify(request.method(), request.uri(), request.headers())
         {
             HyperProtocolDispatch::WebSocketUpgrade => {
@@ -1309,6 +1322,31 @@ impl LoopbackProtocolConnectionHandler {
             self.selection_state_store.list_accounts().await,
         )
     }
+}
+
+fn router_compatibility_response(
+    method: &HttpMethod,
+    uri: &Uri,
+    local_model_authentication_required: bool,
+) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
+    if method != HttpMethod::GET || uri.path() != "/healthz" {
+        return None;
+    }
+
+    let body = match serde_json::to_vec(&RouterCompatibility::current(
+        local_model_authentication_required,
+    )) {
+        Ok(body) => body,
+        Err(_error) => {
+            return Some(empty_response(StatusCode::INTERNAL_SERVER_ERROR));
+        }
+    };
+    let response = HttpResponse::builder()
+        .status(StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(box_body_from_bytes(body))
+        .unwrap_or_else(|_error| HttpResponse::new(empty_body()));
+    Some(response)
 }
 
 fn enabled_account_attempt_limit_from_accounts(
@@ -2351,6 +2389,46 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[tokio::test]
+    async fn compatibility_health_response_is_static_and_bypasses_model_authentication() {
+        let uri = Uri::from_static("/healthz");
+        let response = router_compatibility_response(&HttpMethod::GET, &uri, true)
+            .unwrap_or_else(|| panic!("GET /healthz should return a compatibility response"));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap_or_else(|error| panic!("compatibility body should collect: {error}"))
+            .to_bytes();
+        let payload = serde_json::from_slice::<
+            codex_router_core::router_compatibility::RouterCompatibility,
+        >(&body)
+        .unwrap_or_else(|error| panic!("compatibility body should decode: {error}"));
+
+        assert_eq!(
+            payload,
+            codex_router_core::router_compatibility::RouterCompatibility::current(true)
+        );
+    }
+
+    #[test]
+    fn compatibility_health_response_rejects_other_methods_and_paths() {
+        assert!(
+            router_compatibility_response(&HttpMethod::POST, &Uri::from_static("/healthz"), false,)
+                .is_none()
+        );
+        assert!(
+            router_compatibility_response(
+                &HttpMethod::GET,
+                &Uri::from_static("/v1/models"),
+                false,
+            )
+            .is_none()
+        );
+    }
 
     #[derive(Clone, Debug, Default)]
     struct RecordingAsyncAffinityOwnerRecorder {

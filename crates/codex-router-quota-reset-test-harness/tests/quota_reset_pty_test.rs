@@ -284,8 +284,12 @@ mod quota_reset_pty_test {
             terminal.wait_for_text_after("1%", click_start, SEMANTIC_WAIT),
             "pointer-incremented floor",
         )?;
+        let cancel_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
-        terminal.wait_for_text("ctrl-e edit floor", SEMANTIC_WAIT)?;
+        stage(
+            terminal.wait_for_text_after("ctrl-e edit floor", cancel_start, SEMANTIC_WAIT),
+            "cancelled weekly-floor editor",
+        )?;
         terminal.send(b"q")?;
 
         let transcript = terminal.finish(SEMANTIC_WAIT)?;

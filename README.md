@@ -5,7 +5,8 @@
 The product boundary is intentionally narrow:
 
 - Codex remains the CLI, protocol client, session owner, installer, config owner, hook runner, MCP owner, and log/session/history owner.
-- `codex-router` owns only local router authentication, upstream OAuth accounts, quota snapshots, account selection, and byte-preserving forwarding of Codex model-provider traffic.
+- `codex-router serve` owns local router authentication, upstream OAuth accounts, quota snapshots, account selection, and byte-preserving forwarding of Codex model-provider traffic.
+- The optional foreground `codex-router host` command owns one local router and one native Codex app-server child. Codex clients connect directly to the app-server Unix socket; the host never proxies Codex protocol traffic.
 - Prodex is source-mining reference material only. This repo is not a Prodex fork.
 
 Current design source of truth:
@@ -51,3 +52,29 @@ refresh. `serve` reads last-known SQLite quota state immediately, starts an
 immediate background refresh after binding, and continues refreshing on the
 configured schedule. Run `quota refresh` for an explicit manual provider fetch,
 and `quota status` for SQLite-only status output.
+
+## Shared Codex Host
+
+Start the personal-use shared host manually in a foreground terminal:
+
+```shell
+cargo run -p codex-router-cli -- host
+```
+
+The host starts `codex-router serve` when a compatible router is absent, starts
+the managed Codex app-server with Remote Control enabled, and keeps lifecycle
+control on an owner-only Unix socket. Existing `sessions` new/resume launches
+attach directly to Codex's conventional app-server socket.
+
+```shell
+cargo run -p codex-router-cli -- host status
+cargo run -p codex-router-cli -- host restart
+cargo run -p codex-router-cli -- host restart-router
+cargo run -p codex-router-cli -- host update
+```
+
+`host update` runs the managed Codex updater. If executable content changes,
+the foreground host stops its children and re-execs itself; otherwise the
+running app-server and connected clients are left untouched. This MVP is not a
+background service, launchd agent, client proxy, or cross-machine control
+plane.

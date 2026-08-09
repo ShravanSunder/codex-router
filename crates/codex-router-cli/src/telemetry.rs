@@ -3,6 +3,9 @@
 use std::env;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
@@ -27,10 +30,47 @@ const OBSERVABILITY_MARKER_ENV: &str = "CODEX_ROUTER_OBSERVABILITY_MARKER";
 pub(crate) struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    completed: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TelemetryShutdownHandle {
+    tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
+    completed: Arc<AtomicBool>,
+}
+
+impl TelemetryShutdownHandle {
+    pub(crate) fn flush_and_shutdown(&self) {
+        if self.completed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(tracer_provider) = &self.tracer_provider {
+            let _ = tracer_provider.force_flush();
+            let _ = tracer_provider.shutdown();
+        }
+        if let Some(meter_provider) = &self.meter_provider {
+            let _ = meter_provider.force_flush();
+            let _ = meter_provider.shutdown();
+        }
+    }
+}
+
+impl TelemetryGuard {
+    pub(crate) fn shutdown_handle(&self) -> TelemetryShutdownHandle {
+        TelemetryShutdownHandle {
+            tracer_provider: self.tracer_provider.clone(),
+            meter_provider: self.meter_provider.clone(),
+            completed: self.completed.clone(),
+        }
+    }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        if self.completed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         if let Some(tracer_provider) = self.tracer_provider.take() {
             let _ = tracer_provider.force_flush();
             let _ = tracer_provider.shutdown();
@@ -56,6 +96,7 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
         return TelemetryGuard {
             tracer_provider: None,
             meter_provider: None,
+            completed: Arc::new(AtomicBool::new(false)),
         };
     };
 
@@ -73,6 +114,7 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
             return TelemetryGuard {
                 tracer_provider: None,
                 meter_provider: None,
+                completed: Arc::new(AtomicBool::new(false)),
             };
         }
     };
@@ -106,6 +148,7 @@ pub(crate) fn init_from_env() -> TelemetryGuard {
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
         meter_provider,
+        completed: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -260,6 +303,33 @@ fn sanitize_error(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    #[test]
+    fn telemetry_shutdown_completion_is_shared_across_guard_and_handles() {
+        let guard = TelemetryGuard {
+            tracer_provider: None,
+            meter_provider: None,
+            completed: Arc::new(AtomicBool::new(false)),
+        };
+        let first_handle = guard.shutdown_handle();
+        let second_handle = first_handle.clone();
+
+        assert!(Arc::ptr_eq(&guard.completed, &first_handle.completed));
+        assert!(Arc::ptr_eq(
+            &first_handle.completed,
+            &second_handle.completed
+        ));
+
+        first_handle.flush_and_shutdown();
+        assert!(guard.completed.load(Ordering::Acquire));
+        drop(guard);
+        second_handle.flush_and_shutdown();
+    }
+
     #[test]
     fn process_start_telemetry_does_not_emit_raw_otlp_endpoint() {
         let source = include_str!("telemetry.rs");

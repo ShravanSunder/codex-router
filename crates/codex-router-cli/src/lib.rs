@@ -28,6 +28,7 @@ use codex_router_secret_store::file_backend::FileSecretStore;
 pub mod account;
 mod credential_runtime;
 pub mod doctor;
+mod host_command;
 mod live;
 mod presentation;
 pub mod profile;
@@ -40,6 +41,8 @@ pub mod token;
 
 use account::AccountCommand;
 use account::AccountCommandError;
+use host_command::HostCommand;
+use host_command::HostCommandError;
 use live::LiveCommand;
 use profile::CodexRouterProfile;
 use profile::CodexRouterProfileWriter;
@@ -59,6 +62,8 @@ const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
 const DEBUG_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_DEBUG_ROUTER_ROOT";
+#[cfg(all(debug_assertions, not(test)))]
+const DEBUG_APP_SERVER_SOCKET_ENV: &str = "CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET";
 #[cfg(all(debug_assertions, not(test)))]
 const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
 const DEFAULT_DEBUG_ROUTER_ROOT_DIR: &str = ".codex-router-debug";
@@ -83,18 +88,29 @@ pub fn run() -> i32 {
 pub async fn run_async() -> i32 {
     let args = std::env::args_os().collect::<Vec<_>>();
     let context = CliContext::from_process();
-    let uses_async_dispatch = matches!(CliCommand::parse(args.clone()), Ok(CliCommand::Quota(_)));
+    let parsed_command = CliCommand::parse(args.clone());
+    let uses_async_dispatch = matches!(&parsed_command, Ok(CliCommand::Quota(_)))
+        || matches!(&parsed_command, Ok(CliCommand::Host(_)));
     if !uses_async_dispatch {
         return std::thread::spawn(move || run_sync_process_args(args))
             .join()
             .unwrap_or(2);
     }
-    let _telemetry_guard = telemetry::init_from_env();
+    let telemetry_guard = telemetry::init_from_env();
+    let telemetry_shutdown = telemetry_guard.shutdown_handle();
     let run_span = telemetry::run_span();
     let _run_span_guard = run_span.enter();
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    if let Err(error) = run_with_io_async(args, &context, &mut stdout, &mut stderr).await {
+    if let Err(error) = run_with_io_async_with_telemetry(
+        args,
+        &context,
+        &mut stdout,
+        &mut stderr,
+        Some(telemetry_shutdown),
+    )
+    .await
+    {
         let _ = writeln!(stderr, "{error}");
         return 2;
     }
@@ -159,6 +175,20 @@ where
     W: std::io::Write,
     E: std::io::Write,
 {
+    run_with_io_async_with_telemetry(args, context, stdout, stderr, None).await
+}
+
+async fn run_with_io_async_with_telemetry<W, E>(
+    args: Vec<OsString>,
+    context: &CliContext,
+    stdout: &mut W,
+    stderr: &mut E,
+    telemetry_shutdown: Option<telemetry::TelemetryShutdownHandle>,
+) -> Result<(), CliError>
+where
+    W: std::io::Write,
+    E: std::io::Write,
+{
     match CliCommand::parse(args.clone())? {
         CliCommand::Quota(command) => {
             quota::run_quota_command(
@@ -169,6 +199,10 @@ where
                 context.stdout_terminal_width(),
             )
             .await?;
+            stderr.flush().map_err(CliError::Stderr)
+        }
+        CliCommand::Host(command) => {
+            host_command::run_host_command(stdout, command, context, telemetry_shutdown).await?;
             stderr.flush().map_err(CliError::Stderr)
         }
         _ => run_with_io(args, context, stdout, stderr),
@@ -311,6 +345,7 @@ where
         CliCommand::Quota(_) => return Err(QuotaCommandError::AsyncDispatchRequired.into()),
         CliCommand::Live(command) => live::run_live_command(stdout, command)?,
         CliCommand::Sessions(command) => sessions::run_sessions_command(stdout, command, context)?,
+        CliCommand::Host(_) => return Err(CliError::HostRequiresAsyncDispatch),
         CliCommand::Version => {
             writeln!(stdout, "codex-router {}", env!("CARGO_PKG_VERSION"))
                 .map_err(CliError::Stdout)?;
@@ -389,6 +424,37 @@ fn default_router_root_from_environment(
 
 fn debug_default_router_root_for_home(home: &Path) -> PathBuf {
     home.join(DEFAULT_DEBUG_ROUTER_ROOT_DIR)
+}
+
+pub(crate) fn app_server_socket_or_default(
+    context: &CliContext,
+    paths: &codex_router_codex::CodexPaths,
+) -> Result<PathBuf, &'static str> {
+    #[cfg(all(debug_assertions, not(test)))]
+    if context.env_var(USE_HOME_DEFAULT_ENV).is_none()
+        && let Some(debug_socket) = context.env_var(DEBUG_APP_SERVER_SOCKET_ENV)
+    {
+        return validate_debug_app_server_socket(PathBuf::from(debug_socket));
+    }
+
+    #[cfg(not(all(debug_assertions, not(test))))]
+    let _ = context;
+
+    Ok(paths.app_server_socket())
+}
+
+fn validate_debug_app_server_socket(debug_socket: PathBuf) -> Result<PathBuf, &'static str> {
+    if !debug_socket.is_absolute() {
+        return Err("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET must be an absolute path");
+    }
+    let Some(parent) = debug_socket.parent() else {
+        return Err("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET must have a dedicated parent directory");
+    };
+    if parent == Path::new("/") || parent == std::env::temp_dir() {
+        return Err("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET must be inside a dedicated directory");
+    }
+
+    Ok(debug_socket)
 }
 
 fn write_websocket_registry_report_file(
@@ -653,6 +719,7 @@ enum CliCommand {
     Quota(QuotaCommand),
     Live(LiveCommand),
     Sessions(SessionsCommand),
+    Host(HostCommand),
     Version,
     Help,
 }
@@ -691,6 +758,10 @@ impl CliCommand {
             "sessions" => Ok(Self::Sessions(
                 SessionsCommand::parse(parser.remaining_arguments())
                     .map_err(|message| CliError::SessionsParse { message })?,
+            )),
+            "host" => Ok(Self::Host(
+                HostCommand::parse(parser.remaining_arguments())
+                    .map_err(|message| CliError::HostParse { message })?,
             )),
             "--version" | "-V" | "version" => {
                 parser.reject_remaining()?;
@@ -1303,6 +1374,21 @@ pub enum CliError {
     #[error(transparent)]
     Sessions(#[from] SessionsCommandError),
 
+    /// Host command failed to parse.
+    #[error("{message}")]
+    HostParse {
+        /// Clap-rendered parse error.
+        message: String,
+    },
+
+    /// Shared host command failed.
+    #[error(transparent)]
+    Host(#[from] HostCommandError),
+
+    /// Host commands use the process's existing Tokio runtime.
+    #[error("host command requires native async dispatch")]
+    HostRequiresAsyncDispatch,
+
     /// Loopback bind failed.
     #[error(transparent)]
     Bind(#[from] ServerBindError),
@@ -1351,6 +1437,11 @@ commands:
   sessions --checkout           Pick from this git checkout
   sessions --repo               Pick from all checkouts for this repo
   sessions --any                Pick from all Codex sessions
+  host                           Run the foreground shared Codex host
+  host status                    Show shared host status
+  host restart                   Restart the managed app-server
+  host restart-router            Restart the router when host-owned
+  host update                    Update Codex and restart the host if changed
   doctor                        Diagnose local router setup
   profile print                 Print the Codex profile snippet
 ";
@@ -1383,6 +1474,25 @@ mod tests {
     use tungstenite::Message;
     use tungstenite::accept_hdr;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn host_commands_parse_with_explicit_router_root() {
+        let router_root = PathBuf::from("/tmp/router-host-test");
+        let command = match CliCommand::parse([
+            OsString::from("codex-router"),
+            OsString::from("host"),
+            OsString::from("status"),
+            OsString::from("--router-root"),
+            router_root.as_os_str().to_owned(),
+        ]) {
+            Ok(CliCommand::Host(command)) => command,
+            Ok(other) => panic!("host status should parse, got {other:?}"),
+            Err(error) => panic!("host status should parse: {error}"),
+        };
+
+        assert_eq!(command.action(), crate::host_command::HostAction::Status);
+        assert_eq!(command.router_root(), Some(router_root.as_path()));
+    }
     use tungstenite::connect;
     use tungstenite::handshake::server::Request;
     use tungstenite::handshake::server::Response;
@@ -1653,6 +1763,30 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("home-default escape should resolve: {error}")),
             home.join(".codex-router")
+        );
+    }
+
+    #[test]
+    fn debug_app_server_socket_requires_absolute_dedicated_parent() {
+        assert!(
+            super::validate_debug_app_server_socket(PathBuf::from("relative/app-server.sock"))
+                .is_err()
+        );
+        assert!(
+            super::validate_debug_app_server_socket(std::env::temp_dir().join("app-server.sock"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn debug_app_server_socket_accepts_absolute_dedicated_parent() {
+        let socket = std::env::temp_dir()
+            .join("codex-router-debug-app-server")
+            .join("app-server.sock");
+
+        assert_eq!(
+            super::validate_debug_app_server_socket(socket.clone()),
+            Ok(socket)
         );
     }
 
@@ -5827,6 +5961,7 @@ exit 42
 
     #[test]
     fn sessions_new_dry_run_prints_codex_command_with_passthrough_flags() {
+        let codex_home = PathBuf::from("/tmp/codex-router-sessions-new-home");
         let command = match CliCommand::parse([
             OsString::from("sessions"),
             OsString::from("--new"),
@@ -5846,14 +5981,22 @@ exit 42
         must_ok(crate::sessions::run_sessions_command_with_dependencies(
             &mut stdout,
             command,
-            &CliContext::new(Vec::new()),
+            &CliContext::new(vec![(
+                "CODEX_HOME".to_owned(),
+                codex_home.display().to_string(),
+            )]),
             &mut runner,
             &mut picker,
         ));
 
         assert_eq!(
             String::from_utf8(stdout).unwrap_or_else(|error| panic!("stdout utf8: {error}")),
-            "codex --profile codex-router --yolo --model gpt-5.4-mini\n"
+            format!(
+                "codex --profile codex-router --remote unix://{} --yolo --model gpt-5.4-mini\n",
+                codex_home
+                    .join("app-server-control/app-server-control.sock")
+                    .display()
+            )
         );
         assert!(runner.new_codex_args.is_empty());
         assert!(runner.resumed_session_ids.is_empty());
@@ -6368,7 +6511,12 @@ exit 42
 
         assert_eq!(
             output.stdout,
-            "codex --profile codex-router resume -- thread-new\n"
+            format!(
+                "codex --profile codex-router --remote unix://{} resume -- thread-new\n",
+                codex_home
+                    .join("app-server-control/app-server-control.sock")
+                    .display()
+            )
         );
     }
 
