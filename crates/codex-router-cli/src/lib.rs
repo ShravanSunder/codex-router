@@ -1443,6 +1443,7 @@ commands:
   sessions --checkout           Pick from this git checkout
   sessions --repo               Pick from all checkouts for this repo
   sessions --any                Pick from all Codex sessions
+  sessions --id <uuid>          Resume one exact Codex session
   host                           Run the foreground shared Codex host
   host status                    Show shared host status
   host restart                   Restart the managed app-server
@@ -5913,11 +5914,117 @@ exit 42
         assert!(!command.list);
         assert_eq!(command.format, crate::sessions::SessionsFormat::Table);
         assert!(!command.last);
+        assert!(command.id.is_none());
         assert!(!command.new);
         assert!(!command.local);
         assert_eq!(command.limit, 100);
         assert!(!command.dry_run);
         assert!(command.codex_args.is_empty());
+    }
+
+    #[test]
+    fn sessions_command_parses_exact_resume_id_with_passthrough_args() {
+        const SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--id"),
+            OsString::from(SESSION_ID),
+            OsString::from("--local"),
+            OsString::from("--dry-run"),
+            OsString::from("--yolo"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.6-luna"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+
+        assert_eq!(command.id.as_deref(), Some(SESSION_ID));
+        assert_eq!(
+            command.codex_args,
+            [
+                OsString::from("--yolo"),
+                OsString::from("--model"),
+                OsString::from("gpt-5.6-luna")
+            ]
+        );
+    }
+
+    #[test]
+    fn sessions_command_rejects_non_uuid_resume_ids() {
+        for session_id in [
+            "thread-name",
+            "00000000-0000-4000-8000-00000000000",
+            "00000000-0000-4000-8000-000000000001-suffix",
+            " 00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000001 ",
+        ] {
+            let error = must_err(CliCommand::parse([
+                OsString::from("sessions"),
+                OsString::from("--id"),
+                OsString::from(session_id),
+            ]));
+            assert!(
+                error.to_string().contains("complete UUID"),
+                "unexpected resume id error for {session_id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_command_id_conflicts_with_other_selection_modes() {
+        for conflicting_option in ["--new", "--last", "--list"] {
+            let error = must_err(CliCommand::parse([
+                OsString::from("sessions"),
+                OsString::from("--id"),
+                OsString::from("00000000-0000-4000-8000-000000000001"),
+                OsString::from(conflicting_option),
+            ]));
+            assert!(
+                error.to_string().contains("cannot be used with"),
+                "unexpected --id conflict error for {conflicting_option}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_exact_resume_id_uses_runner_without_picker_or_state_lookup() {
+        const SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--id"),
+            OsString::from(SESSION_ID),
+            OsString::from("--local"),
+            OsString::from("--yolo"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let context = CliContext::new(vec![
+            (
+                "CODEX_HOME".to_owned(),
+                "/path/that/does/not/exist".to_owned(),
+            ),
+            ("CODEX_ROUTER_FORCE_NON_TTY".to_owned(), "1".to_owned()),
+        ]);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new("picker-must-not-run");
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert!(picker.offered_session_ids.is_empty());
+        assert_eq!(runner.resumed_session_ids, [SESSION_ID]);
+        assert_eq!(runner.resume_codex_args, [[OsString::from("--yolo")]]);
     }
 
     #[test]

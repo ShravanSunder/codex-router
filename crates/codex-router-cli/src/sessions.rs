@@ -131,6 +131,8 @@ pub struct SessionsCommand {
     pub format: SessionsFormat,
     /// Resume the latest session matching filters.
     pub last: bool,
+    /// Resume one exact Codex session UUID without loading session records.
+    pub id: Option<String>,
     /// Launch a new Codex session instead of resuming one.
     pub new: bool,
     /// Launch Codex locally instead of attaching to the hosted app-server.
@@ -187,6 +189,9 @@ impl SessionsCommand {
         argv.extend(arguments);
         let parsed =
             ClapSessionsCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
+        if let Some(session_id) = parsed.id.as_deref() {
+            validate_exact_uuid_session_id(session_id)?;
+        }
         reject_legacy_router_options(&parsed.codex_args)?;
         reject_interactive_limit(&parsed)?;
         Ok(Self {
@@ -197,6 +202,7 @@ impl SessionsCommand {
             list: parsed.list,
             format: parsed.format,
             last: parsed.last,
+            id: parsed.id,
             new: parsed.new,
             local: parsed.local,
             limit: parsed.limit.unwrap_or(DEFAULT_SESSION_RECORD_LIMIT),
@@ -223,6 +229,22 @@ fn reject_interactive_limit(command: &ClapSessionsCommand) -> Result<(), String>
     Ok(())
 }
 
+fn validate_exact_uuid_session_id(session_id: &str) -> Result<(), String> {
+    let bytes = session_id.as_bytes();
+    let is_canonical_uuid = bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes.get(index) == Some(&b'-'))
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit());
+    if !is_canonical_uuid {
+        return Err("--id requires a complete UUID".to_owned());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "sessions", disable_help_subcommand = true)]
 struct ClapSessionsCommand {
@@ -244,6 +266,9 @@ struct ClapSessionsCommand {
     format: SessionsFormat,
     #[arg(long)]
     last: bool,
+    /// Resume one complete canonical UUID directly without opening the picker.
+    #[arg(long, conflicts_with_all = ["new", "last", "list"])]
+    id: Option<String>,
     #[arg(long, conflicts_with_all = ["list", "last"])]
     new: bool,
     #[arg(long)]
@@ -289,6 +314,9 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
     let launch_target = sessions_launch_target(&command, context)?;
+    if let Some(session_id) = command.id.as_deref() {
+        return run_id_session(stdout, &command, &launch_target, runner, session_id);
+    }
     if command.new {
         return run_new_session(stdout, command, &launch_target, runner);
     }
@@ -302,6 +330,23 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
         SessionsFormat::Json => write_sessions_json(stdout, command, context),
         SessionsFormat::Table => write_sessions_table(stdout, command, context),
     }
+}
+
+fn run_id_session<W: Write>(
+    stdout: &mut W,
+    command: &SessionsCommand,
+    launch_target: &SessionsLaunchTarget,
+    runner: &mut impl SessionsCommandRunner,
+    session_id: &str,
+) -> Result<(), SessionsCommandError> {
+    if validate_exact_uuid_session_id(session_id).is_err() {
+        return Err(SessionsCommandError::InvalidResumeSessionId);
+    }
+    if command.dry_run {
+        write_codex_resume_dry_run(stdout, launch_target, &command.codex_args, session_id)?;
+        return Ok(());
+    }
+    runner.run_codex_resume(&command.codex_args, session_id)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1888,6 +1933,9 @@ pub enum SessionsCommandError {
     /// Session id from Codex state is unsafe to pass to resume.
     #[error("unsafe Codex session id in state database")]
     UnsafeSessionId,
+    /// Direct resume ids must be complete UUIDs.
+    #[error("--id requires a complete UUID")]
+    InvalidResumeSessionId,
     /// JSON rendering failed.
     #[error("failed to render sessions JSON: {0}")]
     Json(serde_json::Error),
