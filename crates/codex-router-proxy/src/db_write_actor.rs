@@ -164,7 +164,7 @@ impl DbWriteCommand {
         match self {
             Self::ProviderQuotaExhausted { route_band, .. } => Some(*route_band),
             Self::PreviousResponseAffinityOwner { owner } => Some(owner.route_band()),
-            Self::SessionAccountAffinity { route_band, .. } => Some(*route_band),
+            Self::SessionAccountAffinity { .. } => None,
             Self::ActiveClientAcquired { .. } | Self::ActiveClientReleased { .. } => None,
         }
     }
@@ -940,6 +940,7 @@ mod tests {
     use codex_router_core::affinity::AffinityKeyHash;
     use codex_router_state::affinity_owner::AffinitySourceTransport;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+    use codex_router_state::session_account_affinity::SessionAccountAffinity;
 
     use super::DbWriteActor;
     use super::DbWriteCommand;
@@ -1693,6 +1694,42 @@ mod tests {
         actor.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn session_affinity_write_failure_does_not_degrade_request_routing() {
+        let repository = Arc::new(FailingSessionAffinityRepository::default());
+        let queue_health = RouteBandQueueHealth::default();
+        let actor = DbWriteActor::start_on_handle(
+            &tokio::runtime::Handle::current(),
+            repository.clone(),
+            queue_health.clone(),
+            2,
+        );
+
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-write-failure",
+                    account_id("acct_session_write_failure"),
+                    1_000,
+                ),
+            )),
+            DbWriteEnqueueResult::Enqueued
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            repository.write_attempted.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("session affinity write should be attempted"));
+
+        route_band_queue_health_allows_selection(&queue_health, RouteBand::Responses)
+            .unwrap_or_else(|error| {
+                panic!("cache-affinity persistence failure must not block routing: {error}")
+            });
+        actor.shutdown().await;
+    }
+
     #[derive(Default)]
     struct BlockingDbWriteRepository {
         entered: Notify,
@@ -1971,6 +2008,37 @@ mod tests {
                 Err(DbWriteRepositoryError::State(
                     codex_router_state::sqlite::StateStoreError::Sqlite {
                         message: "injected write failure before health probe".to_owned(),
+                    },
+                ))
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingSessionAffinityRepository {
+        write_attempted: Notify,
+    }
+
+    impl DbWriteRepository for FailingSessionAffinityRepository {
+        fn record_provider_quota_exhausted<'a>(
+            &'a self,
+            _account_id: AccountId,
+            _route_band: RouteBand,
+            _classification: ProviderErrorClassification,
+            _observed_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn record_session_account_affinity<'a>(
+            &'a self,
+            _affinity: SessionAccountAffinity,
+        ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            Box::pin(async move {
+                self.write_attempted.notify_one();
+                Err(DbWriteRepositoryError::State(
+                    codex_router_state::sqlite::StateStoreError::Sqlite {
+                        message: "injected session affinity write failure".to_owned(),
                     },
                 ))
             })

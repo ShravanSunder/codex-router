@@ -2275,7 +2275,7 @@ mod tests {
             .expect("async state should open");
         async_state
             .upsert_session_account_affinity(&SessionAccountAffinity::new(
-                "session-inside-ttl",
+                " session-inside-ttl ",
                 mapped.account_id().clone(),
                 10_001,
             ))
@@ -2292,7 +2292,7 @@ mod tests {
         let selected = selector
             .select_upstream_account(
                 &HttpProxyRequest::new(Method::Post, "/v1/responses")
-                    .with_header(Header::new("session-id", "session-inside-ttl")),
+                    .with_header(Header::new("session-id", " session-inside-ttl ")),
                 TokenGeneration::new(1),
                 None,
             )
@@ -9878,6 +9878,100 @@ mod tests {
             vec!["Bearer selected-upstream-token"],
         );
         assert_eq!(headers.value("x-codex-router-token"), None);
+    }
+
+    #[tokio::test]
+    async fn async_websocket_router_reuses_and_refreshes_prompt_cache_account_affinity() {
+        let temp_dir = ProxyTestTempDir::new("websocket_prompt_cache_account_affinity");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let preferred = AccountRecord::new(
+            account_id("acct_websocket_preferred"),
+            "websocket-preferred",
+            AccountStatus::Enabled,
+        );
+        let mapped = AccountRecord::new(
+            account_id("acct_websocket_mapped"),
+            "websocket-mapped",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &preferred,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &mapped,
+            "responses",
+            &[(18_000, 50, true), (604_800, 50, false)],
+        );
+        drop(state);
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        async_state
+            .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                "websocket-session",
+                mapped.account_id().clone(),
+                1_000,
+            ))
+            .await
+            .expect("session affinity should persist");
+        let writer = DbWriteActor::start(
+            Arc::new(SqliteDbWriteRepository::new(async_state.clone())),
+            4,
+        );
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            0,
+            Arc::new(|| 1_100),
+        )
+        .with_session_affinity_writer(writer.clone());
+        let resolver = RecordingAsyncProviderCredentialResolver::new("selected-upstream-token");
+        let protocol_router = WebSocketProtocolRouter::new();
+        let auth_gate = local_auth_gate();
+        let router = AsyncAuthenticatedWebSocketRouter::new(
+            &auth_gate,
+            &selector,
+            &resolver,
+            &protocol_router,
+        )
+        .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+
+        router
+            .route_first_frame(
+                WebSocketHandshakeRequest::new()
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_header(Header::new("session-id", "websocket-session")),
+                WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec()),
+            )
+            .await
+            .expect("websocket session affinity should route");
+
+        assert_eq!(
+            resolver.take_recorded(),
+            vec![mapped.account_id().as_str().to_owned()]
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let affinity = async_state
+                    .load_session_account_affinity("websocket-session")
+                    .await
+                    .expect("session affinity should load")
+                    .expect("session affinity should exist");
+                if affinity.last_seen_unix_seconds() == 1_100 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("websocket session affinity should refresh");
+        writer.shutdown().await;
     }
 
     #[tokio::test]

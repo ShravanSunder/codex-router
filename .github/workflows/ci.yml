@@ -70,7 +70,7 @@ jobs:
         run: cargo deny check
 
       - name: Audit
-        run: cargo audit
+        run: cargo audit --db "$RUNNER_TEMP/rustsec-advisory-db"
 
   workflow-lint:
     name: Workflow lint

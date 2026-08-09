@@ -1117,7 +1117,6 @@ where
             let session_id = if route_kind.previous_response_affinity_capable() {
                 request
                     .header_value("session-id")
-                    .map(str::trim)
                     .filter(|session_id| !session_id.is_empty())
             } else {
                 None
