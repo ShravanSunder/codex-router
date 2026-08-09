@@ -20,4 +20,4 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-codex-router-test-support = { path = "../codex-router-test-support", version = "0.1.3" }
+codex-router-test-support = { path = "../codex-router-test-support", version = "0.1.4" }
