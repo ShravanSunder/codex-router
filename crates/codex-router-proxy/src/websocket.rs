@@ -427,6 +427,10 @@ where
         let mut selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
             .with_websocket_upgrade(true)
             .with_body(first_frame.payload().to_vec());
+        if let Some(session_id) = handshake.header_value("session-id") {
+            selection_request =
+                selection_request.with_header(Header::new("session-id", session_id));
+        }
         let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
             self.emit_audit_event(websocket_selection_rejection_audit_event());
             WebSocketCloseReason::Selection {
@@ -630,6 +634,10 @@ where
         let mut selection_request = HttpProxyRequest::new(Method::Post, "/v1/responses")
             .with_websocket_upgrade(true)
             .with_body(first_frame.payload().to_vec());
+        if let Some(session_id) = handshake.header_value("session-id") {
+            selection_request =
+                selection_request.with_header(Header::new("session-id", session_id));
+        }
         let affinity_secret = self.load_affinity_secret().map_err(|_reason| {
             self.emit_audit_event(websocket_selection_rejection_audit_event());
             WebSocketCloseReason::Selection {

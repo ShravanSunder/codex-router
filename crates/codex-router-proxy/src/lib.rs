@@ -31,6 +31,7 @@ mod tests {
     use crate::account_selection::AccountDecisionSelector;
     use crate::account_selection::AsyncAccountDecisionSelector;
     use crate::account_selection::AsyncRepositoryBackedAccountSelector;
+    use crate::account_selection::PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS;
     use crate::account_selection::QuotaAwareAccountSelector;
     use crate::account_selection::QuotaAwareAccountSelectorError;
     use crate::account_selection::QuotaAwareAccountState;
@@ -41,6 +42,8 @@ mod tests {
     use crate::account_selection::SelectedAccountDecision;
     use crate::account_selection::release_account_reservation;
     use crate::credential_runtime::ProxyCredentialResolver;
+    use crate::db_write_actor::DbWriteActor;
+    use crate::db_write_actor::SqliteDbWriteRepository;
     use crate::headers::Header;
     use crate::headers::HeaderCollection;
     use crate::http_sse::AsyncProviderCredentialResolver;
@@ -144,6 +147,7 @@ mod tests {
     use codex_router_state::repositories::QuotaSnapshotRepository;
     use codex_router_state::repositories::SelectorQuotaRepository;
     use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts;
+    use codex_router_state::session_account_affinity::SessionAccountAffinity;
     use codex_router_state::sqlite::AsyncQuotaHistoryRepository;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
     use codex_router_state::sqlite::AsyncWeeklyQuotaFloorMutationStore;
@@ -2239,6 +2243,331 @@ mod tests {
 
         assert_eq!(selected.account_id(), beta.account_id());
         assert_eq!(selected.selection_reason(), "previous_response_affinity");
+    }
+
+    #[tokio::test]
+    async fn prompt_cache_account_affinity_reuses_mapped_account_inside_two_hours() {
+        let temp_dir = ProxyTestTempDir::new("prompt_cache_account_affinity_reuses_inside_ttl");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let preferred = AccountRecord::new(
+            account_id("acct_preferred"),
+            "preferred",
+            AccountStatus::Enabled,
+        );
+        let mapped =
+            AccountRecord::new(account_id("acct_mapped"), "mapped", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &preferred,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &mapped,
+            "responses",
+            &[(18_000, 50, true), (604_800, 50, false)],
+        );
+        drop(state);
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        async_state
+            .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                "session-inside-ttl",
+                mapped.account_id().clone(),
+                10_001,
+            ))
+            .await
+            .expect("session affinity should persist");
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            0,
+            Arc::new(|| 10_000 + PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS),
+        );
+
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("session-id", "session-inside-ttl")),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+            .expect("mapped session account should select");
+
+        assert_eq!(selected.account_id(), mapped.account_id());
+        assert_eq!(selected.selection_reason(), "prompt_cache_account_affinity");
+    }
+
+    #[tokio::test]
+    async fn prompt_cache_account_affinity_expires_at_exactly_two_hours() {
+        let temp_dir = ProxyTestTempDir::new("prompt_cache_account_affinity_expires_at_ttl");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let preferred = AccountRecord::new(
+            account_id("acct_preferred"),
+            "preferred",
+            AccountStatus::Enabled,
+        );
+        let mapped =
+            AccountRecord::new(account_id("acct_mapped"), "mapped", AccountStatus::Enabled);
+        persist_account_with_selector_window_specs(
+            &state,
+            &preferred,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &mapped,
+            "responses",
+            &[(18_000, 50, true), (604_800, 50, false)],
+        );
+        drop(state);
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        async_state
+            .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                "session-at-ttl",
+                mapped.account_id().clone(),
+                10_000,
+            ))
+            .await
+            .expect("session affinity should persist");
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            0,
+            Arc::new(|| 10_000 + PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS),
+        );
+
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("session-id", "session-at-ttl")),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+            .expect("normal selection should fall back");
+
+        assert_eq!(selected.account_id(), preferred.account_id());
+        assert_ne!(selected.selection_reason(), "prompt_cache_account_affinity");
+    }
+
+    #[tokio::test]
+    async fn unavailable_prompt_cache_account_affinity_falls_back_to_normal_selection() {
+        let temp_dir = ProxyTestTempDir::new("prompt_cache_account_affinity_unavailable_fallback");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let available = AccountRecord::new(
+            account_id("acct_available"),
+            "available",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &available,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        drop(state);
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        async_state
+            .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                "session-unavailable",
+                account_id("acct_missing"),
+                10_000,
+            ))
+            .await
+            .expect("session affinity should persist");
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            0,
+            Arc::new(|| 10_100),
+        );
+
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("session-id", "session-unavailable")),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+            .expect("normal selection should fall back");
+
+        assert_eq!(selected.account_id(), available.account_id());
+        assert_ne!(selected.selection_reason(), "prompt_cache_account_affinity");
+    }
+
+    #[tokio::test]
+    async fn first_normal_selection_persists_prompt_cache_account_affinity() {
+        let temp_dir = ProxyTestTempDir::new("first_selection_persists_session_affinity");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let selected_account = AccountRecord::new(
+            account_id("acct_first_selection"),
+            "first-selection",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &selected_account,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        drop(state);
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        let writer = DbWriteActor::start(
+            Arc::new(SqliteDbWriteRepository::new(async_state.clone())),
+            4,
+        );
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            0,
+            Arc::new(|| 10_100),
+        )
+        .with_session_affinity_writer(writer.clone());
+
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("session-id", "session-first-selection")),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+            .expect("normal account should select");
+        assert_eq!(selected.account_id(), selected_account.account_id());
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if async_state
+                    .load_session_account_affinity("session-first-selection")
+                    .await
+                    .expect("session affinity should load")
+                    == Some(SessionAccountAffinity::new(
+                        "session-first-selection",
+                        selected_account.account_id().clone(),
+                        10_100,
+                    ))
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("normal selection should persist session affinity");
+        writer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn previous_response_affinity_wins_and_refreshes_prompt_cache_account_affinity() {
+        let temp_dir = ProxyTestTempDir::new("previous_response_refreshes_session_affinity");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let session_owner = AccountRecord::new(
+            account_id("acct_session_owner"),
+            "session-owner",
+            AccountStatus::Enabled,
+        );
+        let response_owner = AccountRecord::new(
+            account_id("acct_response_owner"),
+            "response-owner",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &session_owner,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        persist_account_with_selector_window_specs(
+            &state,
+            &response_owner,
+            "responses",
+            &[(18_000, 100, true), (604_800, 100, false)],
+        );
+        let affinity_secret = test_affinity_secret();
+        persist_previous_response_owner(
+            &state,
+            "resp-owner",
+            &affinity_secret,
+            response_owner.account_id(),
+        )
+        .expect("previous response owner should persist");
+        drop(state);
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        async_state
+            .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                "session-rebound",
+                session_owner.account_id().clone(),
+                10_000,
+            ))
+            .await
+            .expect("session affinity should persist");
+        let writer = DbWriteActor::start(
+            Arc::new(SqliteDbWriteRepository::new(async_state.clone())),
+            4,
+        );
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime(
+            &async_state,
+            RouteBandWeightedSelectors::default(),
+            RouteBandAccountHolds::default(),
+            0,
+            Arc::new(|| 10_100),
+        )
+        .with_session_affinity_writer(writer.clone());
+
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_header(Header::new("session-id", "session-rebound"))
+                    .with_body(br#"{"previous_response_id":"resp-owner"}"#.to_vec()),
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+            .expect("previous response owner should select");
+        assert_eq!(selected.account_id(), response_owner.account_id());
+        assert_eq!(selected.selection_reason(), "previous_response_affinity");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let affinity = async_state
+                    .load_session_account_affinity("session-rebound")
+                    .await
+                    .expect("session affinity should load")
+                    .expect("session affinity should exist");
+                if affinity.account_id() == response_owner.account_id()
+                    && affinity.last_seen_unix_seconds() == 10_100
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("previous response selection should refresh session affinity");
+        writer.shutdown().await;
     }
 
     #[tokio::test]
@@ -8860,17 +9189,23 @@ mod tests {
 
     struct RecordingSelector {
         recorded: RefCell<Vec<(String, TokenGeneration)>>,
+        recorded_session_ids: RefCell<Vec<Option<String>>>,
     }
 
     impl RecordingSelector {
         fn new() -> Self {
             Self {
                 recorded: RefCell::new(Vec::new()),
+                recorded_session_ids: RefCell::new(Vec::new()),
             }
         }
 
         fn take_recorded(&self) -> Vec<(String, TokenGeneration)> {
             self.recorded.take()
+        }
+
+        fn take_recorded_session_ids(&self) -> Vec<Option<String>> {
+            self.recorded_session_ids.take()
         }
     }
 
@@ -8884,6 +9219,9 @@ mod tests {
             self.recorded
                 .borrow_mut()
                 .push((request.path().to_owned(), token_generation));
+            self.recorded_session_ids
+                .borrow_mut()
+                .push(request.header_value("session-id").map(str::to_owned));
             let account_id = match codex_router_core::ids::AccountId::new("acct_selected") {
                 Ok(account_id) => account_id,
                 Err(error) => {
@@ -8899,11 +9237,18 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingAsyncSelector {
         recorded: Arc<Mutex<Vec<(String, TokenGeneration)>>>,
+        recorded_session_ids: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     impl RecordingAsyncSelector {
         fn take_recorded(&self) -> Vec<(String, TokenGeneration)> {
             lock_test_mutex(&self.recorded, "async selector records")
+                .drain(..)
+                .collect()
+        }
+
+        fn take_recorded_session_ids(&self) -> Vec<Option<String>> {
+            lock_test_mutex(&self.recorded_session_ids, "async selector session ids")
                 .drain(..)
                 .collect()
         }
@@ -8919,6 +9264,8 @@ mod tests {
             Box::pin(async move {
                 lock_test_mutex(&self.recorded, "async selector records")
                     .push((request.path().to_owned(), token_generation));
+                lock_test_mutex(&self.recorded_session_ids, "async selector session ids")
+                    .push(request.header_value("session-id").map(str::to_owned));
                 let account_id = match codex_router_core::ids::AccountId::new("acct_selected") {
                     Ok(account_id) => account_id,
                     Err(error) => {
@@ -9365,7 +9712,8 @@ mod tests {
         let decision = match router.route_first_frame(
             WebSocketHandshakeRequest::new()
                 .with_header(Header::new("X-Codex-Router-Token", "current-token"))
-                .with_header(Header::new("Authorization", "Bearer current-token")),
+                .with_header(Header::new("Authorization", "Bearer current-token"))
+                .with_header(Header::new("session-id", "sync-session")),
             frame.clone(),
         ) {
             Ok(decision) => decision,
@@ -9375,6 +9723,10 @@ mod tests {
         assert_eq!(
             selector.take_recorded(),
             vec![("/v1/responses".to_owned(), TokenGeneration::new(1))]
+        );
+        assert_eq!(
+            selector.take_recorded_session_ids(),
+            vec![Some("sync-session".to_owned())]
         );
         let WebSocketFirstFrameDecision::OpenUpstream {
             headers,
@@ -9493,7 +9845,8 @@ mod tests {
         let decision = match router
             .route_first_frame(
                 WebSocketHandshakeRequest::new()
-                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token"))
+                    .with_header(Header::new("session-id", "async-session")),
                 frame.clone(),
             )
             .await
@@ -9505,6 +9858,10 @@ mod tests {
         assert_eq!(
             selector.take_recorded(),
             vec![("/v1/responses".to_owned(), TokenGeneration::new(1))],
+        );
+        assert_eq!(
+            selector.take_recorded_session_ids(),
+            vec![Some("async-session".to_owned())],
         );
         assert_eq!(resolver.take_recorded(), vec!["acct_selected".to_owned()],);
         let WebSocketFirstFrameDecision::OpenUpstream {

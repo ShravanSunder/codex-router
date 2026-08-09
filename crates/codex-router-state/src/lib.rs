@@ -6,6 +6,7 @@ pub mod affinity_owner;
 pub mod quota_snapshot;
 pub mod repositories;
 pub mod selection_projection;
+pub mod session_account_affinity;
 pub mod sqlite;
 
 /// Returns this crate's package name.
@@ -57,10 +58,12 @@ mod tests {
     use crate::repositories::SelectorQuotaRepository;
     use crate::selection_projection::project_route_band_selection_inputs;
     use crate::selection_projection::project_route_band_selection_inputs_with_active_counts;
+    use crate::session_account_affinity::SessionAccountAffinity;
     use crate::sqlite::AsyncAffinityRepository;
     use crate::sqlite::AsyncQuotaExhaustionRepository;
     use crate::sqlite::AsyncQuotaHistoryRepository;
     use crate::sqlite::AsyncSelectorQuotaRepository;
+    use crate::sqlite::AsyncSessionAccountAffinityRepository;
     use crate::sqlite::AsyncSqliteStateStore;
     use crate::sqlite::AsyncWeeklyQuotaFloorMutationStore;
     use crate::sqlite::SqliteStateStore;
@@ -82,6 +85,7 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE account_routing_policies;
+                 DROP TABLE session_account_affinities;
                  PRAGMA user_version = 10;",
             )
             .unwrap_or_else(|error| panic!("fixture should convert to v10: {error}"));
@@ -104,9 +108,21 @@ mod tests {
                  INSERT INTO account_routing_policies
                     SELECT * FROM account_routing_policies_current;
                  DROP TABLE account_routing_policies_current;
+                 DROP TABLE session_account_affinities;
                  PRAGMA user_version = 11;",
             )
             .unwrap_or_else(|error| panic!("fixture should convert to v11: {error}"));
+    }
+
+    fn convert_current_fixture_to_v12(database_path: &Path) {
+        let connection = Connection::open(database_path)
+            .unwrap_or_else(|error| panic!("fixture should reopen for v12 conversion: {error}"));
+        connection
+            .execute_batch(
+                "DROP TABLE session_account_affinities;
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap_or_else(|error| panic!("fixture should convert to v12: {error}"));
     }
 
     fn assert_intact_v11_policy_database(
@@ -157,6 +173,68 @@ mod tests {
     #[test]
     fn reports_package_name() {
         assert_eq!(package_name(), "codex-router-state");
+    }
+
+    #[tokio::test]
+    async fn session_account_affinity_v12_migrates_to_v13() {
+        let temp_dir = TestTempDir::new("session_account_affinity_v12_to_v13");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("current fixture should open");
+        store.close().await.expect("fixture should close");
+        convert_current_fixture_to_v12(&database_path);
+
+        let migrated = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("v12 database should migrate");
+
+        assert_eq!(migrated.schema_version().await, Ok(13));
+        migrated.close().await.expect("migrated store should close");
+        let raw = Connection::open(&database_path).expect("migrated database should inspect");
+        let mut statement = raw
+            .prepare("PRAGMA table_info(session_account_affinities)")
+            .expect("session affinity schema should prepare");
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("session affinity columns should query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("session affinity columns should load");
+        assert_eq!(
+            columns,
+            vec!["session_id", "account_id", "last_seen_unix_seconds"]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_account_affinity_upsert_replaces_account_and_last_seen() {
+        let temp_dir = TestTempDir::new("session_account_affinity_upsert");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state store should open");
+        let first = SessionAccountAffinity::new("session-123", account_id("acct_first"), 1_000);
+        let replacement =
+            SessionAccountAffinity::new("session-123", account_id("acct_replacement"), 1_100);
+
+        AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(&store, &first)
+            .await
+            .expect("first mapping should persist");
+        AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(
+            &store,
+            &replacement,
+        )
+        .await
+        .expect("replacement mapping should persist");
+
+        assert_eq!(
+            AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+                &store,
+                "session-123",
+            )
+            .await,
+            Ok(Some(replacement))
+        );
     }
 
     #[test]
@@ -222,7 +300,7 @@ mod tests {
         let migrated = AsyncSqliteStateStore::open(&database_path)
             .await
             .unwrap_or_else(|error| panic!("v10 database should migrate: {error}"));
-        assert_eq!(migrated.schema_version().await, Ok(12));
+        assert_eq!(migrated.schema_version().await, Ok(13));
         assert_eq!(migrated.list_accounts().await, Ok(vec![account]));
         assert_eq!(
             migrated.list_account_routing_policies().await,
@@ -306,7 +384,7 @@ mod tests {
         let migrated = AsyncSqliteStateStore::open(&database_path)
             .await
             .expect("v11 database should migrate to v12");
-        assert_eq!(migrated.schema_version().await, Ok(12));
+        assert_eq!(migrated.schema_version().await, Ok(13));
         assert_eq!(
             migrated.list_account_routing_policies().await,
             Ok(vec![AccountRoutingPolicy::new(
@@ -386,7 +464,7 @@ mod tests {
         let migrated = AsyncSqliteStateStore::open(&database_path)
             .await
             .expect("migration retry should succeed");
-        assert_eq!(migrated.schema_version().await, Ok(12));
+        assert_eq!(migrated.schema_version().await, Ok(13));
         assert_eq!(migrated.list_accounts().await, Ok(vec![account]));
     }
 
@@ -414,7 +492,7 @@ mod tests {
 
         let migrated =
             SqliteStateStore::open(&database_path).expect("sync migration retry should succeed");
-        assert_eq!(migrated.schema_version(), 12);
+        assert_eq!(migrated.schema_version(), 13);
     }
 
     #[tokio::test]
@@ -453,7 +531,7 @@ mod tests {
         let migrated = AsyncSqliteStateStore::open(&database_path)
             .await
             .expect("v12 migration retry should succeed");
-        assert_eq!(migrated.schema_version().await, Ok(12));
+        assert_eq!(migrated.schema_version().await, Ok(13));
         assert_eq!(
             migrated.list_account_routing_policies().await,
             Ok(vec![AccountRoutingPolicy::new(account_id, floor)])
@@ -489,7 +567,7 @@ mod tests {
 
         let migrated = SqliteStateStore::open(&database_path)
             .expect("sync v12 migration retry should succeed");
-        assert_eq!(migrated.schema_version(), 12);
+        assert_eq!(migrated.schema_version(), 13);
         drop(migrated);
         let raw = Connection::open(&database_path).expect("migrated database should reopen");
         let preserved_floor: i64 = raw
@@ -818,7 +896,7 @@ mod tests {
         let migrated = AsyncSqliteStateStore::open(&database_path)
             .await
             .expect("production migration retry should succeed");
-        assert_eq!(migrated.schema_version().await, Ok(12));
+        assert_eq!(migrated.schema_version().await, Ok(13));
         assert_eq!(migrated.list_accounts().await, Ok(vec![account.clone()]));
         assert_eq!(
             migrated.list_account_routing_policies().await,
@@ -1168,7 +1246,7 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 12);
+        assert_eq!(store.schema_version(), 13);
 
         let account_id = match AccountId::new("acct_primary") {
             Ok(account_id) => account_id,
@@ -1419,7 +1497,7 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         create_v10_database_missing_async_projection_tables(&database_path);
         let raw = Connection::open(&database_path).expect("fixture should reopen");
-        raw.pragma_update(None, "user_version", 12_i64)
+        raw.pragma_update(None, "user_version", 13_i64)
             .expect("fixture should claim current schema");
         drop(raw);
 
@@ -2219,7 +2297,7 @@ mod tests {
                 .schema_version()
                 .await
                 .unwrap_or_else(|error| panic!("schema version should load: {error}")),
-            12
+            13
         );
         assert_eq!(
             store
@@ -3286,7 +3364,7 @@ mod tests {
             Err(error) => panic!("v2 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 12);
+        assert_eq!(store.schema_version(), 13);
         let selector_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -3345,7 +3423,7 @@ mod tests {
             Err(error) => panic!("v3 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 12);
+        assert_eq!(store.schema_version(), 13);
         let responses_inputs = match SelectorQuotaRepository::selector_inputs_for_route_band(
             &store,
             "responses",
@@ -3379,7 +3457,7 @@ mod tests {
             Err(error) => panic!("v6 state store should migrate to current schema: {error}"),
         };
 
-        assert_eq!(store.schema_version(), 12);
+        assert_eq!(store.schema_version(), 13);
         let account_id = account_id("acct_v6_reset_credits");
         let snapshot = match QuotaSnapshotRepository::load_snapshot_for_route_band(
             &store,

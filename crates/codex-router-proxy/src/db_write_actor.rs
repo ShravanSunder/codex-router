@@ -30,6 +30,7 @@ use crate::telemetry::emit_db_write_queue_lag_observed;
 use crate::telemetry::record_db_write_queue_depth;
 use crate::telemetry::record_db_write_queue_event;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+use codex_router_state::session_account_affinity::SessionAccountAffinity;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
@@ -62,6 +63,11 @@ pub enum DbWriteCommand {
     /// Persist a previous-response affinity owner record.
     PreviousResponseAffinityOwner {
         owner: PreviousResponseAffinityOwnerRecord,
+    },
+    /// Persist the latest account selected for one Codex session.
+    SessionAccountAffinity {
+        route_band: RouteBand,
+        affinity: SessionAccountAffinity,
     },
     /// Persist an active-client mirror acquisition.
     ActiveClientAcquired {
@@ -106,6 +112,18 @@ impl DbWriteCommand {
         Self::PreviousResponseAffinityOwner { owner }
     }
 
+    /// Creates a buffered Codex session account-affinity command.
+    #[must_use]
+    pub const fn session_account_affinity(
+        route_band: RouteBand,
+        affinity: SessionAccountAffinity,
+    ) -> Self {
+        Self::SessionAccountAffinity {
+            route_band,
+            affinity,
+        }
+    }
+
     /// Creates a best-effort active-client mirror acquisition command.
     #[must_use]
     pub fn active_client_acquired(
@@ -146,6 +164,7 @@ impl DbWriteCommand {
         match self {
             Self::ProviderQuotaExhausted { route_band, .. } => Some(*route_band),
             Self::PreviousResponseAffinityOwner { owner } => Some(owner.route_band()),
+            Self::SessionAccountAffinity { route_band, .. } => Some(*route_band),
             Self::ActiveClientAcquired { .. } | Self::ActiveClientReleased { .. } => None,
         }
     }
@@ -154,6 +173,7 @@ impl DbWriteCommand {
         match self {
             Self::ProviderQuotaExhausted { route_band, .. } => route_band.as_str(),
             Self::PreviousResponseAffinityOwner { owner } => owner.route_band().as_str(),
+            Self::SessionAccountAffinity { route_band, .. } => route_band.as_str(),
             Self::ActiveClientAcquired { route_band, .. }
             | Self::ActiveClientReleased { route_band, .. } => route_band.as_str(),
         }
@@ -166,6 +186,7 @@ impl DbWriteCommand {
                 ..
             } => *observed_unix_seconds,
             Self::PreviousResponseAffinityOwner { owner } => owner.created_unix_seconds(),
+            Self::SessionAccountAffinity { affinity, .. } => affinity.last_seen_unix_seconds(),
             Self::ActiveClientAcquired {
                 acquired_unix_seconds,
                 ..
@@ -181,6 +202,7 @@ impl DbWriteCommand {
         match self {
             Self::ProviderQuotaExhausted { .. } => PROVIDER_EXHAUSTION_QUEUE_NAME,
             Self::PreviousResponseAffinityOwner { .. } => "affinity_owner",
+            Self::SessionAccountAffinity { .. } => "affinity_owner",
             Self::ActiveClientAcquired { .. } | Self::ActiveClientReleased { .. } => {
                 "active_client_mirror"
             }
@@ -233,6 +255,14 @@ pub trait DbWriteRepository: Send + Sync + 'static {
     fn record_previous_response_affinity_owner<'a>(
         &'a self,
         _owner: PreviousResponseAffinityOwnerRecord,
+    ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Persists a Codex session account affinity.
+    fn record_session_account_affinity<'a>(
+        &'a self,
+        _affinity: SessionAccountAffinity,
     ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
         Box::pin(async { Ok(()) })
     }
@@ -332,6 +362,18 @@ impl DbWriteRepository for SqliteDbWriteRepository {
     ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
         Box::pin(async move {
             self.state.write_previous_response_owner(&owner).await?;
+            Ok(())
+        })
+    }
+
+    fn record_session_account_affinity<'a>(
+        &'a self,
+        affinity: SessionAccountAffinity,
+    ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+        Box::pin(async move {
+            self.state
+                .upsert_session_account_affinity(&affinity)
+                .await?;
             Ok(())
         })
     }
@@ -564,7 +606,8 @@ impl DbWriteActor {
     fn sender_for_command(&self, command: &DbWriteCommand) -> &mpsc::Sender<QueuedDbWriteCommand> {
         match command {
             DbWriteCommand::ProviderQuotaExhausted { .. } => &self.provider_exhaustion_sender,
-            DbWriteCommand::PreviousResponseAffinityOwner { .. } => &self.affinity_owner_sender,
+            DbWriteCommand::PreviousResponseAffinityOwner { .. }
+            | DbWriteCommand::SessionAccountAffinity { .. } => &self.affinity_owner_sender,
             DbWriteCommand::ActiveClientAcquired { .. }
             | DbWriteCommand::ActiveClientReleased { .. } => &self.active_mirror_sender,
         }
@@ -781,6 +824,24 @@ async fn handle_db_write_command(
                 };
             }
             DbWriteCommandResult::Failed(DbWriteCommand::PreviousResponseAffinityOwner { owner })
+        }
+        DbWriteCommand::SessionAccountAffinity {
+            route_band,
+            affinity,
+        } => {
+            let result = repository
+                .record_session_account_affinity(affinity.clone())
+                .await;
+            if result.is_ok() {
+                return DbWriteCommandResult::Succeeded {
+                    route_band,
+                    queue_name: "affinity_owner",
+                };
+            }
+            DbWriteCommandResult::Failed(DbWriteCommand::SessionAccountAffinity {
+                route_band,
+                affinity,
+            })
         }
         DbWriteCommand::ActiveClientAcquired {
             route_band,

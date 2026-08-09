@@ -45,7 +45,9 @@ use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::selection_projection::AsyncSelectionProjectionRepository;
 use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts_read_only;
+use codex_router_state::session_account_affinity::SessionAccountAffinity;
 use codex_router_state::sqlite::AsyncAffinityRepository;
+use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
 use codex_router_state::sqlite::StateStoreError;
 use futures_util::future::BoxFuture;
 use sha2::Digest;
@@ -130,6 +132,8 @@ const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
+/// Idle time after which a Codex session may move to another account.
+pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 = 2 * 60 * 60;
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
@@ -672,7 +676,10 @@ where
 /// Async selector that hydrates account state from repositories at request time.
 pub struct AsyncRepositoryBackedAccountSelector<'a, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectionProjectionRepository + Sync,
+    R: AsyncAffinityRepository
+        + AsyncSessionAccountAffinityRepository
+        + AsyncSelectionProjectionRepository
+        + Sync,
 {
     state_repository: &'a R,
     weighted_selectors: RouteBandWeightedSelectors,
@@ -681,6 +688,7 @@ where
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
+    session_affinity_writer: Option<DbWriteActor>,
     selection_reservation_lock: SelectionReservationLock,
     minimum_account_hold_cooldown_seconds: u64,
     clock: UnixClock,
@@ -740,7 +748,10 @@ where
 
 impl<'a, R> AsyncRepositoryBackedAccountSelector<'a, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectionProjectionRepository + Sync,
+    R: AsyncAffinityRepository
+        + AsyncSessionAccountAffinityRepository
+        + AsyncSelectionProjectionRepository
+        + Sync,
 {
     /// Creates an async repository-backed selector.
     #[must_use]
@@ -753,6 +764,7 @@ where
             runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
+            session_affinity_writer: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
@@ -774,6 +786,7 @@ where
             runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
+            session_affinity_writer: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
@@ -797,6 +810,7 @@ where
             runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
+            session_affinity_writer: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -821,6 +835,7 @@ where
             runtime_exhaustions: Arc::new(Mutex::new(HashMap::new())),
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
+            session_affinity_writer: None,
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -868,6 +883,7 @@ where
             runtime_exhaustions: runtime_state.runtime_exhaustions,
             route_band_queue_health: runtime_state.route_band_queue_health,
             active_client_leases: None,
+            session_affinity_writer: None,
             selection_reservation_lock: runtime_state.selection_reservation_lock,
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -881,6 +897,13 @@ where
         active_client_leases: Arc<dyn ActiveClientLeaseReporter>,
     ) -> Self {
         self.active_client_leases = Some(active_client_leases);
+        self
+    }
+
+    /// Persists Codex session account affinity through the existing DB writer.
+    #[must_use]
+    pub fn with_session_affinity_writer(mut self, db_write_actor: DbWriteActor) -> Self {
+        self.session_affinity_writer = Some(db_write_actor);
         self
     }
 }
@@ -978,6 +1001,7 @@ where
                 &assessment,
                 &mut account_holds,
                 now_unix_seconds,
+                "previous_response_affinity",
             );
         }
 
@@ -994,7 +1018,10 @@ where
 
 impl<R> AsyncAccountDecisionSelector for AsyncRepositoryBackedAccountSelector<'_, R>
 where
-    R: AsyncAffinityRepository + AsyncSelectionProjectionRepository + Sync,
+    R: AsyncAffinityRepository
+        + AsyncSessionAccountAffinityRepository
+        + AsyncSelectionProjectionRepository
+        + Sync,
 {
     fn select_upstream_account<'a>(
         &'a self,
@@ -1087,6 +1114,31 @@ where
             } else {
                 None
             };
+            let session_id = if route_kind.previous_response_affinity_capable() {
+                request
+                    .header_value("session-id")
+                    .map(str::trim)
+                    .filter(|session_id| !session_id.is_empty())
+            } else {
+                None
+            };
+            let session_affinity = match session_id {
+                Some(session_id) => {
+                    AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+                        self.state_repository,
+                        session_id,
+                    )
+                    .await
+                    .map_err(|_error| HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                    })?
+                    .filter(|affinity| {
+                        now_unix_seconds.saturating_sub(affinity.last_seen_unix_seconds())
+                            < PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS
+                    })
+                }
+                None => None,
+            };
 
             let mut weighted_selectors =
                 self.weighted_selectors
@@ -1120,7 +1172,43 @@ where
                     &assessment,
                     &mut account_holds,
                     now_unix_seconds,
+                    "previous_response_affinity",
                 )?;
+                persist_session_account_affinity(
+                    self.session_affinity_writer.as_ref(),
+                    session_id,
+                    selected.account_id(),
+                    route_band,
+                    now_unix_seconds,
+                );
+                return reserve_selected_account(
+                    selected,
+                    &self.active_reservations,
+                    self.active_client_leases.as_ref(),
+                    route_band.as_str(),
+                    transport_label_for_request(request),
+                    now_unix_seconds,
+                );
+            }
+
+            if let Some(session_affinity) = session_affinity
+                && assessment_account_is_available(&assessment, session_affinity.account_id())
+            {
+                let selected = select_affinity_owner(
+                    route_band,
+                    session_affinity.account_id(),
+                    &assessment,
+                    &mut account_holds,
+                    now_unix_seconds,
+                    "prompt_cache_account_affinity",
+                )?;
+                persist_session_account_affinity(
+                    self.session_affinity_writer.as_ref(),
+                    session_id,
+                    selected.account_id(),
+                    route_band,
+                    now_unix_seconds,
+                );
                 return reserve_selected_account(
                     selected,
                     &self.active_reservations,
@@ -1139,6 +1227,13 @@ where
                 self.minimum_account_hold_cooldown_seconds,
                 now_unix_seconds,
             )?;
+            persist_session_account_affinity(
+                self.session_affinity_writer.as_ref(),
+                session_id,
+                selected.account_id(),
+                route_band,
+                now_unix_seconds,
+            );
             reserve_selected_account(
                 selected,
                 &self.active_reservations,
@@ -1171,16 +1266,9 @@ fn select_affinity_owner(
     assessment: &BurnDownRouteBandAssessmentResult,
     account_holds: &mut HashMap<String, AccountHold>,
     now_unix_seconds: u64,
+    selection_reason: &'static str,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
-    if !assessment.accounts().iter().any(|account| {
-        account.account_id() == owner_account_id
-            && matches!(
-                account.availability(),
-                AccountAvailability::Usable
-                    | AccountAvailability::Reserve
-                    | AccountAvailability::Retiring
-            )
-    }) {
+    if !assessment_account_is_available(assessment, owner_account_id) {
         account_holds.remove(route_band.as_str());
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
@@ -1193,8 +1281,39 @@ fn select_affinity_owner(
     );
     Ok(SelectedAccountDecision::new(
         owner_account_id.clone(),
-        "previous_response_affinity",
+        selection_reason,
     ))
+}
+
+fn assessment_account_is_available(
+    assessment: &BurnDownRouteBandAssessmentResult,
+    account_id: &AccountId,
+) -> bool {
+    assessment.accounts().iter().any(|account| {
+        account.account_id() == account_id
+            && matches!(
+                account.availability(),
+                AccountAvailability::Usable
+                    | AccountAvailability::Reserve
+                    | AccountAvailability::Retiring
+            )
+    })
+}
+
+fn persist_session_account_affinity(
+    writer: Option<&DbWriteActor>,
+    session_id: Option<&str>,
+    account_id: &AccountId,
+    route_band: RouteBand,
+    now_unix_seconds: u64,
+) {
+    let (Some(writer), Some(session_id)) = (writer, session_id) else {
+        return;
+    };
+    let _enqueue_result = writer.try_enqueue(DbWriteCommand::session_account_affinity(
+        route_band,
+        SessionAccountAffinity::new(session_id, account_id.clone(), now_unix_seconds),
+    ));
 }
 
 fn select_from_account_states(
@@ -3515,6 +3634,33 @@ mod tests {
             Box::pin(async {
                 Ok(codex_router_state::affinity_owner::PreviousResponseAffinityOwnerLookup::Missing)
             })
+        }
+    }
+
+    impl codex_router_state::sqlite::AsyncSessionAccountAffinityRepository
+        for SlowSelectionProjectionRepository
+    {
+        fn upsert_session_account_affinity<'a>(
+            &'a self,
+            _affinity: &'a codex_router_state::session_account_affinity::SessionAccountAffinity,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<(), codex_router_state::sqlite::StateStoreError>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn load_session_account_affinity<'a>(
+            &'a self,
+            _session_id: &'a str,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Option<codex_router_state::session_account_affinity::SessionAccountAffinity>,
+                codex_router_state::sqlite::StateStoreError,
+            >,
+        > {
+            Box::pin(async { Ok(None) })
         }
     }
 
