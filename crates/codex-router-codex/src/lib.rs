@@ -2,6 +2,7 @@
 
 mod app_server_control_protocol;
 mod app_server_launch;
+mod desktop_launch_policy;
 mod executable;
 mod paths;
 mod profile;
@@ -12,6 +13,8 @@ pub use app_server_control_protocol::AppServerObservation;
 pub use app_server_control_protocol::CodexProtocolError;
 pub use app_server_control_protocol::observe_app_server;
 pub use app_server_launch::AppServerCommandSpec;
+pub use desktop_launch_policy::DesktopLaunchPolicyCommand;
+pub use desktop_launch_policy::DesktopLaunchPolicyError;
 pub use executable::ExecutableIdentity;
 pub use executable::ExecutableIdentityError;
 pub use executable::ExecutableIdentityTask;

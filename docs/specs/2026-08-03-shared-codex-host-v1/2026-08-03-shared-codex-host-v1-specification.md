@@ -87,6 +87,14 @@ unreported competing app-server. Remote Control MUST operate against the same
 hosted app-server. A client version that cannot meet this contract MUST be
 reported incompatible rather than described as shared.
 
+Before foreground host startup publishes its operator endpoint, it MUST set
+the macOS login-session environment value
+`CODEX_APP_SERVER_USE_LOCAL_DAEMON=1`. If that mutation fails, host startup
+MUST fail without claiming ownership or availability. Because an already
+running Desktop does not inherit a changed login-session environment, status
+MUST report that Desktop attachment is configured and that a running Desktop
+must be relaunched.
+
 Basis: U2, U4, U5. Exact compatibility is bounded to the installed upstream
 release; identical feature sets across clients are not required.
 
@@ -118,6 +126,11 @@ The hosted app-server MUST start with Remote Control enabled. An ordinary
 restart MUST re-establish Remote Control using upstream Codex behavior and the
 existing Codex home. V1 MUST NOT own pairing credentials, relay behavior,
 remote client identity, or revocation state.
+
+When upstream Remote Control status is observable, host status MUST preserve
+and display its `serverName` and optional `environmentId` with the corresponding
+Remote Control condition. Missing identity MUST remain visibly unavailable
+rather than being synthesized by the router.
 
 Basis: U5, U10.
 
@@ -166,7 +179,9 @@ Basis: U8. V1 makes no availability promise after the host process itself dies.
 ### R9 — Status and safe observability
 
 Status MUST identify router reachability, app-server reachability and running
-version, and whether bounded recovery is exhausted. A changed-version update
+version, the observed Remote Control server/environment identity, Desktop
+attachment configuration and relaunch guidance, and whether bounded recovery
+is exhausted. A changed-version update
 command MUST report its terminal update and replacement-host result after
 reconnecting when the replacement operator endpoint becomes available. If
 that endpoint does not become available within the bounded replacement-start

@@ -220,6 +220,7 @@ mod tests {
                 running_version: "1.2.3".to_owned(),
             },
             remote_control: RemoteControlCondition::Connected,
+            remote_control_identity: None,
             executable_relation: ExecutableRelation::Match,
             recovery_budget: RecoveryBudget::Available,
             last_lifecycle_outcome: None,

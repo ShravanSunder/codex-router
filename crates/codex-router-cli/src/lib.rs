@@ -666,7 +666,7 @@ impl CliContext {
         self
     }
 
-    fn env_var(&self, name: &str) -> Option<&str> {
+    pub(crate) fn env_var(&self, name: &str) -> Option<&str> {
         self.env
             .iter()
             .find(|(env_name, _)| env_name == name)

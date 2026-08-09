@@ -141,10 +141,14 @@ pub enum HostCommandError {
     CodexHomeUnavailable,
     #[error("invalid debug app-server socket: {0}")]
     AppServerSocket(String),
+    #[error("CODEX_ROUTER_DEBUG_LAUNCHCTL must be an absolute path")]
+    LaunchctlExecutable,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Codex(#[from] codex_router_codex::ExecutableIdentityError),
+    #[error(transparent)]
+    DesktopLaunchPolicy(#[from] codex_router_codex::DesktopLaunchPolicyError),
     #[error(transparent)]
     Operator(#[from] OperatorClientError),
     #[error(transparent)]
