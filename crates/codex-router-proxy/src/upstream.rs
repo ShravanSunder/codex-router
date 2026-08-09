@@ -95,6 +95,7 @@ impl UpstreamEndpoint {
         let upstream_path = match path {
             "v1/responses" => "codex/responses",
             "v1/responses/compact" => "codex/responses/compact",
+            "v1/models" => "codex/models",
             _ => path.strip_prefix("v1/").unwrap_or(path),
         };
         let url = if upstream_path.is_empty() || upstream_path == "v1" {
@@ -528,7 +529,7 @@ fn reqwest_error(error: reqwest::Error) -> HttpProxyError {
 
 #[cfg(test)]
 #[tokio::test]
-async fn hyper_http_upstream_transport_passes_backend_api_models_upstream() {
+async fn hyper_http_upstream_transport_passes_backend_api_codex_models_upstream() {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
@@ -623,7 +624,7 @@ async fn hyper_http_upstream_transport_passes_backend_api_models_upstream() {
         body_bytes.as_ref(),
         br#"{"object":"list","data":[{"id":"upstream-model"}]}"#
     );
-    assert!(recorded_request.starts_with("GET /backend-api/models HTTP/1.1\r\n"));
+    assert!(recorded_request.starts_with("GET /backend-api/codex/models HTTP/1.1\r\n"));
     assert!(normalized_request.contains("authorization: bearer selected-upstream-token\r\n"));
     assert!(!recorded_request.contains(r#"{"models":[]}"#));
 }
