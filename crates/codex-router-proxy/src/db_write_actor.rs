@@ -833,10 +833,7 @@ async fn handle_db_write_command(
                 .record_session_account_affinity(affinity.clone())
                 .await;
             if result.is_ok() {
-                return DbWriteCommandResult::Succeeded {
-                    route_band,
-                    queue_name: "affinity_owner",
-                };
+                return DbWriteCommandResult::SucceededNoRoutingEffect;
             }
             DbWriteCommandResult::Failed(DbWriteCommand::SessionAccountAffinity {
                 route_band,
@@ -1584,6 +1581,42 @@ mod tests {
         assert!(
             route_band_queue_health_allows_selection(&queue_health, RouteBand::Responses).is_err(),
             "a successful write without matching queue identity must not clear unrelated queue degradation"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_session_affinity_write_does_not_clear_critical_affinity_degradation() {
+        let queue_health = RouteBandQueueHealth::default();
+        super::mark_route_band_queue_degraded_for_queue(
+            &queue_health,
+            RouteBand::Responses,
+            "affinity_owner",
+            RouteBandQueueDegradedReason::DbWriteFailed,
+            1_000,
+        )
+        .unwrap_or_else(|error| panic!("test should mark affinity queue degraded: {error}"));
+        let repository = RecordingDbWriteRepository::default();
+        let result = super::handle_db_write_command(
+            &repository,
+            DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-success",
+                    account_id("acct_session_success"),
+                    1_001,
+                ),
+            ),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            super::DbWriteCommandResult::SucceededNoRoutingEffect
+        ));
+        super::apply_db_write_command_result(result, &queue_health, 128, 128, 32);
+        assert!(
+            route_band_queue_health_allows_selection(&queue_health, RouteBand::Responses).is_err(),
+            "optional session affinity success must not clear critical affinity degradation"
         );
     }
 
