@@ -237,6 +237,107 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_account_affinity_purge_deletes_only_rows_before_cutoff() {
+        let temp_dir = TestTempDir::new("session_account_affinity_purge");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state store should open");
+        for affinity in [
+            SessionAccountAffinity::new("session-old", account_id("acct_old"), 999),
+            SessionAccountAffinity::new("session-cutoff", account_id("acct_cutoff"), 1_000),
+            SessionAccountAffinity::new("session-fresh", account_id("acct_fresh"), 1_001),
+        ] {
+            AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(
+                &store, &affinity,
+            )
+            .await
+            .expect("session affinity should persist");
+        }
+
+        store
+            .purge_session_account_affinities_before(1_000)
+            .await
+            .expect("old session affinities should purge");
+
+        assert_eq!(
+            AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+                &store,
+                "session-old",
+            )
+            .await,
+            Ok(None)
+        );
+        for retained_session_id in ["session-cutoff", "session-fresh"] {
+            assert!(
+                AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+                    &store,
+                    retained_session_id,
+                )
+                .await
+                .expect("retained affinity should load")
+                .is_some()
+            );
+        }
+        assert_eq!(store.schema_version().await, Ok(13));
+        store.close().await.expect("state store should close");
+
+        let raw = Connection::open(&database_path).expect("database should inspect");
+        let index_count: i64 = raw
+            .query_row(
+                "SELECT COUNT(*)
+                   FROM pragma_index_list('session_account_affinities')
+                  WHERE name = 'session_account_affinities_last_seen_lookup'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session affinity indexes should query");
+        assert_eq!(index_count, 1);
+    }
+
+    #[tokio::test]
+    async fn existing_v13_database_adds_session_affinity_index_without_version_change() {
+        let temp_dir = TestTempDir::new("session_account_affinity_v13_index_upgrade");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let initial_store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("initial v13 store should open");
+        initial_store
+            .close()
+            .await
+            .expect("initial store should close");
+        let existing_v13 = Connection::open(&database_path).expect("v13 database should open");
+        existing_v13
+            .execute("DROP INDEX session_account_affinities_last_seen_lookup", [])
+            .expect("test fixture should remove the post-v13 index");
+        assert_eq!(
+            existing_v13
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .expect("v13 fixture version should query"),
+            13
+        );
+        drop(existing_v13);
+
+        let reopened = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("existing v13 database should reopen");
+
+        assert_eq!(reopened.schema_version().await, Ok(13));
+        reopened.close().await.expect("reopened store should close");
+        let inspected = Connection::open(&database_path).expect("reopened database should inspect");
+        let index_count: i64 = inspected
+            .query_row(
+                "SELECT COUNT(*)
+                   FROM pragma_index_list('session_account_affinities')
+                  WHERE name = 'session_account_affinities_last_seen_lookup'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session affinity indexes should query");
+        assert_eq!(index_count, 1);
+    }
+
     #[test]
     fn weekly_floor_accepts_only_integer_percent_basis_points() {
         for basis_points in [100_u16, 200, 500, 1_000, 1_500] {

@@ -155,6 +155,9 @@ const V13_SESSION_ACCOUNT_AFFINITY_TABLE_SQL: &str = "CREATE TABLE session_accou
         account_id TEXT NOT NULL,
         last_seen_unix_seconds INTEGER NOT NULL
     )";
+const SESSION_ACCOUNT_AFFINITY_LAST_SEEN_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS session_account_affinities_last_seen_lookup
+        ON session_account_affinities (last_seen_unix_seconds)";
 
 async fn rebuild_account_routing_policy_table_v12_async(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -737,6 +740,7 @@ impl AsyncSqliteStateStore {
         store.apply_v11_if_needed().await?;
         store.apply_v12_if_needed().await?;
         store.apply_v13_if_needed().await?;
+        store.ensure_session_account_affinity_indexes().await?;
         if let Err(error) = store.verify_account_routing_policy_schema().await {
             store.pool.close().await;
             return Err(error);
@@ -1327,6 +1331,22 @@ impl AsyncSqliteStateStore {
             )
         })
         .transpose()
+    }
+
+    /// Purges session-account affinities last observed before the cutoff.
+    pub async fn purge_session_account_affinities_before(
+        &self,
+        cutoff_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "DELETE FROM session_account_affinities
+              WHERE last_seen_unix_seconds < ?1",
+        )
+        .bind(u64_to_i64(cutoff_unix_seconds)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+        Ok(())
     }
 
     async fn load_quota_refresh_status(
@@ -2407,6 +2427,14 @@ impl AsyncSqliteStateStore {
             CURRENT_SCHEMA_VERSION => Ok(()),
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
+    }
+
+    async fn ensure_session_account_affinity_indexes(&self) -> Result<(), StateStoreError> {
+        sqlx::query(SESSION_ACCOUNT_AFFINITY_LAST_SEEN_INDEX_SQL)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_error)?;
+        Ok(())
     }
 
     /// Exercises rollback immediately before the v12 commit.

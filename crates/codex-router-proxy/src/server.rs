@@ -18,6 +18,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::time::SystemTime;
@@ -478,6 +480,7 @@ pub struct LoopbackRouterRuntime {
     route_band_queue_health: RouteBandQueueHealth,
     db_write_actor: DbWriteActor,
     maintenance_actor: MaintenanceActor,
+    last_session_affinity_cleanup_utc_day: AtomicU64,
     fixed_now_unix_seconds: Option<u64>,
     connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
 }
@@ -555,6 +558,7 @@ impl LoopbackRouterRuntime {
             route_band_queue_health,
             db_write_actor,
             maintenance_actor,
+            last_session_affinity_cleanup_utc_day: AtomicU64::new(u64::MAX),
             credential_factory,
             fixed_now_unix_seconds,
             connection_error_reporter: Arc::new(StderrLoopbackConnectionErrorReporter),
@@ -785,6 +789,19 @@ impl LoopbackRouterRuntime {
         const ACTIVE_CLIENT_STALE_AFTER_SECONDS: u64 = 600;
         const ACTIVE_SESSION_RETENTION_SECONDS: u64 = 86_400;
         const ACTIVE_SESSION_COMPACTION_SECONDS: u64 = 86_400;
+        const SESSION_ACCOUNT_AFFINITY_RETENTION_SECONDS: u64 = 7 * 86_400;
+
+        if claim_session_affinity_cleanup_day(
+            &self.last_session_affinity_cleanup_utc_day,
+            now_unix_seconds,
+        ) {
+            let _cleanup_result = self.maintenance_actor.try_enqueue(
+                MaintenanceHint::CleanupStaleSessionAccountAffinities {
+                    stale_before_unix_seconds: now_unix_seconds
+                        .saturating_sub(SESSION_ACCOUNT_AFFINITY_RETENTION_SECONDS),
+                },
+            );
+        }
 
         let interval_start_unix_seconds =
             now_unix_seconds.saturating_sub(now_unix_seconds % ROLLUP_BUCKET_SECONDS);
@@ -826,6 +843,22 @@ impl LoopbackRouterRuntime {
                     });
         }
     }
+}
+
+fn claim_session_affinity_cleanup_day(
+    last_attempted_utc_day: &AtomicU64,
+    now_unix_seconds: u64,
+) -> bool {
+    const SECONDS_PER_DAY: u64 = 86_400;
+    const NO_CLEANUP_ATTEMPT_UTC_DAY: u64 = u64::MAX;
+    let current_utc_day = now_unix_seconds / SECONDS_PER_DAY;
+    last_attempted_utc_day
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |last_attempted_day| {
+            (last_attempted_day == NO_CLEANUP_ATTEMPT_UTC_DAY
+                || current_utc_day > last_attempted_day)
+                .then_some(current_utc_day)
+        })
+        .is_ok()
 }
 
 fn handle_connection_join_result(
@@ -2391,6 +2424,28 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn daily_session_affinity_cleanup_guard_allows_only_advancing_utc_days() {
+        let last_attempted_utc_day = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+        assert!(claim_session_affinity_cleanup_day(
+            &last_attempted_utc_day,
+            0,
+        ));
+        assert!(!claim_session_affinity_cleanup_day(
+            &last_attempted_utc_day,
+            86_399,
+        ));
+        assert!(claim_session_affinity_cleanup_day(
+            &last_attempted_utc_day,
+            86_400,
+        ));
+        assert!(!claim_session_affinity_cleanup_day(
+            &last_attempted_utc_day,
+            1,
+        ));
+    }
 
     #[tokio::test]
     async fn compatibility_health_response_is_static_and_bypasses_model_authentication() {
