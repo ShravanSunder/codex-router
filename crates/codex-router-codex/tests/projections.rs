@@ -110,3 +110,36 @@ fn session_launch_keeps_remote_at_root_for_new_and_resume() {
         ]
     );
 }
+
+#[test]
+fn local_session_launch_keeps_router_profile_without_remote_attachment() {
+    let user_arguments = vec![
+        OsString::from("--model"),
+        OsString::from("gpt-5.6-luna"),
+        OsString::from("--yolo"),
+    ];
+
+    assert_eq!(
+        SessionLaunch::local(&user_arguments).arguments(),
+        vec![
+            OsString::from("--profile"),
+            OsString::from("codex-router"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.6-luna"),
+            OsString::from("--yolo"),
+        ]
+    );
+    assert_eq!(
+        SessionLaunch::resume_local(&user_arguments, "thread_123").arguments(),
+        vec![
+            OsString::from("--profile"),
+            OsString::from("codex-router"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.6-luna"),
+            OsString::from("--yolo"),
+            OsString::from("resume"),
+            OsString::from("--"),
+            OsString::from("thread_123"),
+        ]
+    );
+}
