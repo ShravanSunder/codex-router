@@ -1151,7 +1151,8 @@ impl LoopbackProtocolConnectionHandler {
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
             self.db_write_actor.clone(),
             self.runtime_clock(),
-        )));
+        )))
+        .with_session_affinity_writer(self.db_write_actor.clone());
         let credential_resolver = self
             .credential_factory
             .resolver_for_state(self.credential_state_store.clone());
@@ -1384,7 +1385,8 @@ impl LoopbackProtocolConnectionHandler {
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
             self.db_write_actor.clone(),
             self.runtime_clock(),
-        )));
+        )))
+        .with_session_affinity_writer(self.db_write_actor.clone());
         let service = AuthenticatedHttpProxyService::new(
             &self.auth_gate,
             &selector,

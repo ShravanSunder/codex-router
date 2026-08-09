@@ -1,5 +1,6 @@
 //! Bounded write-side actor for proxy runtime SQLite mirror/proof writes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -30,12 +31,16 @@ use crate::telemetry::emit_db_write_queue_lag_observed;
 use crate::telemetry::record_db_write_queue_depth;
 use crate::telemetry::record_db_write_queue_event;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+use codex_router_state::session_account_affinity::SessionAccountAffinity;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 
 /// Default bounded capacity for durable provider exhaustion writes.
 pub const PROVIDER_EXHAUSTION_QUEUE_CAPACITY: usize = 128;
 const PROVIDER_EXHAUSTION_QUEUE_NAME: &str = "provider_quota_exhaustion";
+const SESSION_ACCOUNT_AFFINITY_QUEUE_NAME: &str = "session_account_affinity";
+const SESSION_ACCOUNT_AFFINITY_DEBOUNCE_SECONDS: u64 = 30;
+const SESSION_ACCOUNT_AFFINITY_MAX_WAIT_SECONDS: u64 = 120;
 const DB_WRITE_SHUTDOWN_DRAIN_GRACE_MS: u64 = 250;
 
 /// Result of a non-blocking write actor enqueue attempt.
@@ -62,6 +67,11 @@ pub enum DbWriteCommand {
     /// Persist a previous-response affinity owner record.
     PreviousResponseAffinityOwner {
         owner: PreviousResponseAffinityOwnerRecord,
+    },
+    /// Persist the latest account selected for one Codex session.
+    SessionAccountAffinity {
+        route_band: RouteBand,
+        affinity: SessionAccountAffinity,
     },
     /// Persist an active-client mirror acquisition.
     ActiveClientAcquired {
@@ -106,6 +116,18 @@ impl DbWriteCommand {
         Self::PreviousResponseAffinityOwner { owner }
     }
 
+    /// Creates a buffered Codex session account-affinity command.
+    #[must_use]
+    pub const fn session_account_affinity(
+        route_band: RouteBand,
+        affinity: SessionAccountAffinity,
+    ) -> Self {
+        Self::SessionAccountAffinity {
+            route_band,
+            affinity,
+        }
+    }
+
     /// Creates a best-effort active-client mirror acquisition command.
     #[must_use]
     pub fn active_client_acquired(
@@ -146,6 +168,7 @@ impl DbWriteCommand {
         match self {
             Self::ProviderQuotaExhausted { route_band, .. } => Some(*route_band),
             Self::PreviousResponseAffinityOwner { owner } => Some(owner.route_band()),
+            Self::SessionAccountAffinity { .. } => None,
             Self::ActiveClientAcquired { .. } | Self::ActiveClientReleased { .. } => None,
         }
     }
@@ -154,6 +177,7 @@ impl DbWriteCommand {
         match self {
             Self::ProviderQuotaExhausted { route_band, .. } => route_band.as_str(),
             Self::PreviousResponseAffinityOwner { owner } => owner.route_band().as_str(),
+            Self::SessionAccountAffinity { route_band, .. } => route_band.as_str(),
             Self::ActiveClientAcquired { route_band, .. }
             | Self::ActiveClientReleased { route_band, .. } => route_band.as_str(),
         }
@@ -166,6 +190,7 @@ impl DbWriteCommand {
                 ..
             } => *observed_unix_seconds,
             Self::PreviousResponseAffinityOwner { owner } => owner.created_unix_seconds(),
+            Self::SessionAccountAffinity { affinity, .. } => affinity.last_seen_unix_seconds(),
             Self::ActiveClientAcquired {
                 acquired_unix_seconds,
                 ..
@@ -181,6 +206,7 @@ impl DbWriteCommand {
         match self {
             Self::ProviderQuotaExhausted { .. } => PROVIDER_EXHAUSTION_QUEUE_NAME,
             Self::PreviousResponseAffinityOwner { .. } => "affinity_owner",
+            Self::SessionAccountAffinity { .. } => SESSION_ACCOUNT_AFFINITY_QUEUE_NAME,
             Self::ActiveClientAcquired { .. } | Self::ActiveClientReleased { .. } => {
                 "active_client_mirror"
             }
@@ -233,6 +259,14 @@ pub trait DbWriteRepository: Send + Sync + 'static {
     fn record_previous_response_affinity_owner<'a>(
         &'a self,
         _owner: PreviousResponseAffinityOwnerRecord,
+    ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Persists a Codex session account affinity.
+    fn record_session_account_affinity<'a>(
+        &'a self,
+        _affinity: SessionAccountAffinity,
     ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
         Box::pin(async { Ok(()) })
     }
@@ -335,6 +369,18 @@ impl DbWriteRepository for SqliteDbWriteRepository {
             Ok(())
         })
     }
+
+    fn record_session_account_affinity<'a>(
+        &'a self,
+        affinity: SessionAccountAffinity,
+    ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+        Box::pin(async move {
+            self.state
+                .upsert_session_account_affinity(&affinity)
+                .await?;
+            Ok(())
+        })
+    }
 }
 
 /// Bounded write-side actor handle.
@@ -342,6 +388,7 @@ impl DbWriteRepository for SqliteDbWriteRepository {
 pub struct DbWriteActor {
     provider_exhaustion_sender: mpsc::Sender<QueuedDbWriteCommand>,
     affinity_owner_sender: mpsc::Sender<QueuedDbWriteCommand>,
+    session_affinity_sender: mpsc::Sender<QueuedDbWriteCommand>,
     active_mirror_sender: mpsc::Sender<QueuedDbWriteCommand>,
     shutdown: CancellationToken,
     closed: Arc<AtomicBool>,
@@ -349,6 +396,7 @@ pub struct DbWriteActor {
     last_degraded_event: Arc<Mutex<Option<QueueDegradedEvent>>>,
     last_queue_lag_event: Arc<Mutex<Option<QueueLagEvent>>>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    session_affinity_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 struct DbWriteActorRuntime {
@@ -361,6 +409,29 @@ struct DbWriteActorRuntime {
     route_band_queue_health: RouteBandQueueHealth,
     low_water_depth: usize,
     last_queue_lag_event: Arc<Mutex<Option<QueueLagEvent>>>,
+}
+
+#[derive(Clone, Debug)]
+struct ScheduledSessionAffinity {
+    account_id: AccountId,
+    pending_command: Option<QueuedDbWriteCommand>,
+    first_pending_at: Option<Instant>,
+    latest_requested_at: Instant,
+}
+
+impl ScheduledSessionAffinity {
+    fn next_deadline(&self) -> Instant {
+        let inactivity_deadline = self.latest_requested_at
+            + std::time::Duration::from_secs(SESSION_ACCOUNT_AFFINITY_MAX_WAIT_SECONDS);
+        let Some(first_pending_at) = self.first_pending_at else {
+            return inactivity_deadline;
+        };
+        let debounce_deadline = self.latest_requested_at
+            + std::time::Duration::from_secs(SESSION_ACCOUNT_AFFINITY_DEBOUNCE_SECONDS);
+        let maximum_wait_deadline = first_pending_at
+            + std::time::Duration::from_secs(SESSION_ACCOUNT_AFFINITY_MAX_WAIT_SECONDS);
+        debounce_deadline.min(maximum_wait_deadline)
+    }
 }
 
 impl DbWriteActor {
@@ -385,6 +456,7 @@ impl DbWriteActor {
     ) -> Self {
         let (provider_exhaustion_sender, provider_exhaustion_receiver) = mpsc::channel(capacity);
         let (affinity_owner_sender, affinity_owner_receiver) = mpsc::channel(capacity);
+        let (session_affinity_sender, session_affinity_receiver) = mpsc::channel(capacity);
         let (active_mirror_sender, active_mirror_receiver) = mpsc::channel(capacity);
         let shutdown = CancellationToken::new();
         let closed = Arc::new(AtomicBool::new(false));
@@ -393,7 +465,20 @@ impl DbWriteActor {
         let task_route_band_queue_health = Arc::clone(&route_band_queue_health);
         let last_queue_lag_event = Arc::new(Mutex::new(None));
         let task_last_queue_lag_event = Arc::clone(&last_queue_lag_event);
+        let session_repository = Arc::clone(&repository);
+        let session_shutdown = shutdown.clone();
+        let session_last_queue_lag_event = Arc::clone(&last_queue_lag_event);
         let low_water_depth = capacity / 4;
+        let session_affinity_task = runtime_handle.spawn(async move {
+            run_session_affinity_scheduler(
+                session_repository,
+                session_affinity_receiver,
+                session_shutdown,
+                capacity,
+                session_last_queue_lag_event,
+            )
+            .await;
+        });
         let task = runtime_handle.spawn(async move {
             run_db_write_actor(DbWriteActorRuntime {
                 repository,
@@ -411,6 +496,7 @@ impl DbWriteActor {
         Self {
             provider_exhaustion_sender,
             affinity_owner_sender,
+            session_affinity_sender,
             active_mirror_sender,
             shutdown,
             closed,
@@ -418,12 +504,17 @@ impl DbWriteActor {
             last_degraded_event: Arc::new(Mutex::new(None)),
             last_queue_lag_event,
             task: Arc::new(Mutex::new(Some(task))),
+            session_affinity_task: Arc::new(Mutex::new(Some(session_affinity_task))),
         }
     }
 
     /// Attempts to enqueue without awaiting queue capacity.
     #[must_use]
     pub fn try_enqueue(&self, command: DbWriteCommand) -> DbWriteEnqueueResult {
+        self.try_enqueue_immediately(command)
+    }
+
+    fn try_enqueue_immediately(&self, command: DbWriteCommand) -> DbWriteEnqueueResult {
         if self.closed.load(Ordering::Acquire) {
             self.record_degraded_event(&command, QueueDegradedReason::Closed);
             return DbWriteEnqueueResult::ClosedDegraded;
@@ -451,7 +542,13 @@ impl DbWriteActor {
                 DbWriteEnqueueResult::FullDegraded
             }
             Err(mpsc::error::TrySendError::Closed(queued_command)) => {
-                self.closed.store(true, Ordering::Release);
+                if queued_command
+                    .command
+                    .routing_degraded_route_band()
+                    .is_some()
+                {
+                    self.closed.store(true, Ordering::Release);
+                }
                 self.record_degraded_event(&queued_command.command, QueueDegradedReason::Closed);
                 DbWriteEnqueueResult::ClosedDegraded
             }
@@ -505,19 +602,21 @@ impl DbWriteActor {
                 None
             }
         };
-        if let Some(mut task) = task {
-            let drain_grace = tokio::time::sleep(std::time::Duration::from_millis(
-                DB_WRITE_SHUTDOWN_DRAIN_GRACE_MS,
-            ));
-            tokio::pin!(drain_grace);
-            tokio::select! {
-                _join_result = &mut task => {}
-                () = &mut drain_grace => {
-                    task.abort();
-                    let _join_result = task.await;
-                }
+        let session_affinity_task = match self.session_affinity_task.lock() {
+            Ok(mut task) => task.take(),
+            Err(error) => {
+                tracing::warn!(
+                    error.class = "session_affinity_task_lock_poisoned",
+                    error.message = %error,
+                    "codex_router.session_affinity_task_unavailable"
+                );
+                None
             }
-        }
+        };
+        tokio::join!(
+            await_db_write_task_shutdown(task),
+            await_db_write_task_shutdown(session_affinity_task),
+        );
     }
 
     fn record_queue_depth(&self, queue_name: &'static str, route_band_label: &'static str) {
@@ -565,6 +664,7 @@ impl DbWriteActor {
         match command {
             DbWriteCommand::ProviderQuotaExhausted { .. } => &self.provider_exhaustion_sender,
             DbWriteCommand::PreviousResponseAffinityOwner { .. } => &self.affinity_owner_sender,
+            DbWriteCommand::SessionAccountAffinity { .. } => &self.session_affinity_sender,
             DbWriteCommand::ActiveClientAcquired { .. }
             | DbWriteCommand::ActiveClientReleased { .. } => &self.active_mirror_sender,
         }
@@ -574,9 +674,198 @@ impl DbWriteActor {
         match queue_name {
             PROVIDER_EXHAUSTION_QUEUE_NAME => &self.provider_exhaustion_sender,
             "affinity_owner" => &self.affinity_owner_sender,
+            SESSION_ACCOUNT_AFFINITY_QUEUE_NAME => &self.session_affinity_sender,
             _ => &self.active_mirror_sender,
         }
     }
+}
+
+async fn await_db_write_task_shutdown(task: Option<JoinHandle<()>>) {
+    let Some(mut task) = task else {
+        return;
+    };
+    let drain_grace = tokio::time::sleep(std::time::Duration::from_millis(
+        DB_WRITE_SHUTDOWN_DRAIN_GRACE_MS,
+    ));
+    tokio::pin!(drain_grace);
+    tokio::select! {
+        _join_result = &mut task => {}
+        () = &mut drain_grace => {
+            task.abort();
+            let _join_result = task.await;
+        }
+    }
+}
+
+async fn run_session_affinity_scheduler(
+    repository: Arc<dyn DbWriteRepository>,
+    mut receiver: mpsc::Receiver<QueuedDbWriteCommand>,
+    shutdown: CancellationToken,
+    schedule_capacity: usize,
+    last_queue_lag_event: Arc<Mutex<Option<QueueLagEvent>>>,
+) {
+    let mut schedules = HashMap::<String, ScheduledSessionAffinity>::new();
+    loop {
+        let next_deadline = schedules
+            .values()
+            .map(ScheduledSessionAffinity::next_deadline)
+            .min()
+            .unwrap_or_else(|| Instant::now() + std::time::Duration::from_secs(86_400));
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                receiver.close();
+                while let Ok(command) = receiver.try_recv() {
+                    process_session_affinity_trigger(
+                        repository.as_ref(),
+                        command,
+                        &mut schedules,
+                        schedule_capacity,
+                        &last_queue_lag_event,
+                    ).await;
+                }
+                flush_all_pending_session_affinities(
+                    repository.as_ref(),
+                    &mut schedules,
+                    &last_queue_lag_event,
+                ).await;
+                return;
+            }
+            command = receiver.recv() => {
+                let Some(command) = command else {
+                    flush_all_pending_session_affinities(
+                        repository.as_ref(),
+                        &mut schedules,
+                        &last_queue_lag_event,
+                    ).await;
+                    return;
+                };
+                process_session_affinity_trigger(
+                    repository.as_ref(),
+                    command,
+                    &mut schedules,
+                    schedule_capacity,
+                    &last_queue_lag_event,
+                ).await;
+            }
+            () = tokio::time::sleep_until(next_deadline) => {
+                flush_due_session_affinities(
+                    repository.as_ref(),
+                    &mut schedules,
+                    &last_queue_lag_event,
+                ).await;
+            }
+        }
+    }
+}
+
+async fn process_session_affinity_trigger(
+    repository: &dyn DbWriteRepository,
+    command: QueuedDbWriteCommand,
+    schedules: &mut HashMap<String, ScheduledSessionAffinity>,
+    schedule_capacity: usize,
+    last_queue_lag_event: &Arc<Mutex<Option<QueueLagEvent>>>,
+) {
+    let DbWriteCommand::SessionAccountAffinity { affinity, .. } = &command.command else {
+        return;
+    };
+    let session_id = affinity.session_id().to_owned();
+    let account_id = affinity.account_id().clone();
+    let requested_at = command.enqueued_at;
+    if let Some(schedule) = schedules.get_mut(&session_id) {
+        schedule.latest_requested_at = requested_at;
+        if schedule.account_id == account_id {
+            schedule.pending_command = Some(command);
+            schedule.first_pending_at.get_or_insert(requested_at);
+            return;
+        }
+        schedule.account_id = account_id;
+        schedule.pending_command = None;
+        schedule.first_pending_at = None;
+        persist_scheduled_session_affinity(repository, command, last_queue_lag_event).await;
+        return;
+    }
+
+    if schedules.len() >= schedule_capacity
+        && let Some(oldest_session_id) = schedules
+            .iter()
+            .min_by_key(|(_session_id, schedule)| schedule.latest_requested_at)
+            .map(|(session_id, _schedule)| session_id.clone())
+        && let Some(evicted_schedule) = schedules.remove(&oldest_session_id)
+        && let Some(pending_command) = evicted_schedule.pending_command
+    {
+        persist_scheduled_session_affinity(repository, pending_command, last_queue_lag_event).await;
+    }
+    schedules.insert(
+        session_id,
+        ScheduledSessionAffinity {
+            account_id,
+            pending_command: None,
+            first_pending_at: None,
+            latest_requested_at: requested_at,
+        },
+    );
+    persist_scheduled_session_affinity(repository, command, last_queue_lag_event).await;
+}
+
+async fn flush_due_session_affinities(
+    repository: &dyn DbWriteRepository,
+    schedules: &mut HashMap<String, ScheduledSessionAffinity>,
+    last_queue_lag_event: &Arc<Mutex<Option<QueueLagEvent>>>,
+) {
+    let now = Instant::now();
+    let due_session_ids = schedules
+        .iter()
+        .filter(|(_session_id, schedule)| now >= schedule.next_deadline())
+        .map(|(session_id, _schedule)| session_id.clone())
+        .collect::<Vec<_>>();
+    let mut pending_commands = Vec::new();
+    for session_id in due_session_ids {
+        let Some(schedule) = schedules.get_mut(&session_id) else {
+            continue;
+        };
+        if let Some(command) = schedule.pending_command.take() {
+            schedule.first_pending_at = None;
+            pending_commands.push(command);
+        } else {
+            schedules.remove(&session_id);
+        }
+    }
+    for command in pending_commands {
+        persist_scheduled_session_affinity(repository, command, last_queue_lag_event).await;
+    }
+}
+
+async fn flush_all_pending_session_affinities(
+    repository: &dyn DbWriteRepository,
+    schedules: &mut HashMap<String, ScheduledSessionAffinity>,
+    last_queue_lag_event: &Arc<Mutex<Option<QueueLagEvent>>>,
+) {
+    let pending_commands = schedules
+        .drain()
+        .filter_map(|(_session_id, schedule)| schedule.pending_command)
+        .collect::<Vec<_>>();
+    for command in pending_commands {
+        persist_scheduled_session_affinity(repository, command, last_queue_lag_event).await;
+    }
+}
+
+async fn persist_scheduled_session_affinity(
+    repository: &dyn DbWriteRepository,
+    queued_command: QueuedDbWriteCommand,
+    last_queue_lag_event: &Arc<Mutex<Option<QueueLagEvent>>>,
+) {
+    let queue_lag_event = emit_db_write_queue_lag_observed(
+        queued_command.command.queue_name(),
+        queued_command.command.route_band_label(),
+        "processing",
+        queue_lag_millis_since(queued_command.enqueued_at),
+    );
+    if let Ok(mut last_event) = last_queue_lag_event.lock() {
+        *last_event = Some(queue_lag_event);
+    }
+    let command_result = handle_db_write_command(repository, queued_command.command).await;
+    apply_db_write_command_result(command_result, &RouteBandQueueHealth::default(), 0, 0, 0);
 }
 
 async fn run_db_write_actor(mut runtime: DbWriteActorRuntime) {
@@ -782,6 +1071,21 @@ async fn handle_db_write_command(
             }
             DbWriteCommandResult::Failed(DbWriteCommand::PreviousResponseAffinityOwner { owner })
         }
+        DbWriteCommand::SessionAccountAffinity {
+            route_band,
+            affinity,
+        } => {
+            let result = repository
+                .record_session_account_affinity(affinity.clone())
+                .await;
+            if result.is_ok() {
+                return DbWriteCommandResult::SucceededNoRoutingEffect;
+            }
+            DbWriteCommandResult::Failed(DbWriteCommand::SessionAccountAffinity {
+                route_band,
+                affinity,
+            })
+        }
         DbWriteCommand::ActiveClientAcquired {
             route_band,
             process_run_id,
@@ -879,6 +1183,7 @@ mod tests {
     use codex_router_core::affinity::AffinityKeyHash;
     use codex_router_state::affinity_owner::AffinitySourceTransport;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+    use codex_router_state::session_account_affinity::SessionAccountAffinity;
 
     use super::DbWriteActor;
     use super::DbWriteCommand;
@@ -1125,6 +1430,108 @@ mod tests {
             });
 
         repository.release.notify_waiters();
+        actor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_affinity_queue_pressure_does_not_consume_affinity_owner_capacity() {
+        let repository = Arc::new(BlockingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository.clone(), 1);
+
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-blocking",
+                    account_id("acct_session_blocking"),
+                    1_000,
+                ),
+            )),
+            DbWriteEnqueueResult::Enqueued
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            repository.entered.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("session affinity write should block the actor"));
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-queued",
+                    account_id("acct_session_queued"),
+                    1_001,
+                ),
+            )),
+            DbWriteEnqueueResult::Enqueued
+        );
+        let owner = PreviousResponseAffinityOwnerRecord::new(
+            AffinityKeyHash::new("b".repeat(64))
+                .unwrap_or_else(|error| panic!("test affinity hash should validate: {error}")),
+            account_id("acct_affinity_separate_capacity"),
+            1,
+            RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            1_002,
+        );
+
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::previous_response_affinity_owner(owner)),
+            DbWriteEnqueueResult::Enqueued,
+            "session refresh pressure must not consume critical affinity-owner capacity"
+        );
+
+        repository.release.notify_waiters();
+        actor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn closed_session_affinity_queue_does_not_close_critical_affinity_queue() {
+        let repository = Arc::new(RecordingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository, 1);
+        let session_task = actor
+            .session_affinity_task
+            .lock()
+            .unwrap_or_else(|error| panic!("session task lock should hold: {error}"))
+            .take()
+            .unwrap_or_else(|| panic!("session scheduler task should exist"));
+        session_task.abort();
+        let _join_result = session_task.await;
+
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-closed-optional-queue",
+                    account_id("acct_session_closed"),
+                    1_000,
+                ),
+            )),
+            DbWriteEnqueueResult::ClosedDegraded
+        );
+        let owner = PreviousResponseAffinityOwnerRecord::new(
+            AffinityKeyHash::new("c".repeat(64))
+                .unwrap_or_else(|error| panic!("test affinity hash should validate: {error}")),
+            account_id("acct_critical_still_open"),
+            1,
+            RouteBand::Responses,
+            AffinitySourceTransport::HttpSse,
+            1_001,
+        );
+
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::previous_response_affinity_owner(owner)),
+            DbWriteEnqueueResult::Enqueued
+        );
+        assert!(
+            route_band_queue_health_allows_selection(
+                &actor.route_band_queue_health,
+                RouteBand::Responses,
+            )
+            .is_ok()
+        );
+
         actor.shutdown().await;
     }
 
@@ -1526,6 +1933,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_session_affinity_write_does_not_clear_critical_affinity_degradation() {
+        let queue_health = RouteBandQueueHealth::default();
+        super::mark_route_band_queue_degraded_for_queue(
+            &queue_health,
+            RouteBand::Responses,
+            "affinity_owner",
+            RouteBandQueueDegradedReason::DbWriteFailed,
+            1_000,
+        )
+        .unwrap_or_else(|error| panic!("test should mark affinity queue degraded: {error}"));
+        let repository = RecordingDbWriteRepository::default();
+        let result = super::handle_db_write_command(
+            &repository,
+            DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-success",
+                    account_id("acct_session_success"),
+                    1_001,
+                ),
+            ),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            super::DbWriteCommandResult::SucceededNoRoutingEffect
+        ));
+        super::apply_db_write_command_result(result, &queue_health, 128, 128, 32);
+        assert!(
+            route_band_queue_health_allows_selection(&queue_health, RouteBand::Responses).is_err(),
+            "optional session affinity success must not clear critical affinity degradation"
+        );
+    }
+
+    #[tokio::test]
     async fn quota_write_failure_marks_route_band_degraded_until_recovery() {
         let repository = Arc::new(FailingOnceDbWriteRepository::default());
         let queue_health = RouteBandQueueHealth::default();
@@ -1632,6 +2075,361 @@ mod tests {
         actor.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn session_affinity_write_failure_does_not_degrade_request_routing() {
+        let repository = Arc::new(FailingSessionAffinityRepository::default());
+        let queue_health = RouteBandQueueHealth::default();
+        let actor = DbWriteActor::start_on_handle(
+            &tokio::runtime::Handle::current(),
+            repository.clone(),
+            queue_health.clone(),
+            2,
+        );
+
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-write-failure",
+                    account_id("acct_session_write_failure"),
+                    1_000,
+                ),
+            )),
+            DbWriteEnqueueResult::Enqueued
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            repository.write_attempted.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("session affinity write should be attempted"));
+
+        route_band_queue_health_allows_selection(&queue_health, RouteBand::Responses)
+            .unwrap_or_else(|error| {
+                panic!("cache-affinity persistence failure must not block routing: {error}")
+            });
+        actor.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_session_affinity_refreshes_are_not_written_immediately() {
+        let repository = Arc::new(RecordingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository.clone(), 4);
+        let selected_account_id = account_id("acct_debounced_session");
+
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new(
+                    "session-debounced",
+                    selected_account_id.clone(),
+                    1_000,
+                ),
+            )),
+            DbWriteEnqueueResult::Enqueued
+        );
+        for last_seen_unix_seconds in [1_001, 1_002] {
+            assert_eq!(
+                actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                    RouteBand::Responses,
+                    SessionAccountAffinity::new(
+                        "session-debounced",
+                        selected_account_id.clone(),
+                        last_seen_unix_seconds,
+                    ),
+                )),
+                DbWriteEnqueueResult::Enqueued
+            );
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if !repository.records().is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("the first session mapping should persist immediately"));
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        assert_eq!(
+            repository.records(),
+            vec![RecordedDbWrite::SessionAccountAffinity(
+                SessionAccountAffinity::new("session-debounced", selected_account_id, 1_000,)
+            )],
+            "unchanged-account refreshes should wait for the debounce deadline"
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if repository.records().len() == 2 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("the latest refresh should flush after the debounce"));
+        assert_eq!(
+            repository.records()[1],
+            RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                "session-debounced",
+                account_id("acct_debounced_session"),
+                1_002,
+            )),
+            "the debounced write should contain the latest timestamp"
+        );
+
+        actor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn simultaneous_first_session_triggers_enqueue_only_one_immediate_write() {
+        let repository = Arc::new(RecordingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository.clone(), 4);
+        let selected_account_id = account_id("acct_simultaneous_first");
+
+        for last_seen_unix_seconds in [1_000, 1_001, 1_002] {
+            assert_eq!(
+                actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                    RouteBand::Responses,
+                    SessionAccountAffinity::new(
+                        "session-simultaneous-first",
+                        selected_account_id.clone(),
+                        last_seen_unix_seconds,
+                    ),
+                )),
+                DbWriteEnqueueResult::Enqueued
+            );
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if !repository.records().is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("first session mapping should persist immediately"));
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        assert_eq!(
+            repository.records(),
+            vec![RecordedDbWrite::SessionAccountAffinity(
+                SessionAccountAffinity::new(
+                    "session-simultaneous-first",
+                    selected_account_id,
+                    1_000,
+                )
+            )],
+            "concurrent first triggers should coalesce behind the first immediate write"
+        );
+
+        actor.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn account_change_cancels_older_pending_session_refresh() {
+        let repository = Arc::new(RecordingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository.clone(), 4);
+        let first_account_id = account_id("acct_before_change");
+        let changed_account_id = account_id("acct_after_change");
+
+        for (account_id, last_seen_unix_seconds) in [
+            (first_account_id.clone(), 1_000),
+            (first_account_id, 1_001),
+            (changed_account_id.clone(), 1_002),
+        ] {
+            assert_eq!(
+                actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                    RouteBand::Responses,
+                    SessionAccountAffinity::new(
+                        "session-account-change",
+                        account_id,
+                        last_seen_unix_seconds,
+                    ),
+                )),
+                DbWriteEnqueueResult::Enqueued
+            );
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            repository.records(),
+            vec![
+                RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    "session-account-change",
+                    account_id("acct_before_change"),
+                    1_000,
+                )),
+                RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    "session-account-change",
+                    changed_account_id,
+                    1_002,
+                )),
+            ],
+            "an older pending refresh must not overwrite an immediate account change"
+        );
+        actor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_flushes_latest_pending_session_refresh() {
+        let repository = Arc::new(RecordingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository.clone(), 4);
+        let selected_account_id = account_id("acct_shutdown_refresh");
+        for last_seen_unix_seconds in [1_000, 1_001] {
+            assert_eq!(
+                actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                    RouteBand::Responses,
+                    SessionAccountAffinity::new(
+                        "session-shutdown-refresh",
+                        selected_account_id.clone(),
+                        last_seen_unix_seconds,
+                    ),
+                )),
+                DbWriteEnqueueResult::Enqueued
+            );
+        }
+
+        actor.shutdown().await;
+
+        assert_eq!(
+            repository.records(),
+            vec![
+                RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    "session-shutdown-refresh",
+                    selected_account_id.clone(),
+                    1_000,
+                )),
+                RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    "session-shutdown-refresh",
+                    selected_account_id,
+                    1_001,
+                )),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_schedule_capacity_evicts_and_flushes_oldest_pending_refresh() {
+        let repository = Arc::new(RecordingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository.clone(), 1);
+
+        for (session_id, account_id_value, last_seen_unix_seconds) in [
+            ("session-capacity-one", "acct_capacity_one", 1_000),
+            ("session-capacity-one", "acct_capacity_one", 1_001),
+            ("session-capacity-two", "acct_capacity_two", 1_002),
+        ] {
+            loop {
+                let result = actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                    RouteBand::Responses,
+                    SessionAccountAffinity::new(
+                        session_id,
+                        account_id(account_id_value),
+                        last_seen_unix_seconds,
+                    ),
+                ));
+                if result == DbWriteEnqueueResult::Enqueued {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if repository.records().len() == 3 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("capacity eviction should flush the pending refresh"));
+
+        assert_eq!(
+            repository.records(),
+            vec![
+                RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    "session-capacity-one",
+                    account_id("acct_capacity_one"),
+                    1_000,
+                )),
+                RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    "session-capacity-one",
+                    account_id("acct_capacity_one"),
+                    1_001,
+                )),
+                RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    "session-capacity-two",
+                    account_id("acct_capacity_two"),
+                    1_002,
+                )),
+            ]
+        );
+        actor.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn continuous_session_activity_flushes_at_the_maximum_wait() {
+        let repository = Arc::new(RecordingDbWriteRepository::default());
+        let actor = DbWriteActor::start(repository.clone(), 4);
+        let account_id = account_id("acct_maximum_wait");
+        assert_eq!(
+            actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                RouteBand::Responses,
+                SessionAccountAffinity::new("session-maximum-wait", account_id.clone(), 1_000,),
+            )),
+            DbWriteEnqueueResult::Enqueued
+        );
+        tokio::task::yield_now().await;
+        for last_seen_unix_seconds in [1_029, 1_058, 1_087, 1_116] {
+            assert_eq!(
+                actor.try_enqueue(DbWriteCommand::session_account_affinity(
+                    RouteBand::Responses,
+                    SessionAccountAffinity::new(
+                        "session-maximum-wait",
+                        account_id.clone(),
+                        last_seen_unix_seconds,
+                    ),
+                )),
+                DbWriteEnqueueResult::Enqueued
+            );
+            tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        }
+
+        assert_eq!(repository.records().len(), 1);
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if repository.records().len() == 2 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("continuous activity should flush at maximum wait"));
+
+        assert_eq!(
+            repository.records()[1],
+            RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                "session-maximum-wait",
+                account_id,
+                1_116,
+            ))
+        );
+        actor.shutdown().await;
+    }
+
     #[derive(Default)]
     struct BlockingDbWriteRepository {
         entered: Notify,
@@ -1678,6 +2476,13 @@ mod tests {
         ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
             self.block_first_write()
         }
+
+        fn record_session_account_affinity<'a>(
+            &'a self,
+            _affinity: SessionAccountAffinity,
+        ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            self.block_first_write()
+        }
     }
 
     impl BlockingDbWriteRepository {
@@ -1701,6 +2506,7 @@ mod tests {
             observed_unix_seconds: u64,
         },
         PreviousResponseAffinityOwner(PreviousResponseAffinityOwnerRecord),
+        SessionAccountAffinity(SessionAccountAffinity),
         ActiveClientAcquired {
             route_band: RouteBand,
             process_run_id: String,
@@ -1793,6 +2599,21 @@ mod tests {
                         panic!("recording repository lock should hold: {error}")
                     })
                     .push(RecordedDbWrite::PreviousResponseAffinityOwner(owner));
+                Ok(())
+            })
+        }
+
+        fn record_session_account_affinity<'a>(
+            &'a self,
+            affinity: SessionAccountAffinity,
+        ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            Box::pin(async move {
+                self.records
+                    .lock()
+                    .unwrap_or_else(|error| {
+                        panic!("recording repository lock should hold: {error}")
+                    })
+                    .push(RecordedDbWrite::SessionAccountAffinity(affinity));
                 Ok(())
             })
         }
@@ -1910,6 +2731,37 @@ mod tests {
                 Err(DbWriteRepositoryError::State(
                     codex_router_state::sqlite::StateStoreError::Sqlite {
                         message: "injected write failure before health probe".to_owned(),
+                    },
+                ))
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingSessionAffinityRepository {
+        write_attempted: Notify,
+    }
+
+    impl DbWriteRepository for FailingSessionAffinityRepository {
+        fn record_provider_quota_exhausted<'a>(
+            &'a self,
+            _account_id: AccountId,
+            _route_band: RouteBand,
+            _classification: ProviderErrorClassification,
+            _observed_unix_seconds: u64,
+        ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn record_session_account_affinity<'a>(
+            &'a self,
+            _affinity: SessionAccountAffinity,
+        ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            Box::pin(async move {
+                self.write_attempted.notify_one();
+                Err(DbWriteRepositoryError::State(
+                    codex_router_state::sqlite::StateStoreError::Sqlite {
+                        message: "injected session affinity write failure".to_owned(),
                     },
                 ))
             })

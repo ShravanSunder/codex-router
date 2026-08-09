@@ -52,9 +52,11 @@ use crate::repositories::AffinityRepository;
 use crate::repositories::QuotaSnapshotRepository;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::SelectorQuotaRepository;
+use crate::session_account_affinity::SessionAccountAffinity;
 
-const CURRENT_SCHEMA_VERSION: i64 = 12;
-const PREVIOUS_SCHEMA_VERSION: i64 = 11;
+const CURRENT_SCHEMA_VERSION: i64 = 13;
+const PREVIOUS_SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION_V11: i64 = 11;
 const SCHEMA_VERSION_V10: i64 = 10;
 const WEEKLY_FLOOR_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -148,6 +150,11 @@ const V12_ACCOUNT_ROUTING_POLICY_REPLACEMENT_TABLE_SQL: &str =
                 AND weekly_quota_floor_basis_points % 100 = 0
             )
     )";
+const V13_SESSION_ACCOUNT_AFFINITY_TABLE_SQL: &str = "CREATE TABLE session_account_affinities (
+        session_id TEXT PRIMARY KEY NOT NULL,
+        account_id TEXT NOT NULL,
+        last_seen_unix_seconds INTEGER NOT NULL
+    )";
 
 async fn rebuild_account_routing_policy_table_v12_async(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -209,7 +216,7 @@ fn rebuild_account_routing_policy_table_v12_sync(
         )
         .map_err(sqlite_error)?;
     transaction
-        .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", PREVIOUS_SCHEMA_VERSION)
         .map_err(sqlite_error)?;
 
     Ok(())
@@ -729,6 +736,7 @@ impl AsyncSqliteStateStore {
         store.ensure_active_session_history_schema().await?;
         store.apply_v11_if_needed().await?;
         store.apply_v12_if_needed().await?;
+        store.apply_v13_if_needed().await?;
         if let Err(error) = store.verify_account_routing_policy_schema().await {
             store.pool.close().await;
             return Err(error);
@@ -1272,6 +1280,53 @@ impl AsyncSqliteStateStore {
         .map_err(sqlx_error)?;
 
         Ok(())
+    }
+
+    /// Inserts or replaces the account affinity for one Codex session.
+    pub async fn upsert_session_account_affinity(
+        &self,
+        affinity: &SessionAccountAffinity,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "INSERT INTO session_account_affinities (
+               session_id, account_id, last_seen_unix_seconds
+             ) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET
+               account_id = excluded.account_id,
+               last_seen_unix_seconds = excluded.last_seen_unix_seconds",
+        )
+        .bind(affinity.session_id())
+        .bind(affinity.account_id().as_str())
+        .bind(u64_to_i64(affinity.last_seen_unix_seconds())?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+        Ok(())
+    }
+
+    /// Loads the account affinity for one Codex session.
+    pub async fn load_session_account_affinity(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionAccountAffinity>, StateStoreError> {
+        let row = sqlx::query(
+            "SELECT session_id, account_id, last_seen_unix_seconds
+               FROM session_account_affinities
+              WHERE session_id = ?1",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        row.map(|row| {
+            parse_session_account_affinity_row(
+                row.get::<String, _>(0),
+                row.get::<String, _>(1),
+                row.get::<i64, _>(2),
+            )
+        })
+        .transpose()
     }
 
     async fn load_quota_refresh_status(
@@ -2266,7 +2321,10 @@ impl AsyncSqliteStateStore {
                 self.apply_v10().await
             }
             9 => self.apply_v10().await,
-            SCHEMA_VERSION_V10 | PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
+            SCHEMA_VERSION_V10
+            | SCHEMA_VERSION_V11
+            | PREVIOUS_SCHEMA_VERSION
+            | CURRENT_SCHEMA_VERSION => Ok(()),
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
     }
@@ -2285,7 +2343,7 @@ impl AsyncSqliteStateStore {
                     .map_err(sqlx_error)?;
                 transaction.commit().await.map_err(sqlx_error)
             }
-            PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
+            SCHEMA_VERSION_V11 | PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
             version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
     }
@@ -2322,9 +2380,28 @@ impl AsyncSqliteStateStore {
 
     async fn apply_v12_if_needed(&self) -> Result<(), StateStoreError> {
         match self.schema_version().await? {
-            PREVIOUS_SCHEMA_VERSION => {
+            SCHEMA_VERSION_V11 => {
                 let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
                 rebuild_account_routing_policy_table_v12_async(&mut transaction).await?;
+                transaction.commit().await.map_err(sqlx_error)
+            }
+            PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
+            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
+        }
+    }
+
+    async fn apply_v13_if_needed(&self) -> Result<(), StateStoreError> {
+        match self.schema_version().await? {
+            PREVIOUS_SCHEMA_VERSION => {
+                let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+                sqlx::query(V13_SESSION_ACCOUNT_AFFINITY_TABLE_SQL)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(sqlx_error)?;
+                sqlx::query("PRAGMA user_version = 13")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(sqlx_error)?;
                 transaction.commit().await.map_err(sqlx_error)
             }
             CURRENT_SCHEMA_VERSION => Ok(()),
@@ -2469,6 +2546,7 @@ impl AsyncSqliteStateStore {
             "active_session_events",
             "active_session_rollups",
             "account_routing_policies",
+            "session_account_affinities",
         ] {
             if !self.schema_object_exists("table", table_name).await? {
                 return Err(StateStoreError::MissingReadOnlySchemaObject {
@@ -2492,6 +2570,9 @@ impl AsyncSqliteStateStore {
                 "account_routing_policies",
                 "weekly_quota_floor_basis_points",
             ),
+            ("session_account_affinities", "session_id"),
+            ("session_account_affinities", "account_id"),
+            ("session_account_affinities", "last_seen_unix_seconds"),
         ] {
             if !self.table_has_column(table_name, column_name).await? {
                 return Err(StateStoreError::MissingReadOnlySchemaObject {
@@ -2671,6 +2752,12 @@ impl AsyncSqliteStateStore {
                     .await
                     .map_err(sqlx_error)?
             }
+            "session_account_affinities" => {
+                sqlx::query("PRAGMA table_info(\"session_account_affinities\")")
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(sqlx_error)?
+            }
             _ => Vec::new(),
         };
         Ok(rows
@@ -2680,7 +2767,7 @@ impl AsyncSqliteStateStore {
 }
 
 impl AsyncWeeklyQuotaFloorMutationStore {
-    /// Opens an existing v12 database without migrating, ensuring schemas, or checkpointing.
+    /// Opens an existing current-schema database without migrating or checkpointing.
     pub async fn open(database_path: &Path) -> Result<Self, StateStoreError> {
         let options = SqliteConnectOptions::new()
             .filename(database_path)
@@ -2999,6 +3086,37 @@ impl AsyncQuotaExhaustionRepository for AsyncSqliteStateStore {
     }
 }
 
+/// Async Codex session account-affinity repository.
+pub trait AsyncSessionAccountAffinityRepository {
+    /// Inserts or replaces one session account affinity.
+    fn upsert_session_account_affinity<'a>(
+        &'a self,
+        affinity: &'a SessionAccountAffinity,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>>;
+
+    /// Loads one session account affinity.
+    fn load_session_account_affinity<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<SessionAccountAffinity>, StateStoreError>>;
+}
+
+impl AsyncSessionAccountAffinityRepository for AsyncSqliteStateStore {
+    fn upsert_session_account_affinity<'a>(
+        &'a self,
+        affinity: &'a SessionAccountAffinity,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+        Box::pin(async move { self.upsert_session_account_affinity(affinity).await })
+    }
+
+    fn load_session_account_affinity<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<SessionAccountAffinity>, StateStoreError>> {
+        Box::pin(async move { self.load_session_account_affinity(session_id).await })
+    }
+}
+
 /// Async affinity repository contract for Tokio runtime callers.
 pub trait AsyncAffinityRepository {
     /// Writes a hashed previous-response owner record.
@@ -3048,6 +3166,7 @@ impl SqliteStateStore {
         store.ensure_async_read_only_schema()?;
         store.apply_v11_if_needed()?;
         store.apply_v12_if_needed()?;
+        store.apply_v13_if_needed()?;
         store.verify_account_routing_policy_schema()?;
 
         Ok(store)
@@ -3980,7 +4099,10 @@ impl SqliteStateStore {
                 self.apply_v10()
             }
             9 => self.apply_v10(),
-            SCHEMA_VERSION_V10 | PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
+            SCHEMA_VERSION_V10
+            | SCHEMA_VERSION_V11
+            | PREVIOUS_SCHEMA_VERSION
+            | CURRENT_SCHEMA_VERSION => Ok(()),
             _ => Err(StateStoreError::UnsupportedSchemaVersion { version }),
         }
     }
@@ -3993,8 +4115,20 @@ impl SqliteStateStore {
                     .execute(V11_ACCOUNT_ROUTING_POLICY_TABLE_SQL, [])
                     .map_err(sqlite_error)?;
                 transaction
-                    .pragma_update(None, "user_version", PREVIOUS_SCHEMA_VERSION)
+                    .pragma_update(None, "user_version", SCHEMA_VERSION_V11)
                     .map_err(sqlite_error)?;
+                transaction.commit().map_err(sqlite_error)
+            }
+            SCHEMA_VERSION_V11 | PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
+            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
+        }
+    }
+
+    fn apply_v12_if_needed(&mut self) -> Result<(), StateStoreError> {
+        match self.schema_version() {
+            SCHEMA_VERSION_V11 => {
+                let transaction = self.connection.transaction().map_err(sqlite_error)?;
+                rebuild_account_routing_policy_table_v12_sync(&transaction)?;
                 transaction.commit().map_err(sqlite_error)
             }
             PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
@@ -4002,11 +4136,16 @@ impl SqliteStateStore {
         }
     }
 
-    fn apply_v12_if_needed(&mut self) -> Result<(), StateStoreError> {
+    fn apply_v13_if_needed(&mut self) -> Result<(), StateStoreError> {
         match self.schema_version() {
             PREVIOUS_SCHEMA_VERSION => {
                 let transaction = self.connection.transaction().map_err(sqlite_error)?;
-                rebuild_account_routing_policy_table_v12_sync(&transaction)?;
+                transaction
+                    .execute(V13_SESSION_ACCOUNT_AFFINITY_TABLE_SQL, [])
+                    .map_err(sqlite_error)?;
+                transaction
+                    .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
+                    .map_err(sqlite_error)?;
                 transaction.commit().map_err(sqlite_error)
             }
             CURRENT_SCHEMA_VERSION => Ok(()),
@@ -4043,7 +4182,7 @@ impl SqliteStateStore {
             .execute(V11_ACCOUNT_ROUTING_POLICY_TABLE_SQL, [])
             .map_err(sqlite_error)?;
         transaction
-            .pragma_update(None, "user_version", PREVIOUS_SCHEMA_VERSION)
+            .pragma_update(None, "user_version", SCHEMA_VERSION_V11)
             .map_err(sqlite_error)?;
         transaction.rollback().map_err(sqlite_error)?;
         Err(redacted_weekly_floor_sqlite_error(
@@ -5440,6 +5579,28 @@ fn max_concurrent_sessions(segments: &[(u64, u64)]) -> u32 {
     }
 
     u32::try_from(maximum).unwrap_or_default()
+}
+
+fn parse_session_account_affinity_row(
+    session_id: String,
+    account_id_value: String,
+    last_seen_unix_seconds: i64,
+) -> Result<SessionAccountAffinity, StateStoreError> {
+    let account_id =
+        AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
+            account_id: account_id_value.clone(),
+            field: "account_id",
+        })?;
+    let last_seen_unix_seconds = i64_to_u64(
+        last_seen_unix_seconds,
+        &account_id_value,
+        "last_seen_unix_seconds",
+    )?;
+    Ok(SessionAccountAffinity::new(
+        session_id,
+        account_id,
+        last_seen_unix_seconds,
+    ))
 }
 
 fn parse_previous_response_owner_row(
