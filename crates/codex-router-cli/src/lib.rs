@@ -6028,7 +6028,52 @@ exit 42
     }
 
     #[test]
+    fn sessions_exact_resume_id_dry_run_uses_invoking_cwd() {
+        const SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
+        let codex_home = PathBuf::from("/tmp/codex-router-sessions-id-home");
+        let invoking_cwd = PathBuf::from("/tmp/codex-router-sessions-id-project");
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--id"),
+            OsString::from(SESSION_ID),
+            OsString::from("--dry-run"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new("picker-must-not-run");
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &CliContext::new(vec![(
+                "CODEX_HOME".to_owned(),
+                codex_home.display().to_string(),
+            )])
+            .with_current_dir(invoking_cwd.clone()),
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert_eq!(
+            String::from_utf8(stdout).unwrap_or_else(|error| panic!("stdout utf8: {error}")),
+            format!(
+                "codex --profile codex-router --remote unix://{} --cd {} resume -- {SESSION_ID}\n",
+                codex_home
+                    .join("app-server-control/app-server-control.sock")
+                    .display(),
+                invoking_cwd.display(),
+            )
+        );
+        assert!(picker.offered_session_ids.is_empty());
+    }
+
+    #[test]
     fn sessions_local_new_dry_run_keeps_router_profile_without_remote_attachment() {
+        let invoking_cwd = PathBuf::from("/tmp/codex-router-sessions-local-project");
         let command = match CliCommand::parse([
             OsString::from("sessions"),
             OsString::from("--local"),
@@ -6049,14 +6094,17 @@ exit 42
         must_ok(crate::sessions::run_sessions_command_with_dependencies(
             &mut stdout,
             command,
-            &CliContext::new(vec![]),
+            &CliContext::new(vec![]).with_current_dir(invoking_cwd.clone()),
             &mut runner,
             &mut picker,
         ));
 
         assert_eq!(
             String::from_utf8(stdout).unwrap_or_else(|error| panic!("stdout utf8: {error}")),
-            "codex --profile codex-router --model gpt-5.6-luna --yolo\n"
+            format!(
+                "codex --profile codex-router --cd {} --model gpt-5.6-luna --yolo\n",
+                invoking_cwd.display(),
+            )
         );
     }
 
@@ -6109,6 +6157,7 @@ exit 42
     #[test]
     fn sessions_new_dry_run_prints_codex_command_with_passthrough_flags() {
         let codex_home = PathBuf::from("/tmp/codex-router-sessions-new-home");
+        let invoking_cwd = PathBuf::from("/tmp/codex-router-sessions-new-project");
         let command = match CliCommand::parse([
             OsString::from("sessions"),
             OsString::from("--new"),
@@ -6131,7 +6180,8 @@ exit 42
             &CliContext::new(vec![(
                 "CODEX_HOME".to_owned(),
                 codex_home.display().to_string(),
-            )]),
+            )])
+            .with_current_dir(invoking_cwd.clone()),
             &mut runner,
             &mut picker,
         ));
@@ -6139,10 +6189,11 @@ exit 42
         assert_eq!(
             String::from_utf8(stdout).unwrap_or_else(|error| panic!("stdout utf8: {error}")),
             format!(
-                "codex --profile codex-router --remote unix://{} --yolo --model gpt-5.4-mini\n",
+                "codex --profile codex-router --remote unix://{} --cd {} --yolo --model gpt-5.4-mini\n",
                 codex_home
                     .join("app-server-control/app-server-control.sock")
-                    .display()
+                    .display(),
+                invoking_cwd.display(),
             )
         );
         assert!(runner.new_codex_args.is_empty());
@@ -6613,6 +6664,7 @@ exit 42
         let project = test_root.path().join("project");
         must_ok(fs::create_dir(&codex_home));
         must_ok(fs::create_dir(&project));
+        let invoking_cwd = must_ok(fs::canonicalize(&project));
         create_codex_state_db_with_thread_rows(
             &codex_home.join("state_5.sqlite"),
             "LAST_CANARY_SHOULD_NOT_LEAK",
@@ -6659,10 +6711,11 @@ exit 42
         assert_eq!(
             output.stdout,
             format!(
-                "codex --profile codex-router --remote unix://{} resume -- thread-new\n",
+                "codex --profile codex-router --remote unix://{} --cd {} resume -- thread-new\n",
                 codex_home
                     .join("app-server-control/app-server-control.sock")
-                    .display()
+                    .display(),
+                invoking_cwd.display(),
             )
         );
     }
@@ -6675,6 +6728,7 @@ exit 42
         let project = test_root.path().join("project");
         must_ok(fs::create_dir(&codex_home));
         must_ok(fs::create_dir(&project));
+        let invoking_cwd = must_ok(fs::canonicalize(&project));
         create_codex_state_db_with_thread_rows(
             &codex_home.join("state_5.sqlite"),
             "LOCAL_SESSION",
@@ -6708,7 +6762,10 @@ exit 42
 
         assert_eq!(
             output.stdout,
-            "codex --profile codex-router resume -- thread-local\n"
+            format!(
+                "codex --profile codex-router --cd {} resume -- thread-local\n",
+                invoking_cwd.display(),
+            )
         );
     }
 

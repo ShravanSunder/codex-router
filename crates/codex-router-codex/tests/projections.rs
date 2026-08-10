@@ -82,26 +82,31 @@ fn app_server_command_uses_managed_executable_profile_and_native_contract() {
 #[test]
 fn session_launch_keeps_remote_at_root_for_new_and_resume() {
     let socket = PathBuf::from("/Users/owner/.codex/app-server-control/app-server-control.sock");
+    let invoking_cwd = PathBuf::from("/Users/owner/project");
     let user_arguments = vec![OsString::from("--model"), OsString::from("gpt-5.4")];
 
     assert_eq!(
-        SessionLaunch::new(&socket, &user_arguments).arguments(),
+        SessionLaunch::new(&socket, &invoking_cwd, &user_arguments).arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
             OsString::from("--remote"),
             OsString::from("unix:///Users/owner/.codex/app-server-control/app-server-control.sock"),
+            OsString::from("--cd"),
+            OsString::from("/Users/owner/project"),
             OsString::from("--model"),
             OsString::from("gpt-5.4"),
         ]
     );
     assert_eq!(
-        SessionLaunch::resume(&socket, &user_arguments, "thread_123").arguments(),
+        SessionLaunch::resume(&socket, &invoking_cwd, &user_arguments, "thread_123").arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
             OsString::from("--remote"),
             OsString::from("unix:///Users/owner/.codex/app-server-control/app-server-control.sock"),
+            OsString::from("--cd"),
+            OsString::from("/Users/owner/project"),
             OsString::from("--model"),
             OsString::from("gpt-5.4"),
             OsString::from("resume"),
@@ -113,6 +118,7 @@ fn session_launch_keeps_remote_at_root_for_new_and_resume() {
 
 #[test]
 fn local_session_launch_keeps_router_profile_without_remote_attachment() {
+    let invoking_cwd = PathBuf::from("/Users/owner/project");
     let user_arguments = vec![
         OsString::from("--model"),
         OsString::from("gpt-5.6-luna"),
@@ -120,20 +126,24 @@ fn local_session_launch_keeps_router_profile_without_remote_attachment() {
     ];
 
     assert_eq!(
-        SessionLaunch::local(&user_arguments).arguments(),
+        SessionLaunch::local(&invoking_cwd, &user_arguments).arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
+            OsString::from("--cd"),
+            OsString::from("/Users/owner/project"),
             OsString::from("--model"),
             OsString::from("gpt-5.6-luna"),
             OsString::from("--yolo"),
         ]
     );
     assert_eq!(
-        SessionLaunch::resume_local(&user_arguments, "thread_123").arguments(),
+        SessionLaunch::resume_local(&invoking_cwd, &user_arguments, "thread_123").arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
+            OsString::from("--cd"),
+            OsString::from("/Users/owner/project"),
             OsString::from("--model"),
             OsString::from("gpt-5.6-luna"),
             OsString::from("--yolo"),
@@ -142,4 +152,41 @@ fn local_session_launch_keeps_router_profile_without_remote_attachment() {
             OsString::from("thread_123"),
         ]
     );
+}
+
+#[test]
+fn session_launch_preserves_every_explicit_cwd_spelling_without_injecting_a_duplicate() {
+    let socket = PathBuf::from("/Users/owner/.codex/app-server-control/app-server-control.sock");
+    let invoking_cwd = PathBuf::from("/Users/owner/invoking-project");
+    let explicit_cwd_spellings = [
+        vec!["--cd", "/Users/owner/explicit-project"],
+        vec!["--cd=/Users/owner/explicit-project"],
+        vec!["-C", "/Users/owner/explicit-project"],
+        vec!["-Cexplicit-project"],
+    ];
+
+    for explicit_cwd_spelling in explicit_cwd_spellings {
+        let user_arguments = explicit_cwd_spelling
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        let mut expected_arguments = vec![
+            OsString::from("--profile"),
+            OsString::from("codex-router"),
+            OsString::from("--remote"),
+            OsString::from("unix:///Users/owner/.codex/app-server-control/app-server-control.sock"),
+        ];
+        expected_arguments.extend(user_arguments.iter().cloned());
+        expected_arguments.extend([
+            OsString::from("resume"),
+            OsString::from("--"),
+            OsString::from("thread_123"),
+        ]);
+
+        assert_eq!(
+            SessionLaunch::resume(&socket, &invoking_cwd, &user_arguments, "thread_123")
+                .arguments(),
+            expected_arguments,
+        );
+    }
 }
