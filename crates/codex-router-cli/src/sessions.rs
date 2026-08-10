@@ -351,17 +351,27 @@ fn run_id_session<W: Write>(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SessionsLaunchTarget {
-    Hosted(PathBuf),
-    Local,
+    Hosted {
+        app_server_socket: PathBuf,
+        invoking_cwd: PathBuf,
+    },
+    Local {
+        invoking_cwd: PathBuf,
+    },
 }
 
 impl SessionsLaunchTarget {
     fn new_launch(&self, codex_args: &[OsString]) -> codex_router_codex::SessionLaunch {
         match self {
-            Self::Hosted(app_server_socket) => {
-                codex_router_codex::SessionLaunch::new(app_server_socket, codex_args)
+            Self::Hosted {
+                app_server_socket,
+                invoking_cwd,
+            } => {
+                codex_router_codex::SessionLaunch::new(app_server_socket, invoking_cwd, codex_args)
             }
-            Self::Local => codex_router_codex::SessionLaunch::local(codex_args),
+            Self::Local { invoking_cwd } => {
+                codex_router_codex::SessionLaunch::local(invoking_cwd, codex_args)
+            }
         }
     }
 
@@ -371,10 +381,20 @@ impl SessionsLaunchTarget {
         session_id: &str,
     ) -> codex_router_codex::SessionLaunch {
         match self {
-            Self::Hosted(app_server_socket) => {
-                codex_router_codex::SessionLaunch::resume(app_server_socket, codex_args, session_id)
-            }
-            Self::Local => codex_router_codex::SessionLaunch::resume_local(codex_args, session_id),
+            Self::Hosted {
+                app_server_socket,
+                invoking_cwd,
+            } => codex_router_codex::SessionLaunch::resume(
+                app_server_socket,
+                invoking_cwd,
+                codex_args,
+                session_id,
+            ),
+            Self::Local { invoking_cwd } => codex_router_codex::SessionLaunch::resume_local(
+                invoking_cwd,
+                codex_args,
+                session_id,
+            ),
         }
     }
 }
@@ -383,13 +403,17 @@ fn sessions_launch_target(
     command: &SessionsCommand,
     context: &CliContext,
 ) -> Result<SessionsLaunchTarget, SessionsCommandError> {
+    let invoking_cwd = normalize_path(context.current_dir());
     if command.local {
-        return Ok(SessionsLaunchTarget::Local);
+        return Ok(SessionsLaunchTarget::Local { invoking_cwd });
     }
     let codex_paths = codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?);
     let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
         .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
-    Ok(SessionsLaunchTarget::Hosted(app_server_socket))
+    Ok(SessionsLaunchTarget::Hosted {
+        app_server_socket,
+        invoking_cwd,
+    })
 }
 
 fn write_sessions_json<W: Write>(
