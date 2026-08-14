@@ -10,9 +10,10 @@ use crate::presentation::session_picker::filters::source_matches;
 use crate::presentation::session_picker::render::render_model_snapshot;
 use crate::presentation::session_picker::request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
+use crate::presentation::session_picker::request::SessionsPickerRoot;
 use crate::sessions::SessionPickerRecord;
+use crate::sessions::SessionSearchExpression;
 use crate::sessions::SessionsProvider;
-use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
@@ -30,7 +31,7 @@ pub(super) enum SessionsPickerFocus {
 pub(crate) struct SessionsPickerModel {
     pub(super) request: SessionsPickerRequest,
     pub(super) width: usize,
-    pub(super) root: SessionsRoot,
+    pub(super) root: SessionsPickerRoot,
     pub(super) provider: SessionsProvider,
     pub(super) source: SessionsSource,
     pub(super) sort: SessionsSort,
@@ -262,7 +263,7 @@ impl SessionsPickerModel {
     }
 
     fn rebuild_visible_rows(&mut self) {
-        let search = self.search.to_lowercase();
+        let search = SessionSearchExpression::parse(&self.search);
         let mut indices = self
             .request
             .records
@@ -271,17 +272,7 @@ impl SessionsPickerModel {
             .filter(|(_index, record)| root_matches(self.root, &self.request, record))
             .filter(|(_index, record)| provider_matches(&self.provider, &self.request, record))
             .filter(|(_index, record)| source_matches(self.source, record))
-            .filter(|(_index, record)| {
-                search.is_empty()
-                    || record.title.to_lowercase().contains(&search)
-                    || record.session_id.to_lowercase().contains(&search)
-                    || record
-                        .provider
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_lowercase()
-                        .contains(&search)
-            })
+            .filter(|(_index, record)| search.is_empty() || record.matches_search(&search))
             .map(|(index, _record)| index)
             .collect::<Vec<_>>();
         indices.sort_by(|left_index, right_index| {

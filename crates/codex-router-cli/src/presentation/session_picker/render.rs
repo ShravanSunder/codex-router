@@ -5,7 +5,7 @@ use crate::presentation::session_picker::model::VISIBLE_SESSION_ROWS;
 #[cfg(test)]
 use crate::presentation::session_picker::model::visible_window_start;
 #[cfg(test)]
-use crate::sessions::SessionsRoot;
+use crate::presentation::session_picker::request::SessionsPickerRoot;
 #[cfg(test)]
 use crate::sessions::SessionsSort;
 #[cfg(test)]
@@ -28,7 +28,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         fit_line("Resume a previous session", model.width),
         fit_line(
             if model.search.is_empty() {
-                "Type to search".to_owned()
+                "Search text, id:, b:branch, repo:name".to_owned()
             } else {
                 format!("Search: [{}]", model.search)
             }
@@ -107,11 +107,6 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
         if model.width >= NARROW_PICKER_WIDTH
             && let Some(record) = model.focused_record()
         {
-            lines.push(fit_line("Preview", model.width));
-            lines.push(fit_line(
-                record.preview.as_deref().unwrap_or(&record.title),
-                model.width,
-            ));
             lines.push(fit_line("Conversation", model.width));
             if record.conversation.snippets.is_empty() {
                 lines.push(fit_line(
@@ -127,19 +122,6 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
                     lines.push(fit_line(&format!("• {snippet}"), model.width));
                 }
             }
-            lines.push(fit_line("Metadata", model.width));
-            lines.push(fit_line(
-                &format!("provider {}", record.provider.as_deref().unwrap_or("-")),
-                model.width,
-            ));
-            lines.push(fit_line(
-                &format!("model {}", record.model.as_deref().unwrap_or("-")),
-                model.width,
-            ));
-            lines.push(fit_line(
-                &format!("id {}", short_id(&record.session_id)),
-                model.width,
-            ));
         }
     }
 
@@ -161,7 +143,7 @@ fn start_new_args_label(model: &SessionsPickerModel) -> String {
 
 #[cfg(test)]
 fn render_filters_line(model: &SessionsPickerModel) -> String {
-    let root = format!("Scope: [{}]", root_label(model.root));
+    let root = format!("[{}]", root_label(model.root));
     let source = format!("Threads: [{}]", source_label(model.source));
     let sort = format!("Sort: [{}]", sort_label(model.sort));
     if model.width < ULTRA_NARROW_PICKER_WIDTH {
@@ -183,12 +165,11 @@ fn sort_label(sort: SessionsSort) -> &'static str {
 }
 
 #[cfg(test)]
-fn root_label(root: SessionsRoot) -> &'static str {
+fn root_label(root: SessionsPickerRoot) -> &'static str {
     match root {
-        SessionsRoot::Cwd => "📂 cwd",
-        SessionsRoot::Checkout => "worktree",
-        SessionsRoot::Repo => "repo",
-        SessionsRoot::Any => "all",
+        SessionsPickerRoot::Cwd => "📂 cwd",
+        SessionsPickerRoot::Repo => "repo",
+        SessionsPickerRoot::Any => "all",
     }
 }
 
@@ -199,11 +180,6 @@ fn source_label(source: SessionsSource) -> &'static str {
         SessionsSource::All => "all",
         SessionsSource::Subagents => "subagents",
     }
-}
-
-#[cfg(test)]
-fn short_id(session_id: &str) -> String {
-    truncate_middle(session_id, 12)
 }
 
 #[cfg(test)]
@@ -266,22 +242,18 @@ mod tests {
     #[test]
     fn sessions_picker_width_snapshots_fit_without_table_sprawl() {
         let wide = SessionsPickerModel::new(picker_request(), 100).render_snapshot();
-        assert!(wide.contains("Preview"));
-        assert!(wide.contains("Feature design session preview text"));
         assert!(wide.contains("Conversation"));
         assert!(wide.contains("Feature design session first real message"));
-        assert!(wide.contains("Metadata"));
-        assert!(wide.contains("provider codex-router"));
-        assert!(wide.contains("model gpt-5-codex"));
-        assert!(wide.contains("id thread-a"));
+        assert!(!wide.contains("Preview"));
+        assert!(!wide.contains("Metadata"));
         assert!(wide.lines().all(|line| line.chars().count() <= 100));
 
         let narrow = SessionsPickerModel::new(picker_request(), 64).render_snapshot();
-        assert!(narrow.contains("Scope: [📂 cwd]  Threads: [interactive]"));
+        assert!(narrow.contains("[📂 cwd]  Threads: [interactive]"));
         assert!(narrow.lines().all(|line| line.chars().count() <= 64));
 
         let ultra_narrow = SessionsPickerModel::new(picker_request(), 36).render_snapshot();
-        assert!(ultra_narrow.contains("Scope: [📂 cwd]"));
+        assert!(ultra_narrow.contains("[📂 cwd]"));
         assert!(ultra_narrow.contains("Threads: [interactive]"));
         assert!(ultra_narrow.contains("Sort: [updated]"));
         assert!(ultra_narrow.contains('…'));

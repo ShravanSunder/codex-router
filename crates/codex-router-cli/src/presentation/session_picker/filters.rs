@@ -1,29 +1,29 @@
 use std::path::Path;
 
 use crate::presentation::session_picker::request::SessionsPickerRequest;
+use crate::presentation::session_picker::request::SessionsPickerRoot;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsProvider;
-use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
+use crate::sessions::session_belongs_to_repository;
 
 pub(super) fn root_matches(
-    root: SessionsRoot,
+    root: SessionsPickerRoot,
     request: &SessionsPickerRequest,
     record: &SessionPickerRecord,
 ) -> bool {
-    let Some(cwd) = record.cwd.as_deref().map(Path::new) else {
-        return matches!(root, SessionsRoot::Any);
+    let Some(cwd) = record.normalized_cwd.as_deref().map(Path::new) else {
+        return matches!(root, SessionsPickerRoot::Any);
     };
-    let cwd = normalize_path(cwd);
     match root {
-        SessionsRoot::Cwd => cwd == normalize_path(&request.current_dir),
-        SessionsRoot::Checkout => path_is_equal_or_child(&cwd, &request.checkout_root),
-        SessionsRoot::Repo => request
-            .repo_roots
-            .iter()
-            .any(|repo_root| path_is_equal_or_child(&cwd, repo_root)),
-        SessionsRoot::Any => true,
+        SessionsPickerRoot::Cwd => cwd == request.current_dir,
+        SessionsPickerRoot::Repo => session_belongs_to_repository(
+            &request.repository_identity,
+            record.git_origin_url.as_deref(),
+            cwd,
+        ),
+        SessionsPickerRoot::Any => true,
     }
 }
 
@@ -56,12 +56,11 @@ pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecor
     }
 }
 
-pub(super) fn next_root_filter(root: SessionsRoot) -> SessionsRoot {
+pub(super) fn next_root_filter(root: SessionsPickerRoot) -> SessionsPickerRoot {
     match root {
-        SessionsRoot::Cwd => SessionsRoot::Checkout,
-        SessionsRoot::Checkout => SessionsRoot::Repo,
-        SessionsRoot::Repo => SessionsRoot::Any,
-        SessionsRoot::Any => SessionsRoot::Cwd,
+        SessionsPickerRoot::Cwd => SessionsPickerRoot::Repo,
+        SessionsPickerRoot::Repo => SessionsPickerRoot::Any,
+        SessionsPickerRoot::Any => SessionsPickerRoot::Cwd,
     }
 }
 
@@ -78,12 +77,4 @@ pub(super) fn next_sort_filter(sort: SessionsSort) -> SessionsSort {
         SessionsSort::Updated => SessionsSort::Created,
         SessionsSort::Created => SessionsSort::Updated,
     }
-}
-
-fn normalize_path(path: &Path) -> std::path::PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_error| path.to_path_buf())
-}
-
-fn path_is_equal_or_child(candidate: &Path, parent: &Path) -> bool {
-    candidate == parent || candidate.starts_with(parent)
 }

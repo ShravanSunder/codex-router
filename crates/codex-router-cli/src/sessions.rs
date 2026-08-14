@@ -32,6 +32,7 @@ use crate::presentation::session_picker::SessionsPickerDataQuery;
 use crate::presentation::session_picker::SessionsPickerOutcome;
 use crate::presentation::session_picker::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::SessionsPickerRequest;
+use crate::presentation::session_picker::SessionsPickerRoot;
 use crate::presentation::session_picker::run_sessions_picker;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
@@ -41,6 +42,12 @@ const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
 const SESSION_RECORD_PAGE_SIZE: usize = 250;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionRecordPageCursor {
+    sort_value: Option<i64>,
+    session_id: String,
+}
 
 /// Session search root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,6 +163,115 @@ struct SessionRecordQuery {
     search: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionSearchExpression {
+    terms: Vec<SessionSearchTerm>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionSearchTerm {
+    Bare(String),
+    SessionId(String),
+    Branch(String),
+    Repository(String),
+}
+
+struct SessionSearchDocument<'a> {
+    session_id: &'a str,
+    title: &'a str,
+    preview: &'a str,
+    first_user_message: &'a str,
+    branch: &'a str,
+    origin: &'a str,
+    cwd: &'a str,
+}
+
+impl SessionSearchExpression {
+    pub(crate) fn parse(input: &str) -> Self {
+        let terms = tokenize_session_search(input)
+            .into_iter()
+            .map(|token| {
+                let normalized = token.to_lowercase();
+                if let Some(value) = normalized.strip_prefix("id:") {
+                    Self::term_with_value(SessionSearchTerm::SessionId, value)
+                } else if let Some(value) = normalized.strip_prefix("b:") {
+                    Self::term_with_value(SessionSearchTerm::Branch, value)
+                } else if let Some(value) = normalized.strip_prefix("branch:") {
+                    Self::term_with_value(SessionSearchTerm::Branch, value)
+                } else if let Some(value) = normalized.strip_prefix("repo:") {
+                    Self::term_with_value(SessionSearchTerm::Repository, value)
+                } else {
+                    SessionSearchTerm::Bare(normalized)
+                }
+            })
+            .collect();
+        Self { terms }
+    }
+
+    fn term_with_value(
+        constructor: impl FnOnce(String) -> SessionSearchTerm,
+        value: &str,
+    ) -> SessionSearchTerm {
+        constructor(value.to_owned())
+    }
+
+    fn matches(&self, document: &SessionSearchDocument<'_>) -> bool {
+        let session_id = document.session_id.to_lowercase();
+        let title = document.title.to_lowercase();
+        let preview = document.preview.to_lowercase();
+        let first_user_message = document.first_user_message.to_lowercase();
+        let branch = document.branch.to_lowercase();
+        let origin = document.origin.to_lowercase();
+        let cwd = document.cwd.to_lowercase();
+
+        self.terms.iter().all(|term| match term {
+            SessionSearchTerm::Bare(value) => {
+                !value.is_empty()
+                    && [
+                        session_id.as_str(),
+                        title.as_str(),
+                        preview.as_str(),
+                        first_user_message.as_str(),
+                        origin.as_str(),
+                        cwd.as_str(),
+                    ]
+                    .iter()
+                    .any(|field| field.contains(value))
+            }
+            SessionSearchTerm::SessionId(value) => !value.is_empty() && session_id.contains(value),
+            SessionSearchTerm::Branch(value) => !value.is_empty() && branch.contains(value),
+            SessionSearchTerm::Repository(value) => {
+                !value.is_empty() && (origin.contains(value) || cwd.contains(value))
+            }
+        })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+}
+
+fn tokenize_session_search(input: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in input.trim().chars() {
+        match character {
+            '"' => quoted = !quoted,
+            character if character.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    terms.push(std::mem::take(&mut current));
+                }
+            }
+            character => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    terms
+}
+
 impl SessionRecordQuery {
     fn from_command(command: &SessionsCommand) -> Self {
         Self {
@@ -171,13 +287,36 @@ impl SessionRecordQuery {
 
     fn from_picker_query(query: SessionsPickerDataQuery) -> Self {
         Self {
-            root: query.root,
+            root: query.root.into(),
             provider: query.provider,
             source: query.source,
             sort: query.sort,
             last: false,
             limit: DEFAULT_SESSION_RECORD_LIMIT,
             search: query.search,
+        }
+    }
+}
+
+impl From<SessionsPickerRoot> for SessionsRoot {
+    fn from(root: SessionsPickerRoot) -> Self {
+        match root {
+            SessionsPickerRoot::Cwd => Self::Cwd,
+            SessionsPickerRoot::Repo => Self::Repo,
+            SessionsPickerRoot::Any => Self::Any,
+        }
+    }
+}
+
+impl TryFrom<SessionsRoot> for SessionsPickerRoot {
+    type Error = SessionsCommandError;
+
+    fn try_from(root: SessionsRoot) -> Result<Self, Self::Error> {
+        match root {
+            SessionsRoot::Cwd => Ok(Self::Cwd),
+            SessionsRoot::Repo => Ok(Self::Repo),
+            SessionsRoot::Any => Ok(Self::Any),
+            SessionsRoot::Checkout => Err(SessionsCommandError::InteractiveCheckoutUnsupported),
         }
     }
 }
@@ -194,6 +333,7 @@ impl SessionsCommand {
         }
         reject_legacy_router_options(&parsed.codex_args)?;
         reject_interactive_limit(&parsed)?;
+        reject_interactive_checkout(&parsed)?;
         Ok(Self {
             root: parsed.root()?,
             provider: parsed.provider,
@@ -225,6 +365,17 @@ fn reject_legacy_router_options(codex_args: &[OsString]) -> Result<(), String> {
 fn reject_interactive_limit(command: &ClapSessionsCommand) -> Result<(), String> {
     if command.limit.is_some() && !command.list {
         return Err("--limit only applies with --list".to_owned());
+    }
+    Ok(())
+}
+
+fn reject_interactive_checkout(command: &ClapSessionsCommand) -> Result<(), String> {
+    let opens_picker = !command.list && !command.last && command.id.is_none() && !command.new;
+    if command.checkout && opens_picker {
+        return Err(
+            "--checkout requires --list because the interactive picker supports cwd, repo, and all"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -287,6 +438,9 @@ impl ClapSessionsCommand {
             (true, false, false) => Ok(SessionsRoot::Checkout),
             (false, true, false) => Ok(SessionsRoot::Repo),
             (false, false, true) => Ok(SessionsRoot::Any),
+            (false, false, false) if !self.list && !self.last && self.id.is_none() && !self.new => {
+                Ok(SessionsRoot::Repo)
+            }
             (false, false, false) => Ok(SessionsRoot::Cwd),
             _ => Err("--checkout, --repo, and --any cannot be used together".to_owned()),
         }
@@ -461,7 +615,15 @@ async fn load_session_records_for_query(
     query: SessionRecordQuery,
     context: &CliContext,
 ) -> Result<Vec<SessionRecord>, SessionsCommandError> {
-    let root_filter = RootFilter::from_command(query.root, context);
+    load_session_records_for_query_with_identity(query, context, None).await
+}
+
+async fn load_session_records_for_query_with_identity(
+    query: SessionRecordQuery,
+    context: &CliContext,
+    repository_identity: Option<RepositoryIdentity>,
+) -> Result<Vec<SessionRecord>, SessionsCommandError> {
+    let root_filter = RootFilter::from_query(query.root, context, repository_identity);
     let codex_home_path = codex_home(context)?;
     let provider_filter = ProviderFilter::from_command(&query.provider, &codex_home_path)?;
 
@@ -479,45 +641,19 @@ async fn load_session_records_for_query(
         .map_err(SessionsCommandError::Sqlx)?;
 
     let mut records = Vec::new();
+    let search_expression = SessionSearchExpression::parse(&query.search);
     let target_limit = if query.last { 1 } else { query.limit };
-    let mut offset = 0_i64;
+    let mut page_cursor = None;
     while target_limit == 0 || records.len() < target_limit {
-        let page_size = target_limit
-            .checked_sub(records.len())
-            .filter(|remaining| *remaining > 0)
-            .map_or(SESSION_RECORD_PAGE_SIZE, |remaining| {
-                remaining.min(SESSION_RECORD_PAGE_SIZE)
-            });
-        let mut builder = QueryBuilder::<Sqlite>::new(
-            r#"
-                SELECT
-                    id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
-                    title, preview, first_user_message,
-                    created_at_ms, updated_at_ms, recency_at_ms
-                FROM threads
-                WHERE archived = 0
-                "#,
-        );
-        append_session_record_filters(
-            &mut builder,
+        let page_size = session_record_candidate_page_size();
+        let mut builder = session_record_page_query(
             &root_filter,
             &provider_filter,
             query.source,
-            &query.search,
+            query.sort,
+            page_size,
+            page_cursor.as_ref(),
         );
-        match query.sort {
-            SessionsSort::Created => {
-                builder.push(" ORDER BY created_at_ms DESC, id DESC");
-            }
-            SessionsSort::Updated => {
-                builder.push(" ORDER BY recency_at_ms DESC, id DESC");
-            }
-        }
-        builder
-            .push(" LIMIT ")
-            .push_bind(i64::try_from(page_size).unwrap_or(i64::MAX))
-            .push(" OFFSET ")
-            .push_bind(offset);
         let rows = builder
             .build()
             .fetch_all(&pool)
@@ -527,13 +663,23 @@ async fn load_session_records_for_query(
         if rows.is_empty() {
             break;
         }
-        offset = offset.saturating_add(i64::try_from(rows.len()).unwrap_or(i64::MAX));
+        let page_was_full = rows.len() == page_size;
+        page_cursor = rows.last().map(|row| SessionRecordPageCursor {
+            sort_value: match query.sort {
+                SessionsSort::Created => row.get::<Option<i64>, _>("created_at_ms"),
+                SessionsSort::Updated => row.get::<Option<i64>, _>("recency_at_ms"),
+            },
+            session_id: row.get("id"),
+        });
 
         for row in rows {
             let source = row.get::<Option<String>, _>("source");
             let thread_source = row.get::<Option<String>, _>("thread_source");
             let cwd = row.get::<Option<String>, _>("cwd");
-            records.push(SessionRecord {
+            let title = row.get::<Option<String>, _>("title");
+            let preview = row.get::<Option<String>, _>("preview");
+            let first_user_message = row.get::<Option<String>, _>("first_user_message");
+            let record = SessionRecord {
                 session_id: row.get("id"),
                 rollout_path: deferred_rollout_source(
                     &codex_home_path,
@@ -545,20 +691,31 @@ async fn load_session_records_for_query(
                 source,
                 thread_source,
                 git_branch: row.get::<Option<String>, _>("git_branch"),
-                preview: row.get::<Option<String>, _>("preview"),
+                git_origin_url: row.get::<Option<String>, _>("git_origin_url"),
+                title: title.clone(),
+                preview: preview.clone(),
+                first_user_message: first_user_message.clone(),
                 display_title: display_title_from_session_fields(
-                    row.get::<Option<String>, _>("title").as_deref(),
-                    row.get::<Option<String>, _>("preview").as_deref(),
-                    row.get::<Option<String>, _>("first_user_message")
-                        .as_deref(),
+                    title.as_deref(),
+                    preview.as_deref(),
+                    first_user_message.as_deref(),
                 ),
                 created_at_ms: row.get::<Option<i64>, _>("created_at_ms"),
                 updated_at_ms: row.get::<Option<i64>, _>("updated_at_ms"),
                 recency_at_ms: row.get::<Option<i64>, _>("recency_at_ms"),
-            });
+            };
+            if !session_record_matches_root(&record, &root_filter)
+                || !record.matches_search(&search_expression)
+            {
+                continue;
+            }
+            records.push(record);
             if target_limit != 0 && records.len() >= target_limit {
                 break;
             }
+        }
+        if !page_was_full {
+            break;
         }
     }
     pool.close().await;
@@ -566,55 +723,83 @@ async fn load_session_records_for_query(
     Ok(records)
 }
 
+fn session_record_candidate_page_size() -> usize {
+    SESSION_RECORD_PAGE_SIZE
+}
+
+fn session_record_page_query(
+    root_filter: &RootFilter,
+    provider_filter: &ProviderFilter,
+    source: SessionsSource,
+    sort: SessionsSort,
+    page_size: usize,
+    page_cursor: Option<&SessionRecordPageCursor>,
+) -> QueryBuilder<Sqlite> {
+    let (sort_column, sort_index) = match sort {
+        SessionsSort::Created => ("created_at_ms", "idx_threads_created_at_ms"),
+        SessionsSort::Updated => ("recency_at_ms", "idx_threads_recency_at_ms"),
+    };
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        r#"
+            SELECT
+                id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
+                git_origin_url, title, preview, first_user_message,
+                created_at_ms, updated_at_ms, recency_at_ms
+            FROM threads INDEXED BY "#,
+    );
+    builder.push(sort_index).push(" WHERE archived = 0");
+    append_session_record_filters(&mut builder, root_filter, provider_filter, source);
+    if let Some(cursor) = page_cursor {
+        builder.push(" AND (").push(sort_column);
+        if let Some(sort_value) = cursor.sort_value {
+            builder
+                .push(" < ")
+                .push_bind(sort_value)
+                .push(" OR ")
+                .push(sort_column)
+                .push(" IS NULL OR (")
+                .push(sort_column)
+                .push(" = ")
+                .push_bind(sort_value)
+                .push(" AND id < ")
+                .push_bind(cursor.session_id.clone())
+                .push(")");
+        } else {
+            builder
+                .push(" IS NULL AND id < ")
+                .push_bind(cursor.session_id.clone());
+        }
+        builder.push(")");
+    }
+    builder
+        .push(" ORDER BY ")
+        .push(sort_column)
+        .push(" DESC, id DESC LIMIT ")
+        .push_bind(i64::try_from(page_size).unwrap_or(i64::MAX));
+    builder
+}
+
 fn append_session_record_filters(
     builder: &mut QueryBuilder<Sqlite>,
     root_filter: &RootFilter,
     provider_filter: &ProviderFilter,
     source: SessionsSource,
-    search: &str,
 ) {
     append_root_filter(builder, root_filter);
     append_provider_filter(builder, provider_filter);
     append_source_filter(builder, source);
-    append_search_filter(builder, search);
 }
 
 fn append_root_filter(builder: &mut QueryBuilder<Sqlite>, root_filter: &RootFilter) {
     match root_filter {
         RootFilter::Any => {}
-        RootFilter::Cwd(current_dir) => {
-            builder.push(" AND (");
-            append_path_exact_filter(builder, current_dir);
-            builder.push(")");
-        }
+        RootFilter::Cwd(_) => {}
         RootFilter::Checkout(checkout_root) => {
             builder.push(" AND (");
             append_path_scope_filter(builder, checkout_root);
             builder.push(")");
         }
-        RootFilter::Repo(repo_roots) => {
-            if repo_roots.is_empty() {
-                builder.push(" AND 0 = 1");
-                return;
-            }
-            builder.push(" AND (");
-            for (index, repo_root) in repo_roots.iter().enumerate() {
-                if index > 0 {
-                    builder.push(" OR ");
-                }
-                append_path_scope_filter(builder, repo_root);
-            }
-            builder.push(")");
-        }
-    }
-}
-
-fn append_path_exact_filter(builder: &mut QueryBuilder<Sqlite>, path: &Path) {
-    for (index, path_value) in path_sql_values(path).into_iter().enumerate() {
-        if index > 0 {
-            builder.push(" OR ");
-        }
-        builder.push("cwd = ").push_bind(path_value);
+        RootFilter::Repo(_) => {}
     }
 }
 
@@ -663,29 +848,6 @@ fn append_source_filter(builder: &mut QueryBuilder<Sqlite>, source: SessionsSour
     }
 }
 
-fn append_search_filter(builder: &mut QueryBuilder<Sqlite>, search: &str) {
-    let search = search.trim().to_lowercase();
-    if search.is_empty() {
-        return;
-    }
-    let pattern = format!("%{}%", escape_like(&search));
-    builder.push(" AND (lower(id) LIKE ");
-    append_like_bind(builder, &pattern);
-    builder.push(" OR lower(coalesce(title, '')) LIKE ");
-    append_like_bind(builder, &pattern);
-    builder.push(" OR lower(coalesce(preview, '')) LIKE ");
-    append_like_bind(builder, &pattern);
-    builder.push(" OR lower(coalesce(first_user_message, '')) LIKE ");
-    append_like_bind(builder, &pattern);
-    builder.push(" OR lower(coalesce(model_provider, '')) LIKE ");
-    append_like_bind(builder, &pattern);
-    builder.push(")");
-}
-
-fn append_like_bind(builder: &mut QueryBuilder<Sqlite>, pattern: &str) {
-    builder.push_bind(pattern.to_owned()).push(" ESCAPE '\\'");
-}
-
 fn path_sql_values(path: &Path) -> Vec<String> {
     let path = path.to_string_lossy().into_owned();
     let mut values = vec![path.clone()];
@@ -722,7 +884,7 @@ fn run_interactive_session(
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
     picker.ensure_available()?;
-    let picker_root = command.root;
+    let picker_root = SessionsPickerRoot::try_from(command.root)?;
     let picker_provider = command.provider.clone();
     let picker_source = command.source;
     let picker_sort = command.sort;
@@ -730,15 +892,19 @@ fn run_interactive_session(
         .enable_all()
         .build()
         .map_err(SessionsCommandError::Runtime)?;
-    let records = runtime.block_on(load_session_records(command.clone(), context))?;
+    let repository_identity = RepositoryIdentity::discover(context.current_dir());
+    let records = runtime.block_on(load_session_records_for_query_with_identity(
+        SessionRecordQuery::from_command(&command),
+        context,
+        Some(repository_identity.clone()),
+    ))?;
     let request = SessionsPickerRequest {
         root: picker_root,
         provider: picker_provider,
         source: picker_source,
         sort: picker_sort,
         current_dir: normalize_path(context.current_dir()),
-        checkout_root: checkout_root(context.current_dir()),
-        repo_roots: repo_roots(context.current_dir()),
+        repository_identity: repository_identity.clone(),
         current_provider: current_provider_for_picker(context),
         new_session_args_display: codex_args_display(&command.codex_args),
         records: records
@@ -746,7 +912,7 @@ fn run_interactive_session(
             .map(SessionPickerRecord::from_record)
             .collect(),
     };
-    let record_loader = session_picker_record_loader(context.clone());
+    let record_loader = session_picker_record_loader(context.clone(), repository_identity);
     let Some(outcome) = picker.select_session(request, Some(record_loader))? else {
         return Err(SessionsCommandError::PickerCanceled);
     };
@@ -760,7 +926,10 @@ fn run_interactive_session(
     }
 }
 
-fn session_picker_record_loader(context: CliContext) -> SessionsPickerRecordLoader {
+fn session_picker_record_loader(
+    context: CliContext,
+    repository_identity: RepositoryIdentity,
+) -> SessionsPickerRecordLoader {
     std::sync::Arc::new(move |query| {
         let record_query = SessionRecordQuery::from_picker_query(query);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -768,7 +937,11 @@ fn session_picker_record_loader(context: CliContext) -> SessionsPickerRecordLoad
             .build()
             .map_err(|error| error.to_string())?;
         runtime
-            .block_on(load_session_records_for_query(record_query, &context))
+            .block_on(load_session_records_for_query_with_identity(
+                record_query,
+                &context,
+                Some(repository_identity.clone()),
+            ))
             .map(|records| {
                 records
                     .iter()
@@ -989,20 +1162,34 @@ impl ProviderFilter {
 #[derive(Debug)]
 enum RootFilter {
     Any,
-    Cwd(PathBuf),
+    Cwd(Vec<PathBuf>),
     Checkout(PathBuf),
-    Repo(Vec<PathBuf>),
+    Repo(RepositoryIdentity),
 }
 
 impl RootFilter {
-    fn from_command(root: SessionsRoot, context: &CliContext) -> Self {
+    fn from_query(
+        root: SessionsRoot,
+        context: &CliContext,
+        repository_identity: Option<RepositoryIdentity>,
+    ) -> Self {
         match root {
             SessionsRoot::Any => Self::Any,
-            SessionsRoot::Cwd => Self::Cwd(normalize_path(context.current_dir())),
+            SessionsRoot::Cwd => Self::Cwd(path_identity_candidates(context.current_dir())),
             SessionsRoot::Checkout => Self::Checkout(checkout_root(context.current_dir())),
-            SessionsRoot::Repo => Self::Repo(repo_roots(context.current_dir())),
+            SessionsRoot::Repo => Self::Repo(
+                repository_identity
+                    .unwrap_or_else(|| RepositoryIdentity::discover(context.current_dir())),
+            ),
         }
     }
+}
+
+fn path_identity_candidates(path: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![path.to_path_buf(), normalize_path(path)];
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 fn codex_home(context: &CliContext) -> Result<PathBuf, SessionsCommandError> {
@@ -1112,6 +1299,159 @@ fn checkout_root(current_dir: &Path) -> PathBuf {
     find_worktree_root(current_dir).unwrap_or_else(|| normalize_path(current_dir))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepositoryIdentity {
+    pub(crate) normalized_origin: Option<String>,
+    pub(crate) live_roots: Vec<PathBuf>,
+    pub(crate) repository_basename: String,
+}
+
+impl RepositoryIdentity {
+    fn discover(current_dir: &Path) -> Self {
+        let current_checkout = checkout_root(current_dir);
+        let live_roots = repo_roots(current_dir);
+        let primary_worktree = live_roots.first().map(PathBuf::as_path);
+        let raw_origin = git_stdout(current_dir, &["remote", "get-url", "origin"]);
+        let normalized_origin = raw_origin.as_deref().and_then(normalize_git_origin_url);
+        let git_common_dir = git_stdout(
+            current_dir,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .map(PathBuf::from);
+        let repository_basename = repository_basename_from_evidence(
+            normalized_origin.as_deref(),
+            git_common_dir.as_deref(),
+            primary_worktree,
+            &current_checkout,
+        );
+        Self {
+            normalized_origin,
+            live_roots,
+            repository_basename,
+        }
+    }
+}
+
+fn git_stdout(current_dir: &Path, arguments: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(current_dir)
+        .args(arguments)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    non_empty_trimmed(&value).map(str::to_owned)
+}
+
+fn normalize_git_origin_url(origin: &str) -> Option<String> {
+    let origin = origin
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    if origin.is_empty() {
+        return None;
+    }
+    let (host, repository_path) = if let Some((_scheme, remainder)) = origin.split_once("://") {
+        let remainder = remainder
+            .rsplit_once('@')
+            .map_or(remainder, |(_, value)| value);
+        remainder.split_once('/')?
+    } else if let Some((host_with_user, repository_path)) = origin.split_once(':') {
+        let host = host_with_user
+            .rsplit_once('@')
+            .map_or(host_with_user, |(_, value)| value);
+        (host, repository_path)
+    } else {
+        let (host, repository_path) = origin.split_once('/')?;
+        if !host.contains('.') {
+            return None;
+        }
+        (host, repository_path)
+    };
+    let host = host.trim().to_lowercase();
+    let repository_path = repository_path
+        .trim_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(repository_path.trim_matches('/'));
+    if host.is_empty() || repository_path.is_empty() {
+        return None;
+    }
+    Some(format!("{host}/{repository_path}"))
+}
+
+fn repository_basename_from_evidence(
+    normalized_origin: Option<&str>,
+    git_common_dir: Option<&Path>,
+    primary_worktree: Option<&Path>,
+    current_checkout: &Path,
+) -> String {
+    normalized_origin
+        .and_then(|origin| origin.rsplit('/').next())
+        .or_else(|| {
+            git_common_dir.and_then(|common_dir| {
+                if common_dir.file_name() == Some(OsStr::new(".git")) {
+                    common_dir.parent().and_then(Path::file_name)
+                } else {
+                    common_dir.file_name()
+                }
+                .and_then(OsStr::to_str)
+            })
+        })
+        .or_else(|| {
+            primary_worktree
+                .and_then(Path::file_name)
+                .and_then(OsStr::to_str)
+        })
+        .or_else(|| current_checkout.file_name().and_then(OsStr::to_str))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+pub(crate) fn session_belongs_to_repository(
+    identity: &RepositoryIdentity,
+    row_origin: Option<&str>,
+    cwd: &Path,
+) -> bool {
+    let row_origin = row_origin.and_then(non_empty_trimmed);
+    let normalized_row_origin = row_origin.and_then(normalize_git_origin_url);
+    if let (Some(current_origin), Some(_)) = (&identity.normalized_origin, row_origin) {
+        return normalized_row_origin.is_some_and(|row_origin| row_origin == *current_origin);
+    }
+    let is_under_live_root = identity
+        .live_roots
+        .iter()
+        .any(|root| path_is_equal_or_child_for_repo(cwd, root));
+    let matches_historical_basename = !identity.repository_basename.is_empty()
+        && cwd.file_name().and_then(OsStr::to_str).is_some_and(|leaf| {
+            leaf == identity.repository_basename
+                || leaf
+                    .strip_prefix(&identity.repository_basename)
+                    .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('-'))
+        });
+
+    match (&identity.normalized_origin, row_origin) {
+        (Some(_), Some(_)) => false,
+        (Some(_), None) | (None, None) => is_under_live_root || matches_historical_basename,
+        (None, Some(_)) => is_under_live_root,
+    }
+}
+
+fn path_is_equal_or_child_for_repo(candidate: &Path, parent: &Path) -> bool {
+    path_sql_values(candidate).into_iter().any(|candidate| {
+        path_sql_values(parent).into_iter().any(|parent| {
+            candidate == parent
+                || candidate
+                    .strip_prefix(&parent)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    })
+}
+
 fn repo_roots(current_dir: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -1201,7 +1541,13 @@ struct SessionRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     git_branch: Option<String>,
     #[serde(skip)]
+    git_origin_url: Option<String>,
+    #[serde(skip)]
+    title: Option<String>,
+    #[serde(skip)]
     preview: Option<String>,
+    #[serde(skip)]
+    first_user_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1218,6 +1564,50 @@ impl SessionRecord {
     fn branch(&self) -> &str {
         self.git_branch.as_deref().unwrap_or("-")
     }
+
+    fn matches_search(&self, expression: &SessionSearchExpression) -> bool {
+        let normalized_origin = self
+            .git_origin_url
+            .as_deref()
+            .and_then(normalize_git_origin_url)
+            .unwrap_or_default();
+        expression.matches(&SessionSearchDocument {
+            session_id: &self.session_id,
+            title: self.title.as_deref().unwrap_or_default(),
+            preview: self.preview.as_deref().unwrap_or_default(),
+            first_user_message: self.first_user_message.as_deref().unwrap_or_default(),
+            branch: self.git_branch.as_deref().unwrap_or_default(),
+            origin: &normalized_origin,
+            cwd: self.cwd.as_deref().unwrap_or_default(),
+        })
+    }
+}
+
+fn session_record_matches_root(record: &SessionRecord, root_filter: &RootFilter) -> bool {
+    match root_filter {
+        RootFilter::Cwd(current_dirs) => record.cwd.as_deref().is_some_and(|cwd| {
+            current_dirs
+                .iter()
+                .any(|current_dir| paths_resolve_to_same_location(Path::new(cwd), current_dir))
+        }),
+        RootFilter::Repo(identity) => record.cwd.as_deref().is_some_and(|cwd| {
+            let normalized_cwd = normalize_path(Path::new(cwd));
+            session_belongs_to_repository(
+                identity,
+                record.git_origin_url.as_deref(),
+                &normalized_cwd,
+            )
+        }),
+        RootFilter::Any | RootFilter::Checkout(_) => true,
+    }
+}
+
+fn paths_resolve_to_same_location(left: &Path, right: &Path) -> bool {
+    let left = normalize_path(left);
+    let right = normalize_path(right);
+    path_sql_values(&left)
+        .iter()
+        .any(|left| path_sql_values(&right).contains(left))
 }
 
 /// Picker display row for one session.
@@ -1225,16 +1615,21 @@ impl SessionRecord {
 pub(crate) struct SessionPickerRecord {
     pub(crate) session_id: String,
     pub(crate) title: String,
+    pub(crate) full_title: String,
     pub(crate) recency: String,
     pub(crate) created: String,
     pub(crate) recency_at_ms: Option<i64>,
     pub(crate) created_at_ms: Option<i64>,
     pub(crate) branch: String,
+    pub(crate) persisted_branch: String,
     pub(crate) context: String,
     pub(crate) cwd: Option<String>,
+    pub(crate) normalized_cwd: Option<String>,
+    pub(crate) git_origin_url: Option<String>,
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) preview: Option<String>,
+    pub(crate) first_user_message: String,
     pub(crate) conversation: SessionConversationPreview,
     pub(crate) conversation_source: Option<SessionConversationSource>,
     pub(crate) source: Option<String>,
@@ -1266,27 +1661,50 @@ impl SessionConversationSource {
 }
 
 impl SessionPickerRecord {
+    pub(crate) fn matches_search(&self, expression: &SessionSearchExpression) -> bool {
+        let normalized_origin = self
+            .git_origin_url
+            .as_deref()
+            .and_then(normalize_git_origin_url)
+            .unwrap_or_default();
+        expression.matches(&SessionSearchDocument {
+            session_id: &self.session_id,
+            title: &self.full_title,
+            preview: self.preview.as_deref().unwrap_or_default(),
+            first_user_message: &self.first_user_message,
+            branch: &self.persisted_branch,
+            origin: &normalized_origin,
+            cwd: self.cwd.as_deref().unwrap_or_default(),
+        })
+    }
+
     fn from_record(record: &SessionRecord) -> Self {
         Self {
             session_id: record.session_id.clone(),
             title: record.display_title().to_owned(),
+            full_title: record.title.clone().unwrap_or_default(),
             recency: format_recency_at_ms(record.recency_at_ms),
             created: format_recency_at_ms(record.created_at_ms),
             recency_at_ms: record.recency_at_ms,
             created_at_ms: record.created_at_ms,
             branch: record.branch().to_owned(),
+            persisted_branch: record.git_branch.clone().unwrap_or_default(),
             context: record
                 .cwd
                 .as_deref()
                 .map(session_context_from_cwd)
                 .unwrap_or_else(|| "-".to_owned()),
             cwd: record.cwd.clone(),
+            normalized_cwd: record.cwd.as_deref().map(|cwd| {
+                normalize_path(Path::new(cwd))
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+            git_origin_url: record.git_origin_url.clone(),
             provider: record.provider.clone(),
             model: record.model.clone(),
-            preview: record
-                .preview
-                .clone()
-                .or_else(|| Some(record.display_title().to_owned())),
+            preview: record.preview.clone(),
+            first_user_message: record.first_user_message.clone().unwrap_or_default(),
             conversation: SessionConversationPreview::unavailable("history not loaded"),
             conversation_source: record.rollout_path.clone(),
             source: record.source.clone(),
@@ -1592,15 +2010,484 @@ fn format_duration_ms(duration_ms: u128) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::RepositoryIdentity;
     use super::SessionConversationPreview;
+    use super::SessionPickerRecord;
+    use super::SessionRecord;
+    use super::SessionSearchDocument;
+    use super::SessionSearchExpression;
+    use super::SessionsCommand;
+    use super::SessionsRoot;
     use super::codex_home_from_environment;
     use super::deferred_rollout_source;
     use super::extract_recent_conversation_snippets;
     use super::format_duration_ms;
+    use super::normalize_git_origin_url;
+    use super::repository_basename_from_evidence;
+    use super::session_belongs_to_repository;
     use super::validated_rollout_path;
     use serde_json::json;
+    use sqlx::Execute;
     use std::fs;
     use std::path::PathBuf;
+
+    fn search_consistency_record(
+        git_origin_url: Option<&str>,
+        first_user_message: Option<&str>,
+    ) -> SessionRecord {
+        SessionRecord {
+            session_id: "thread-search-consistency".to_owned(),
+            rollout_path: None,
+            display_title: Some("deploy rollback plan".to_owned()),
+            cwd: Some("/history/app.impl-search".to_owned()),
+            provider: Some("codex-router".to_owned()),
+            model: None,
+            source: Some("cli".to_owned()),
+            thread_source: None,
+            git_branch: Some("main".to_owned()),
+            git_origin_url: git_origin_url.map(str::to_owned),
+            title: None,
+            preview: None,
+            first_user_message: first_user_message.map(str::to_owned),
+            created_at_ms: Some(1),
+            updated_at_ms: Some(1),
+            recency_at_ms: Some(1),
+        }
+    }
+
+    #[test]
+    fn session_record_pages_use_keyset_order_index_without_offset() {
+        let mut first_page_builder = super::session_record_page_query(
+            &super::RootFilter::Any,
+            &super::ProviderFilter::Any,
+            super::SessionsSource::All,
+            super::SessionsSort::Updated,
+            super::SESSION_RECORD_PAGE_SIZE,
+            None,
+        );
+        let first_page_sql = first_page_builder.build().sql().as_str().to_owned();
+        let cursor = super::SessionRecordPageCursor {
+            sort_value: Some(42),
+            session_id: "thread-cursor".to_owned(),
+        };
+        let mut later_page_builder = super::session_record_page_query(
+            &super::RootFilter::Any,
+            &super::ProviderFilter::Any,
+            super::SessionsSource::All,
+            super::SessionsSort::Updated,
+            super::SESSION_RECORD_PAGE_SIZE,
+            Some(&cursor),
+        );
+        let later_page_sql = later_page_builder.build().sql().as_str().to_owned();
+
+        assert!(first_page_sql.contains("INDEXED BY idx_threads_recency_at_ms"));
+        assert!(!first_page_sql.contains("OFFSET"));
+        assert!(later_page_sql.contains("recency_at_ms <"));
+        assert!(later_page_sql.contains("recency_at_ms ="));
+        assert!(later_page_sql.contains("id <"));
+        assert!(!later_page_sql.contains("OFFSET"));
+
+        let null_cursor = super::SessionRecordPageCursor {
+            sort_value: None,
+            session_id: "thread-null-cursor".to_owned(),
+        };
+        let mut created_page_builder = super::session_record_page_query(
+            &super::RootFilter::Any,
+            &super::ProviderFilter::Any,
+            super::SessionsSource::All,
+            super::SessionsSort::Created,
+            super::SESSION_RECORD_PAGE_SIZE,
+            Some(&null_cursor),
+        );
+        let created_page_sql = created_page_builder.build().sql().as_str().to_owned();
+        assert!(created_page_sql.contains("INDEXED BY idx_threads_created_at_ms"));
+        assert!(created_page_sql.contains("created_at_ms IS NULL AND id <"));
+        assert!(!created_page_sql.contains("OFFSET"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_query_candidates_preserve_raw_symlink_and_canonical_paths() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "codex-router-session-cwd-query-candidates-{}",
+            std::process::id()
+        ));
+        let canonical_checkout = fixture_root.join("canonical-checkout");
+        let checkout_alias = fixture_root.join("checkout-alias");
+        fs::create_dir_all(&canonical_checkout).expect("create canonical checkout");
+        std::os::unix::fs::symlink(&canonical_checkout, &checkout_alias)
+            .expect("create checkout symlink");
+
+        let candidates = super::path_identity_candidates(&checkout_alias);
+        let canonical_path = fs::canonicalize(&canonical_checkout).expect("canonicalize checkout");
+
+        fs::remove_file(&checkout_alias).expect("remove checkout symlink");
+        fs::remove_dir(&canonical_checkout).expect("remove canonical checkout");
+        fs::remove_dir(&fixture_root).expect("remove fixture root");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.contains(&checkout_alias));
+        assert!(candidates.contains(&canonical_path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_scope_defers_all_symlink_spellings_to_the_final_matcher() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "codex-router-session-cwd-final-matcher-{}",
+            std::process::id()
+        ));
+        let canonical_parent = fixture_root.join("canonical-parent");
+        let canonical_checkout = canonical_parent.join("checkout");
+        let first_alias = fixture_root.join("first-alias");
+        let second_alias = fixture_root.join("second-alias");
+        fs::create_dir_all(&canonical_checkout).expect("create canonical checkout");
+        std::os::unix::fs::symlink(&canonical_parent, &first_alias).expect("create first alias");
+        std::os::unix::fs::symlink(&canonical_parent, &second_alias).expect("create second alias");
+        let current_dir = first_alias.join("checkout");
+        let persisted_cwd = second_alias.join("checkout");
+        let root_filter = super::RootFilter::Cwd(super::path_identity_candidates(&current_dir));
+        let mut record = search_consistency_record(None, None);
+        record.cwd = Some(persisted_cwd.display().to_string());
+        let mut query = super::session_record_page_query(
+            &root_filter,
+            &super::ProviderFilter::Any,
+            super::SessionsSource::All,
+            super::SessionsSort::Updated,
+            super::SESSION_RECORD_PAGE_SIZE,
+            None,
+        );
+        let query_sql = query.build().sql().as_str().to_owned();
+        let record_matches = super::session_record_matches_root(&record, &root_filter);
+
+        fs::remove_file(&first_alias).expect("remove first alias");
+        fs::remove_file(&second_alias).expect("remove second alias");
+        fs::remove_dir(&canonical_checkout).expect("remove canonical checkout");
+        fs::remove_dir(&canonical_parent).expect("remove canonical parent");
+        fs::remove_dir(&fixture_root).expect("remove fixture root");
+        assert!(!query_sql.contains("cwd ="));
+        assert!(record_matches);
+    }
+
+    #[test]
+    fn session_record_candidate_pages_do_not_shrink_to_the_remaining_match_limit() {
+        assert_eq!(super::session_record_candidate_page_size(), 250);
+    }
+
+    #[test]
+    fn git_origin_normalization_compares_common_transport_forms() {
+        let expected = Some("github.com/shravan-agent/codex-router".to_owned());
+
+        assert_eq!(
+            normalize_git_origin_url("https://github.com/shravan-agent/codex-router.git"),
+            expected
+        );
+        assert_eq!(
+            normalize_git_origin_url("git@github.com:shravan-agent/codex-router.git"),
+            expected
+        );
+        assert_eq!(
+            normalize_git_origin_url("ssh://git@github.com/shravan-agent/codex-router/"),
+            expected
+        );
+        assert_eq!(
+            normalize_git_origin_url(
+                "https://user:secret@GitHub.com/shravan-agent/codex-router.git?token=secret#branch",
+            ),
+            expected
+        );
+        assert_eq!(
+            normalize_git_origin_url("github.com/shravan-agent/codex-router"),
+            expected
+        );
+    }
+
+    #[test]
+    fn picker_repository_matching_normalizes_persisted_origin_exactly_once() {
+        let raw_origin = "http://gitlab.internal:8443/team/app.git";
+        let identity = RepositoryIdentity {
+            normalized_origin: normalize_git_origin_url(raw_origin),
+            live_roots: vec![PathBuf::from("/dev/app")],
+            repository_basename: "app".to_owned(),
+        };
+        let record = search_consistency_record(Some(raw_origin), None);
+        let picker_record = SessionPickerRecord::from_record(&record);
+
+        assert!(session_belongs_to_repository(
+            &identity,
+            picker_record.git_origin_url.as_deref(),
+            std::path::Path::new(picker_record.cwd.as_deref().expect("record cwd")),
+        ));
+    }
+
+    #[test]
+    fn picker_search_uses_the_same_complete_persisted_fields_as_loader_search() {
+        let record = search_consistency_record(None, Some("deploy\nrollback plan"));
+        let picker_record = SessionPickerRecord::from_record(&record);
+        let expression = SessionSearchExpression::parse("\"deploy rollback\"");
+
+        assert_eq!(
+            picker_record.matches_search(&expression),
+            record.matches_search(&expression)
+        );
+        assert!(!picker_record.matches_search(&expression));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picker_search_preserves_raw_persisted_cwd_for_loader_parity() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "codex-router-session-picker-search-cwd-{}",
+            std::process::id()
+        ));
+        let canonical_checkout = fixture_root.join("canonical-checkout");
+        let checkout_alias = fixture_root.join("checkout-alias");
+        fs::create_dir_all(&canonical_checkout).expect("create canonical checkout");
+        std::os::unix::fs::symlink(&canonical_checkout, &checkout_alias)
+            .expect("create checkout symlink");
+        let mut record = search_consistency_record(None, None);
+        record.cwd = Some(checkout_alias.display().to_string());
+        let picker_record = SessionPickerRecord::from_record(&record);
+        let alias_expression = SessionSearchExpression::parse("checkout-alias");
+        let canonical_expression = SessionSearchExpression::parse("canonical-checkout");
+        let actual = [
+            picker_record.matches_search(&alias_expression),
+            picker_record.matches_search(&canonical_expression),
+        ];
+        let expected = [
+            record.matches_search(&alias_expression),
+            record.matches_search(&canonical_expression),
+        ];
+        fs::remove_file(&checkout_alias).expect("remove checkout symlink");
+        fs::remove_dir(&canonical_checkout).expect("remove canonical checkout");
+        fs::remove_dir(&fixture_root).expect("remove fixture root");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn picker_search_does_not_match_missing_branch_display_placeholder() {
+        let mut record = search_consistency_record(None, None);
+        record.git_branch = None;
+        let picker_record = SessionPickerRecord::from_record(&record);
+        let expression = SessionSearchExpression::parse("b:-");
+
+        assert_eq!(
+            picker_record.matches_search(&expression),
+            record.matches_search(&expression)
+        );
+        assert!(!picker_record.matches_search(&expression));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picker_record_normalizes_existing_cwd_before_interactive_matching() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "codex-router-session-picker-path-normalization-{}",
+            std::process::id()
+        ));
+        let canonical_checkout = fixture_root.join("canonical-checkout");
+        let checkout_alias = fixture_root.join("checkout-alias");
+        fs::create_dir_all(&canonical_checkout).expect("create canonical checkout");
+        std::os::unix::fs::symlink(&canonical_checkout, &checkout_alias)
+            .expect("create checkout symlink");
+        let mut record = search_consistency_record(None, None);
+        record.cwd = Some(checkout_alias.display().to_string());
+
+        let picker_record = SessionPickerRecord::from_record(&record);
+        let actual_cwd = picker_record.normalized_cwd;
+        let expected_cwd = fs::canonicalize(&canonical_checkout)
+            .expect("canonicalize checkout")
+            .display()
+            .to_string();
+        fs::remove_file(&checkout_alias).expect("remove checkout symlink");
+        fs::remove_dir(&canonical_checkout).expect("remove canonical checkout");
+        fs::remove_dir(&fixture_root).expect("remove fixture root");
+
+        assert_eq!(actual_cwd.as_deref(), Some(expected_cwd.as_str()));
+    }
+
+    #[test]
+    fn repository_membership_uses_origin_precedence_and_bounded_path_fallbacks() {
+        let identity = RepositoryIdentity {
+            normalized_origin: normalize_git_origin_url(
+                "https://github.com/shravan-agent/codex-router.git",
+            ),
+            live_roots: vec![PathBuf::from("/dev/codex-router.live")],
+            repository_basename: "codex-router".to_owned(),
+        };
+
+        let cases = [
+            (
+                "matching origin survives deleted worktree",
+                Some("git@github.com:shravan-agent/codex-router.git"),
+                "/history/unrelated-name",
+                true,
+            ),
+            (
+                "conflicting origin overrides live-root shape",
+                Some("https://github.com/other/codex-router.git"),
+                "/dev/codex-router.live/src",
+                false,
+            ),
+            (
+                "missing origin uses live root",
+                None,
+                "/dev/codex-router.live/src",
+                true,
+            ),
+            (
+                "missing origin uses dotted historical basename",
+                None,
+                "/history/codex-router.impl-search",
+                true,
+            ),
+            (
+                "missing origin rejects a prefixed lookalike",
+                None,
+                "/history/my-codex-router",
+                false,
+            ),
+        ];
+
+        for (name, row_origin, cwd, expected) in cases {
+            assert_eq!(
+                session_belongs_to_repository(&identity, row_origin, std::path::Path::new(cwd)),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_current_origin_never_uses_deleted_path_fallback_for_present_row_origin() {
+        let identity = RepositoryIdentity {
+            normalized_origin: None,
+            live_roots: vec![PathBuf::from("/dev/codex-router.live")],
+            repository_basename: "codex-router".to_owned(),
+        };
+
+        assert!(session_belongs_to_repository(
+            &identity,
+            Some("https://github.com/shravan-agent/codex-router.git"),
+            std::path::Path::new("/dev/codex-router.live/src"),
+        ));
+        assert!(!session_belongs_to_repository(
+            &identity,
+            Some("https://github.com/shravan-agent/codex-router.git"),
+            std::path::Path::new("/history/codex-router.impl-old"),
+        ));
+        assert!(session_belongs_to_repository(
+            &identity,
+            None,
+            std::path::Path::new("/history/codex-router.impl-old"),
+        ));
+    }
+
+    #[test]
+    fn empty_repository_basename_does_not_admit_dot_or_dash_prefixed_paths() {
+        let identity = RepositoryIdentity {
+            normalized_origin: None,
+            live_roots: Vec::new(),
+            repository_basename: String::new(),
+        };
+
+        assert!(!session_belongs_to_repository(
+            &identity,
+            None,
+            std::path::Path::new("/history/.cache"),
+        ));
+        assert!(!session_belongs_to_repository(
+            &identity,
+            None,
+            std::path::Path::new("/history/-scratch"),
+        ));
+    }
+
+    #[test]
+    fn repository_basename_prefers_origin_and_git_common_directory_over_invoking_worktree() {
+        assert_eq!(
+            repository_basename_from_evidence(
+                normalize_git_origin_url("git@github.com:shravan-agent/codex-router.git")
+                    .as_deref(),
+                Some(std::path::Path::new("/dev/codex-router/.git")),
+                Some(std::path::Path::new("/dev/codex-router")),
+                std::path::Path::new("/dev/codex-router.impl-y"),
+            ),
+            "codex-router"
+        );
+        assert_eq!(
+            repository_basename_from_evidence(
+                None,
+                Some(std::path::Path::new("/dev/codex-router/.git")),
+                Some(std::path::Path::new("/dev/codex-router.impl-x")),
+                std::path::Path::new("/dev/codex-router.impl-y"),
+            ),
+            "codex-router"
+        );
+    }
+
+    #[test]
+    fn qualified_search_ands_terms_and_keeps_branch_out_of_bare_matching() {
+        let document = SessionSearchDocument {
+            session_id: "019abc-session",
+            title: "Fix router crash",
+            preview: "Investigate deleted worktree sessions",
+            first_user_message: "please make search robust",
+            branch: "main",
+            origin: "github.com/shravan-agent/codex-router",
+            cwd: "/dev/codex-router.impl-search",
+        };
+
+        assert!(SessionSearchExpression::parse("019abc").matches(&document));
+        assert!(SessionSearchExpression::parse("id:019abc").matches(&document));
+        assert!(SessionSearchExpression::parse("b:main").matches(&document));
+        assert!(SessionSearchExpression::parse("branch:main crash").matches(&document));
+        assert!(SessionSearchExpression::parse("repo:codex-router crash").matches(&document));
+        assert!(SessionSearchExpression::parse("\"deleted worktree\"").matches(&document));
+        assert!(!SessionSearchExpression::parse("main").matches(&document));
+        assert!(!SessionSearchExpression::parse("b:feature").matches(&document));
+        assert!(!SessionSearchExpression::parse("main crash").matches(&document));
+    }
+
+    #[test]
+    fn qualified_search_handles_unicode_literals_unknown_prefixes_and_empty_qualifiers() {
+        let document = SessionSearchDocument {
+            session_id: "thread-percent",
+            title: "ÉCHEC 100%_safe\\path",
+            preview: "ticket:router",
+            first_user_message: "",
+            branch: "feature/Échec",
+            origin: "github.com/Org/Repo",
+            cwd: "/dev/Repo",
+        };
+
+        assert!(SessionSearchExpression::parse("échec").matches(&document));
+        assert!(SessionSearchExpression::parse("100%_safe\\path").matches(&document));
+        assert!(SessionSearchExpression::parse("ticket:router").matches(&document));
+        assert!(!SessionSearchExpression::parse("id:").matches(&document));
+        assert!(!SessionSearchExpression::parse("b:").matches(&document));
+    }
+
+    #[test]
+    fn interactive_sessions_default_to_repo_and_reject_checkout() {
+        let command = SessionsCommand::parse(Vec::new()).expect("interactive command should parse");
+        assert_eq!(command.root, SessionsRoot::Repo);
+
+        let error = SessionsCommand::parse(vec!["--checkout".into()])
+            .expect_err("interactive checkout cannot be represented by the picker");
+        assert!(error.contains("--checkout requires --list"), "{error}");
+    }
+
+    #[test]
+    fn list_sessions_preserves_default_cwd_and_explicit_checkout() {
+        let default_list = SessionsCommand::parse(vec!["--list".into()])
+            .expect("default list command should parse");
+        assert_eq!(default_list.root, SessionsRoot::Cwd);
+
+        let checkout_list = SessionsCommand::parse(vec!["--checkout".into(), "--list".into()])
+            .expect("checkout list command should parse");
+        assert_eq!(checkout_list.root, SessionsRoot::Checkout);
+    }
 
     #[test]
     fn duration_format_uses_now_without_suffix_for_subminute_values() {
@@ -1901,6 +2788,11 @@ mod tests {
 /// Sessions command failures.
 #[derive(Debug, Error)]
 pub enum SessionsCommandError {
+    /// Checkout scope is intentionally list-only.
+    #[error(
+        "--checkout requires --list because the interactive picker supports cwd, repo, and all"
+    )]
+    InteractiveCheckoutUnsupported,
     /// Interactive picker has not landed yet.
     #[error("sessions interactive picker is not implemented yet; use --list --format json")]
     InteractivePickerNotImplemented,
