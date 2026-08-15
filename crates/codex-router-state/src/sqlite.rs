@@ -1257,6 +1257,31 @@ impl AsyncSqliteStateStore {
         Ok(())
     }
 
+    /// Disables an account only when the rejected credential generation is still current.
+    pub async fn disable_account_if_credential_generation_current(
+        &self,
+        account_id: &AccountId,
+        expected_active_credential_generation: u64,
+    ) -> Result<bool, StateStoreError> {
+        let expected_generation = u64_to_i64(expected_active_credential_generation)?;
+        let update = sqlx::query(
+            "UPDATE accounts
+                SET status = ?2
+              WHERE account_id = ?1
+                AND status = ?3
+                AND active_credential_generation = ?4",
+        )
+        .bind(account_id.as_str())
+        .bind(AccountStatus::Disabled.as_str())
+        .bind(AccountStatus::Enabled.as_str())
+        .bind(expected_generation)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(update.rows_affected() == 1)
+    }
+
     /// Writes a previous-response owner record through the async state pool.
     pub async fn write_previous_response_owner(
         &self,

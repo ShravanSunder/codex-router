@@ -3748,6 +3748,78 @@ mod tests {
         assert_eq!(loaded_account.active_credential_generation(), Some(1));
     }
 
+    #[tokio::test]
+    async fn provider_rejection_disables_only_current_credential_generation() {
+        let temp_dir = TestTempDir::new("provider_rejection_generation_guard");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let sync_store = match SqliteStateStore::open(&database_path) {
+            Ok(store) => store,
+            Err(error) => panic!("sync state store should open and migrate: {error}"),
+        };
+        let account_id = account_id("acct_provider_rejection_generation_guard");
+        let account = AccountRecord::new(
+            account_id.clone(),
+            "provider-rejection",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
+            panic!("account should persist: {error}");
+        }
+        let async_store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        if let Err(error) = sync_store.activate_account_credential_generation_and_invalidate_quota(
+            &account_id,
+            2,
+            AccountStatus::Enabled,
+        ) {
+            panic!("new credential generation should activate: {error}");
+        }
+
+        let stale_generation_disabled = match async_store
+            .disable_account_if_credential_generation_current(&account_id, 1)
+            .await
+        {
+            Ok(disabled) => disabled,
+            Err(error) => panic!("stale provider rejection should be checked: {error}"),
+        };
+        assert!(!stale_generation_disabled);
+        let current_generation_disabled = match async_store
+            .disable_account_if_credential_generation_current(&account_id, 2)
+            .await
+        {
+            Ok(disabled) => disabled,
+            Err(error) => panic!("current provider rejection should disable account: {error}"),
+        };
+        assert!(current_generation_disabled);
+        let disabled_account = match AccountStateRepository::load_account(&sync_store, &account_id)
+        {
+            Ok(Some(account)) => account,
+            Ok(None) => panic!("disabled account should still exist"),
+            Err(error) => panic!("disabled account should load: {error}"),
+        };
+        assert_eq!(disabled_account.status(), AccountStatus::Disabled);
+        assert_eq!(disabled_account.active_credential_generation(), Some(2));
+
+        if let Err(error) = sync_store.activate_account_credential_generation_and_invalidate_quota(
+            &account_id,
+            3,
+            AccountStatus::Enabled,
+        ) {
+            panic!("new login generation should restore eligibility: {error}");
+        }
+        let restored_account = match AccountStateRepository::load_account(&sync_store, &account_id)
+        {
+            Ok(Some(account)) => account,
+            Ok(None) => panic!("restored account should still exist"),
+            Err(error) => panic!("restored account should load: {error}"),
+        };
+        assert_eq!(restored_account.status(), AccountStatus::Enabled);
+        assert_eq!(restored_account.active_credential_generation(), Some(3));
+    }
+
     #[test]
     fn credential_mutation_invalidates_selector_windows_atomically() {
         let temp_dir = TestTempDir::new("credential_mutation_invalidates_selector_windows");
