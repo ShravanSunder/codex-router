@@ -11,6 +11,7 @@ use crate::presentation::session_picker::action::SessionsPickerOutcome;
 use crate::presentation::session_picker::interactive_row::InteractiveSessionChoiceRow;
 use crate::presentation::session_picker::model::SessionsPickerModel;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
+use crate::presentation::session_picker::render::footer_lines;
 use crate::presentation::session_picker::request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::request::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
@@ -377,7 +378,13 @@ fn render_picker_view(
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let filter_controls = render_filter_controls(model, content_width);
     let control_height = filter_controls.len();
-    let body_budget = picker_body_budget(height, control_height, minimum_render_height);
+    let footer_lines = footer_lines(content_width);
+    let body_budget = picker_body_budget(
+        height,
+        control_height,
+        footer_lines.len(),
+        minimum_render_height,
+    );
     let mut children = vec![
         element! {
             Text(
@@ -453,7 +460,7 @@ fn render_picker_view(
         }
     }
 
-    children.push(render_footer(content_width));
+    children.push(render_footer(content_width, footer_lines));
     let picker_height = height.max(minimum_render_height);
     element! {
         View(
@@ -474,10 +481,16 @@ fn render_picker_view(
     }
 }
 
-fn picker_body_budget(height: usize, control_height: usize, minimum_render_height: usize) -> usize {
+fn picker_body_budget(
+    height: usize,
+    control_height: usize,
+    footer_line_count: usize,
+    minimum_render_height: usize,
+) -> usize {
     let root_border_height = 2;
     let title_height = 1;
-    let footer_height = 2;
+    let footer_border_height = 1;
+    let footer_height = footer_border_height + footer_line_count;
     height
         .max(minimum_render_height)
         .saturating_sub(root_border_height + title_height + control_height + footer_height)
@@ -551,17 +564,17 @@ fn detail_height(conversation: Option<&SessionConversationPreview>, width: usize
             .sum::<usize>()
     });
     let detail_border_height = 2;
+    let session_identity_height = 2;
     let conversation_heading_height = 1;
 
-    detail_border_height + conversation_heading_height + conversation_row_count
+    detail_border_height
+        + session_identity_height
+        + conversation_heading_height
+        + conversation_row_count
 }
 
 fn render_filter_controls(model: &SessionsPickerModel, width: usize) -> Vec<AnyElement<'static>> {
-    let filter = if model.search.is_empty() {
-        "Search text, id:, b:branch, repo:name".to_owned()
-    } else {
-        format!("Search: [{}]", model.search)
-    };
+    let filter = format!("Search: [{}]", model.search);
     let scope = format!("[{}]", root_label(model.root));
     let threads = format!("Threads: [{}]", source_label(model.source));
     let sort = format!("Sort: [{}]", sort_label(model.sort));
@@ -925,6 +938,8 @@ fn render_details(
             padding_left: 1,
             padding_right: 1,
         ) {
+            Text(content: format!("Session ID: {}", record.session_id), color: Color::Grey, weight: Weight::Normal, wrap: TextWrap::NoWrap)
+            View(height: 1) { Text(content: "") }
             Text(content: "Conversation", color: Color::Cyan, weight: Weight::Bold)
             #(conversation_rows)
         }
@@ -956,14 +971,21 @@ fn detail_text(value: &str, width: usize, color: Color) -> AnyElement<'static> {
     .into_any()
 }
 
-fn render_footer(width: usize) -> AnyElement<'static> {
-    let content = if width < NARROW_PICKER_WIDTH {
-        "type search    enter resume    ctrl-n new"
-    } else if width < 90 {
-        "type search    enter resume    ctrl-n new    esc exit"
-    } else {
-        "type search  ↑/↓ select  enter  ctrl-n new  ctrl-s scope  ctrl-t threads  ctrl-o sort  esc"
-    };
+fn render_footer(width: usize, lines: Vec<String>) -> AnyElement<'static> {
+    let footer_text = lines
+        .into_iter()
+        .map(|line| {
+            element! {
+                Text(
+                    content: fit_line(&line, width),
+                    color: Color::Grey,
+                    weight: Weight::Light,
+                    wrap: TextWrap::NoWrap,
+                )
+            }
+            .into_any()
+        })
+        .collect::<Vec<_>>();
     element! {
         View(
             width: 100pct,
@@ -973,17 +995,13 @@ fn render_footer(width: usize) -> AnyElement<'static> {
         ) {
             View(
                 width: 100pct,
+                flex_direction: FlexDirection::Column,
                 border_style: BorderStyle::Single,
                 border_edges: Edges::Top,
                 border_color: Color::DarkGrey,
                 padding_top: 0,
             ) {
-                Text(
-                    content: fit_line(content, width),
-                    color: Color::Grey,
-                    weight: Weight::Light,
-                    wrap: TextWrap::NoWrap,
-                )
+                #(footer_text)
             }
         }
     }
@@ -1634,7 +1652,7 @@ mod tests {
         assert!(
             actual
                 .iter()
-                .any(|snapshot| snapshot.contains("Search text, id:, b:branch, repo:name")),
+                .any(|snapshot| snapshot.contains("Search: []")),
             "first escape should clear search instead of exiting immediately: {actual:?}"
         );
         assert_eq!(selected_outcome, None);
@@ -1734,10 +1752,10 @@ mod tests {
         let text = render_picker_capture(
             request,
             100,
-            vec![TerminalEvent::Key(KeyEvent::new(
-                KeyEventKind::Press,
-                KeyCode::Esc,
-            ))],
+            vec![
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Up)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
         )
         .await;
         let lines = text.lines().collect::<Vec<_>>();
@@ -1854,7 +1872,7 @@ mod tests {
             let lines = text.lines().collect::<Vec<_>>();
             let footer_index = lines
                 .iter()
-                .position(|line| line.contains("type search"))
+                .rposition(|line| line.contains("ctrl-o sort"))
                 .unwrap_or_else(|| panic!("capture should render footer:\n{text}"));
             let bottom_border_index = lines
                 .iter()
@@ -1891,6 +1909,7 @@ mod tests {
             .records
             .get_mut(0)
             .unwrap_or_else(|| panic!("capture request should have a record"));
+        record.session_id = "019ff0bb-5993-70d3-b1ba-f56724b94919".to_owned();
         record.conversation.snippets = vec![format!(
             "{} final-conversation-marker",
             "conversation words that should use the available detail width ".repeat(3)
@@ -1912,6 +1931,16 @@ mod tests {
             "wrapped conversation should not overflow stacked details frame:\n{text}"
         );
         assert!(text.contains("final-conversation-marker"), "{text}");
+        let session_id_index = text
+            .find("Session ID: 019ff0bb-5993-70d3-b1ba-f56724b94919")
+            .unwrap_or_else(|| panic!("selected session ID should render:\n{text}"));
+        let conversation_index = text
+            .find("Conversation")
+            .unwrap_or_else(|| panic!("conversation heading should render:\n{text}"));
+        assert!(
+            session_id_index < conversation_index,
+            "selected session ID should appear before Conversation:\n{text}"
+        );
         assert!(!text.contains("Preview"), "{text}");
         assert!(!text.contains("Metadata"), "{text}");
     }
@@ -2033,7 +2062,7 @@ mod tests {
             "sidecar details should stay within the 24-row frame:\n{text}"
         );
         assert!(
-            text.contains("type search"),
+            text.contains("Search: id:<id>"),
             "sidecar details should not clip the footer at 160x24:\n{text}"
         );
     }
@@ -2053,7 +2082,7 @@ mod tests {
         let lines = text.lines().collect::<Vec<_>>();
         let footer_index = lines
             .iter()
-            .position(|line| line.contains("type search"))
+            .position(|line| line.contains("Search: id:<id>"))
             .unwrap_or_else(|| panic!("sidecar footer should render:\n{text}"));
         let panel_bottom_index = lines[..footer_index]
             .iter()
@@ -2082,13 +2111,24 @@ mod tests {
 
         assert!(
             text.lines().any(|line| {
-                line.contains("Search text, id:, b:branch, repo:name")
+                line.contains("Search: []")
                     && line.contains("[all]")
                     && line.contains("Threads:")
                     && line.contains("Sort:")
             }),
             "wide sessions controls should fit on one line:\n{text}"
         );
+        assert!(
+            !text.contains("Search text, id:, b:branch, repo:name"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Search: id:<id> | b:<branch> | repo:<name>    ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"),
+            "wide footer should group qualified search and shortcuts:\n{text}"
+        );
+        assert!(!text.contains("type search"), "{text}");
+        assert!(!text.contains("enter resume"), "{text}");
+        assert!(!text.contains("esc exit"), "{text}");
     }
 
     #[tokio::test]
@@ -2115,7 +2155,7 @@ mod tests {
             "long search controls should not grow the picker past the 24-row frame:\n{text}"
         );
         assert!(
-            text.contains("type search"),
+            text.contains("Search: id:<id>"),
             "wrapped controls should not clip the footer at 100x24:\n{text}"
         );
         assert!(

@@ -12,7 +12,11 @@ fn sessions_picker_model_shows_and_switches_three_filters() {
     assert!(initial.contains("[📂 cwd]"));
     assert!(initial.contains("Threads: [interactive]"));
     assert!(initial.contains("Sort: [updated]"));
-    assert!(initial.contains("ctrl-n new thread"));
+    assert!(initial.contains("Search: id:<id> | b:<branch> | repo:<name>"));
+    assert!(initial.contains("ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"));
+    assert!(!initial.contains("type search"));
+    assert!(!initial.contains("enter resume"));
+    assert!(!initial.contains("esc exit"));
     assert!(initial.contains("Start new session"));
     assert!(initial.contains("Feature design session"));
     assert!(!initial.contains("Subagent planning"));
@@ -203,7 +207,7 @@ fn sessions_picker_model_clears_search_without_changing_filters() {
 
     model.handle_key(SessionsPickerKey::ClearSearch);
     let snapshot = model.render_snapshot();
-    assert!(snapshot.contains("Search text, id:, b:branch, repo:name"));
+    assert!(snapshot.contains("Search: []"));
     assert!(snapshot.contains("[📂 cwd]"));
     assert!(snapshot.contains("Threads: [interactive]"));
 }
