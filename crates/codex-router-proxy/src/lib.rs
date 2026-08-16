@@ -2246,7 +2246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_cache_account_affinity_reuses_mapped_account_inside_two_hours() {
+    async fn prompt_cache_account_affinity_reuses_mapped_account_inside_sixty_five_minutes() {
         let temp_dir = ProxyTestTempDir::new("prompt_cache_account_affinity_reuses_inside_ttl");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
@@ -2304,7 +2304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_cache_account_affinity_expires_at_exactly_two_hours() {
+    async fn prompt_cache_account_affinity_expires_at_exactly_sixty_five_minutes() {
         let temp_dir = ProxyTestTempDir::new("prompt_cache_account_affinity_expires_at_ttl");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
