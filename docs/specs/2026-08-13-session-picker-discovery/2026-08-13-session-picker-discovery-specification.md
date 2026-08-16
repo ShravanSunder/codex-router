@@ -7,7 +7,7 @@ Governing Requirements:
 
 `codex-router sessions` presents one coherent discovery model: scope decides
 which active Codex sessions are eligible, and the search expression narrows
-that eligible set. The interactive picker defaults to `repo`; its scope cycle
+that eligible set. The interactive picker defaults to `cwd`; its scope cycle
 is `cwd -> repo -> all -> cwd`. An explicit CLI root option still determines
 the initial scope, and noninteractive `--checkout` remains available.
 
@@ -36,9 +36,9 @@ not replace a stable basename available from an earlier source.
 
 The basename rule is a legacy fallback, not an equal source of repository
 truth. Path comparisons MUST retain the existing `/var` and `/private/var`
-alias handling. If Git metadata for the current directory cannot be read, repo
-scope MUST degrade to the current checkout/path evidence that is available and
-MUST not silently become `all`.
+alias handling. If the current directory is not inside a discoverable Git
+repository, `repo` scope MUST degrade to exact `cwd`. It MUST NOT include
+descendants, apply historical repository heuristics, or silently become `all`.
 
 Origin normalization MUST compare repository identity across common URL forms:
 trim surrounding whitespace and trailing slashes, parse SCP-style SSH and URL
@@ -60,7 +60,7 @@ Examples for a current basename `codex-router`:
 
 R2 (U5): Interactive scope MUST expose only `cwd`, `repo`, and `all`.
 `cwd` is exact current cwd. `repo` uses R1. `all` includes every otherwise
-eligible active session. The picker MUST default to `repo` when no root option
+eligible active session. The picker MUST default to `cwd` when no root option
 was supplied. The explicit noninteractive checkout filter remains an accepted
 CLI behavior but is not a picker scope state.
 
@@ -136,7 +136,7 @@ show the existing bounded unavailable reason and MUST leave navigation usable.
 R7 (U7, U8): Git subprocess discovery, SQLite access, and rollout filesystem
 reads/parsing MUST execute on a blocking-capable boundary, never directly on a
 Tokio async worker. Conversation loading remains lazy for the selected session
-and reads at most the existing 256 KiB tail. Search MUST not read rollout files.
+and reads at most the final 1 MiB tail. Search MUST not read rollout files.
 
 At most one blocking record reload may execute at a time. While it runs, query
 changes MUST coalesce to one replaceable latest query; after completion, that

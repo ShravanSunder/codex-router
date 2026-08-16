@@ -6,6 +6,7 @@ use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
+use crate::sessions::normalized_paths_resolve_to_same_location;
 use crate::sessions::session_belongs_to_repository;
 
 pub(super) fn root_matches(
@@ -17,7 +18,9 @@ pub(super) fn root_matches(
         return matches!(root, SessionsPickerRoot::Any);
     };
     match root {
-        SessionsPickerRoot::Cwd => cwd == request.current_dir,
+        SessionsPickerRoot::Cwd => {
+            normalized_paths_resolve_to_same_location(cwd, &request.current_dir)
+        }
         SessionsPickerRoot::Repo => session_belongs_to_repository(
             &request.repository_identity,
             record.git_origin_url.as_deref(),
@@ -76,5 +79,22 @@ pub(super) fn next_sort_filter(sort: SessionsSort) -> SessionsSort {
     match sort {
         SessionsSort::Updated => SessionsSort::Created,
         SessionsSort::Created => SessionsSort::Updated,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root_matches;
+    use crate::presentation::session_picker::request::SessionsPickerRoot;
+    use crate::presentation::session_picker::test_support::picker_request;
+
+    #[test]
+    fn cwd_scope_treats_var_and_private_var_as_the_same_location() {
+        let mut request = picker_request();
+        request.current_dir = "/private/var/folders/session-work".into();
+        let mut record = request.records.remove(0);
+        record.normalized_cwd = Some("/var/folders/session-work".to_owned());
+
+        assert!(root_matches(SessionsPickerRoot::Cwd, &request, &record));
     }
 }

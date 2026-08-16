@@ -18,6 +18,7 @@ pub(crate) fn picker_request() -> SessionsPickerRequest {
             normalized_origin: Some("github.com/shravan-agent/codex-router".to_owned()),
             live_roots: vec!["/repo/project-a".into(), "/repo/project-b".into()],
             repository_basename: "project-a".to_owned(),
+            fallback_cwd: None,
         },
         current_provider: Some("codex-router".to_owned()),
         new_session_args_display: String::new(),

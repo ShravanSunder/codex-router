@@ -36,7 +36,7 @@ pub(crate) type SessionsPickerRecordLoader =
 impl Default for SessionsPickerRequest {
     fn default() -> Self {
         Self {
-            root: SessionsPickerRoot::Repo,
+            root: SessionsPickerRoot::Cwd,
             provider: SessionsProvider::Any,
             source: SessionsSource::Interactive,
             sort: SessionsSort::Updated,
@@ -45,6 +45,7 @@ impl Default for SessionsPickerRequest {
                 normalized_origin: None,
                 live_roots: Vec::new(),
                 repository_basename: String::new(),
+                fallback_cwd: None,
             },
             current_provider: None,
             new_session_args_display: String::new(),
