@@ -181,19 +181,37 @@ where
                         error_class,
                     )
                     .await?;
+                    let provider_rejected_credentials =
+                        matches!(error, QuotaCommandError::ProviderStatus { status: 401 });
+                    if provider_rejected_credentials {
+                        quota_history_state
+                            .disable_account_if_credential_generation_current(
+                                account.account_id(),
+                                resolved.credential_generation(),
+                            )
+                            .await?;
+                    }
+                    let diagnostic_error_class = if provider_rejected_credentials {
+                        "provider_auth_rejected"
+                    } else {
+                        error_class.as_str()
+                    };
                     tracing::warn!(
                         account.hash = telemetry_hash(account.account_id().as_str()),
                         route_band,
-                        error.class = error_class.as_str(),
+                        error.class = diagnostic_error_class,
                         "codex_router.quota_refresh_failed"
                     );
-                    record_quota_refresh_metric(route_band, "failure", error_class.as_str());
+                    record_quota_refresh_metric(route_band, "failure", diagnostic_error_class);
                     let diagnostic_account = quota_refresh_diagnostic_account_label(account);
                     writeln!(
                         stdout,
                         "refresh failed: account={diagnostic_account} route_band={route_band} error={error}",
                     )
                     .map_err(QuotaCommandError::Stdout)?;
+                    if provider_rejected_credentials {
+                        break;
+                    }
                     continue;
                 }
             };

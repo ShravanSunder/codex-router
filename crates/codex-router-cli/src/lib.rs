@@ -4445,7 +4445,7 @@ exit 42
             1_000,
             NoopCredentialRefreshClient,
         ));
-        let provider = AccountFailingQuotaRefreshProvider::new(unsafe_account_label, 0);
+        let provider = AccountFailingQuotaRefreshProvider::new(unsafe_account_label, 429, 0);
         let (diagnostic_sender, diagnostic_receiver) = mpsc::channel();
 
         let worker = start_background_quota_refresh_worker_with_reporter(
@@ -4648,7 +4648,7 @@ exit 42
         }
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-        let provider = AccountFailingQuotaRefreshProvider::new("failing", 69);
+        let provider = AccountFailingQuotaRefreshProvider::new("failing", 429, 69);
         let mut stdout = Vec::new();
 
         must_ok(refresh_quota_with_dependencies(
@@ -4686,6 +4686,107 @@ exit 42
         assert!(rendered_stdout.contains("failed: 2\n"));
         assert!(!rendered_stdout.contains("failing-provider-token-canary"));
         assert!(!rendered_stdout.contains("healthy-provider-token-canary"));
+    }
+
+    #[test]
+    fn quota_refresh_excludes_only_account_rejected_with_http_401() {
+        for (provider_status, expected_account_status) in [
+            (401, AccountStatus::Disabled),
+            (403, AccountStatus::Enabled),
+        ] {
+            let test_root = TestRoot::new(&format!(
+                "quota-refresh-provider-auth-rejection-{provider_status}"
+            ));
+            must_ok(fs::create_dir(test_root.path()));
+            let router_root = test_root.path().join("router");
+            must_ok(fs::create_dir_all(&router_root));
+            let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+            let rejected_account_id = account_id("acct_quota_provider_rejected");
+            let healthy_account_id = account_id("acct_quota_provider_healthy");
+            for (account_id, account_label) in [
+                (&rejected_account_id, "rejected"),
+                (&healthy_account_id, "healthy"),
+            ] {
+                let account =
+                    AccountRecord::new(account_id.clone(), account_label, AccountStatus::Enabled)
+                        .with_active_credential_generation(1);
+                must_ok(AccountStateRepository::upsert_account(&state, &account));
+            }
+            let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+            for (account_id, access_token) in [
+                (&rejected_account_id, "rejected-provider-token-canary"),
+                (&healthy_account_id, "healthy-provider-token-canary"),
+            ] {
+                let bundle_key = must_ok(account_credential_bundle_key(account_id, 1));
+                must_ok(
+                    secrets.write_secret(
+                        &bundle_key,
+                        &must_ok(
+                            AccountCredentialBundle::imported_codex_auth(
+                                access_token,
+                                Some(format!("{access_token}-refresh")),
+                            )
+                            .with_expires_unix_seconds(2_000)
+                            .to_secret_string(),
+                        ),
+                    ),
+                );
+            }
+            let resolver =
+                RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+            let provider = AccountFailingQuotaRefreshProvider::new("rejected", provider_status, 73);
+            let mut stdout = Vec::new();
+
+            must_ok(refresh_quota_with_dependencies(
+                &mut stdout,
+                router_root,
+                "https://chatgpt.com/backend-api".to_owned(),
+                &resolver,
+                &provider,
+                1_100,
+            ));
+
+            let rejected_account = must_ok(AccountStateRepository::load_account(
+                &state,
+                &rejected_account_id,
+            ))
+            .unwrap_or_else(|| panic!("rejected account should remain registered"));
+            assert_eq!(rejected_account.status(), expected_account_status);
+            let healthy_account = must_ok(AccountStateRepository::load_account(
+                &state,
+                &healthy_account_id,
+            ))
+            .unwrap_or_else(|| panic!("healthy account should remain registered"));
+            assert_eq!(healthy_account.status(), AccountStatus::Enabled);
+            let healthy_snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+                &state,
+                &healthy_account_id,
+                "responses",
+            ))
+            .unwrap_or_else(|| panic!("healthy account should still refresh"));
+            assert_eq!(healthy_snapshot.remaining_headroom(), 73);
+            let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
+                &state,
+                "responses",
+                1_100,
+            ));
+            let rejected_selector_input = selector_inputs
+                .iter()
+                .find(|input| input.account_id() == &rejected_account_id)
+                .unwrap_or_else(|| panic!("rejected account should remain in selector state"));
+            assert_eq!(
+                rejected_selector_input.account_status(),
+                expected_account_status
+            );
+            let healthy_selector_input = selector_inputs
+                .iter()
+                .find(|input| input.account_id() == &healthy_account_id)
+                .unwrap_or_else(|| panic!("healthy account should remain in selector state"));
+            assert_eq!(
+                healthy_selector_input.account_status(),
+                AccountStatus::Enabled
+            );
+        }
     }
 
     #[test]
@@ -8300,13 +8401,15 @@ exit 42
 
     struct AccountFailingQuotaRefreshProvider {
         failing_account_label: &'static str,
+        status: u16,
         remaining_headroom: u32,
     }
 
     impl AccountFailingQuotaRefreshProvider {
-        fn new(failing_account_label: &'static str, remaining_headroom: u32) -> Self {
+        fn new(failing_account_label: &'static str, status: u16, remaining_headroom: u32) -> Self {
             Self {
                 failing_account_label,
+                status,
                 remaining_headroom,
             }
         }
@@ -8318,7 +8421,9 @@ exit 42
             request: QuotaRefreshProviderRequest,
         ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
             if request.account_label() == self.failing_account_label {
-                return Err(crate::quota::QuotaCommandError::ProviderStatus { status: 429 });
+                return Err(crate::quota::QuotaCommandError::ProviderStatus {
+                    status: self.status,
+                });
             }
 
             Ok(QuotaRefreshProviderResponse {
