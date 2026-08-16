@@ -59,10 +59,12 @@ shows the existing read-only foundation cannot satisfy U7.
 ## Success boundary
 
 Success means a developer can enter the picker from any live checkout, start
-in repository scope, find sessions from live or deleted sibling worktrees,
-search with ordinary text or explicit ID/branch/repository qualifiers, and read
-more of the selected conversation without stale results replacing current
-results.
+in exact current-directory scope, intentionally switch to repository scope to
+find sessions from live or deleted sibling worktrees, search with ordinary text
+or explicit ID/branch/repository qualifiers, and read more of the selected
+conversation without stale results replacing current results. When repository
+identity cannot be discovered, repository scope is the same exact-current-cwd
+set and never a descendant-directory approximation.
 
 The accepted scope choices are:
 

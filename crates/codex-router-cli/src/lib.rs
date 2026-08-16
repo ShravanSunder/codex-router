@@ -1440,10 +1440,11 @@ commands:
   quota                         Show quota, refresh state, and next account
   quota refresh                 Refresh quota data now
   sessions                      Pick and resume a Codex session from this folder
-  sessions --checkout           Pick from this git checkout
+  sessions --checkout --list    List sessions from this git checkout
   sessions --repo               Pick from all checkouts for this repo
   sessions --any                Pick from all Codex sessions
-  sessions --id <uuid>          Resume one exact Codex session
+  sessions <uuid>               Resume one exact Codex session
+  sessions --id <uuid>          Resume one exact Codex session (explicit form)
   host                           Run the foreground shared Codex host
   host status                    Show shared host status
   host restart                   Restart the managed app-server
@@ -1956,7 +1957,7 @@ mod tests {
             "account set-weekly-floor      Set or disable an account weekly quota floor",
             "quota                         Show quota, refresh state, and next account",
             "sessions                      Pick and resume a Codex session from this folder",
-            "sessions --checkout           Pick from this git checkout",
+            "sessions --checkout --list    List sessions from this git checkout",
             "sessions --repo               Pick from all checkouts for this repo",
             "doctor                        Diagnose local router setup",
         ] {
@@ -6001,14 +6002,14 @@ exit 42
     }
 
     #[test]
-    fn sessions_command_defaults_to_repo_root_provider_any_interactive_source() {
+    fn sessions_command_defaults_to_cwd_root_provider_any_interactive_source() {
         let command = match CliCommand::parse([OsString::from("sessions")]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
             Err(error) => panic!("sessions command should parse: {error}"),
         };
 
-        assert_eq!(command.root, crate::sessions::SessionsRoot::Repo);
+        assert_eq!(command.root, crate::sessions::SessionsRoot::Cwd);
         assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
         assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
         assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);
@@ -6035,6 +6036,8 @@ exit 42
             OsString::from("--yolo"),
             OsString::from("--model"),
             OsString::from("gpt-5.6-luna"),
+            OsString::from("--request-id"),
+            OsString::from("11111111-1111-4111-8111-111111111111"),
         ]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
@@ -6047,9 +6050,49 @@ exit 42
             [
                 OsString::from("--yolo"),
                 OsString::from("--model"),
-                OsString::from("gpt-5.6-luna")
+                OsString::from("gpt-5.6-luna"),
+                OsString::from("--request-id"),
+                OsString::from("11111111-1111-4111-8111-111111111111")
             ]
         );
+    }
+
+    #[test]
+    fn sessions_command_parses_positional_resume_id_as_exact_session() {
+        const SESSION_ID: &str = "019ff05e-77c0-7831-8f68-40bf182509f6";
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from(SESSION_ID),
+            OsString::from("--"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.6-luna"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+
+        assert_eq!(command.id.as_deref(), Some(SESSION_ID));
+        assert_eq!(
+            command.codex_args,
+            [OsString::from("--model"), OsString::from("gpt-5.6-luna")]
+        );
+    }
+
+    #[test]
+    fn sessions_command_positional_id_keeps_exact_id_mode_conflicts() {
+        const SESSION_ID: &str = "019ff05e-77c0-7831-8f68-40bf182509f6";
+        for conflicting_option in ["--new", "--last", "--list"] {
+            let error = must_err(CliCommand::parse([
+                OsString::from("sessions"),
+                OsString::from(SESSION_ID),
+                OsString::from(conflicting_option),
+            ]));
+            assert!(
+                error.to_string().contains("cannot be used with"),
+                "unexpected positional id conflict error for {conflicting_option}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -6581,8 +6624,16 @@ exit 42
         ] {
             must_ok(fs::create_dir(directory));
         }
-        must_ok(fs::create_dir(project_a.join(".git")));
-        must_ok(fs::create_dir(project_b.join(".git")));
+        for repository in [&project_a, &project_b] {
+            let init_status = must_ok(
+                ProcessCommand::new("git")
+                    .arg("-C")
+                    .arg(repository)
+                    .args(["init", "--quiet"])
+                    .status(),
+            );
+            assert!(init_status.success());
+        }
 
         create_codex_state_db_with_thread_rows(
             &codex_home.join("state_5.sqlite"),
@@ -7268,7 +7319,10 @@ exit 42
             "UNMATCHED_SEARCH_CANARY",
             &rows,
         );
-        let command = match must_ok(CliCommand::parse([OsString::from("sessions")])) {
+        let command = match must_ok(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--repo"),
+        ])) {
             CliCommand::Sessions(command) => command,
             other => panic!("sessions command should parse, got {other:?}"),
         };
@@ -7369,7 +7423,10 @@ exit 42
                 ),
             ],
         );
-        let command = match must_ok(CliCommand::parse([OsString::from("sessions")])) {
+        let command = match must_ok(CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--repo"),
+        ])) {
             CliCommand::Sessions(command) => command,
             other => panic!("sessions command should parse, got {other:?}"),
         };

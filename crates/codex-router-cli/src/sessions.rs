@@ -37,8 +37,8 @@ use crate::presentation::session_picker::run_sessions_picker;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
-const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 256 * 1024;
-const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
+const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 1024 * 1024;
+const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 10;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
 const SESSION_RECORD_PAGE_SIZE: usize = 250;
@@ -322,7 +322,30 @@ impl TryFrom<SessionsRoot> for SessionsPickerRoot {
 }
 
 impl SessionsCommand {
-    pub(crate) fn parse(arguments: Vec<OsString>) -> Result<Self, String> {
+    pub(crate) fn parse(mut arguments: Vec<OsString>) -> Result<Self, String> {
+        let passthrough_separator_index = arguments
+            .iter()
+            .position(|argument| argument == OsStr::new("--"));
+        let router_arguments_before_passthrough = passthrough_separator_index
+            .and_then(|index| arguments.get(..index))
+            .map(<[OsString]>::to_vec);
+        let first_argument = arguments
+            .first()
+            .and_then(|argument| argument.to_str())
+            .map(str::to_owned);
+        if let Some(first_argument) = first_argument {
+            if validate_exact_uuid_session_id(&first_argument).is_ok() {
+                let positional_option_end = passthrough_separator_index.unwrap_or(arguments.len());
+                let positional_options =
+                    arguments.get(1..positional_option_end).unwrap_or_default();
+                if contains_explicit_session_id_option(positional_options) {
+                    return Err("positional session UUID cannot be combined with --id".to_owned());
+                }
+                arguments.insert(0, OsString::from("--id"));
+            } else if resembles_uuid_session_id(&first_argument) {
+                validate_exact_uuid_session_id(&first_argument)?;
+            }
+        }
         let mut argv = Vec::with_capacity(arguments.len() + 1);
         argv.push(OsString::from("sessions"));
         argv.extend(arguments);
@@ -332,6 +355,13 @@ impl SessionsCommand {
             validate_exact_uuid_session_id(session_id)?;
         }
         reject_legacy_router_options(&parsed.codex_args)?;
+        if parsed.id.is_none() {
+            reject_misplaced_positional_session_id(
+                router_arguments_before_passthrough
+                    .as_deref()
+                    .unwrap_or(&parsed.codex_args),
+            )?;
+        }
         reject_interactive_limit(&parsed)?;
         reject_interactive_checkout(&parsed)?;
         Ok(Self {
@@ -352,6 +382,15 @@ impl SessionsCommand {
     }
 }
 
+fn contains_explicit_session_id_option(arguments: &[OsString]) -> bool {
+    arguments.iter().any(|argument| {
+        argument == OsStr::new("--id")
+            || argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with("--id="))
+    })
+}
+
 fn reject_legacy_router_options(codex_args: &[OsString]) -> Result<(), String> {
     if codex_args
         .iter()
@@ -360,6 +399,29 @@ fn reject_legacy_router_options(codex_args: &[OsString]) -> Result<(), String> {
         return Err("--scope was removed; use --checkout, --repo, or --any".to_owned());
     }
     Ok(())
+}
+
+fn reject_misplaced_positional_session_id(codex_args: &[OsString]) -> Result<(), String> {
+    if codex_args.iter().any(|argument| {
+        argument
+            .to_str()
+            .is_some_and(|argument| validate_exact_uuid_session_id(argument).is_ok())
+    }) {
+        return Err("session UUID must be the first argument or use --id <uuid>".to_owned());
+    }
+    Ok(())
+}
+
+fn resembles_uuid_session_id(argument: &str) -> bool {
+    let bytes = argument.as_bytes();
+    (32..=36).contains(&bytes.len())
+        && bytes
+            .get(..8)
+            .is_some_and(|prefix| prefix.iter().all(u8::is_ascii_alphanumeric))
+        && bytes.iter().any(u8::is_ascii_digit)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
 }
 
 fn reject_interactive_limit(command: &ClapSessionsCommand) -> Result<(), String> {
@@ -438,9 +500,6 @@ impl ClapSessionsCommand {
             (true, false, false) => Ok(SessionsRoot::Checkout),
             (false, true, false) => Ok(SessionsRoot::Repo),
             (false, false, true) => Ok(SessionsRoot::Any),
-            (false, false, false) if !self.list && !self.last && self.id.is_none() && !self.new => {
-                Ok(SessionsRoot::Repo)
-            }
             (false, false, false) => Ok(SessionsRoot::Cwd),
             _ => Err("--checkout, --repo, and --any cannot be used together".to_owned()),
         }
@@ -1176,7 +1235,17 @@ impl RootFilter {
         match root {
             SessionsRoot::Any => Self::Any,
             SessionsRoot::Cwd => Self::Cwd(path_identity_candidates(context.current_dir())),
-            SessionsRoot::Checkout => Self::Checkout(checkout_root(context.current_dir())),
+            SessionsRoot::Checkout => {
+                let identity = RepositoryIdentity::discover(context.current_dir());
+                if identity.fallback_cwd.is_some() {
+                    Self::Cwd(path_identity_candidates(context.current_dir()))
+                } else {
+                    find_worktree_root(context.current_dir()).map_or_else(
+                        || Self::Cwd(path_identity_candidates(context.current_dir())),
+                        Self::Checkout,
+                    )
+                }
+            }
             SessionsRoot::Repo => Self::Repo(
                 repository_identity
                     .unwrap_or_else(|| RepositoryIdentity::discover(context.current_dir())),
@@ -1304,13 +1373,13 @@ pub(crate) struct RepositoryIdentity {
     pub(crate) normalized_origin: Option<String>,
     pub(crate) live_roots: Vec<PathBuf>,
     pub(crate) repository_basename: String,
+    pub(crate) fallback_cwd: Option<PathBuf>,
 }
 
 impl RepositoryIdentity {
     fn discover(current_dir: &Path) -> Self {
         let current_checkout = checkout_root(current_dir);
-        let live_roots = repo_roots(current_dir);
-        let primary_worktree = live_roots.first().map(PathBuf::as_path);
+        let discovered_live_roots = repo_roots(current_dir);
         let raw_origin = git_stdout(current_dir, &["remote", "get-url", "origin"]);
         let normalized_origin = raw_origin.as_deref().and_then(normalize_git_origin_url);
         let git_common_dir = git_stdout(
@@ -1318,18 +1387,43 @@ impl RepositoryIdentity {
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )
         .map(PathBuf::from);
-        let repository_basename = repository_basename_from_evidence(
-            normalized_origin.as_deref(),
-            git_common_dir.as_deref(),
-            primary_worktree,
+        let has_git_repository_evidence = normalized_origin.is_some()
+            || git_common_dir.is_some()
+            || !discovered_live_roots.is_empty();
+        let live_roots = live_roots_with_current_checkout_fallback(
+            discovered_live_roots,
             &current_checkout,
+            has_git_repository_evidence,
         );
+        let primary_worktree = live_roots.first().map(PathBuf::as_path);
+        let repository_basename = if has_git_repository_evidence {
+            repository_basename_from_evidence(
+                normalized_origin.as_deref(),
+                git_common_dir.as_deref(),
+                primary_worktree,
+                &current_checkout,
+            )
+        } else {
+            String::new()
+        };
         Self {
             normalized_origin,
             live_roots,
             repository_basename,
+            fallback_cwd: (!has_git_repository_evidence).then(|| normalize_path(current_dir)),
         }
     }
+}
+
+fn live_roots_with_current_checkout_fallback(
+    mut live_roots: Vec<PathBuf>,
+    current_checkout: &Path,
+    has_git_repository_evidence: bool,
+) -> Vec<PathBuf> {
+    if has_git_repository_evidence && live_roots.is_empty() {
+        live_roots.push(current_checkout.to_path_buf());
+    }
+    live_roots
 }
 
 fn git_stdout(current_dir: &Path, arguments: &[&str]) -> Option<String> {
@@ -1417,6 +1511,9 @@ pub(crate) fn session_belongs_to_repository(
     row_origin: Option<&str>,
     cwd: &Path,
 ) -> bool {
+    if let Some(fallback_cwd) = &identity.fallback_cwd {
+        return normalized_paths_resolve_to_same_location(cwd, fallback_cwd);
+    }
     let row_origin = row_origin.and_then(non_empty_trimmed);
     let normalized_row_origin = row_origin.and_then(normalize_git_origin_url);
     if let (Some(current_origin), Some(_)) = (&identity.normalized_origin, row_origin) {
@@ -1469,7 +1566,7 @@ fn repo_roots(current_dir: &Path) -> Vec<PathBuf> {
             return roots;
         }
     }
-    vec![checkout_root(current_dir)]
+    Vec::new()
 }
 
 fn parse_git_worktree_roots(output: &str) -> Vec<PathBuf> {
@@ -1602,12 +1699,16 @@ fn session_record_matches_root(record: &SessionRecord, root_filter: &RootFilter)
     }
 }
 
-fn paths_resolve_to_same_location(left: &Path, right: &Path) -> bool {
+pub(crate) fn paths_resolve_to_same_location(left: &Path, right: &Path) -> bool {
     let left = normalize_path(left);
     let right = normalize_path(right);
-    path_sql_values(&left)
+    normalized_paths_resolve_to_same_location(&left, &right)
+}
+
+pub(crate) fn normalized_paths_resolve_to_same_location(left: &Path, right: &Path) -> bool {
+    path_sql_values(left)
         .iter()
-        .any(|left| path_sql_values(&right).contains(left))
+        .any(|left| path_sql_values(right).contains(left))
 }
 
 /// Picker display row for one session.
@@ -1771,34 +1872,58 @@ fn read_history_tail(path: &Path) -> std::io::Result<String> {
     let file_len = metadata.len();
     let start = file_len.saturating_sub(SESSION_CONVERSATION_MAX_READ_BYTES);
     file.seek(SeekFrom::Start(start))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
+    let tail_len = file_len - start;
+    let mut bytes = Vec::with_capacity(tail_len as usize);
+    file.take(SESSION_CONVERSATION_MAX_READ_BYTES)
+        .read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
     if start > 0
         && let Some((_, remaining)) = text.split_once('\n')
     {
         return Ok(remaining.to_owned());
     }
-    Ok(text)
+    Ok(text.into_owned())
 }
 
 fn extract_recent_conversation_snippets(text: &str) -> Vec<String> {
-    let mut snippets = Vec::new();
+    let mut recent_messages = Vec::new();
+    let mut latest_user_message = None;
     for line in text.lines() {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let Some(snippet) = conversation_snippet_from_event(&event) else {
+        let Some(message) = conversation_message_from_event(&event) else {
             continue;
         };
-        snippets.push(snippet);
-        if snippets.len() > SESSION_CONVERSATION_MAX_SNIPPETS {
-            snippets.remove(0);
+        if message.is_user {
+            latest_user_message = Some(message.clone());
+        }
+        recent_messages.push(message);
+        if recent_messages.len() > SESSION_CONVERSATION_MAX_SNIPPETS {
+            recent_messages.remove(0);
         }
     }
-    snippets
+    if !recent_messages.iter().any(|message| message.is_user)
+        && let Some(latest_user_message) = latest_user_message
+    {
+        if recent_messages.len() == SESSION_CONVERSATION_MAX_SNIPPETS {
+            recent_messages.remove(0);
+        }
+        recent_messages.insert(0, latest_user_message);
+    }
+    recent_messages
+        .into_iter()
+        .map(|message| message.snippet)
+        .collect()
 }
 
-fn conversation_snippet_from_event(event: &Value) -> Option<String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConversationMessage {
+    snippet: String,
+    is_user: bool,
+}
+
+fn conversation_message_from_event(event: &Value) -> Option<ConversationMessage> {
     if event.get("type").and_then(Value::as_str) != Some("response_item") {
         return None;
     }
@@ -1819,10 +1944,10 @@ fn conversation_snippet_from_event(event: &Value) -> Option<String> {
     if normalized.is_empty() || is_control_conversation_text(normalized) {
         return None;
     }
-    Some(truncate_end(
-        normalized,
-        SESSION_CONVERSATION_SNIPPET_MAX_CHARS,
-    ))
+    Some(ConversationMessage {
+        snippet: truncate_end(normalized, SESSION_CONVERSATION_SNIPPET_MAX_CHARS),
+        is_user: role == "user",
+    })
 }
 
 fn collect_text_fragments(value: &Value, fragments: &mut Vec<String>) {
@@ -2011,6 +2136,8 @@ fn format_duration_ms(duration_ms: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::RepositoryIdentity;
+    use super::RootFilter;
+    use super::SESSION_CONVERSATION_MAX_READ_BYTES;
     use super::SessionConversationPreview;
     use super::SessionPickerRecord;
     use super::SessionRecord;
@@ -2022,6 +2149,7 @@ mod tests {
     use super::deferred_rollout_source;
     use super::extract_recent_conversation_snippets;
     use super::format_duration_ms;
+    use super::live_roots_with_current_checkout_fallback;
     use super::normalize_git_origin_url;
     use super::repository_basename_from_evidence;
     use super::session_belongs_to_repository;
@@ -2030,6 +2158,8 @@ mod tests {
     use sqlx::Execute;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     fn search_consistency_record(
         git_origin_url: Option<&str>,
@@ -2208,6 +2338,7 @@ mod tests {
             normalized_origin: normalize_git_origin_url(raw_origin),
             live_roots: vec![PathBuf::from("/dev/app")],
             repository_basename: "app".to_owned(),
+            fallback_cwd: None,
         };
         let record = search_consistency_record(Some(raw_origin), None);
         let picker_record = SessionPickerRecord::from_record(&record);
@@ -2314,6 +2445,7 @@ mod tests {
             ),
             live_roots: vec![PathBuf::from("/dev/codex-router.live")],
             repository_basename: "codex-router".to_owned(),
+            fallback_cwd: None,
         };
 
         let cases = [
@@ -2364,6 +2496,7 @@ mod tests {
             normalized_origin: None,
             live_roots: vec![PathBuf::from("/dev/codex-router.live")],
             repository_basename: "codex-router".to_owned(),
+            fallback_cwd: None,
         };
 
         assert!(session_belongs_to_repository(
@@ -2389,6 +2522,7 @@ mod tests {
             normalized_origin: None,
             live_roots: Vec::new(),
             repository_basename: String::new(),
+            fallback_cwd: None,
         };
 
         assert!(!session_belongs_to_repository(
@@ -2401,6 +2535,71 @@ mod tests {
             None,
             std::path::Path::new("/history/-scratch"),
         ));
+    }
+
+    #[test]
+    fn repository_scope_without_git_metadata_matches_only_the_exact_cwd() {
+        let current_dir = std::env::temp_dir().join(format!(
+            "codex-router-non-repository-sessions-scope-{}",
+            std::process::id()
+        ));
+        let identity = RepositoryIdentity::discover(&current_dir);
+
+        assert!(session_belongs_to_repository(&identity, None, &current_dir,));
+        assert!(!session_belongs_to_repository(
+            &identity,
+            None,
+            &current_dir.join("nested-repository"),
+        ));
+    }
+
+    #[test]
+    fn repository_scope_with_broken_git_metadata_falls_back_to_the_exact_cwd() {
+        let repository_root = std::env::temp_dir().join(format!(
+            "codex-router-broken-repository-sessions-scope-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        ));
+        let current_dir = repository_root.join("nested");
+        fs::create_dir_all(&current_dir).expect("nested test cwd should be created");
+        fs::write(repository_root.join(".git"), "gitdir: missing\n")
+            .expect("broken git metadata should be created");
+
+        let identity = RepositoryIdentity::discover(&current_dir);
+        let context = crate::CliContext::new(Vec::new()).with_current_dir(current_dir.clone());
+
+        assert!(session_belongs_to_repository(&identity, None, &current_dir));
+        assert!(!session_belongs_to_repository(
+            &identity,
+            None,
+            &repository_root,
+        ));
+        assert!(matches!(
+            RootFilter::from_query(SessionsRoot::Checkout, &context, None),
+            RootFilter::Cwd(_)
+        ));
+
+        fs::remove_file(repository_root.join(".git"))
+            .expect("broken git metadata should be removed");
+        fs::remove_dir(&current_dir).expect("nested test cwd should be removed");
+        fs::remove_dir(&repository_root).expect("test repository root should be removed");
+    }
+
+    #[test]
+    fn partial_git_evidence_retains_the_current_checkout_as_a_live_root() {
+        let current_checkout = PathBuf::from("/repo/project");
+
+        assert_eq!(
+            live_roots_with_current_checkout_fallback(Vec::new(), &current_checkout, true,),
+            vec![current_checkout.clone()]
+        );
+        assert!(
+            live_roots_with_current_checkout_fallback(Vec::new(), &current_checkout, false)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2469,9 +2668,9 @@ mod tests {
     }
 
     #[test]
-    fn interactive_sessions_default_to_repo_and_reject_checkout() {
+    fn interactive_sessions_default_to_cwd_and_reject_checkout() {
         let command = SessionsCommand::parse(Vec::new()).expect("interactive command should parse");
-        assert_eq!(command.root, SessionsRoot::Repo);
+        assert_eq!(command.root, SessionsRoot::Cwd);
 
         let error = SessionsCommand::parse(vec!["--checkout".into()])
             .expect_err("interactive checkout cannot be represented by the picker");
@@ -2487,6 +2686,78 @@ mod tests {
         let checkout_list = SessionsCommand::parse(vec!["--checkout".into(), "--list".into()])
             .expect("checkout list command should parse");
         assert_eq!(checkout_list.root, SessionsRoot::Checkout);
+    }
+
+    #[test]
+    fn positional_session_id_after_an_option_is_rejected_instead_of_forwarded() {
+        let error = SessionsCommand::parse(vec![
+            "--local".into(),
+            "019ff0bb-5993-70d3-b1ba-f56724b94919".into(),
+        ])
+        .expect_err("a misplaced positional session id must not become a Codex argument");
+
+        assert!(
+            error.contains("session UUID must be the first argument or use --id"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn near_miss_positional_session_id_is_rejected_instead_of_forwarded() {
+        for near_miss in [
+            "019ff05e-77c0-7831-8f68-40bf182509f",
+            "019ff05g-77c0-7831-8f68-40bf182509f6",
+            "019ff05e77c078318f6840bf182509f6",
+        ] {
+            let error = SessionsCommand::parse(vec![near_miss.into()])
+                .expect_err("a positional UUID typo must not become a Codex argument");
+
+            assert!(error.contains("complete UUID"), "{near_miss}: {error}");
+        }
+    }
+
+    #[test]
+    fn sessions_command_preserves_escaped_uuid_passthrough_without_resume_mode() {
+        let command = SessionsCommand::parse(vec![
+            "--new".into(),
+            "--".into(),
+            "--request-id".into(),
+            "11111111-1111-4111-8111-111111111111".into(),
+        ])
+        .expect("an escaped UUID belongs to Codex passthrough arguments");
+
+        assert!(command.new);
+        assert!(command.id.is_none());
+        assert_eq!(
+            command.codex_args,
+            [
+                std::ffi::OsString::from("--request-id"),
+                std::ffi::OsString::from("11111111-1111-4111-8111-111111111111"),
+            ]
+        );
+    }
+
+    #[test]
+    fn positional_session_id_conflicts_with_explicit_id() {
+        for arguments in [
+            vec![
+                "019ff05e-77c0-7831-8f68-40bf182509f6".into(),
+                "--id".into(),
+                "11111111-1111-4111-8111-111111111111".into(),
+            ],
+            vec![
+                "019ff05e-77c0-7831-8f68-40bf182509f6".into(),
+                "--id=11111111-1111-4111-8111-111111111111".into(),
+            ],
+        ] {
+            let error = SessionsCommand::parse(arguments)
+                .expect_err("two exact resume IDs must not silently choose one");
+
+            assert_eq!(
+                error,
+                "positional session UUID cannot be combined with --id"
+            );
+        }
     }
 
     #[test]
@@ -2547,6 +2818,118 @@ mod tests {
                 "please pull main".to_owned(),
                 "checking branch and upstream state".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_keep_ten_messages_and_retain_latest_user_context() {
+        let mut events = vec![json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "the user request that explains the work"}]
+            }
+        })];
+        events.extend((1..=11).map(|index| {
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": format!("assistant update {index}")}]
+                }
+            })
+        }));
+        let jsonl = events
+            .into_iter()
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let snippets = extract_recent_conversation_snippets(&jsonl);
+
+        assert_eq!(snippets.len(), 10);
+        assert_eq!(
+            snippets.first().map(String::as_str),
+            Some("the user request that explains the work")
+        );
+        assert_eq!(
+            snippets.get(1).map(String::as_str),
+            Some("assistant update 3")
+        );
+        assert_eq!(
+            snippets.last().map(String::as_str),
+            Some("assistant update 11")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn conversation_preview_reads_message_beyond_the_previous_tail_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-router-large-session-history-{}.jsonl",
+            std::process::id()
+        ));
+        let trailing_padding = format!("\n{}", "x\n".repeat(350 * 1024));
+        let recent_message = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "message inside the expanded tail"}]
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{recent_message}{trailing_padding}"))
+            .expect("test should write large history fixture");
+
+        let preview = SessionConversationPreview::from_rollout_path(Some(
+            path.to_str().expect("temp path should be utf-8"),
+        ));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            preview.snippets,
+            vec!["message inside the expanded tail".to_owned()]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn conversation_preview_recovers_when_tail_starts_inside_utf8_character() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-router-split-utf8-session-history-{}.jsonl",
+            std::process::id()
+        ));
+        let recent_message = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "message after split UTF-8 boundary"}]
+            }
+        })
+        .to_string();
+        let mut bytes = "épartial line\n".as_bytes().to_vec();
+        bytes.extend_from_slice(recent_message.as_bytes());
+        bytes.push(b'\n');
+        bytes.resize(
+            usize::try_from(SESSION_CONVERSATION_MAX_READ_BYTES)
+                .expect("tail bound should fit usize")
+                + 1,
+            b'x',
+        );
+        fs::write(&path, bytes).expect("test should write split UTF-8 history fixture");
+
+        let preview = SessionConversationPreview::from_rollout_path(Some(
+            path.to_str().expect("temp path should be utf-8"),
+        ));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            preview.snippets,
+            vec!["message after split UTF-8 boundary".to_owned()]
         );
     }
 

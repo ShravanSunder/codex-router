@@ -26,6 +26,7 @@ const MIN_RENDER_HEIGHT: usize = 24;
 const SIDECAR_PICKER_WIDTH: usize = 160;
 const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
+const MIN_STACKED_DETAILS_HEIGHT: usize = 6;
 const START_NEW_DETAILS_HEIGHT: usize = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -429,14 +430,14 @@ fn render_picker_view(
         } else {
             session_list_height(visible_len, model.focused_window_start(1), 1)
         };
-        let show_stacked_details = details_height
-            .map(|height| minimum_list_height + height <= body_budget)
-            .unwrap_or(false);
-        let list_budget = body_budget.saturating_sub(if show_stacked_details {
-            details_height.unwrap_or(0)
-        } else {
-            0
-        });
+        let visible_details_height = details_height
+            .map(|preferred_height| {
+                preferred_height
+                    .min(body_budget.saturating_sub(minimum_list_height))
+                    .min(body_budget / 2)
+            })
+            .filter(|height| *height >= MIN_STACKED_DETAILS_HEIGHT);
+        let list_budget = body_budget.saturating_sub(visible_details_height.unwrap_or(0));
         let visible_row_budget = session_visible_row_budget(model, list_budget);
         children.push(render_session_list(
             model,
@@ -450,12 +451,12 @@ fn render_picker_view(
                 visible_row_budget,
             ),
         ));
-        if show_stacked_details && let Some(record) = focused_record {
+        if let (Some(record), Some(details_height)) = (focused_record, visible_details_height) {
             children.push(render_details(
                 record,
                 content_width,
                 selected_conversation,
-                details_height.unwrap_or(0),
+                details_height,
             ));
         }
     }
@@ -1943,6 +1944,39 @@ mod tests {
         );
         assert!(!text.contains("Preview"), "{text}");
         assert!(!text.contains("Metadata"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_stacked_details_clip_long_conversation_without_hiding_the_panel() {
+        let mut request = capture_picker_request();
+        let record = request
+            .records
+            .get_mut(0)
+            .unwrap_or_else(|| panic!("capture request should have a record"));
+        record.conversation.snippets = (0..10)
+            .map(|index| format!("message {index}: {}", "conversation text ".repeat(12)))
+            .collect();
+
+        let text = render_picker_capture_at(
+            request,
+            120,
+            40,
+            vec![TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Esc,
+            ))],
+        )
+        .await;
+
+        assert!(
+            text.contains("Conversation"),
+            "stacked details should remain visible and clip overflow:\n{text}"
+        );
+        assert!(
+            text.contains("Feature design session")
+                && text.contains("Provider migration with very very long provider metadata"),
+            "stacked details should leave room for multiple session rows:\n{text}"
+        );
     }
 
     #[tokio::test]

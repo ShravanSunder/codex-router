@@ -62,9 +62,9 @@ semantics.
 ```text
 normalized_origin: optional host/path identity
 live_roots: normalized current git-worktree paths
-current_checkout_root: fallback path
+fallback_cwd: exact invoking cwd used only when Git identity is undiscoverable
 repository_basename: stable repository leaf used only for missing-origin rows
-discovery_quality: origin-and-worktrees | worktrees-only | checkout-only
+discovery_quality: origin-and-worktrees | worktrees-only | exact-cwd-fallback
 ```
 
 Discovery runs once for the initial picker request and again only if a fresh
@@ -92,7 +92,7 @@ requested final match count or store exhaustion. The picker uses the same pure
 matcher for already-loaded records.
 
 Command validation keeps Checkout as a list-query-only root. Interactive
-initialization maps no explicit root to Repo, `--repo` to Repo, and `--any` to
+initialization maps no explicit root to Cwd, `--repo` to Repo, and `--any` to
 Any; it rejects `--checkout` before picker construction. The picker model thus
 never needs a hidden fourth root or a lossy Checkout mapping.
 
@@ -162,7 +162,7 @@ target:
 CONVERSATION DETAIL
 current and preserved:
   focus -> cache miss -> mark session ID Loading
-        -> spawn_blocking(validated 256 KiB JSONL-tail read)
+        -> spawn_blocking(validated 1 MiB JSONL-tail read)
         <- cache Loaded under the requested session ID
         -> current focus reads only its own cache key
 
@@ -196,7 +196,7 @@ on identity guards and capacity rests on component-local single-flight
 coalescing, not cancellation or Tokio's blocking-pool limit. Conversation loads
 remain one in-flight load per session. Rapid refocus may create work for
 several different IDs, but duplicates for one ID are forbidden and every read
-remains bounded to 256 KiB.
+remains bounded to 1 MiB.
 
 SQLite stays async inside the loader's current-thread runtime because `sqlx`
 owns that interface. Git and filesystem operations stay synchronous inside the
@@ -207,7 +207,7 @@ on a Tokio worker.
 
 | Boundary | Detection | Containment and recovery | Observable result |
 | --- | --- | --- | --- |
-| Git origin unavailable | command exit/parse failure | retain worktree or checkout evidence | conservative repo scope, never `all` |
+| Git repository identity unavailable | all Git evidence fails | use the normalized exact invoking cwd only | repo scope equals cwd; never descendants or `all` |
 | malformed row origin | normalization failure | apply the R1 present-unknown cell; never treat it as absent | no basename false-positive |
 | SQLite open/query/join failure | loader result | retain last authoritative rows; allow subsequent query | picker remains usable |
 | obsolete reload | query generation/value mismatch | discard entire result | current rows remain authoritative |
