@@ -322,7 +322,14 @@ impl TryFrom<SessionsRoot> for SessionsPickerRoot {
 }
 
 impl SessionsCommand {
-    pub(crate) fn parse(arguments: Vec<OsString>) -> Result<Self, String> {
+    pub(crate) fn parse(mut arguments: Vec<OsString>) -> Result<Self, String> {
+        if arguments
+            .first()
+            .and_then(|argument| argument.to_str())
+            .is_some_and(|argument| validate_exact_uuid_session_id(argument).is_ok())
+        {
+            arguments.insert(0, OsString::from("--id"));
+        }
         let mut argv = Vec::with_capacity(arguments.len() + 1);
         argv.push(OsString::from("sessions"));
         argv.extend(arguments);

@@ -1443,7 +1443,8 @@ commands:
   sessions --checkout           Pick from this git checkout
   sessions --repo               Pick from all checkouts for this repo
   sessions --any                Pick from all Codex sessions
-  sessions --id <uuid>          Resume one exact Codex session
+  sessions <uuid>               Resume one exact Codex session
+  sessions --id <uuid>          Resume one exact Codex session (explicit form)
   host                           Run the foreground shared Codex host
   host status                    Show shared host status
   host restart                   Restart the managed app-server
@@ -6050,6 +6051,44 @@ exit 42
                 OsString::from("gpt-5.6-luna")
             ]
         );
+    }
+
+    #[test]
+    fn sessions_command_parses_positional_resume_id_as_exact_session() {
+        const SESSION_ID: &str = "019ff05e-77c0-7831-8f68-40bf182509f6";
+        let command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from(SESSION_ID),
+            OsString::from("--"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.6-luna"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
+
+        assert_eq!(command.id.as_deref(), Some(SESSION_ID));
+        assert_eq!(
+            command.codex_args,
+            [OsString::from("--model"), OsString::from("gpt-5.6-luna")]
+        );
+    }
+
+    #[test]
+    fn sessions_command_positional_id_keeps_exact_id_mode_conflicts() {
+        const SESSION_ID: &str = "019ff05e-77c0-7831-8f68-40bf182509f6";
+        for conflicting_option in ["--new", "--last", "--list"] {
+            let error = must_err(CliCommand::parse([
+                OsString::from("sessions"),
+                OsString::from(SESSION_ID),
+                OsString::from(conflicting_option),
+            ]));
+            assert!(
+                error.to_string().contains("cannot be used with"),
+                "unexpected positional id conflict error for {conflicting_option}: {error}"
+            );
+        }
     }
 
     #[test]

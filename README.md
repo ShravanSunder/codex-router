@@ -67,7 +67,7 @@ control on an owner-only Unix socket. Existing `sessions` new/resume launches
 attach directly to Codex's conventional app-server socket.
 
 ```shell
-cargo run -p codex-router-cli -- sessions --id 019fe7c6-f493-7f02-be72-2feac69d6e6d
+cargo run -p codex-router-cli -- sessions 019fe7c6-f493-7f02-be72-2feac69d6e6d
 cargo run -p codex-router-cli -- host status
 cargo run -p codex-router-cli -- host restart
 cargo run -p codex-router-cli -- host restart-router
