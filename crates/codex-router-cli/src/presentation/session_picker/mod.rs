@@ -17,3 +17,4 @@ pub(crate) use component::run_sessions_picker_test_harness;
 pub(crate) use request::SessionsPickerDataQuery;
 pub(crate) use request::SessionsPickerRecordLoader;
 pub(crate) use request::SessionsPickerRequest;
+pub(crate) use request::SessionsPickerRoot;

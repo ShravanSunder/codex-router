@@ -6001,14 +6001,14 @@ exit 42
     }
 
     #[test]
-    fn sessions_command_defaults_to_cwd_root_provider_any_interactive_source() {
+    fn sessions_command_defaults_to_repo_root_provider_any_interactive_source() {
         let command = match CliCommand::parse([OsString::from("sessions")]) {
             Ok(CliCommand::Sessions(command)) => command,
             Ok(other) => panic!("sessions command should parse, got {other:?}"),
             Err(error) => panic!("sessions command should parse: {error}"),
         };
 
-        assert_eq!(command.root, crate::sessions::SessionsRoot::Cwd);
+        assert_eq!(command.root, crate::sessions::SessionsRoot::Repo);
         assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
         assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
         assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);
@@ -6303,12 +6303,15 @@ exit 42
 
     #[test]
     fn sessions_command_parses_checkout_and_repo_roots() {
-        let checkout_command =
-            match CliCommand::parse([OsString::from("sessions"), OsString::from("--checkout")]) {
-                Ok(CliCommand::Sessions(command)) => command,
-                Ok(other) => panic!("sessions command should parse, got {other:?}"),
-                Err(error) => panic!("sessions command should parse: {error}"),
-            };
+        let checkout_command = match CliCommand::parse([
+            OsString::from("sessions"),
+            OsString::from("--checkout"),
+            OsString::from("--list"),
+        ]) {
+            Ok(CliCommand::Sessions(command)) => command,
+            Ok(other) => panic!("sessions command should parse, got {other:?}"),
+            Err(error) => panic!("sessions command should parse: {error}"),
+        };
         let repo_command =
             match CliCommand::parse([OsString::from("sessions"), OsString::from("--repo")]) {
                 Ok(CliCommand::Sessions(command)) => command,
@@ -6321,6 +6324,15 @@ exit 42
             crate::sessions::SessionsRoot::Checkout
         );
         assert_eq!(repo_command.root, crate::sessions::SessionsRoot::Repo);
+
+        let checkout_error =
+            CliCommand::parse([OsString::from("sessions"), OsString::from("--checkout")])
+                .expect_err("interactive checkout should be rejected");
+        assert!(
+            checkout_error
+                .to_string()
+                .contains("--checkout requires --list")
+        );
     }
 
     #[test]
@@ -6407,6 +6419,78 @@ exit 42
             test_root.path().join("project-a").display().to_string()
         );
         assert_eq!(sessions[1]["session_id"], "thread-older");
+    }
+
+    #[test]
+    fn sessions_codex_state_reader_returns_busy_immediately_and_leaves_state_unchanged() {
+        let test_root = TestRoot::new("sessions-state-busy");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        must_ok(fs::create_dir(&codex_home));
+        let state_database_path = codex_home.join("state_5.sqlite");
+        create_codex_state_db_with_threads(&state_database_path, "busy-canary");
+        let state_before = must_ok(fs::read(&state_database_path));
+
+        let runtime = test_async_runtime();
+        let owner_pool = runtime.block_on(async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&state_database_path)
+                .create_if_missing(false);
+            must_ok(
+                sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(options)
+                    .await,
+            )
+        });
+        runtime.block_on(async {
+            must_ok(sqlx::query("BEGIN EXCLUSIVE").execute(&owner_pool).await);
+        });
+
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let started_at = Instant::now();
+        let error = run_with_io(
+            vec![
+                "sessions".into(),
+                "--any".into(),
+                "--source".into(),
+                "all".into(),
+                "--list".into(),
+                "--format".into(),
+                "json".into(),
+            ],
+            &context,
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect_err("Codex owner lock must win immediately");
+        let elapsed = started_at.elapsed();
+
+        assert!(
+            error.to_string().to_lowercase().contains("locked")
+                || error.to_string().to_lowercase().contains("busy"),
+            "expected SQLITE_BUSY/locked, got {error}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "read-only guest must not wait or retry while Codex owns the database: {elapsed:?}"
+        );
+        assert!(stdout.is_empty());
+
+        runtime.block_on(async {
+            must_ok(sqlx::query("ROLLBACK").execute(&owner_pool).await);
+            owner_pool.close().await;
+        });
+        assert_eq!(
+            must_ok(fs::read(&state_database_path)),
+            state_before,
+            "session discovery must not mutate Codex state"
+        );
     }
 
     #[test]
@@ -7138,6 +7222,182 @@ exit 42
         assert!(stdout.is_empty());
         assert_eq!(picker.offered_session_ids, [target_session_id]);
         assert_eq!(runner.resumed_session_ids, [target_session_id]);
+    }
+
+    #[test]
+    fn sessions_picker_loader_pages_until_full_persisted_search_field_matches() {
+        let test_root = TestRoot::new("sessions-picker-search-paging");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+
+        let mut rows = (0..260)
+            .map(|index| {
+                CodexStateThreadFixture::new(
+                    &format!("thread-unmatched-{index}"),
+                    &project,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    10_000 + i64::from(index),
+                )
+            })
+            .collect::<Vec<_>>();
+        let target_session_id = "thread-full-field-match";
+        rows.push(
+            CodexStateThreadFixture::new(
+                target_session_id,
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "feature/search",
+                1_000,
+            )
+            .with_search_fields(
+                &format!("{} deep-marker", "display-prefix ".repeat(12)),
+                "preview without the marker",
+                "first message without the marker",
+            ),
+        );
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "UNMATCHED_SEARCH_CANARY",
+            &rows,
+        );
+        let command = match must_ok(CliCommand::parse([OsString::from("sessions")])) {
+            CliCommand::Sessions(command) => command,
+            other => panic!("sessions command should parse, got {other:?}"),
+        };
+        let query = crate::presentation::session_picker::SessionsPickerDataQuery {
+            root: crate::presentation::session_picker::SessionsPickerRoot::Any,
+            provider: crate::sessions::SessionsProvider::Any,
+            source: crate::sessions::SessionsSource::All,
+            sort: crate::sessions::SessionsSort::Updated,
+            search: "deep-marker".to_owned(),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new(target_session_id).with_loader_query(query);
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert_eq!(
+            picker.loaded_session_ids,
+            [vec![target_session_id.to_owned()]]
+        );
+        assert_eq!(runner.resumed_session_ids, [target_session_id]);
+    }
+
+    #[test]
+    fn sessions_repo_scope_uses_persisted_origin_for_deleted_worktrees() {
+        let test_root = TestRoot::new("sessions-repo-origin");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let current_checkout = test_root.path().join("session-picker-fixture");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&current_checkout));
+        let init_status = must_ok(
+            ProcessCommand::new("git")
+                .arg("-C")
+                .arg(&current_checkout)
+                .args(["init", "--quiet"])
+                .status(),
+        );
+        assert!(init_status.success());
+        let remote_status = must_ok(
+            ProcessCommand::new("git")
+                .arg("-C")
+                .arg(&current_checkout)
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/shravan-agent/session-picker-fixture.git",
+                ])
+                .status(),
+        );
+        assert!(remote_status.success());
+
+        let matching_origin_session = "thread-deleted-matching-origin";
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "ORIGIN_SCOPE_CANARY",
+            &[
+                CodexStateThreadFixture::new(
+                    matching_origin_session,
+                    &test_root.path().join("deleted-worktree-no-name-match"),
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "feature/deleted",
+                    3_000,
+                )
+                .with_git_origin("git@github.com:shravan-agent/session-picker-fixture.git"),
+                CodexStateThreadFixture::new(
+                    "thread-live-path-conflicting-origin",
+                    &current_checkout,
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "main",
+                    2_000,
+                )
+                .with_git_origin("https://github.com/other/session-picker-fixture.git"),
+                CodexStateThreadFixture::new(
+                    "thread-historical-basename-without-origin",
+                    &test_root.path().join("session-picker-fixture.old"),
+                    "codex-router",
+                    "cli",
+                    "cli",
+                    "old",
+                    1_000,
+                ),
+            ],
+        );
+        let command = match must_ok(CliCommand::parse([OsString::from("sessions")])) {
+            CliCommand::Sessions(command) => command,
+            other => panic!("sessions command should parse, got {other:?}"),
+        };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(current_checkout);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new(matching_origin_session);
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert_eq!(
+            picker.offered_session_ids,
+            [
+                matching_origin_session,
+                "thread-historical-basename-without-origin",
+            ]
+        );
+        assert_eq!(runner.resumed_session_ids, [matching_origin_session]);
     }
 
     #[test]
@@ -8604,6 +8864,10 @@ exit 42
         source: String,
         thread_source: Option<String>,
         git_branch: String,
+        git_origin_url: Option<String>,
+        title: Option<String>,
+        preview: Option<String>,
+        first_user_message: Option<String>,
         recency_at_ms: i64,
     }
 
@@ -8625,12 +8889,33 @@ exit 42
                 source: source.to_owned(),
                 thread_source: Some(thread_source.to_owned()),
                 git_branch: git_branch.to_owned(),
+                git_origin_url: None,
+                title: None,
+                preview: None,
+                first_user_message: None,
                 recency_at_ms,
             }
         }
 
         fn with_thread_source(mut self, thread_source: Option<&str>) -> Self {
             self.thread_source = thread_source.map(str::to_owned);
+            self
+        }
+
+        fn with_git_origin(mut self, git_origin_url: &str) -> Self {
+            self.git_origin_url = Some(git_origin_url.to_owned());
+            self
+        }
+
+        fn with_search_fields(
+            mut self,
+            title: &str,
+            preview: &str,
+            first_user_message: &str,
+        ) -> Self {
+            self.title = Some(title.to_owned());
+            self.preview = Some(preview.to_owned());
+            self.first_user_message = Some(first_user_message.to_owned());
             self
         }
     }
@@ -8667,6 +8952,8 @@ exit 42
         offered_session_ids: Vec<String>,
         offered_labels: Vec<String>,
         new_session_args_display: Option<String>,
+        loader_queries: Vec<crate::presentation::session_picker::SessionsPickerDataQuery>,
+        loaded_session_ids: Vec<Vec<String>>,
     }
 
     impl FakeSessionsPicker {
@@ -8679,6 +8966,8 @@ exit 42
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
                 new_session_args_display: None,
+                loader_queries: Vec::new(),
+                loaded_session_ids: Vec::new(),
             }
         }
 
@@ -8689,7 +8978,17 @@ exit 42
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
                 new_session_args_display: None,
+                loader_queries: Vec::new(),
+                loaded_session_ids: Vec::new(),
             }
+        }
+
+        fn with_loader_query(
+            mut self,
+            query: crate::presentation::session_picker::SessionsPickerDataQuery,
+        ) -> Self {
+            self.loader_queries.push(query);
+            self
         }
     }
 
@@ -8697,7 +8996,7 @@ exit 42
         fn select_session(
             &mut self,
             request: crate::presentation::session_picker::SessionsPickerRequest,
-            _record_loader: Option<crate::presentation::session_picker::SessionsPickerRecordLoader>,
+            record_loader: Option<crate::presentation::session_picker::SessionsPickerRecordLoader>,
         ) -> Result<
             Option<crate::presentation::session_picker::SessionsPickerOutcome>,
             crate::sessions::SessionsCommandError,
@@ -8713,6 +9012,19 @@ exit 42
                 .iter()
                 .map(|record| record.title.clone())
                 .collect();
+            if let Some(record_loader) = record_loader {
+                for query in self.loader_queries.clone() {
+                    let records = record_loader(query).map_err(|error| {
+                        crate::sessions::SessionsCommandError::Picker(std::io::Error::other(error))
+                    })?;
+                    self.loaded_session_ids.push(
+                        records
+                            .into_iter()
+                            .map(|record| record.session_id)
+                            .collect(),
+                    );
+                }
+            }
             Ok(Some(self.selected_outcome.clone()))
         }
     }
@@ -8813,6 +9125,22 @@ exit 42
                 .execute(&pool)
                 .await,
             );
+            must_ok(
+                sqlx::query(
+                    "CREATE INDEX idx_threads_created_at_ms \
+                     ON threads(created_at_ms DESC, id DESC)",
+                )
+                .execute(&pool)
+                .await,
+            );
+            must_ok(
+                sqlx::query(
+                    "CREATE INDEX idx_threads_recency_at_ms \
+                     ON threads(recency_at_ms DESC, id DESC)",
+                )
+                .execute(&pool)
+                .await,
+            );
             for row in rows {
                 must_ok(
                     sqlx::query(
@@ -8826,7 +9154,7 @@ exit 42
                         thread_source, preview, recency_at, recency_at_ms
                     ) VALUES (
                         ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, 0, 1,
-                        0, NULL, NULL, ?, NULL, NULL,
+                        0, NULL, NULL, ?, ?, NULL,
                         ?, NULL, NULL, NULL, ?, NULL, NULL,
                         ?, ?, ?, ?, NULL, ?
                     )
@@ -8836,14 +9164,15 @@ exit 42
                     .bind(&row.source)
                     .bind(&row.provider)
                     .bind(row.cwd.display().to_string())
-                    .bind(prompt_canary)
+                    .bind(row.title.as_deref().unwrap_or(prompt_canary))
                     .bind(&row.git_branch)
-                    .bind(prompt_canary)
+                    .bind(&row.git_origin_url)
+                    .bind(row.first_user_message.as_deref().unwrap_or(prompt_canary))
                     .bind(&row.model)
                     .bind(row.recency_at_ms - 100)
                     .bind(row.recency_at_ms)
                     .bind(&row.thread_source)
-                    .bind(prompt_canary)
+                    .bind(row.preview.as_deref().unwrap_or(prompt_canary))
                     .bind(row.recency_at_ms)
                     .execute(&pool)
                     .await,

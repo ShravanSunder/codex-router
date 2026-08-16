@@ -9,10 +9,14 @@ fn sessions_picker_model_shows_and_switches_three_filters() {
     let mut model = SessionsPickerModel::new(picker_request(), 120);
 
     let initial = model.render_snapshot();
-    assert!(initial.contains("Scope: [📂 cwd]"));
+    assert!(initial.contains("[📂 cwd]"));
     assert!(initial.contains("Threads: [interactive]"));
     assert!(initial.contains("Sort: [updated]"));
-    assert!(initial.contains("ctrl-n new thread"));
+    assert!(initial.contains("Search: id:<id> | b:<branch> | repo:<name>"));
+    assert!(initial.contains("ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"));
+    assert!(!initial.contains("type search"));
+    assert!(!initial.contains("enter resume"));
+    assert!(!initial.contains("esc exit"));
     assert!(initial.contains("Start new session"));
     assert!(initial.contains("Feature design session"));
     assert!(!initial.contains("Subagent planning"));
@@ -22,7 +26,7 @@ fn sessions_picker_model_shows_and_switches_three_filters() {
     model.handle_key(SessionsPickerKey::CycleSort);
 
     let updated = model.render_snapshot();
-    assert!(updated.contains("Scope: [worktree]"));
+    assert!(updated.contains("[repo]"));
     assert!(updated.contains("Threads: [all]"));
     assert!(updated.contains("Sort: [created]"));
     assert!(updated.contains("Subagent planning"));
@@ -32,12 +36,12 @@ fn sessions_picker_model_shows_and_switches_three_filters() {
 fn sessions_picker_model_cycles_scope_source_and_sort_without_focus_mode() {
     let mut model = SessionsPickerModel::new(picker_request(), 120);
 
-    for expected_scope in ["worktree", "repo", "all", "📂 cwd"] {
+    for expected_scope in ["repo", "all", "📂 cwd"] {
         model.handle_key(SessionsPickerKey::CycleRoot);
         assert!(
             model
                 .render_snapshot()
-                .contains(&format!("Scope: [{expected_scope}]"))
+                .contains(&format!("[{expected_scope}]"))
         );
     }
 
@@ -63,9 +67,8 @@ fn sessions_picker_model_searches_navigates_and_selects_visible_rows() {
     model.handle_key(SessionsPickerKey::SearchChar('f'));
     model.handle_key(SessionsPickerKey::SearchChar('e'));
     assert!(model.render_snapshot().contains("Search: [fe]"));
-    assert_eq!(model.focused_session_id(), Some("thread-a"));
+    assert!(model.render_snapshot().contains("Feature design session"));
 
-    model.handle_key(SessionsPickerKey::CycleRoot);
     model.handle_key(SessionsPickerKey::CycleRoot);
     model.handle_key(SessionsPickerKey::CycleRoot);
     model.handle_key(SessionsPickerKey::SearchBackspace);
@@ -75,9 +78,33 @@ fn sessions_picker_model_searches_navigates_and_selects_visible_rows() {
 }
 
 #[test]
+fn sessions_picker_model_uses_qualified_search_over_complete_fields() {
+    let mut request = picker_request();
+    request.root = crate::presentation::session_picker::request::SessionsPickerRoot::Any;
+    request.records[0].branch = "feature/session-picker".to_owned();
+    request.records[0].persisted_branch = "feature/session-picker".to_owned();
+    request.records[0].full_title = "Conversation beyond compact display".to_owned();
+    request.records[0].first_user_message = "find the historical worktree".to_owned();
+    request.records[0].git_origin_url =
+        Some("https://github.com/shravan-agent/codex-router.git".to_owned());
+    let mut model = SessionsPickerModel::new(request, 100);
+
+    for character in "b:session-picker historical".chars() {
+        model.handle_key(SessionsPickerKey::SearchChar(character));
+    }
+    assert!(model.render_snapshot().contains("Feature design session"));
+
+    model.handle_key(SessionsPickerKey::ClearSearch);
+    for character in "session-picker".chars() {
+        model.handle_key(SessionsPickerKey::SearchChar(character));
+    }
+    assert!(!model.render_snapshot().contains("Feature design session"));
+}
+
+#[test]
 fn sessions_picker_model_scrolls_visible_window_with_selection() {
     let mut request = picker_request();
-    request.root = crate::sessions::SessionsRoot::Any;
+    request.root = crate::presentation::session_picker::request::SessionsPickerRoot::Any;
     request.source = crate::sessions::SessionsSource::All;
     for index in 0..12 {
         request.records.push(picker_record(
@@ -108,7 +135,7 @@ fn sessions_picker_model_scrolls_visible_window_with_selection() {
 #[test]
 fn sessions_picker_model_supports_page_and_edge_navigation() {
     let mut request = picker_request();
-    request.root = crate::sessions::SessionsRoot::Any;
+    request.root = crate::presentation::session_picker::request::SessionsPickerRoot::Any;
     request.source = crate::sessions::SessionsSource::All;
     for index in 0..12 {
         request.records.push(picker_record(
@@ -137,7 +164,7 @@ fn sessions_picker_model_supports_page_and_edge_navigation() {
 #[test]
 fn sessions_picker_model_reuses_visible_rows_for_navigation_keys() {
     let mut request = picker_request();
-    request.root = crate::sessions::SessionsRoot::Any;
+    request.root = crate::presentation::session_picker::request::SessionsPickerRoot::Any;
     request.source = crate::sessions::SessionsSource::All;
     for index in 0..25 {
         request.records.push(picker_record(
@@ -180,17 +207,17 @@ fn sessions_picker_model_clears_search_without_changing_filters() {
 
     model.handle_key(SessionsPickerKey::ClearSearch);
     let snapshot = model.render_snapshot();
-    assert!(snapshot.contains("Type to search"));
-    assert!(snapshot.contains("Scope: [📂 cwd]"));
+    assert!(snapshot.contains("Search: []"));
+    assert!(snapshot.contains("[📂 cwd]"));
     assert!(snapshot.contains("Threads: [interactive]"));
 }
 
 #[test]
-fn sessions_picker_root_filters_match_checkout_and_repo_roots() {
+fn sessions_picker_root_filters_match_cwd_and_repository_identity() {
     let mut request = picker_request();
     request.current_dir = "/repo/project-a/pkg/src".into();
-    request.checkout_root = "/repo/project-a".into();
-    request.repo_roots = vec!["/repo/project-a".into(), "/repo/project-b".into()];
+    request.repository_identity.live_roots =
+        vec!["/repo/project-a".into(), "/repo/project-b".into()];
     request.records = vec![
         picker_record(
             "thread-src",
@@ -220,12 +247,6 @@ fn sessions_picker_root_filters_match_checkout_and_repo_roots() {
     assert!(cwd_snapshot.contains("Current source session"));
     assert!(!cwd_snapshot.contains("Sibling test session"));
     assert!(!cwd_snapshot.contains("Sibling worktree session"));
-
-    model.handle_key(SessionsPickerKey::CycleRoot);
-    let checkout_snapshot = model.render_snapshot();
-    assert!(checkout_snapshot.contains("Current source session"));
-    assert!(checkout_snapshot.contains("Sibling test session"));
-    assert!(!checkout_snapshot.contains("Sibling worktree session"));
 
     model.handle_key(SessionsPickerKey::CycleRoot);
     let repo_snapshot = model.render_snapshot();
@@ -271,7 +292,7 @@ fn sessions_picker_empty_filter_offers_start_new_session() {
 #[test]
 fn sessions_picker_pointer_focus_resolves_stable_visible_session_identity() {
     let mut request = picker_request();
-    request.root = crate::sessions::SessionsRoot::Any;
+    request.root = crate::presentation::session_picker::request::SessionsPickerRoot::Any;
     request.source = crate::sessions::SessionsSource::All;
     let mut model = SessionsPickerModel::new(request, 100);
 
@@ -315,7 +336,7 @@ fn sessions_picker_pointer_focus_ignores_stale_identity_and_keeps_start_new_expl
 #[test]
 fn sessions_picker_pointer_focus_preserves_the_rendered_scrolled_window() {
     let mut request = picker_request();
-    request.root = crate::sessions::SessionsRoot::Any;
+    request.root = crate::presentation::session_picker::request::SessionsPickerRoot::Any;
     request.source = crate::sessions::SessionsSource::All;
     for index in 0..12 {
         request.records.push(picker_record(

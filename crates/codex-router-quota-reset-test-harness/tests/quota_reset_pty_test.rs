@@ -309,7 +309,7 @@ mod quota_reset_pty_test {
     }
 
     #[test]
-    fn compiled_sessions_tui_click_focuses_preview_and_enter_resumes() -> TestResult<()> {
+    fn compiled_sessions_tui_click_focuses_conversation_and_enter_resumes() -> TestResult<()> {
         let arguments = [OsString::from("--sessions-picker")];
         let mut terminal = TerminalDriver::spawn(
             Path::new(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness")),
@@ -325,12 +325,16 @@ mod quota_reset_pty_test {
         let pointer_focus_start = terminal.transcript_len();
         terminal.send_sgr_mouse_left_down(10, 14)?;
         stage(
-            terminal.wait_for_text_after("BETA_PREVIEW_ACTIVE", pointer_focus_start, SEMANTIC_WAIT),
-            "pointer-focused existing session preview",
+            terminal.wait_for_text_after(
+                "BETA_CONVERSATION_ACTIVE",
+                pointer_focus_start,
+                SEMANTIC_WAIT,
+            ),
+            "pointer-focused existing session conversation",
         )?;
         ensure(
             terminal.child_is_running()?,
-            "existing-session click activated instead of changing preview focus",
+            "existing-session click activated instead of changing conversation focus",
         )?;
         terminal.send(b"\r")?;
 

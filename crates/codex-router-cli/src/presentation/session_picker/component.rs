@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use iocraft::prelude::*;
 use unicode_width::UnicodeWidthStr;
@@ -9,13 +11,14 @@ use crate::presentation::session_picker::action::SessionsPickerOutcome;
 use crate::presentation::session_picker::interactive_row::InteractiveSessionChoiceRow;
 use crate::presentation::session_picker::model::SessionsPickerModel;
 use crate::presentation::session_picker::render::MIN_PICKER_WIDTH;
+use crate::presentation::session_picker::render::footer_lines;
 use crate::presentation::session_picker::request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::request::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::request::SessionsPickerRequest;
+use crate::presentation::session_picker::request::SessionsPickerRoot;
 use crate::sessions::SessionConversationPreview;
 use crate::sessions::SessionConversationSource;
 use crate::sessions::SessionPickerRecord;
-use crate::sessions::SessionsRoot;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
@@ -52,10 +55,40 @@ pub(crate) struct SessionsPickerComponentProps<'a> {
     selected_outcome_out: Option<&'a mut Option<SessionsPickerOutcome>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct SessionRecordsReloadRequest {
+    generation: u64,
     query: SessionsPickerDataQuery,
-    loader: SessionsPickerRecordLoader,
+}
+
+#[derive(Clone)]
+struct SessionRecordsReloadPort {
+    sender: tokio::sync::watch::Sender<SessionRecordsReloadRequest>,
+    receiver: Arc<Mutex<Option<tokio::sync::watch::Receiver<SessionRecordsReloadRequest>>>>,
+}
+
+impl SessionRecordsReloadPort {
+    fn new(initial_query: SessionsPickerDataQuery) -> Self {
+        let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
+            generation: 0,
+            query: initial_query,
+        });
+        Self {
+            sender,
+            receiver: Arc::new(Mutex::new(Some(receiver))),
+        }
+    }
+
+    fn send(&self, request: SessionRecordsReloadRequest) {
+        self.sender.send_replace(request);
+    }
+
+    fn take_receiver(&self) -> Option<tokio::sync::watch::Receiver<SessionRecordsReloadRequest>> {
+        self.receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
 }
 
 #[component]
@@ -97,23 +130,29 @@ pub(crate) fn SessionsPickerComponent<'a>(
     }
     let mut conversation_cache =
         hooks.use_state(BTreeMap::<String, ConversationPreviewLoadState>::new);
-    let reload_records = hooks.use_async_handler({
+    let reload_generation = hooks.use_state(|| 0_u64);
+    let reload_port = hooks.use_memo(
+        || SessionRecordsReloadPort::new(model.read().data_query()),
+        (),
+    );
+    hooks.use_future({
+        let receiver = reload_port.take_receiver();
+        let record_loader = props.record_loader.clone();
         let mut model = model;
-        move |request: SessionRecordsReloadRequest| async move {
-            let query = request.query;
-            let loader = request.loader;
-            let loaded_records = tokio::task::spawn_blocking({
-                let query = query.clone();
-                move || loader(query)
-            })
-            .await;
-            let Ok(Ok(records)) = loaded_records else {
+        async move {
+            let (Some(receiver), Some(loader)) = (receiver, record_loader) else {
                 return;
             };
-            let mut model_value = model.write();
-            if model_value.data_query() == query {
-                model_value.replace_records(records);
-            }
+            run_session_record_reload_worker(receiver, loader, move |request, records| {
+                if reload_generation.get() != request.generation {
+                    return;
+                }
+                let mut model_value = model.write();
+                if model_value.data_query() == request.query {
+                    model_value.replace_records(records);
+                }
+            })
+            .await;
         }
     });
     let load_conversation = hooks.use_async_handler({
@@ -136,12 +175,10 @@ pub(crate) fn SessionsPickerComponent<'a>(
     });
     let mut selected_outcome = hooks.use_state(|| Option::<SessionsPickerOutcome>::None);
     let mut should_cancel = hooks.use_state(|| false);
-    let record_loader = props.record_loader.clone();
-
     hooks.use_terminal_events({
         let mut observed_width = observed_width;
         let mut observed_height = observed_height;
-        let record_loader = record_loader.clone();
+        let mut reload_generation = reload_generation;
         move |event| {
             if let TerminalEvent::Resize(width, height) = event {
                 if live_terminal_width {
@@ -216,12 +253,12 @@ pub(crate) fn SessionsPickerComponent<'a>(
             let next_query = model_value.data_query();
             drop(model_value);
 
-            if next_query != previous_query
-                && let Some(loader) = record_loader.clone()
-            {
-                reload_records(SessionRecordsReloadRequest {
+            if next_query != previous_query {
+                let generation = reload_generation.get().saturating_add(1);
+                reload_generation.set(generation);
+                reload_port.send(SessionRecordsReloadRequest {
+                    generation,
                     query: next_query,
-                    loader,
                 });
             }
         }
@@ -284,6 +321,22 @@ pub(crate) fn SessionsPickerComponent<'a>(
     )
 }
 
+async fn run_session_record_reload_worker(
+    mut receiver: tokio::sync::watch::Receiver<SessionRecordsReloadRequest>,
+    loader: SessionsPickerRecordLoader,
+    mut accept_records: impl FnMut(SessionRecordsReloadRequest, Vec<SessionPickerRecord>),
+) {
+    while receiver.changed().await.is_ok() {
+        let request = receiver.borrow_and_update().clone();
+        let query = request.query.clone();
+        let loader = loader.clone();
+        let loaded_records = tokio::task::spawn_blocking(move || loader(query)).await;
+        if let Ok(Ok(records)) = loaded_records {
+            accept_records(request, records);
+        }
+    }
+}
+
 fn selected_conversation_preview_for_record(
     record: &SessionPickerRecord,
     cache: &BTreeMap<String, ConversationPreviewLoadState>,
@@ -325,7 +378,13 @@ fn render_picker_view(
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let filter_controls = render_filter_controls(model, content_width);
     let control_height = filter_controls.len();
-    let body_budget = picker_body_budget(height, control_height, minimum_render_height);
+    let footer_lines = footer_lines(content_width);
+    let body_budget = picker_body_budget(
+        height,
+        control_height,
+        footer_lines.len(),
+        minimum_render_height,
+    );
     let mut children = vec![
         element! {
             Text(
@@ -359,7 +418,12 @@ fn render_picker_view(
     } else {
         let details_height = focused_record
             .filter(|_| model.width >= NARROW_PICKER_WIDTH)
-            .map(|record| detail_height(selected_conversation.or(Some(&record.conversation))));
+            .map(|record| {
+                detail_height(
+                    selected_conversation.or(Some(&record.conversation)),
+                    content_width,
+                )
+            });
         let minimum_list_height = if visible_len == 0 {
             0
         } else {
@@ -396,7 +460,7 @@ fn render_picker_view(
         }
     }
 
-    children.push(render_footer(content_width));
+    children.push(render_footer(content_width, footer_lines));
     let picker_height = height.max(minimum_render_height);
     element! {
         View(
@@ -417,10 +481,16 @@ fn render_picker_view(
     }
 }
 
-fn picker_body_budget(height: usize, control_height: usize, minimum_render_height: usize) -> usize {
+fn picker_body_budget(
+    height: usize,
+    control_height: usize,
+    footer_line_count: usize,
+    minimum_render_height: usize,
+) -> usize {
     let root_border_height = 2;
     let title_height = 1;
-    let footer_height = 2;
+    let footer_border_height = 1;
+    let footer_height = footer_border_height + footer_line_count;
     height
         .max(minimum_render_height)
         .saturating_sub(root_border_height + title_height + control_height + footer_height)
@@ -471,32 +541,41 @@ const fn session_choice_row_height(visible_index: usize) -> usize {
     if visible_index == 0 { 4 } else { 2 }
 }
 
-fn detail_height(conversation: Option<&SessionConversationPreview>) -> usize {
-    let conversation_row_count = conversation
-        .map(|conversation| conversation.snippets.len().max(1))
-        .unwrap_or(1);
+fn detail_height(conversation: Option<&SessionConversationPreview>, width: usize) -> usize {
+    let text_width = width.saturating_sub(4).max(1);
+    let conversation_row_count = conversation.map_or(1, |conversation| {
+        if conversation.snippets.is_empty() {
+            return conversation
+                .unavailable_reason
+                .as_deref()
+                .map_or(1, |reason| {
+                    UnicodeWidthStr::width(reason).max(1).div_ceil(text_width)
+                });
+        }
+        conversation
+            .snippets
+            .iter()
+            .map(|snippet| {
+                UnicodeWidthStr::width(snippet.as_str())
+                    .saturating_add(2)
+                    .max(1)
+                    .div_ceil(text_width)
+            })
+            .sum::<usize>()
+    });
     let detail_border_height = 2;
-    let preview_height = 2;
-    let divider_height = 2;
+    let session_identity_height = 2;
     let conversation_heading_height = 1;
-    let metadata_height = 6;
 
     detail_border_height
-        + preview_height
-        + divider_height
+        + session_identity_height
         + conversation_heading_height
         + conversation_row_count
-        + divider_height
-        + metadata_height
 }
 
 fn render_filter_controls(model: &SessionsPickerModel, width: usize) -> Vec<AnyElement<'static>> {
-    let filter = if model.search.is_empty() {
-        "Type to search".to_owned()
-    } else {
-        format!("Search: [{}]", model.search)
-    };
-    let scope = format!("Scope: [{}]", root_label(model.root));
+    let filter = format!("Search: [{}]", model.search);
+    let scope = format!("[{}]", root_label(model.root));
     let threads = format!("Threads: [{}]", source_label(model.source));
     let sort = format!("Sort: [{}]", sort_label(model.sort));
 
@@ -830,49 +909,23 @@ fn render_details(
     selected_conversation: Option<&SessionConversationPreview>,
     height: usize,
 ) -> AnyElement<'static> {
-    let detail_width = width.saturating_sub(4);
-    let preview = record.preview.as_deref().unwrap_or(&record.title);
     let conversation = selected_conversation.unwrap_or(&record.conversation);
     let panel_height = height.max(1);
     let conversation_rows = if conversation.snippets.is_empty() {
-        vec![detail_text(
+        vec![conversation_text(
             conversation
                 .unavailable_reason
                 .as_deref()
                 .unwrap_or("history unavailable"),
-            detail_width,
             Color::DarkGrey,
         )]
     } else {
         conversation
             .snippets
             .iter()
-            .map(|snippet| detail_text(&format!("• {snippet}"), detail_width, Color::Grey))
+            .map(|snippet| conversation_text(&format!("• {snippet}"), Color::Grey))
             .collect::<Vec<_>>()
     };
-    let metadata_rows = vec![
-        detail_line(
-            "provider",
-            record.provider.as_deref().unwrap_or("-"),
-            detail_width,
-        ),
-        detail_line(
-            "model",
-            record.model.as_deref().unwrap_or("-"),
-            detail_width,
-        ),
-        detail_line(
-            "thread",
-            record.thread_source.as_deref().unwrap_or("-"),
-            detail_width,
-        ),
-        detail_line(
-            "source",
-            record.source.as_deref().unwrap_or("-"),
-            detail_width,
-        ),
-        detail_line("id", &short_id(&record.session_id), detail_width),
-    ];
 
     element! {
         View(
@@ -885,19 +938,23 @@ fn render_details(
             padding_left: 1,
             padding_right: 1,
         ) {
-            Text(content: "Preview", color: Color::Cyan, weight: Weight::Bold)
-            Text(content: fit_line(preview, detail_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-            View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
-                Text(content: "")
-            }
+            Text(content: format!("Session ID: {}", record.session_id), color: Color::Grey, weight: Weight::Normal, wrap: TextWrap::NoWrap)
+            View(height: 1) { Text(content: "") }
             Text(content: "Conversation", color: Color::Cyan, weight: Weight::Bold)
             #(conversation_rows)
-            View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {
-                Text(content: "")
-            }
-            Text(content: "Metadata", color: Color::Cyan, weight: Weight::Bold)
-            #(metadata_rows)
         }
+    }
+    .into_any()
+}
+
+fn conversation_text(value: &str, color: Color) -> AnyElement<'static> {
+    element! {
+        Text(
+            content: value.to_owned(),
+            color,
+            weight: Weight::Normal,
+            wrap: TextWrap::Wrap,
+        )
     }
     .into_any()
 }
@@ -914,26 +971,21 @@ fn detail_text(value: &str, width: usize, color: Color) -> AnyElement<'static> {
     .into_any()
 }
 
-fn detail_line(label: &str, value: &str, width: usize) -> AnyElement<'static> {
-    element! {
-        Text(
-            content: fit_line(&format!("{label:<9} {value}"), width),
-            color: Color::Grey,
-            weight: Weight::Normal,
-            wrap: TextWrap::NoWrap,
-        )
-    }
-    .into_any()
-}
-
-fn render_footer(width: usize) -> AnyElement<'static> {
-    let content = if width < NARROW_PICKER_WIDTH {
-        "type search    enter resume    ctrl-n new"
-    } else if width < 90 {
-        "type search    enter resume    ctrl-n new    esc exit"
-    } else {
-        "type search  ↑/↓ select  enter  ctrl-n new  ctrl-s scope  ctrl-t threads  ctrl-o sort  esc"
-    };
+fn render_footer(width: usize, lines: Vec<String>) -> AnyElement<'static> {
+    let footer_text = lines
+        .into_iter()
+        .map(|line| {
+            element! {
+                Text(
+                    content: fit_line(&line, width),
+                    color: Color::Grey,
+                    weight: Weight::Light,
+                    wrap: TextWrap::NoWrap,
+                )
+            }
+            .into_any()
+        })
+        .collect::<Vec<_>>();
     element! {
         View(
             width: 100pct,
@@ -943,29 +995,24 @@ fn render_footer(width: usize) -> AnyElement<'static> {
         ) {
             View(
                 width: 100pct,
+                flex_direction: FlexDirection::Column,
                 border_style: BorderStyle::Single,
                 border_edges: Edges::Top,
                 border_color: Color::DarkGrey,
                 padding_top: 0,
             ) {
-                Text(
-                    content: fit_line(content, width),
-                    color: Color::Grey,
-                    weight: Weight::Light,
-                    wrap: TextWrap::NoWrap,
-                )
+                #(footer_text)
             }
         }
     }
     .into_any()
 }
 
-fn root_label(root: SessionsRoot) -> &'static str {
+fn root_label(root: SessionsPickerRoot) -> &'static str {
     match root {
-        SessionsRoot::Cwd => "📂 cwd",
-        SessionsRoot::Checkout => "worktree",
-        SessionsRoot::Repo => "repo",
-        SessionsRoot::Any => "all",
+        SessionsPickerRoot::Cwd => "📂 cwd",
+        SessionsPickerRoot::Repo => "repo",
+        SessionsPickerRoot::Any => "all",
     }
 }
 
@@ -982,10 +1029,6 @@ fn sort_label(sort: SessionsSort) -> &'static str {
         SessionsSort::Updated => "updated",
         SessionsSort::Created => "created",
     }
-}
-
-fn short_id(session_id: &str) -> String {
-    truncate_middle(session_id, 12)
 }
 
 fn fit_line(line: &str, width: usize) -> String {
@@ -1066,7 +1109,7 @@ pub(crate) fn run_sessions_picker_test_harness() -> io::Result<()> {
     use crate::presentation::session_picker::test_support::picker_request;
 
     let mut request = picker_request();
-    request.root = SessionsRoot::Any;
+    request.root = SessionsPickerRoot::Any;
     request.source = SessionsSource::All;
     if let Some(pointer_focus_record) = request
         .records
@@ -1100,15 +1143,116 @@ mod tests {
     use futures_util::StreamExt;
     use iocraft::prelude::*;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::presentation::session_picker::request::SessionsPickerRoot as SessionsRoot;
     use crate::presentation::session_picker::test_support::picker_record;
     use crate::presentation::session_picker::test_support::picker_request;
     use crate::sessions::SessionConversationPreview;
     use crate::sessions::SessionPickerRecord;
-    use crate::sessions::SessionsRoot;
+    use crate::sessions::SessionsProvider;
+    use crate::sessions::SessionsSort;
     use crate::sessions::SessionsSource;
+
+    #[tokio::test]
+    async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_pending_query() {
+        let initial_request = SessionRecordsReloadRequest {
+            generation: 0,
+            query: reload_query("initial"),
+        };
+        let (sender, receiver) = tokio::sync::watch::channel(initial_request);
+        let (release_first_sender, release_first_receiver) = mpsc::channel::<()>();
+        let release_first_receiver = Arc::new(Mutex::new(release_first_receiver));
+        let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let active_loads = Arc::new(AtomicUsize::new(0));
+        let maximum_active_loads = Arc::new(AtomicUsize::new(0));
+        let loader: SessionsPickerRecordLoader = Arc::new({
+            let active_loads = Arc::clone(&active_loads);
+            let maximum_active_loads = Arc::clone(&maximum_active_loads);
+            let release_first_receiver = Arc::clone(&release_first_receiver);
+            move |query| {
+                let active = active_loads.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum_active_loads.fetch_max(active, Ordering::SeqCst);
+                let search = query.search;
+                let _ = started_sender.send(search.clone());
+                if search == "a" {
+                    release_first_receiver
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv()
+                        .unwrap_or_else(|error| {
+                            panic!("first load release should arrive: {error}")
+                        });
+                }
+                active_loads.fetch_sub(1, Ordering::SeqCst);
+                Ok(vec![picker_record(
+                    &format!("thread-{search}"),
+                    &format!("result {search}"),
+                    "/repo/project-a",
+                    "codex-router",
+                    "cli",
+                )])
+            }
+        });
+        let current_generation = Arc::new(AtomicU64::new(0));
+        let (accepted_sender, mut accepted_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
+        let worker = tokio::spawn({
+            let current_generation = Arc::clone(&current_generation);
+            async move {
+                run_session_record_reload_worker(receiver, loader, move |request, _records| {
+                    if current_generation.load(Ordering::SeqCst) == request.generation {
+                        let _ = accepted_sender.send(request.query.search);
+                    }
+                })
+                .await;
+            }
+        });
+
+        current_generation.store(1, Ordering::SeqCst);
+        sender.send_replace(SessionRecordsReloadRequest {
+            generation: 1,
+            query: reload_query("a"),
+        });
+        assert_eq!(started_receiver.recv().await.as_deref(), Some("a"));
+
+        current_generation.store(2, Ordering::SeqCst);
+        sender.send_replace(SessionRecordsReloadRequest {
+            generation: 2,
+            query: reload_query("b"),
+        });
+        current_generation.store(3, Ordering::SeqCst);
+        sender.send_replace(SessionRecordsReloadRequest {
+            generation: 3,
+            query: reload_query("c"),
+        });
+        release_first_sender
+            .send(())
+            .unwrap_or_else(|error| panic!("first load should release: {error}"));
+
+        assert_eq!(started_receiver.recv().await.as_deref(), Some("c"));
+        assert_eq!(accepted_receiver.recv().await.as_deref(), Some("c"));
+        assert_eq!(maximum_active_loads.load(Ordering::SeqCst), 1);
+        assert!(
+            started_receiver.try_recv().is_err(),
+            "obsolete B must not run"
+        );
+
+        worker.abort();
+    }
+
+    fn reload_query(search: &str) -> SessionsPickerDataQuery {
+        SessionsPickerDataQuery {
+            root: SessionsRoot::Any,
+            provider: SessionsProvider::Any,
+            source: SessionsSource::All,
+            sort: SessionsSort::Updated,
+            search: search.to_owned(),
+        }
+    }
 
     #[tokio::test]
     async fn sessions_picker_iocraft_mock_terminal_handles_keys() {
@@ -1145,7 +1289,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_picker_existing_row_pointer_focus_updates_preview_without_activation() {
+    async fn sessions_picker_existing_row_pointer_focus_updates_conversation_without_activation() {
         let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
         let frames = element! {
             SessionsPickerComponent(
@@ -1179,10 +1323,10 @@ mod tests {
             frames.iter().any(|frame| {
                 frame.contains("❯ Provider migration")
                     && frame.contains(
-                        "Provider migration with very very long provider metadata preview text",
+                        "Provider migration with very very long provider metadata first real",
                     )
             }),
-            "pointer focus should update the existing-session preview without activation: {frames:?}"
+            "pointer focus should update the existing-session conversation without activation: {frames:?}"
         );
     }
 
@@ -1380,8 +1524,9 @@ mod tests {
         .await;
 
         assert!(
-            actual.iter().any(|snapshot| snapshot
-                .contains("Scope: [worktree]    Threads: [all]    Sort: [created]")),
+            actual
+                .iter()
+                .any(|snapshot| snapshot.contains("[repo]    Threads: [all]    Sort: [created]")),
             "ctrl shortcuts should cycle scope, threads, and sort: {actual:?}"
         );
     }
@@ -1423,10 +1568,12 @@ mod tests {
                     loader_called.notified(),
                 )
                 .await;
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc))
             }),
         );
-        let _actual = element! {
+        let actual = element! {
             SessionsPickerComponent(
                 request,
                 record_loader: Some(record_loader),
@@ -1435,6 +1582,7 @@ mod tests {
             )
         }
         .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
+        .map(|canvas| canvas.to_string())
         .collect::<Vec<_>>()
         .await;
 
@@ -1446,6 +1594,12 @@ mod tests {
                 .iter()
                 .any(|query| query.source == SessionsSource::All),
             "ctrl-t should reload records for the next thread-source query: {queries:?}"
+        );
+        assert!(
+            actual
+                .iter()
+                .any(|snapshot| snapshot.contains("Reloaded SQL result")),
+            "the current reload result should become visible in the wired component: {actual:?}"
         );
     }
 
@@ -1498,7 +1652,7 @@ mod tests {
         assert!(
             actual
                 .iter()
-                .any(|snapshot| snapshot.contains("Type to search")),
+                .any(|snapshot| snapshot.contains("Search: []")),
             "first escape should clear search instead of exiting immediately: {actual:?}"
         );
         assert_eq!(selected_outcome, None);
@@ -1551,7 +1705,7 @@ mod tests {
         assert!(
             actual
                 .iter()
-                .any(|snapshot| snapshot.contains("Scope: [📂 cwd]    Threads: [interactive]")),
+                .any(|snapshot| snapshot.contains("[📂 cwd]    Threads: [interactive]")),
             "plain search input should leave filters unchanged: {actual:?}"
         );
     }
@@ -1598,10 +1752,10 @@ mod tests {
         let text = render_picker_capture(
             request,
             100,
-            vec![TerminalEvent::Key(KeyEvent::new(
-                KeyEventKind::Press,
-                KeyCode::Esc,
-            ))],
+            vec![
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Up)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ],
         )
         .await;
         let lines = text.lines().collect::<Vec<_>>();
@@ -1718,7 +1872,7 @@ mod tests {
             let lines = text.lines().collect::<Vec<_>>();
             let footer_index = lines
                 .iter()
-                .position(|line| line.contains("type search"))
+                .rposition(|line| line.contains("ctrl-o sort"))
                 .unwrap_or_else(|| panic!("capture should render footer:\n{text}"));
             let bottom_border_index = lines
                 .iter()
@@ -1749,13 +1903,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_picker_stacked_details_truncates_long_preview_inside_frame() {
+    async fn sessions_picker_stacked_details_wraps_conversation_without_preview_or_metadata() {
         let mut request = capture_picker_request();
         let record = request
             .records
             .get_mut(0)
             .unwrap_or_else(|| panic!("capture request should have a record"));
-        record.preview = Some("preview-without-spaces-".repeat(16));
+        record.session_id = "019ff0bb-5993-70d3-b1ba-f56724b94919".to_owned();
+        record.conversation.snippets = vec![format!(
+            "{} final-conversation-marker",
+            "conversation words that should use the available detail width ".repeat(3)
+        )];
 
         let width = 120;
         let text = render_picker_capture(
@@ -1770,8 +1928,21 @@ mod tests {
 
         assert!(
             text.lines().all(|line| line.chars().count() <= width),
-            "long preview should not overflow stacked details frame:\n{text}"
+            "wrapped conversation should not overflow stacked details frame:\n{text}"
         );
+        assert!(text.contains("final-conversation-marker"), "{text}");
+        let session_id_index = text
+            .find("Session ID: 019ff0bb-5993-70d3-b1ba-f56724b94919")
+            .unwrap_or_else(|| panic!("selected session ID should render:\n{text}"));
+        let conversation_index = text
+            .find("Conversation")
+            .unwrap_or_else(|| panic!("conversation heading should render:\n{text}"));
+        assert!(
+            session_id_index < conversation_index,
+            "selected session ID should appear before Conversation:\n{text}"
+        );
+        assert!(!text.contains("Preview"), "{text}");
+        assert!(!text.contains("Metadata"), "{text}");
     }
 
     #[tokio::test]
@@ -1891,7 +2062,7 @@ mod tests {
             "sidecar details should stay within the 24-row frame:\n{text}"
         );
         assert!(
-            text.contains("type search"),
+            text.contains("Search: id:<id>"),
             "sidecar details should not clip the footer at 160x24:\n{text}"
         );
     }
@@ -1911,7 +2082,7 @@ mod tests {
         let lines = text.lines().collect::<Vec<_>>();
         let footer_index = lines
             .iter()
-            .position(|line| line.contains("type search"))
+            .position(|line| line.contains("Search: id:<id>"))
             .unwrap_or_else(|| panic!("sidecar footer should render:\n{text}"));
         let panel_bottom_index = lines[..footer_index]
             .iter()
@@ -1940,13 +2111,24 @@ mod tests {
 
         assert!(
             text.lines().any(|line| {
-                line.contains("Type to search")
-                    && line.contains("Scope:")
+                line.contains("Search: []")
+                    && line.contains("[all]")
                     && line.contains("Threads:")
                     && line.contains("Sort:")
             }),
             "wide sessions controls should fit on one line:\n{text}"
         );
+        assert!(
+            !text.contains("Search text, id:, b:branch, repo:name"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Search: id:<id> | b:<branch> | repo:<name>    ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"),
+            "wide footer should group qualified search and shortcuts:\n{text}"
+        );
+        assert!(!text.contains("type search"), "{text}");
+        assert!(!text.contains("enter resume"), "{text}");
+        assert!(!text.contains("esc exit"), "{text}");
     }
 
     #[tokio::test]
@@ -1973,7 +2155,7 @@ mod tests {
             "long search controls should not grow the picker past the 24-row frame:\n{text}"
         );
         assert!(
-            text.contains("type search"),
+            text.contains("Search: id:<id>"),
             "wrapped controls should not clip the footer at 100x24:\n{text}"
         );
         assert!(
@@ -2232,16 +2414,21 @@ mod tests {
         SessionPickerRecord {
             session_id: session_id.to_owned(),
             title: title.to_owned(),
+            full_title: title.to_owned(),
             recency: "now".to_owned(),
             created: "1d ago".to_owned(),
             recency_at_ms: Some(2_000),
             created_at_ms: Some(1_000),
             branch: "main".to_owned(),
+            persisted_branch: "main".to_owned(),
             context: cwd.rsplit('/').next().unwrap_or(cwd).to_owned(),
             cwd: Some(cwd.to_owned()),
+            normalized_cwd: Some(cwd.to_owned()),
+            git_origin_url: Some("https://github.com/shravan-agent/codex-router.git".to_owned()),
             provider: Some(provider.to_owned()),
             model: Some("gpt-5-codex".to_owned()),
             preview: Some(format!("{title} preview text")),
+            first_user_message: format!("{title} recent question"),
             conversation: SessionConversationPreview {
                 snippets: vec![
                     format!("{title} recent question"),
