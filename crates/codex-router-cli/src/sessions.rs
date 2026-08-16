@@ -37,8 +37,8 @@ use crate::presentation::session_picker::run_sessions_picker;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
-const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 256 * 1024;
-const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 4;
+const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 1024 * 1024;
+const SESSION_CONVERSATION_MAX_SNIPPETS: usize = 10;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
 const SESSION_RECORD_PAGE_SIZE: usize = 250;
@@ -1771,34 +1771,58 @@ fn read_history_tail(path: &Path) -> std::io::Result<String> {
     let file_len = metadata.len();
     let start = file_len.saturating_sub(SESSION_CONVERSATION_MAX_READ_BYTES);
     file.seek(SeekFrom::Start(start))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
+    let tail_len = file_len - start;
+    let mut bytes = Vec::with_capacity(tail_len as usize);
+    file.take(SESSION_CONVERSATION_MAX_READ_BYTES)
+        .read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
     if start > 0
         && let Some((_, remaining)) = text.split_once('\n')
     {
         return Ok(remaining.to_owned());
     }
-    Ok(text)
+    Ok(text.into_owned())
 }
 
 fn extract_recent_conversation_snippets(text: &str) -> Vec<String> {
-    let mut snippets = Vec::new();
+    let mut recent_messages = Vec::new();
+    let mut latest_user_message = None;
     for line in text.lines() {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let Some(snippet) = conversation_snippet_from_event(&event) else {
+        let Some(message) = conversation_message_from_event(&event) else {
             continue;
         };
-        snippets.push(snippet);
-        if snippets.len() > SESSION_CONVERSATION_MAX_SNIPPETS {
-            snippets.remove(0);
+        if message.is_user {
+            latest_user_message = Some(message.clone());
+        }
+        recent_messages.push(message);
+        if recent_messages.len() > SESSION_CONVERSATION_MAX_SNIPPETS {
+            recent_messages.remove(0);
         }
     }
-    snippets
+    if !recent_messages.iter().any(|message| message.is_user)
+        && let Some(latest_user_message) = latest_user_message
+    {
+        if recent_messages.len() == SESSION_CONVERSATION_MAX_SNIPPETS {
+            recent_messages.remove(0);
+        }
+        recent_messages.insert(0, latest_user_message);
+    }
+    recent_messages
+        .into_iter()
+        .map(|message| message.snippet)
+        .collect()
 }
 
-fn conversation_snippet_from_event(event: &Value) -> Option<String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConversationMessage {
+    snippet: String,
+    is_user: bool,
+}
+
+fn conversation_message_from_event(event: &Value) -> Option<ConversationMessage> {
     if event.get("type").and_then(Value::as_str) != Some("response_item") {
         return None;
     }
@@ -1819,10 +1843,10 @@ fn conversation_snippet_from_event(event: &Value) -> Option<String> {
     if normalized.is_empty() || is_control_conversation_text(normalized) {
         return None;
     }
-    Some(truncate_end(
-        normalized,
-        SESSION_CONVERSATION_SNIPPET_MAX_CHARS,
-    ))
+    Some(ConversationMessage {
+        snippet: truncate_end(normalized, SESSION_CONVERSATION_SNIPPET_MAX_CHARS),
+        is_user: role == "user",
+    })
 }
 
 fn collect_text_fragments(value: &Value, fragments: &mut Vec<String>) {
@@ -2547,6 +2571,80 @@ mod tests {
                 "please pull main".to_owned(),
                 "checking branch and upstream state".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn conversation_snippets_keep_ten_messages_and_retain_latest_user_context() {
+        let mut events = vec![json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "the user request that explains the work"}]
+            }
+        })];
+        events.extend((1..=11).map(|index| {
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": format!("assistant update {index}")}]
+                }
+            })
+        }));
+        let jsonl = events
+            .into_iter()
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let snippets = extract_recent_conversation_snippets(&jsonl);
+
+        assert_eq!(snippets.len(), 10);
+        assert_eq!(
+            snippets.first().map(String::as_str),
+            Some("the user request that explains the work")
+        );
+        assert_eq!(
+            snippets.get(1).map(String::as_str),
+            Some("assistant update 3")
+        );
+        assert_eq!(
+            snippets.last().map(String::as_str),
+            Some("assistant update 11")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn conversation_preview_reads_recent_message_from_one_mebibyte_tail() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-router-large-session-history-{}.jsonl",
+            std::process::id()
+        ));
+        let trailing_padding = format!("\n{}", "x\n".repeat(350 * 1024));
+        let recent_message = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "message inside the expanded tail"}]
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{recent_message}{trailing_padding}"))
+            .expect("test should write large history fixture");
+
+        let preview = SessionConversationPreview::from_rollout_path(Some(
+            path.to_str().expect("temp path should be utf-8"),
+        ));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            preview.snippets,
+            vec!["message inside the expanded tail".to_owned()]
         );
     }
 
