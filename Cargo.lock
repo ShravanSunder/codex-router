@@ -243,7 +243,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "base64",
  "chrono",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-codex"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "futures-util",
  "serde",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "hmac",
  "serde",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "codex-router-codex",
  "codex-router-core",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "codex-router-cli",
  "codex-router-codex",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "iocraft",
 ]

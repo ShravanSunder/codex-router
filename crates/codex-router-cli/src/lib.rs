@@ -6851,7 +6851,8 @@ exit 42
 
     #[test]
     fn sessions_list_table_renders_human_title_and_metadata() {
-        const SESSION_TITLE: &str = "Fix session table display";
+        const DERIVED_TITLE: &str = "Derived session title";
+        const EXPLICIT_NAME: &str = "Fix session table display";
         let test_root = TestRoot::new("sessions-table");
         must_ok(fs::create_dir(test_root.path()));
         let codex_home = test_root.path().join("codex-home");
@@ -6860,7 +6861,7 @@ exit 42
         must_ok(fs::create_dir(&project));
         create_codex_state_db_with_thread_rows(
             &codex_home.join("state_5.sqlite"),
-            SESSION_TITLE,
+            DERIVED_TITLE,
             &[CodexStateThreadFixture::new(
                 "thread-table",
                 &project,
@@ -6869,7 +6870,9 @@ exit 42
                 "cli",
                 "main",
                 1000,
-            )],
+            )
+            .with_search_fields(DERIVED_TITLE, "derived preview", "derived message")
+            .with_name(EXPLICIT_NAME)],
         );
 
         let output = run_cli(
@@ -6883,7 +6886,11 @@ exit 42
             .with_current_dir(project),
         );
 
-        assert!(output.stdout.contains(SESSION_TITLE));
+        assert!(
+            output
+                .stdout
+                .contains("Fix session table display | Derived session title")
+        );
         assert!(output.stdout.contains("main"));
         assert!(output.stdout.contains("thread-…"));
         assert!(!output.stdout.contains("┌"));
@@ -8922,6 +8929,7 @@ exit 42
         thread_source: Option<String>,
         git_branch: String,
         git_origin_url: Option<String>,
+        name: Option<String>,
         title: Option<String>,
         preview: Option<String>,
         first_user_message: Option<String>,
@@ -8947,6 +8955,7 @@ exit 42
                 thread_source: Some(thread_source.to_owned()),
                 git_branch: git_branch.to_owned(),
                 git_origin_url: None,
+                name: None,
                 title: None,
                 preview: None,
                 first_user_message: None,
@@ -8961,6 +8970,11 @@ exit 42
 
         fn with_git_origin(mut self, git_origin_url: &str) -> Self {
             self.git_origin_url = Some(git_origin_url.to_owned());
+            self
+        }
+
+        fn with_name(mut self, name: &str) -> Self {
+            self.name = Some(name.to_owned());
             self
         }
 
@@ -9152,6 +9166,7 @@ exit 42
                     source TEXT,
                     model_provider TEXT,
                     cwd TEXT,
+                    name TEXT,
                     title TEXT,
                     sandbox_policy TEXT,
                     approval_mode TEXT,
@@ -9204,13 +9219,13 @@ exit 42
                         r#"
                     INSERT INTO threads (
                         id, rollout_path, created_at, updated_at, source, model_provider, cwd,
-                        title, sandbox_policy, approval_mode, tokens_used, has_user_event,
+                        name, title, sandbox_policy, approval_mode, tokens_used, has_user_event,
                         archived, archived_at, git_sha, git_branch, git_origin_url, cli_version,
                         first_user_message, agent_nickname, agent_role, memory_mode, model,
                         reasoning_effort, agent_path, created_at_ms, updated_at_ms,
                         thread_source, preview, recency_at, recency_at_ms
                     ) VALUES (
-                        ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, 0, 1,
+                        ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, 1,
                         0, NULL, NULL, ?, ?, NULL,
                         ?, NULL, NULL, NULL, ?, NULL, NULL,
                         ?, ?, ?, ?, NULL, ?
@@ -9221,6 +9236,7 @@ exit 42
                     .bind(&row.source)
                     .bind(&row.provider)
                     .bind(row.cwd.display().to_string())
+                    .bind(&row.name)
                     .bind(row.title.as_deref().unwrap_or(prompt_canary))
                     .bind(&row.git_branch)
                     .bind(&row.git_origin_url)

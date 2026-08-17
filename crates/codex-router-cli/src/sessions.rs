@@ -178,6 +178,7 @@ enum SessionSearchTerm {
 
 struct SessionSearchDocument<'a> {
     session_id: &'a str,
+    name: &'a str,
     title: &'a str,
     preview: &'a str,
     first_user_message: &'a str,
@@ -217,6 +218,7 @@ impl SessionSearchExpression {
 
     fn matches(&self, document: &SessionSearchDocument<'_>) -> bool {
         let session_id = document.session_id.to_lowercase();
+        let name = document.name.to_lowercase();
         let title = document.title.to_lowercase();
         let preview = document.preview.to_lowercase();
         let first_user_message = document.first_user_message.to_lowercase();
@@ -229,6 +231,7 @@ impl SessionSearchExpression {
                 !value.is_empty()
                     && [
                         session_id.as_str(),
+                        name.as_str(),
                         title.as_str(),
                         preview.as_str(),
                         first_user_message.as_str(),
@@ -735,6 +738,7 @@ async fn load_session_records_for_query_with_identity(
             let source = row.get::<Option<String>, _>("source");
             let thread_source = row.get::<Option<String>, _>("thread_source");
             let cwd = row.get::<Option<String>, _>("cwd");
+            let name = row.get::<Option<String>, _>("name");
             let title = row.get::<Option<String>, _>("title");
             let preview = row.get::<Option<String>, _>("preview");
             let first_user_message = row.get::<Option<String>, _>("first_user_message");
@@ -751,10 +755,12 @@ async fn load_session_records_for_query_with_identity(
                 thread_source,
                 git_branch: row.get::<Option<String>, _>("git_branch"),
                 git_origin_url: row.get::<Option<String>, _>("git_origin_url"),
+                name: name.clone(),
                 title: title.clone(),
                 preview: preview.clone(),
                 first_user_message: first_user_message.clone(),
                 display_title: display_title_from_session_fields(
+                    name.as_deref(),
                     title.as_deref(),
                     preview.as_deref(),
                     first_user_message.as_deref(),
@@ -802,7 +808,7 @@ fn session_record_page_query(
         r#"
             SELECT
                 id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
-                git_origin_url, title, preview, first_user_message,
+                git_origin_url, name, title, preview, first_user_message,
                 created_at_ms, updated_at_ms, recency_at_ms
             FROM threads INDEXED BY "#,
     );
@@ -1640,6 +1646,8 @@ struct SessionRecord {
     #[serde(skip)]
     git_origin_url: Option<String>,
     #[serde(skip)]
+    name: Option<String>,
+    #[serde(skip)]
     title: Option<String>,
     #[serde(skip)]
     preview: Option<String>,
@@ -1670,6 +1678,7 @@ impl SessionRecord {
             .unwrap_or_default();
         expression.matches(&SessionSearchDocument {
             session_id: &self.session_id,
+            name: self.name.as_deref().unwrap_or_default(),
             title: self.title.as_deref().unwrap_or_default(),
             preview: self.preview.as_deref().unwrap_or_default(),
             first_user_message: self.first_user_message.as_deref().unwrap_or_default(),
@@ -1717,6 +1726,7 @@ pub(crate) struct SessionPickerRecord {
     pub(crate) session_id: String,
     pub(crate) title: String,
     pub(crate) full_title: String,
+    pub(crate) explicit_name: Option<String>,
     pub(crate) recency: String,
     pub(crate) created: String,
     pub(crate) recency_at_ms: Option<i64>,
@@ -1770,6 +1780,7 @@ impl SessionPickerRecord {
             .unwrap_or_default();
         expression.matches(&SessionSearchDocument {
             session_id: &self.session_id,
+            name: self.explicit_name.as_deref().unwrap_or_default(),
             title: &self.full_title,
             preview: self.preview.as_deref().unwrap_or_default(),
             first_user_message: &self.first_user_message,
@@ -1783,6 +1794,7 @@ impl SessionPickerRecord {
         Self {
             session_id: record.session_id.clone(),
             title: record.display_title().to_owned(),
+            explicit_name: record.name.clone(),
             full_title: record.title.clone().unwrap_or_default(),
             recency: format_recency_at_ms(record.recency_at_ms),
             created: format_recency_at_ms(record.created_at_ms),
@@ -2038,14 +2050,24 @@ fn session_context_from_cwd(cwd: &str) -> String {
 }
 
 fn display_title_from_session_fields(
+    name: Option<&str>,
     title: Option<&str>,
     preview: Option<&str>,
     first_user_message: Option<&str>,
 ) -> Option<String> {
-    [title, preview, first_user_message]
+    let explicit_name = name.and_then(normalize_display_title);
+    let derived_title = [title, preview, first_user_message]
         .into_iter()
         .flatten()
-        .find_map(normalize_display_title)
+        .find_map(normalize_display_title);
+    match (explicit_name, derived_title) {
+        (Some(name), Some(derived_title)) => Some(truncate_end(
+            &format!("{name} | {derived_title}"),
+            SESSION_TITLE_MAX_CHARS,
+        )),
+        (Some(name), None) | (None, Some(name)) => Some(name),
+        (None, None) => None,
+    }
 }
 
 fn normalize_display_title(value: &str) -> Option<String> {
@@ -2176,6 +2198,7 @@ mod tests {
             thread_source: None,
             git_branch: Some("main".to_owned()),
             git_origin_url: git_origin_url.map(str::to_owned),
+            name: None,
             title: None,
             preview: None,
             first_user_message: first_user_message.map(str::to_owned),
@@ -2361,6 +2384,49 @@ mod tests {
             record.matches_search(&expression)
         );
         assert!(!picker_record.matches_search(&expression));
+    }
+
+    #[test]
+    fn explicit_session_name_precedes_derived_title_and_is_searchable() {
+        let mut record = search_consistency_record(None, None);
+        record.name = Some("Website stuff".to_owned());
+        record.title = Some("Derived first-message title".to_owned());
+        record.display_title = super::display_title_from_session_fields(
+            record.name.as_deref(),
+            record.title.as_deref(),
+            record.preview.as_deref(),
+            record.first_user_message.as_deref(),
+        );
+
+        let picker_record = SessionPickerRecord::from_record(&record);
+
+        assert_eq!(
+            picker_record.title,
+            "Website stuff | Derived first-message title"
+        );
+        for query in ["website stuff", "derived first-message"] {
+            let expression = SessionSearchExpression::parse(query);
+            assert!(record.matches_search(&expression), "loader search: {query}");
+            assert!(
+                picker_record.matches_search(&expression),
+                "picker search: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_explicit_session_name_keeps_the_previous_display_fallback() {
+        let mut record = search_consistency_record(None, Some("fallback first message"));
+        record.title = Some("previous title".to_owned());
+        record.display_title = super::display_title_from_session_fields(
+            record.name.as_deref(),
+            record.title.as_deref(),
+            record.preview.as_deref(),
+            record.first_user_message.as_deref(),
+        );
+        let picker_record = SessionPickerRecord::from_record(&record);
+
+        assert_eq!(picker_record.title, "previous title");
     }
 
     #[cfg(unix)]
@@ -2629,6 +2695,7 @@ mod tests {
     fn qualified_search_ands_terms_and_keeps_branch_out_of_bare_matching() {
         let document = SessionSearchDocument {
             session_id: "019abc-session",
+            name: "Named router session",
             title: "Fix router crash",
             preview: "Investigate deleted worktree sessions",
             first_user_message: "please make search robust",
@@ -2652,6 +2719,7 @@ mod tests {
     fn qualified_search_handles_unicode_literals_unknown_prefixes_and_empty_qualifiers() {
         let document = SessionSearchDocument {
             session_id: "thread-percent",
+            name: "ÉCHEC named session",
             title: "ÉCHEC 100%_safe\\path",
             preview: "ticket:router",
             first_user_message: "",
