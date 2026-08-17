@@ -59,6 +59,7 @@ pub(crate) fn picker_record(
         session_id: session_id.to_owned(),
         title: title.to_owned(),
         full_title: title.to_owned(),
+        explicit_name: None,
         recency: "now".to_owned(),
         created: "1d ago".to_owned(),
         recency_at_ms: Some(2_000),
