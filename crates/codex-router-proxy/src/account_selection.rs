@@ -23,6 +23,7 @@ use codex_router_selection::burn_down::BurnDownRouteBandAssessmentResult;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
+use codex_router_selection::burn_down::RoutingExclusion;
 use codex_router_selection::burn_down::SelectedPool;
 use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
 use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
@@ -937,7 +938,7 @@ where
             BurnDownRouteBandAssessmentInput::new(route_band, now_unix_seconds, selector_accounts);
         let assessment = assess_route_band(assessment_input);
         if assessment.selected_pool() == SelectedPool::None {
-            return Err(account_selection_rejected_no_eligible(route_band.as_str()));
+            return Err(empty_assessment_selection_error(&assessment));
         }
 
         let mut weighted_selectors =
@@ -1084,7 +1085,7 @@ where
                         },
                     });
                 }
-                return Err(account_selection_rejected_no_eligible(route_band.as_str()));
+                return Err(empty_assessment_selection_error(&assessment));
             }
 
             let affinity_owner_account_id = if route_kind.previous_response_affinity_capable() {
@@ -1465,9 +1466,7 @@ fn select_from_burn_down_assessment_without_hold(
     _weighted_selector: &mut WeightedDeficitSelector,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
     if assessment.selected_pool() == SelectedPool::None {
-        return Err(HttpProxyError::Selection {
-            reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
-        });
+        return Err(empty_assessment_selection_error(assessment));
     }
     let selected_account_id = strict_preferred_account_id(assessment)?;
     let selected_assessment = assessment
@@ -1495,7 +1494,7 @@ fn select_from_burn_down_assessment(
     let weighted_candidates = assessment.weighted_candidates();
     if weighted_candidates.is_empty() {
         account_holds.remove(route_band);
-        return Err(account_selection_rejected_no_eligible(route_band));
+        return Err(empty_assessment_selection_error(assessment));
     }
 
     if let Some(held_account_id) = reusable_held_account_id(
@@ -1537,6 +1536,39 @@ fn select_from_burn_down_assessment(
         selected_account_id,
         selected_reason,
     ))
+}
+
+fn empty_assessment_selection_error(
+    assessment: &BurnDownRouteBandAssessmentResult,
+) -> HttpProxyError {
+    let route_band = assessment.route_band().as_str();
+    if assessment_has_unavailable_quota_authority(assessment) {
+        crate::telemetry::record_account_rejected(route_band, "quota_authority_unavailable");
+        tracing::warn!(
+            route_band,
+            reason = "quota_authority_unavailable",
+            "codex_router.account_selection_rejected"
+        );
+        return HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::StateUnavailable,
+        };
+    }
+
+    account_selection_rejected_no_eligible(route_band)
+}
+
+fn assessment_has_unavailable_quota_authority(
+    assessment: &BurnDownRouteBandAssessmentResult,
+) -> bool {
+    assessment.accounts().iter().any(|account| {
+        matches!(
+            account.freshness(),
+            QuotaEvidenceFreshness::Stale | QuotaEvidenceFreshness::Unknown
+        ) && matches!(
+            account.routing_exclusion(),
+            RoutingExclusion::None | RoutingExclusion::WeeklyQuotaFloor
+        )
+    })
 }
 
 fn strict_preferred_account_id(
@@ -2077,6 +2109,11 @@ fn post_exhaustion_assessment_has_safe_known_fresh_alternative(
 ) -> Result<bool, StateStoreError> {
     let selected_pool = assessment.selected_pool();
     if selected_pool == SelectedPool::None {
+        if assessment_has_unavailable_quota_authority(assessment) {
+            return Err(StateStoreError::Sqlite {
+                message: "post-exhaustion alternative quota evidence unavailable".to_owned(),
+            });
+        }
         return Ok(false);
     }
     if selected_pool == SelectedPool::Unknown {
@@ -2576,6 +2613,78 @@ mod tests {
             assert_eq!(selected.account_id(), &strong_account_id);
             assert_ne!(selected.account_id(), &weak_account_id);
         }
+    }
+
+    #[test]
+    fn stale_quota_authority_is_unavailable_not_all_accounts_exhausted() {
+        let account_inputs = vec![
+            codex_router_selection::burn_down::BurnDownAccountInput::new(
+                account_id("acct_stale_authority"),
+                "stale-authority",
+                vec![
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Stale,
+                    )
+                    .with_remaining_headroom(90)
+                    .with_reset_unix_seconds(18_000),
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Stale,
+                    )
+                    .with_remaining_headroom(90)
+                    .with_reset_unix_seconds(604_800),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500),
+            codex_router_selection::burn_down::BurnDownAccountInput::new(
+                account_id("acct_fresh_exhausted"),
+                "fresh-exhausted",
+                vec![
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Ineligible,
+                    )
+                    .with_remaining_headroom(0)
+                    .with_reset_unix_seconds(18_000),
+                    codex_router_selection::burn_down::QuotaWindowFact::new(
+                        codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
+                        codex_router_selection::burn_down::QuotaWindowStatus::Ineligible,
+                    )
+                    .with_remaining_headroom(0)
+                    .with_reset_unix_seconds(604_800),
+                ],
+            ),
+        ];
+        let assessment = codex_router_selection::burn_down::assess_route_band(
+            codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput::new(
+                codex_router_core::routes::RouteBand::Responses,
+                1_001,
+                account_inputs,
+            ),
+        );
+        assert_eq!(
+            assessment.selected_pool(),
+            codex_router_selection::burn_down::SelectedPool::None
+        );
+
+        let error = super::select_from_burn_down_assessment_without_hold(
+            &assessment,
+            &mut super::WeightedDeficitSelector::default(),
+        )
+        .expect_err("stale authority must not select an account");
+
+        assert!(matches!(
+            error,
+            crate::http_sse::HttpProxyError::Selection {
+                reason: super::QuotaAwareAccountSelectorError::StateUnavailable,
+            }
+        ));
+        assert!(
+            super::post_exhaustion_assessment_has_safe_known_fresh_alternative(&assessment)
+                .is_err(),
+            "post-exhaustion classification must not report stale authority as proven exhaustion"
+        );
     }
 
     #[test]

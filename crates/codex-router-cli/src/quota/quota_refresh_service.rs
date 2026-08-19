@@ -99,6 +99,7 @@ where
         .collect::<HashMap<_, _>>();
     let mut refreshed_count = 0_u64;
     let mut failed_count = 0_u64;
+    let mut weekly_floor_accounts = Vec::<AccountId>::new();
     for account in accounts
         .iter()
         .filter(|account| account.status() == AccountStatus::Enabled)
@@ -321,9 +322,11 @@ where
                     window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS
                         && window.remaining_headroom.saturating_mul(100) <= floor_basis_points
                 })
-                && let Some(weekly_floor_observer) = weekly_floor_observer
+                && !weekly_floor_accounts
+                    .iter()
+                    .any(|account_id| account_id == account.account_id())
             {
-                weekly_floor_observer.weekly_quota_floor_reached(account.account_id());
+                weekly_floor_accounts.push(account.account_id().clone());
             }
             tracing::info!(
                 account.hash = telemetry_hash(account.account_id().as_str()),
@@ -337,6 +340,11 @@ where
         }
     }
     purge_old_quota_history(&quota_history_state, observed_unix_seconds).await?;
+    if let Some(weekly_floor_observer) = weekly_floor_observer {
+        for account_id in &weekly_floor_accounts {
+            weekly_floor_observer.weekly_quota_floor_reached(account_id);
+        }
+    }
 
     writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)?;
     if failed_count > 0 {

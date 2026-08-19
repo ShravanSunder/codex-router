@@ -58,6 +58,8 @@ use token::TokenCommandError;
 use token::export_token_assignment;
 
 const DEFAULT_PROFILE_PORT: u16 = 8787;
+const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
+const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 240;
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
@@ -830,8 +832,12 @@ impl ServeCommand {
             secret_root,
             upstream_base_url,
             now_unix_seconds: options.now_unix_seconds,
-            max_snapshot_age_seconds: options.max_snapshot_age_seconds.unwrap_or(300),
-            quota_refresh_interval_seconds: options.quota_refresh_interval_seconds.unwrap_or(300),
+            max_snapshot_age_seconds: options
+                .max_snapshot_age_seconds
+                .unwrap_or(DEFAULT_MAX_SNAPSHOT_AGE_SECONDS),
+            quota_refresh_interval_seconds: options
+                .quota_refresh_interval_seconds
+                .unwrap_or(DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS),
             background_quota_refresh_enabled: !options.disable_background_quota_refresh,
             require_local_token: options.require_local_token,
             max_connections: options.max_connections.unwrap_or(usize::MAX),
@@ -4411,6 +4417,18 @@ exit 42
     }
 
     #[test]
+    fn background_quota_refresh_cycle_delay_subtracts_elapsed_work() {
+        assert_eq!(
+            crate::quota::refresh_cycle_delay(Duration::from_secs(240), Duration::from_secs(17),),
+            Duration::from_secs(223)
+        );
+        assert_eq!(
+            crate::quota::refresh_cycle_delay(Duration::from_secs(240), Duration::from_secs(241),),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn background_quota_refresh_worker_reports_refresh_failures() {
         let test_root = TestRoot::new("background-quota-refresh-diagnostics");
         must_ok(fs::create_dir(test_root.path()));
@@ -4902,6 +4920,94 @@ exit 42
         assert!(status_output.stdout.contains("next"));
         assert!(!status_output.stdout.contains("needs probe"));
         assert!(status_output.stderr.is_empty());
+    }
+
+    #[test]
+    fn quota_refresh_defers_floor_notification_until_complete_account_batch() {
+        let test_root = TestRoot::new("quota-refresh-deferred-floor-notification");
+        must_ok(fs::create_dir(test_root.path()));
+        let router_root = test_root.path().join("router");
+        must_ok(fs::create_dir_all(&router_root));
+        let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+        let floor_account_id = account_id("acct_a_floor");
+        let healthy_account_id = account_id("acct_b_healthy");
+        let floor_account = AccountRecord::new(
+            floor_account_id.clone(),
+            "floor-account",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        let healthy_account = AccountRecord::new(
+            healthy_account_id.clone(),
+            "healthy-account",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &floor_account,
+        ));
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &healthy_account,
+        ));
+        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        for (account_id, access_token) in [
+            (&floor_account_id, "floor-access-token"),
+            (&healthy_account_id, "healthy-access-token"),
+        ] {
+            let bundle_key = must_ok(account_credential_bundle_key(account_id, 1));
+            must_ok(
+                secrets.write_secret(
+                    &bundle_key,
+                    &must_ok(
+                        AccountCredentialBundle::imported_codex_auth(
+                            access_token,
+                            Some(format!("{access_token}-refresh")),
+                        )
+                        .with_expires_unix_seconds(2_000)
+                        .to_secret_string(),
+                    ),
+                ),
+            );
+        }
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let mutation = must_ok(test_async_runtime().block_on(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
+        ));
+        must_ok(
+            test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
+                &floor_account_id,
+                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+            )),
+        );
+        test_async_runtime().block_on(mutation.close());
+        let floor_observer = Arc::new(RecordingWeeklyFloorObserver::default());
+        let provider = FloorNotificationOrderingQuotaProvider::new(
+            floor_account_id.clone(),
+            healthy_account_id,
+            Arc::clone(&floor_observer),
+        );
+        let mut stdout = Vec::new();
+
+        must_ok(refresh_quota_store_paths_with_floor_observer(
+            &mut stdout,
+            &router_root.join("state.sqlite"),
+            &router_root.join("secrets"),
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds: 1_100,
+                weekly_floor_observer: Some(floor_observer.as_ref()),
+            },
+        ));
+
+        assert_eq!(
+            *lock_test_mutex(&floor_observer.account_ids, "weekly floor observer"),
+            vec![floor_account_id]
+        );
     }
 
     #[test]
@@ -7883,7 +7989,7 @@ exit 42
     }
 
     #[test]
-    fn serve_command_defaults_to_live_runtime_clock() {
+    fn serve_command_defaults_to_live_runtime_clock_with_quota_freshness_margin() {
         let command = match CliCommand::parse([
             OsString::from("serve"),
             OsString::from("--state-db"),
@@ -7899,6 +8005,15 @@ exit 42
         };
 
         assert_eq!(command.now_unix_seconds, None);
+        assert!(
+            command.quota_refresh_interval_seconds < command.max_snapshot_age_seconds,
+            "background refresh must run before live selector evidence expires"
+        );
+        assert!(
+            command.quota_refresh_interval_seconds
+                < crate::quota::DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS,
+            "background refresh must run before persisted selector evidence becomes stale"
+        );
     }
 
     #[test]
@@ -8649,6 +8764,70 @@ exit 42
 
     struct StaticQuotaRefreshProvider {
         windows: Vec<QuotaRefreshProviderWindow>,
+    }
+
+    struct FloorNotificationOrderingQuotaProvider {
+        floor_account_id: AccountId,
+        healthy_account_id: AccountId,
+        floor_observer: Arc<RecordingWeeklyFloorObserver>,
+    }
+
+    impl FloorNotificationOrderingQuotaProvider {
+        fn new(
+            floor_account_id: AccountId,
+            healthy_account_id: AccountId,
+            floor_observer: Arc<RecordingWeeklyFloorObserver>,
+        ) -> Self {
+            Self {
+                floor_account_id,
+                healthy_account_id,
+                floor_observer,
+            }
+        }
+    }
+
+    impl QuotaRefreshProvider for FloorNotificationOrderingQuotaProvider {
+        async fn fetch_quota(
+            &self,
+            request: QuotaRefreshProviderRequest,
+        ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+            if request.account_id() == &self.healthy_account_id
+                && request.route_band() == "responses"
+            {
+                assert!(
+                    lock_test_mutex(&self.floor_observer.account_ids, "weekly floor observer",)
+                        .is_empty(),
+                    "floor reconnect notification fired before the healthy account was published"
+                );
+            }
+            let remaining_headroom = if request.account_id() == &self.floor_account_id {
+                0
+            } else {
+                80
+            };
+            let windows = if request.account_id() == &self.floor_account_id {
+                vec![
+                    QuotaRefreshProviderWindow {
+                        limit_window_seconds: 18_000,
+                        remaining_headroom,
+                        reset_unix_seconds: Some(20_000),
+                        effective: true,
+                    },
+                    QuotaRefreshProviderWindow {
+                        limit_window_seconds: 604_800,
+                        remaining_headroom,
+                        reset_unix_seconds: Some(614_800),
+                        effective: false,
+                    },
+                ]
+            } else {
+                verified_quota_windows(remaining_headroom)
+            };
+            Ok(QuotaRefreshProviderResponse {
+                windows,
+                reset_credits_available: None,
+            })
+        }
     }
 
     impl StaticQuotaRefreshProvider {

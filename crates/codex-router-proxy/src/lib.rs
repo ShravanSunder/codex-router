@@ -1582,6 +1582,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_repository_selector_reports_stale_authority_as_unavailable() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_stale_authority");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path)
+            .unwrap_or_else(|error| panic!("state store should open: {error}"));
+        let stale_account = AccountRecord::new(
+            account_id("acct_async_stale_authority"),
+            "async-stale-authority",
+            AccountStatus::Enabled,
+        );
+        let exhausted_account = AccountRecord::new(
+            account_id("acct_async_fresh_exhausted"),
+            "async-fresh-exhausted",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_selector_window_status_specs(
+            &state,
+            &stale_account,
+            "responses",
+            &[
+                (18_000, 90, true, SelectorQuotaWindowStatus::Stale),
+                (604_800, 90, false, SelectorQuotaWindowStatus::Stale),
+            ],
+        );
+        persist_account_with_selector_window_status_specs(
+            &state,
+            &exhausted_account,
+            "responses",
+            &[
+                (18_000, 0, true, SelectorQuotaWindowStatus::Ineligible),
+                (604_800, 0, false, SelectorQuotaWindowStatus::Ineligible),
+            ],
+        );
+        drop(state);
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("weekly-floor store should open: {error}"));
+        mutation
+            .set_weekly_quota_floor_by_label(
+                stale_account.label(),
+                Some(
+                    WeeklyQuotaFloorBasisPoints::new(500)
+                        .unwrap_or_else(|error| panic!("weekly floor should validate: {error}")),
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("weekly floor should persist: {error}"));
+        mutation.close().await;
+        let async_state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("async state store should open: {error}"));
+        let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
+
+        let error = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+            .expect_err("stale quota authority must not select an account");
+
+        assert_eq!(
+            error,
+            HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::StateUnavailable,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn usage_limit_observation_quarantines_account_before_next_selection() {
         let temp_dir = ProxyTestTempDir::new("usage_limit_observation_quarantine");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -2085,7 +2156,7 @@ mod tests {
             "responses",
             &[(18_000, 0, true), (604_800, 0, false)],
         );
-        persist_account_with_selector_window_specs(
+        persist_fresh_account_with_selector_window_specs(
             &state,
             &eligible,
             "responses",
@@ -2571,7 +2642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weekly_floor_exclusion_precedes_affinity_and_all_blocked_fails_closed() {
+    async fn weekly_floor_exclusion_precedes_affinity_and_stale_all_blocked_is_unavailable() {
         let temp_dir = ProxyTestTempDir::new("async_repository_selector_weekly_floor");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
@@ -2659,7 +2730,7 @@ mod tests {
                 )
                 .await,
             Err(HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+                reason: QuotaAwareAccountSelectorError::StateUnavailable
             })
         );
         mutation.close().await;
@@ -4733,7 +4804,7 @@ mod tests {
             &database_path,
             protected.account_id(),
             NOW,
-            100,
+            5,
             100,
             48,
             5 * 86_400,
@@ -4822,8 +4893,20 @@ mod tests {
             &state,
             &secrets,
             &second,
-            90,
+            4,
             "second-secret-token",
+        );
+        persist_fresh_account_with_selector_window_specs(
+            &state,
+            &first,
+            "responses",
+            &[(18_000, 5, true), (604_800, 5, false)],
+        );
+        persist_fresh_account_with_selector_window_specs(
+            &state,
+            &second,
+            "responses",
+            &[(18_000, 4, true), (604_800, 4, false)],
         );
         drop(state);
         set_weekly_floor_for_test(&database_path, first.label(), 500);
@@ -8913,6 +8996,49 @@ mod tests {
             {
                 panic!("selector quota window should persist: {error}");
             }
+        }
+    }
+
+    fn persist_fresh_account_with_selector_window_specs(
+        state: &SqliteStateStore,
+        account: &AccountRecord,
+        route_band: &str,
+        windows: &[(u64, u32, bool)],
+    ) {
+        let account_with_generation = account.clone().with_active_credential_generation(1);
+        if let Err(error) = AccountStateRepository::upsert_account(state, &account_with_generation)
+        {
+            panic!("account should persist: {error}");
+        }
+        let observed_unix_seconds = test_unix_seconds();
+        let selector_windows = windows
+            .iter()
+            .map(|(limit_window_seconds, remaining_headroom, effective)| {
+                PersistedSelectorQuotaWindow::new(
+                    account.account_id().clone(),
+                    route_band,
+                    *limit_window_seconds,
+                    SelectorQuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(*remaining_headroom)
+                .with_effective(*effective)
+                .with_observed_unix_seconds(observed_unix_seconds)
+                .with_reset_unix_seconds(
+                    observed_unix_seconds.saturating_add(*limit_window_seconds),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) =
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                state,
+                account.account_id(),
+                route_band,
+                &selector_windows,
+                observed_unix_seconds,
+                observed_unix_seconds.saturating_add(300),
+            )
+        {
+            panic!("fresh selector quota windows should persist: {error}");
         }
     }
 
