@@ -114,6 +114,22 @@ fn session_launch_keeps_remote_at_root_for_new_and_resume() {
             OsString::from("thread_123"),
         ]
     );
+    assert_eq!(
+        SessionLaunch::fork(&socket, &invoking_cwd, &user_arguments, "thread_123").arguments(),
+        vec![
+            OsString::from("--profile"),
+            OsString::from("codex-router"),
+            OsString::from("--remote"),
+            OsString::from("unix:///Users/owner/.codex/app-server-control/app-server-control.sock"),
+            OsString::from("--cd"),
+            OsString::from("/Users/owner/project"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.4"),
+            OsString::from("fork"),
+            OsString::from("--"),
+            OsString::from("thread_123"),
+        ]
+    );
 }
 
 #[test]
@@ -148,6 +164,21 @@ fn local_session_launch_keeps_router_profile_without_remote_attachment() {
             OsString::from("gpt-5.6-luna"),
             OsString::from("--yolo"),
             OsString::from("resume"),
+            OsString::from("--"),
+            OsString::from("thread_123"),
+        ]
+    );
+    assert_eq!(
+        SessionLaunch::fork_local(&invoking_cwd, &user_arguments, "thread_123").arguments(),
+        vec![
+            OsString::from("--profile"),
+            OsString::from("codex-router"),
+            OsString::from("--cd"),
+            OsString::from("/Users/owner/project"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.6-luna"),
+            OsString::from("--yolo"),
+            OsString::from("fork"),
             OsString::from("--"),
             OsString::from("thread_123"),
         ]

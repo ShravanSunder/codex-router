@@ -613,6 +613,27 @@ impl SessionsLaunchTarget {
             ),
         }
     }
+
+    fn fork_launch(
+        &self,
+        codex_args: &[OsString],
+        session_id: &str,
+    ) -> codex_router_codex::SessionLaunch {
+        match self {
+            Self::Hosted {
+                app_server_socket,
+                invoking_cwd,
+            } => codex_router_codex::SessionLaunch::fork(
+                app_server_socket,
+                invoking_cwd,
+                codex_args,
+                session_id,
+            ),
+            Self::Local { invoking_cwd } => {
+                codex_router_codex::SessionLaunch::fork_local(invoking_cwd, codex_args, session_id)
+            }
+        }
+    }
 }
 
 fn sessions_launch_target(
@@ -986,6 +1007,10 @@ fn run_interactive_session(
             validate_resume_session_id(&session_id)?;
             runner.run_codex_resume(&command.codex_args, &session_id)
         }
+        SessionsPickerOutcome::ForkSession(session_id) => {
+            validate_resume_session_id(&session_id)?;
+            runner.run_codex_fork(&command.codex_args, &session_id)
+        }
         SessionsPickerOutcome::StartNewSession => runner.run_codex_new(&command.codex_args),
         SessionsPickerOutcome::TerminalTooNarrow => Err(SessionsCommandError::TerminalTooNarrow),
     }
@@ -1163,6 +1188,13 @@ pub(crate) trait SessionsCommandRunner {
         codex_args: &[OsString],
         session_id: &str,
     ) -> Result<(), SessionsCommandError>;
+
+    /// Launches `codex --profile codex-router fork <session_id>`.
+    fn run_codex_fork(
+        &mut self,
+        codex_args: &[OsString],
+        session_id: &str,
+    ) -> Result<(), SessionsCommandError>;
 }
 
 struct ProcessSessionsCommandRunner {
@@ -1191,6 +1223,25 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         session_id: &str,
     ) -> Result<(), SessionsCommandError> {
         let launch = self.launch_target.resume_launch(codex_args, session_id);
+        let status = Command::new("codex")
+            .args(launch.arguments())
+            .status()
+            .map_err(SessionsCommandError::CodexLaunch)?;
+        if !status.success() {
+            return Err(SessionsCommandError::CodexExit {
+                status: status.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn run_codex_fork(
+        &mut self,
+        codex_args: &[OsString],
+        session_id: &str,
+    ) -> Result<(), SessionsCommandError> {
+        let launch = self.launch_target.fork_launch(codex_args, session_id);
         let status = Command::new("codex")
             .args(launch.arguments())
             .status()

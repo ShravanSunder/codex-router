@@ -15,8 +15,9 @@ use crate::sessions::SessionsSource;
 
 pub(super) const MIN_PICKER_WIDTH: usize = 24;
 pub(super) const SEARCH_HELP: &str = "Search: id:<id> | b:<branch> | repo:<name>";
-pub(super) const SHORTCUT_HELP: &str = "ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort";
-const FULL_HELP: &str = "Search: id:<id> | b:<branch> | repo:<name>    ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort";
+pub(super) const SHORTCUT_HELP: &str =
+    "opt-enter fork | ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort";
+const FULL_HELP: &str = "Search: id:<id> | b:<branch> | repo:<name>    opt-enter fork | ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort";
 #[cfg(test)]
 const NARROW_PICKER_WIDTH: usize = 72;
 #[cfg(test)]
@@ -179,13 +180,15 @@ pub(super) fn footer_lines(width: usize) -> Vec<String> {
 
     if UnicodeWidthStr::width(SHORTCUT_HELP) <= width {
         lines.push(SHORTCUT_HELP.to_owned());
-    } else if width >= 28 {
+    } else if width >= 30 {
         lines.extend([
-            "ctrl-n new | ctrl-s scope".to_owned(),
-            "ctrl-t threads | ctrl-o sort".to_owned(),
+            "opt-enter fork | ctrl-n new".to_owned(),
+            "ctrl-s scope | ctrl-t threads".to_owned(),
+            "ctrl-o sort".to_owned(),
         ]);
     } else {
         lines.extend([
+            "opt-enter fork".to_owned(),
             "ctrl-n new".to_owned(),
             "| ctrl-s scope".to_owned(),
             "| ctrl-t threads".to_owned(),
@@ -311,8 +314,9 @@ mod tests {
         assert!(ultra_narrow.contains("Sort: [updated]"));
         assert!(ultra_narrow.contains("Search: id:<id>"));
         assert!(ultra_narrow.contains("b:<branch> | repo:<name>"));
-        assert!(ultra_narrow.contains("ctrl-n new | ctrl-s scope"));
-        assert!(ultra_narrow.contains("ctrl-t threads | ctrl-o sort"));
+        assert!(ultra_narrow.contains("opt-enter fork | ctrl-n new"));
+        assert!(ultra_narrow.contains("ctrl-s scope | ctrl-t threads"));
+        assert!(ultra_narrow.contains("ctrl-o sort"));
         assert!(ultra_narrow.contains('…'));
         assert!(ultra_narrow.lines().all(|line| line.chars().count() <= 36));
 
@@ -329,6 +333,7 @@ mod tests {
             assert!(text.contains("id:<id>"), "width {width}: {text}");
             assert!(text.contains("b:<branch>"), "width {width}: {text}");
             assert!(text.contains("repo:<name>"), "width {width}: {text}");
+            assert!(text.contains("opt-enter fork"), "width {width}: {text}");
             assert!(text.contains("ctrl-n new"), "width {width}: {text}");
             assert!(text.contains("ctrl-s scope"), "width {width}: {text}");
             assert!(text.contains("ctrl-t threads"), "width {width}: {text}");

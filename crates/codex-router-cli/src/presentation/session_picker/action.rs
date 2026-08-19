@@ -19,6 +19,7 @@ pub(crate) enum SessionsPickerKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SessionsPickerOutcome {
     ResumeSession(String),
+    ForkSession(String),
     StartNewSession,
     TerminalTooNarrow,
 }

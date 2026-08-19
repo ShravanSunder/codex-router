@@ -7213,6 +7213,56 @@ exit 42
     }
 
     #[test]
+    fn sessions_interactive_picker_forks_selected_session_with_injected_dependencies() {
+        let test_root = TestRoot::new("sessions-picker-fork-runner");
+        must_ok(fs::create_dir(test_root.path()));
+        let codex_home = test_root.path().join("codex-home");
+        let project = test_root.path().join("project");
+        must_ok(fs::create_dir(&codex_home));
+        must_ok(fs::create_dir(&project));
+        create_codex_state_db_with_thread_rows(
+            &codex_home.join("state_5.sqlite"),
+            "PICKER_FORK_CANARY",
+            &[CodexStateThreadFixture::new(
+                "thread-fork-source",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                1000,
+            )],
+        );
+        let command =
+            match CliCommand::parse([OsString::from("sessions"), OsString::from("--yolo")]) {
+                Ok(CliCommand::Sessions(command)) => command,
+                Ok(other) => panic!("sessions command should parse, got {other:?}"),
+                Err(error) => panic!("sessions command should parse: {error}"),
+            };
+        let context = CliContext::new(vec![
+            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+            ("HOME".to_owned(), test_root.path().display().to_string()),
+        ])
+        .with_current_dir(project);
+        let mut runner = FakeSessionsCommandRunner::default();
+        let mut picker = FakeSessionsPicker::new_fork("thread-fork-source");
+        let mut stdout = Vec::new();
+
+        must_ok(crate::sessions::run_sessions_command_with_dependencies(
+            &mut stdout,
+            command,
+            &context,
+            &mut runner,
+            &mut picker,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(runner.forked_session_ids, ["thread-fork-source"]);
+        assert_eq!(runner.fork_codex_args, [[OsString::from("--yolo")]]);
+        assert!(runner.resumed_session_ids.is_empty());
+    }
+
+    #[test]
     fn sessions_interactive_picker_loads_older_repo_matches_beyond_default_limit() {
         let test_root = TestRoot::new("sessions-picker-older-repo-match");
         must_ok(fs::create_dir(test_root.path()));
@@ -8996,6 +9046,8 @@ exit 42
         new_codex_args: Vec<Vec<OsString>>,
         resumed_session_ids: Vec<String>,
         resume_codex_args: Vec<Vec<OsString>>,
+        forked_session_ids: Vec<String>,
+        fork_codex_args: Vec<Vec<OsString>>,
     }
 
     impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
@@ -9014,6 +9066,16 @@ exit 42
         ) -> Result<(), crate::sessions::SessionsCommandError> {
             self.resume_codex_args.push(codex_args.to_vec());
             self.resumed_session_ids.push(session_id.to_owned());
+            Ok(())
+        }
+
+        fn run_codex_fork(
+            &mut self,
+            codex_args: &[OsString],
+            session_id: &str,
+        ) -> Result<(), crate::sessions::SessionsCommandError> {
+            self.fork_codex_args.push(codex_args.to_vec());
+            self.forked_session_ids.push(session_id.to_owned());
             Ok(())
         }
     }
@@ -9046,6 +9108,20 @@ exit 42
             Self {
                 selected_outcome:
                     crate::presentation::session_picker::SessionsPickerOutcome::StartNewSession,
+                offered_session_ids: Vec::new(),
+                offered_labels: Vec::new(),
+                new_session_args_display: None,
+                loader_queries: Vec::new(),
+                loaded_session_ids: Vec::new(),
+            }
+        }
+
+        fn new_fork(session_id: &str) -> Self {
+            Self {
+                selected_outcome:
+                    crate::presentation::session_picker::SessionsPickerOutcome::ForkSession(
+                        session_id.to_owned(),
+                    ),
                 offered_session_ids: Vec::new(),
                 offered_labels: Vec::new(),
                 new_session_args_display: None,

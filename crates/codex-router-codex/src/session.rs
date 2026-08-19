@@ -60,6 +60,35 @@ impl SessionLaunch {
         Self { arguments }
     }
 
+    /// Builds arguments for forking one interactive session.
+    #[must_use]
+    pub fn fork(
+        socket_path: &Path,
+        invoking_cwd: &Path,
+        user_arguments: &[OsString],
+        session_id: &str,
+    ) -> Self {
+        let mut arguments = root_arguments(socket_path, invoking_cwd, user_arguments);
+        arguments.extend([
+            OsString::from("fork"),
+            OsString::from("--"),
+            OsString::from(session_id),
+        ]);
+        Self { arguments }
+    }
+
+    /// Builds arguments for locally forking one interactive session.
+    #[must_use]
+    pub fn fork_local(invoking_cwd: &Path, user_arguments: &[OsString], session_id: &str) -> Self {
+        let mut arguments = local_root_arguments(invoking_cwd, user_arguments);
+        arguments.extend([
+            OsString::from("fork"),
+            OsString::from("--"),
+            OsString::from(session_id),
+        ]);
+        Self { arguments }
+    }
+
     /// Returns the projected root arguments.
     #[must_use]
     pub fn arguments(&self) -> Vec<OsString> {

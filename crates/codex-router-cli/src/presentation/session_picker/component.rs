@@ -241,6 +241,13 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 {
                     model_value.handle_key(SessionsPickerKey::SearchChar(character));
                 }
+                KeyCode::Enter if modifiers.contains(KeyModifiers::ALT) => {
+                    if let Some(session_id) = model_value.focused_session_id() {
+                        selected_outcome.set(Some(SessionsPickerOutcome::ForkSession(
+                            session_id.to_owned(),
+                        )));
+                    }
+                }
                 KeyCode::Enter => selected_outcome.set(model_value.activation_outcome_for_focus()),
                 KeyCode::Esc => {
                     if model_value.search.is_empty() {
@@ -1127,6 +1134,9 @@ pub(crate) fn run_sessions_picker_test_harness() -> io::Result<()> {
         Some(SessionsPickerOutcome::ResumeSession(session_id)) => {
             format!("SESSION_PICKER_OUTCOME resume:{session_id}")
         }
+        Some(SessionsPickerOutcome::ForkSession(session_id)) => {
+            format!("SESSION_PICKER_OUTCOME fork:{session_id}")
+        }
         Some(SessionsPickerOutcome::StartNewSession) => {
             "SESSION_PICKER_OUTCOME start-new".to_owned()
         }
@@ -1286,6 +1296,29 @@ mod tests {
         assert_eq!(
             selected_outcome,
             Some(SessionsPickerOutcome::ResumeSession("thread-b".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_option_enter_forks_the_focused_existing_session() {
+        let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+        let _frames = element! {
+            SessionsPickerComponent(
+                request: picker_request(),
+                width: 100usize,
+                selected_outcome_out: &mut selected_outcome,
+            )
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![alt_enter_key()],
+        )))
+        .map(|canvas| canvas.to_string())
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            selected_outcome,
+            Some(SessionsPickerOutcome::ForkSession("thread-a".to_owned()))
         );
     }
 
@@ -1870,6 +1903,10 @@ mod tests {
                 text.contains("ctrl-n new"),
                 "capture should expose the new-thread shortcut:\n{text}"
             );
+            assert!(
+                text.contains("opt-enter fork"),
+                "capture should expose the fork shortcut:\n{text}"
+            );
             let lines = text.lines().collect::<Vec<_>>();
             let footer_index = lines
                 .iter()
@@ -2157,7 +2194,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("Search: id:<id> | b:<branch> | repo:<name>    ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"),
+            text.contains("Search: id:<id> | b:<branch> | repo:<name>    opt-enter fork | ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"),
             "wide footer should group qualified search and shortcuts:\n{text}"
         );
         assert!(!text.contains("type search"), "{text}");
@@ -2419,6 +2456,12 @@ mod tests {
     fn ctrl_key(character: char) -> TerminalEvent {
         let mut event = KeyEvent::new(KeyEventKind::Press, KeyCode::Char(character));
         event.modifiers = KeyModifiers::CONTROL;
+        TerminalEvent::Key(event)
+    }
+
+    fn alt_enter_key() -> TerminalEvent {
+        let mut event = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+        event.modifiers = KeyModifiers::ALT;
         TerminalEvent::Key(event)
     }
 
