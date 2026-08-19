@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -90,7 +91,7 @@ use crate::router_root_or_default;
 
 const DEFAULT_ROUTE_BANDS: &[&str] = &["responses", "models"];
 const USER_QUOTA_ROUTE_BAND: &str = "responses";
-const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 300;
+pub(crate) const DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS: u64 = 360;
 const QUOTA_STATUS_SAMPLE_FRESH_SECONDS: u64 = 900;
 const QUOTA_STATUS_SHORT_BURN_LOOKBACK_SECONDS: u64 = 30 * 60;
 const QUOTA_STATUS_WEEKLY_BURN_LOOKBACK_SECONDS: u64 = 3 * 60 * 60;

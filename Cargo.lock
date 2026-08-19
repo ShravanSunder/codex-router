@@ -62,7 +62,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -73,7 +73,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -243,7 +243,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "base64",
  "chrono",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-codex"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "futures-util",
  "serde",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "hmac",
  "serde",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "codex-router-codex",
  "codex-router-core",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "codex-router-cli",
  "codex-router-codex",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "iocraft",
 ]
@@ -693,7 +693,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -927,9 +927,9 @@ checksum = "be136d9dacc2a13cc70bb6c8f902b414fb2641f8db1314637c6b7933411a8f82"
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1453,7 +1453,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1944,7 +1944,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2237,14 +2237,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]
@@ -2422,7 +2422,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

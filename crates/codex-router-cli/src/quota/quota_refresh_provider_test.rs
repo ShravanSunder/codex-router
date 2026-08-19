@@ -4,8 +4,8 @@ use super::*;
 fn quota_refresh_selector_window_stale_after_uses_plan_freshness_ceiling() {
     assert_eq!(
         stale_after_unix_seconds(1_000),
-        1_300,
-        "selector-window last-known-good freshness must use the plan's 300s ceiling"
+        1_360,
+        "selector-window last-known-good freshness must outlive the default refresh cadence"
     );
 }
 

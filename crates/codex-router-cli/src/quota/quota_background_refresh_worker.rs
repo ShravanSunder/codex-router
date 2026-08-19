@@ -114,6 +114,7 @@ where
     let stop_for_thread = Arc::clone(&stop);
     let thread = thread::spawn(move || {
         loop {
+            let cycle_started_at = Instant::now();
             let mut sink = Vec::new();
             let observed_unix_seconds = observed_clock();
             let result = tokio::runtime::Builder::new_current_thread()
@@ -146,7 +147,8 @@ where
             if let Err(error) = result {
                 diagnostic_reporter(format!("background quota refresh failed: {error}"));
             }
-            if interval.is_zero() || !sleep_interruptibly(&stop_for_thread, interval) {
+            let delay = refresh_cycle_delay(interval, cycle_started_at.elapsed());
+            if interval.is_zero() || !sleep_interruptibly(&stop_for_thread, delay) {
                 break;
             }
         }
@@ -180,6 +182,10 @@ pub(crate) fn start_background_quota_refresh_worker(
         )
         .with_quota_floor_notifier(quota_floor_notifier),
     ))
+}
+
+pub(crate) fn refresh_cycle_delay(interval: Duration, elapsed: Duration) -> Duration {
+    interval.saturating_sub(elapsed)
 }
 
 fn sleep_interruptibly(stop: &AtomicBool, interval: Duration) -> bool {
