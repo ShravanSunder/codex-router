@@ -7,10 +7,10 @@ use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use codex_router_codex::AppServerCommandSpec;
-use codex_router_codex::CodexPaths;
-use codex_router_codex::CodexRouterProfile;
-use codex_router_codex::DesktopLaunchPolicyCommand;
+use codex_native_integration::AppServerCommandSpec;
+use codex_native_integration::CodexPaths;
+use codex_native_integration::CodexRouterProfile;
+use codex_native_integration::DesktopLaunchPolicyCommand;
 use codex_router_host::AppServerLaunchPlan;
 use codex_router_host::ChildCommandSpec;
 use codex_router_host::ChildOutput;
@@ -58,9 +58,10 @@ pub(super) async fn run_foreground_host(
     let profile = CodexRouterProfile::new(port);
     let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile, &app_server_socket);
     let running_identity =
-        codex_router_codex::executable_identity(&codex_paths.managed_executable()).await?;
+        codex_native_integration::executable_identity(&codex_paths.managed_executable()).await?;
     let running_version =
-        codex_router_codex::managed_executable_version(&codex_paths.managed_executable()).await?;
+        codex_native_integration::managed_executable_version(&codex_paths.managed_executable())
+            .await?;
     let app_server = AppServerLaunchPlan::new(
         ChildCommandSpec::new(app_server_spec.executable())
             .with_arguments(app_server_spec.arguments())

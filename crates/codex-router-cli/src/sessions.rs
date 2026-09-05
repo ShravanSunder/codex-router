@@ -35,6 +35,16 @@ use crate::presentation::session_picker::SessionsPickerRequest;
 use crate::presentation::session_picker::SessionsPickerRoot;
 use crate::presentation::session_picker::run_sessions_picker;
 
+#[path = "session_commands/session_launch_selection.rs"]
+mod session_launch_selection;
+use session_launch_selection::SessionsLaunchTarget;
+#[cfg(test)]
+use session_launch_selection::session_profile_for_environment;
+use session_launch_selection::sessions_launch_target;
+
+use codex_native_integration::SessionSearchDocument;
+pub(crate) use codex_native_integration::SessionSearchExpression;
+
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
 const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 1024 * 1024;
@@ -161,118 +171,6 @@ struct SessionRecordQuery {
     last: bool,
     limit: usize,
     search: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SessionSearchExpression {
-    terms: Vec<SessionSearchTerm>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum SessionSearchTerm {
-    Bare(String),
-    SessionId(String),
-    Branch(String),
-    Repository(String),
-}
-
-struct SessionSearchDocument<'a> {
-    session_id: &'a str,
-    name: &'a str,
-    title: &'a str,
-    preview: &'a str,
-    first_user_message: &'a str,
-    branch: &'a str,
-    origin: &'a str,
-    cwd: &'a str,
-}
-
-impl SessionSearchExpression {
-    pub(crate) fn parse(input: &str) -> Self {
-        let terms = tokenize_session_search(input)
-            .into_iter()
-            .map(|token| {
-                let normalized = token.to_lowercase();
-                if let Some(value) = normalized.strip_prefix("id:") {
-                    Self::term_with_value(SessionSearchTerm::SessionId, value)
-                } else if let Some(value) = normalized.strip_prefix("b:") {
-                    Self::term_with_value(SessionSearchTerm::Branch, value)
-                } else if let Some(value) = normalized.strip_prefix("branch:") {
-                    Self::term_with_value(SessionSearchTerm::Branch, value)
-                } else if let Some(value) = normalized.strip_prefix("repo:") {
-                    Self::term_with_value(SessionSearchTerm::Repository, value)
-                } else {
-                    SessionSearchTerm::Bare(normalized)
-                }
-            })
-            .collect();
-        Self { terms }
-    }
-
-    fn term_with_value(
-        constructor: impl FnOnce(String) -> SessionSearchTerm,
-        value: &str,
-    ) -> SessionSearchTerm {
-        constructor(value.to_owned())
-    }
-
-    fn matches(&self, document: &SessionSearchDocument<'_>) -> bool {
-        let session_id = document.session_id.to_lowercase();
-        let name = document.name.to_lowercase();
-        let title = document.title.to_lowercase();
-        let preview = document.preview.to_lowercase();
-        let first_user_message = document.first_user_message.to_lowercase();
-        let branch = document.branch.to_lowercase();
-        let origin = document.origin.to_lowercase();
-        let cwd = document.cwd.to_lowercase();
-
-        self.terms.iter().all(|term| match term {
-            SessionSearchTerm::Bare(value) => {
-                !value.is_empty()
-                    && [
-                        session_id.as_str(),
-                        name.as_str(),
-                        title.as_str(),
-                        preview.as_str(),
-                        first_user_message.as_str(),
-                        origin.as_str(),
-                        cwd.as_str(),
-                    ]
-                    .iter()
-                    .any(|field| field.contains(value))
-            }
-            SessionSearchTerm::SessionId(value) => !value.is_empty() && session_id.contains(value),
-            SessionSearchTerm::Branch(value) => !value.is_empty() && branch.contains(value),
-            SessionSearchTerm::Repository(value) => {
-                !value.is_empty() && (origin.contains(value) || cwd.contains(value))
-            }
-        })
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.terms.is_empty()
-    }
-}
-
-fn tokenize_session_search(input: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    for character in input.trim().chars() {
-        match character {
-            '"' => quoted = !quoted,
-            character if character.is_whitespace() && !quoted => {
-                if !current.is_empty() {
-                    terms.push(std::mem::take(&mut current));
-                }
-            }
-            character => current.push(character),
-        }
-    }
-    if !current.is_empty() {
-        terms.push(current);
-    }
-    terms
 }
 
 impl SessionRecordQuery {
@@ -563,94 +461,6 @@ fn run_id_session<W: Write>(
         return Ok(());
     }
     runner.run_codex_resume(&command.codex_args, session_id)
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum SessionsLaunchTarget {
-    Hosted {
-        app_server_socket: PathBuf,
-        invoking_cwd: PathBuf,
-    },
-    Local {
-        invoking_cwd: PathBuf,
-    },
-}
-
-impl SessionsLaunchTarget {
-    fn new_launch(&self, codex_args: &[OsString]) -> codex_router_codex::SessionLaunch {
-        match self {
-            Self::Hosted {
-                app_server_socket,
-                invoking_cwd,
-            } => {
-                codex_router_codex::SessionLaunch::new(app_server_socket, invoking_cwd, codex_args)
-            }
-            Self::Local { invoking_cwd } => {
-                codex_router_codex::SessionLaunch::local(invoking_cwd, codex_args)
-            }
-        }
-    }
-
-    fn resume_launch(
-        &self,
-        codex_args: &[OsString],
-        session_id: &str,
-    ) -> codex_router_codex::SessionLaunch {
-        match self {
-            Self::Hosted {
-                app_server_socket,
-                invoking_cwd,
-            } => codex_router_codex::SessionLaunch::resume(
-                app_server_socket,
-                invoking_cwd,
-                codex_args,
-                session_id,
-            ),
-            Self::Local { invoking_cwd } => codex_router_codex::SessionLaunch::resume_local(
-                invoking_cwd,
-                codex_args,
-                session_id,
-            ),
-        }
-    }
-
-    fn fork_launch(
-        &self,
-        codex_args: &[OsString],
-        session_id: &str,
-    ) -> codex_router_codex::SessionLaunch {
-        match self {
-            Self::Hosted {
-                app_server_socket,
-                invoking_cwd,
-            } => codex_router_codex::SessionLaunch::fork(
-                app_server_socket,
-                invoking_cwd,
-                codex_args,
-                session_id,
-            ),
-            Self::Local { invoking_cwd } => {
-                codex_router_codex::SessionLaunch::fork_local(invoking_cwd, codex_args, session_id)
-            }
-        }
-    }
-}
-
-fn sessions_launch_target(
-    command: &SessionsCommand,
-    context: &CliContext,
-) -> Result<SessionsLaunchTarget, SessionsCommandError> {
-    let invoking_cwd = normalize_path(context.current_dir());
-    if command.local {
-        return Ok(SessionsLaunchTarget::Local { invoking_cwd });
-    }
-    let codex_paths = codex_router_codex::CodexPaths::from_codex_home(codex_home(context)?);
-    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
-        .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
-    Ok(SessionsLaunchTarget::Hosted {
-        app_server_socket,
-        invoking_cwd,
-    })
 }
 
 fn write_sessions_json<W: Write>(
@@ -2208,6 +2018,23 @@ fn format_duration_ms(duration_ms: u128) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_session_profile_selection_matches_router_default_boundary() {
+        use codex_native_integration::SessionProfile;
+        assert_eq!(
+            super::session_profile_for_environment(true, false),
+            SessionProfile::RouterDebug
+        );
+        assert_eq!(
+            super::session_profile_for_environment(true, true),
+            SessionProfile::Router
+        );
+        assert_eq!(
+            super::session_profile_for_environment(false, false),
+            SessionProfile::Router
+        );
+    }
+
     use super::RepositoryIdentity;
     use super::RootFilter;
     use super::SESSION_CONVERSATION_MAX_READ_BYTES;

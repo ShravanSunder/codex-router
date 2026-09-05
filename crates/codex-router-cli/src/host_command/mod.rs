@@ -146,9 +146,9 @@ pub enum HostCommandError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Codex(#[from] codex_router_codex::ExecutableIdentityError),
+    Codex(#[from] codex_native_integration::ExecutableIdentityError),
     #[error(transparent)]
-    DesktopLaunchPolicy(#[from] codex_router_codex::DesktopLaunchPolicyError),
+    DesktopLaunchPolicy(#[from] codex_native_integration::DesktopLaunchPolicyError),
     #[error(transparent)]
     Operator(#[from] OperatorClientError),
     #[error(transparent)]

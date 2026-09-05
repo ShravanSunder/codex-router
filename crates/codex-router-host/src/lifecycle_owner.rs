@@ -288,7 +288,7 @@ impl HostRuntime {
         let mut active_update = None::<request_admission::ActiveUpdate>;
         let mut active_update_activation = None::<request_admission::ActiveUpdateActivation>;
         let mut active_status = None::<request_admission::ActiveStatusObservation>;
-        let mut pending_identity = None::<codex_router_codex::ExecutableIdentityTask>;
+        let mut pending_identity = None::<codex_native_integration::ExecutableIdentityTask>;
         let mut retained_updater = None::<ProcessGroupChild>;
         loop {
             tokio::select! {

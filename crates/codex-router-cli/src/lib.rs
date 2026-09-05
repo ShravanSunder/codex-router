@@ -436,7 +436,7 @@ fn debug_default_router_root_for_home(home: &Path) -> PathBuf {
 
 pub(crate) fn app_server_socket_or_default(
     context: &CliContext,
-    paths: &codex_router_codex::CodexPaths,
+    paths: &codex_native_integration::CodexPaths,
 ) -> Result<PathBuf, &'static str> {
     #[cfg(all(debug_assertions, not(test)))]
     if context.env_var(USE_HOME_DEFAULT_ENV).is_none()

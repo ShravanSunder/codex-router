@@ -4,8 +4,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use codex_router_codex::RemoteControlObservation;
-use codex_router_codex::observe_app_server;
+use codex_native_integration::RemoteControlObservation;
+use codex_native_integration::observe_app_server;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -143,7 +143,7 @@ impl TestSocket {
     fn new(name: &str) -> std::io::Result<Self> {
         let counter = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
-            "codex-router-codex-{name}-{}-{counter}",
+            "codex-native-integration-{name}-{}-{counter}",
             std::process::id()
         ));
         std::fs::create_dir_all(&directory)?;

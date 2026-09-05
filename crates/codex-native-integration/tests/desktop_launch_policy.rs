@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use codex_router_codex::DesktopLaunchPolicyCommand;
+use codex_native_integration::DesktopLaunchPolicyCommand;
 
 #[test]
 fn desktop_launch_policy_projects_the_native_launchctl_contract() {

@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "crates/codex-router-auth",
     "crates/codex-router-cli",
-    "crates/codex-router-codex",
+    "crates/codex-native-integration",
     "crates/codex-router-core",
     "crates/codex-router-host",
     "crates/codex-router-quota-reset-test-harness",
@@ -24,7 +24,7 @@ publish = false
 
 [workspace.dependencies]
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
-codex-router-codex = { path = "crates/codex-router-codex", version = "0.1.6" }
+codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
 codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
 codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.6" }
 base64 = "0.22.1"

@@ -242,6 +242,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "codex-native-integration"
+version = "0.1.14"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "codex-router-auth"
 version = "0.1.14"
 dependencies = [
@@ -262,8 +275,8 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "codex-native-integration",
  "codex-router-auth",
- "codex-router-codex",
  "codex-router-core",
  "codex-router-host",
  "codex-router-proxy",
@@ -296,19 +309,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-router-codex"
-version = "0.1.14"
-dependencies = [
- "futures-util",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
 name = "codex-router-core"
 version = "0.1.14"
 dependencies = [
@@ -324,7 +324,7 @@ dependencies = [
 name = "codex-router-host"
 version = "0.1.14"
 dependencies = [
- "codex-router-codex",
+ "codex-native-integration",
  "codex-router-core",
  "codex-router-test-support",
  "httparse",
@@ -432,8 +432,8 @@ dependencies = [
 name = "codex-router-test-support"
 version = "0.1.14"
 dependencies = [
+ "codex-native-integration",
  "codex-router-cli",
- "codex-router-codex",
  "codex-router-core",
  "codex-router-proxy",
  "codex-router-secret-store",

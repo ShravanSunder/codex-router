@@ -195,7 +195,8 @@ mod tests {
             managed_executable: std::path::PathBuf::from("/unused/codex"),
             deadlines: crate::HostDeadlines::production(),
         });
-        let identity = codex_router_codex::executable_identity(&std::env::current_exe()?).await?;
+        let identity =
+            codex_native_integration::executable_identity(&std::env::current_exe()?).await?;
         let launch_plan = AppServerLaunchPlan::new(
             crate::ChildCommandSpec::new(std::path::PathBuf::from("/must-not-spawn")),
             identity,

@@ -20,7 +20,7 @@ workspace = true
 base64.workspace = true
 chrono.workspace = true
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.4" }
-codex-router-codex.workspace = true
+codex-native-integration.workspace = true
 codex-router-core.workspace = true
 codex-router-host.workspace = true
 codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.4" }

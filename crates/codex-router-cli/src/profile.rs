@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-pub use codex_router_codex::CodexRouterProfile;
+pub use codex_native_integration::CodexRouterProfile;
 use thiserror::Error;
 
 /// Preview of a Codex profile write.

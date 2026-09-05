@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
-use codex_router_codex::ExecutableIdentityTask;
-use codex_router_codex::UpdaterCommandSpec;
-use codex_router_codex::start_executable_identity;
+use codex_native_integration::ExecutableIdentityTask;
+use codex_native_integration::UpdaterCommandSpec;
+use codex_native_integration::start_executable_identity;
 use thiserror::Error;
 
 use crate::HostSnapshot;

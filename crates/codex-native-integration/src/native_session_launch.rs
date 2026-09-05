@@ -4,9 +4,28 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::Path;
 
+/// Explicit configuration profile for native interactive launches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionProfile {
+    /// Existing installed Router profile.
+    Router,
+    /// Isolated debug Router profile in normal Codex home.
+    RouterDebug,
+}
+
+impl SessionProfile {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Router => "codex-router",
+            Self::RouterDebug => "codex-router-debug",
+        }
+    }
+}
+
 /// Root Codex arguments for a direct native app-server attachment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionLaunch {
+    profile: SessionProfile,
     arguments: Vec<OsString>,
 }
 
@@ -15,6 +34,7 @@ impl SessionLaunch {
     #[must_use]
     pub fn new(socket_path: &Path, invoking_cwd: &Path, user_arguments: &[OsString]) -> Self {
         Self {
+            profile: SessionProfile::Router,
             arguments: root_arguments(socket_path, invoking_cwd, user_arguments),
         }
     }
@@ -23,6 +43,7 @@ impl SessionLaunch {
     #[must_use]
     pub fn local(invoking_cwd: &Path, user_arguments: &[OsString]) -> Self {
         Self {
+            profile: SessionProfile::Router,
             arguments: local_root_arguments(invoking_cwd, user_arguments),
         }
     }
@@ -41,7 +62,10 @@ impl SessionLaunch {
             OsString::from("--"),
             OsString::from(session_id),
         ]);
-        Self { arguments }
+        Self {
+            profile: SessionProfile::Router,
+            arguments,
+        }
     }
 
     /// Builds arguments for locally resuming one interactive session.
@@ -57,7 +81,10 @@ impl SessionLaunch {
             OsString::from("--"),
             OsString::from(session_id),
         ]);
-        Self { arguments }
+        Self {
+            profile: SessionProfile::Router,
+            arguments,
+        }
     }
 
     /// Builds arguments for forking one interactive session.
@@ -74,7 +101,10 @@ impl SessionLaunch {
             OsString::from("--"),
             OsString::from(session_id),
         ]);
-        Self { arguments }
+        Self {
+            profile: SessionProfile::Router,
+            arguments,
+        }
     }
 
     /// Builds arguments for locally forking one interactive session.
@@ -86,13 +116,29 @@ impl SessionLaunch {
             OsString::from("--"),
             OsString::from(session_id),
         ]);
-        Self { arguments }
+        Self {
+            profile: SessionProfile::Router,
+            arguments,
+        }
+    }
+
+    /// Selects the launcher-owned Codex configuration profile.
+    #[must_use]
+    pub const fn with_profile(mut self, profile: SessionProfile) -> Self {
+        self.profile = profile;
+        self
     }
 
     /// Returns the projected root arguments.
     #[must_use]
     pub fn arguments(&self) -> Vec<OsString> {
-        self.arguments.clone()
+        [
+            OsString::from("--profile"),
+            OsString::from(self.profile.name()),
+        ]
+        .into_iter()
+        .chain(self.arguments.iter().cloned())
+        .collect()
     }
 }
 
@@ -102,8 +148,6 @@ fn root_arguments(
     user_arguments: &[OsString],
 ) -> Vec<OsString> {
     let mut arguments = vec![
-        OsString::from("--profile"),
-        OsString::from("codex-router"),
         OsString::from("--remote"),
         OsString::from(format!("unix://{}", socket_path.display())),
     ];
@@ -113,7 +157,7 @@ fn root_arguments(
 }
 
 fn local_root_arguments(invoking_cwd: &Path, user_arguments: &[OsString]) -> Vec<OsString> {
-    let mut arguments = vec![OsString::from("--profile"), OsString::from("codex-router")];
+    let mut arguments = Vec::new();
     append_default_working_directory(&mut arguments, invoking_cwd, user_arguments);
     arguments.extend_from_slice(user_arguments);
     arguments

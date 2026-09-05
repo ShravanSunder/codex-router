@@ -11,7 +11,7 @@ pub(super) struct PreparationContext<'a> {
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
     pub(super) activation: &'a mut Option<request_admission::ActiveUpdateActivation>,
-    pub(super) pending_identity: &'a mut Option<codex_router_codex::ExecutableIdentityTask>,
+    pub(super) pending_identity: &'a mut Option<codex_native_integration::ExecutableIdentityTask>,
     pub(super) retained_updater: &'a mut Option<ProcessGroupChild>,
 }
 

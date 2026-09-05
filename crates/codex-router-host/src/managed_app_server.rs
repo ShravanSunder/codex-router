@@ -3,9 +3,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use codex_router_codex::ExecutableIdentity;
-use codex_router_codex::RemoteControlObservation;
-use codex_router_codex::observe_app_server;
+use codex_native_integration::ExecutableIdentity;
+use codex_native_integration::RemoteControlObservation;
+use codex_native_integration::observe_app_server;
 use thiserror::Error;
 
 use crate::ChildCommandSpec;
@@ -80,10 +80,10 @@ impl AppServerLaunchPlan {
     pub(crate) async fn refreshed(
         &self,
         managed_executable: &Path,
-    ) -> Result<Self, codex_router_codex::ExecutableIdentityError> {
-        let identity = codex_router_codex::executable_identity(managed_executable).await?;
+    ) -> Result<Self, codex_native_integration::ExecutableIdentityError> {
+        let identity = codex_native_integration::executable_identity(managed_executable).await?;
         let expected_version =
-            codex_router_codex::managed_executable_version(managed_executable).await?;
+            codex_native_integration::managed_executable_version(managed_executable).await?;
         Ok(Self::new(self.command.clone(), identity, expected_version))
     }
 }
@@ -167,11 +167,12 @@ impl AppServerChild {
                         }
                     });
                 }
-                Err(codex_router_codex::CodexProtocolError::Connect(_))
-                | Err(codex_router_codex::CodexProtocolError::Timeout { stage: "connect" }) => {
+                Err(codex_native_integration::CodexProtocolError::Connect(_))
+                | Err(codex_native_integration::CodexProtocolError::Timeout { stage: "connect" }) =>
+                {
                     tokio::time::sleep(Duration::from_millis(20).min(remaining)).await;
                 }
-                Err(codex_router_codex::CodexProtocolError::Timeout {
+                Err(codex_native_integration::CodexProtocolError::Timeout {
                     stage: "native readiness",
                 }) => return Err(AppServerReadinessError::StartupTimeout),
                 Err(error) => return Err(AppServerReadinessError::Protocol(error)),
@@ -197,7 +198,7 @@ pub enum AppServerReadinessError {
     VersionMismatch,
     /// Reachable endpoint violated the pinned native protocol.
     #[error("managed app-server native protocol failed: {0}")]
-    Protocol(#[source] codex_router_codex::CodexProtocolError),
+    Protocol(#[source] codex_native_integration::CodexProtocolError),
 }
 
 #[cfg(test)]
@@ -213,7 +214,7 @@ mod tests {
             std::env::temp_dir().join(format!("codex-router-refresh-plan-{}", std::process::id()));
         std::fs::write(&executable, "#!/bin/sh\necho 'codex-cli 1.2.3'\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-        let original_identity = codex_router_codex::executable_identity(&executable).await?;
+        let original_identity = codex_native_integration::executable_identity(&executable).await?;
         let launch_plan = AppServerLaunchPlan::new(
             ChildCommandSpec::new(executable.clone()),
             original_identity.clone(),

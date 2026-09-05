@@ -5,9 +5,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::app_server_control_protocol::CONTROL_RESPONSE_TIMEOUT;
-use super::app_server_control_protocol::CodexProtocolError;
-use super::app_server_control_protocol::InitializedControlExchange;
+use super::native_protocol_observation::CONTROL_RESPONSE_TIMEOUT;
+use super::native_protocol_observation::CodexProtocolError;
+use super::native_protocol_observation::InitializedControlExchange;
 
 const REMOTE_STATUS_REQUEST_ID: u64 = 2;
 

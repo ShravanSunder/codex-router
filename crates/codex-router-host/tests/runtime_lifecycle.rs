@@ -48,7 +48,7 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
     let managed_executable = directory.path().join("managed-codex");
     write_managed_codex_version_fixture(&managed_executable, "1.2.3")?;
     let current_executable = std::env::current_exe()?;
-    let identity = codex_router_codex::executable_identity(&managed_executable).await?;
+    let identity = codex_native_integration::executable_identity(&managed_executable).await?;
     let command = ChildCommandSpec::new(current_executable)
         .with_arguments([
             "--exact",
@@ -252,7 +252,8 @@ async fn runtime_native_app_server_child_entrypoint() -> Result<(), Box<dyn std:
     let managed_executable = std::env::var_os("CODEX_ROUTER_HOST_RUNTIME_MANAGED_EXECUTABLE")
         .ok_or("runtime fixture managed executable is missing")?;
     let version =
-        codex_router_codex::managed_executable_version(Path::new(&managed_executable)).await?;
+        codex_native_integration::managed_executable_version(Path::new(&managed_executable))
+            .await?;
     let process_log = std::env::var_os("CODEX_ROUTER_HOST_RUNTIME_PROCESS_LOG")
         .ok_or("runtime fixture process log is missing")?;
     run_native_app_server_fixture(

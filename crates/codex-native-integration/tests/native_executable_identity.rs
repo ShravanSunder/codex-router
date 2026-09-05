@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use codex_router_codex::UpdaterCommandSpec;
-use codex_router_codex::executable_identity;
-use codex_router_codex::managed_executable_version;
+use codex_native_integration::UpdaterCommandSpec;
+use codex_native_integration::executable_identity;
+use codex_native_integration::managed_executable_version;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 

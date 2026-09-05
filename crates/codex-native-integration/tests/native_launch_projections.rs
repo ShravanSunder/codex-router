@@ -1,10 +1,10 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use codex_router_codex::AppServerCommandSpec;
-use codex_router_codex::CodexPaths;
-use codex_router_codex::CodexRouterProfile;
-use codex_router_codex::SessionLaunch;
+use codex_native_integration::AppServerCommandSpec;
+use codex_native_integration::CodexPaths;
+use codex_native_integration::CodexRouterProfile;
+use codex_native_integration::SessionLaunch;
 
 #[test]
 fn codex_paths_keep_native_state_under_normal_codex_home() {
