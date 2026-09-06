@@ -151,10 +151,14 @@ mod tests {
                 )
                 .await;
             }
-            socket
-                .close(None)
-                .await
-                .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+            if matches!(case, AttachmentCase::BufferedEvents) {
+                // This scenario models server loss. Rejected/stale attachment instead
+                // makes the client disconnect; a server close write would race that exit.
+                socket
+                    .close(None)
+                    .await
+                    .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+            }
             // No turn/start, turn/interrupt or callback response is allowed from an observer.
             while let Some(Ok(frame)) = socket.next().await {
                 assert!(

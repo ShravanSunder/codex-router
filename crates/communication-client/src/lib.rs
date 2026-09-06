@@ -1,5 +1,6 @@
 //! Rust client for the public owner-local communication protocol.
 mod control_connection;
+mod endpoint_notification_state;
 pub use communication_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
 pub use control_connection::{ClientError, ControlClient};
 mod service_discovery;

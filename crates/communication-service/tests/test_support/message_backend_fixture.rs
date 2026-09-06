@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub enum NativeReply {
     Result(Value),
+    NotificationThenResult { notification: Value, result: Value },
     Reject,
     Disconnect,
 }
@@ -126,6 +127,15 @@ pub async fn exercise(
             );
             let response = match step.reply {
                 NativeReply::Result(result) => {
+                    json!({"id":request.get("id").ok_or("missing request ID")?,"result":result})
+                }
+                NativeReply::NotificationThenResult {
+                    notification,
+                    result,
+                } => {
+                    socket
+                        .send(Message::Text(notification.to_string().into()))
+                        .await?;
                     json!({"id":request.get("id").ok_or("missing request ID")?,"result":result})
                 }
                 NativeReply::Reject => {

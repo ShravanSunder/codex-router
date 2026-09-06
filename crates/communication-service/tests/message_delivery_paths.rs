@@ -23,6 +23,42 @@ async fn explicit_queue_rejects_unloaded_without_resume_or_enqueue() {
     assert_eq!(requests.len(), 1);
 }
 #[tokio::test]
+async fn unload_after_loaded_admission_preserves_queue_acceptance_without_compensation() {
+    // Arrange: native residency changes after the metadata check, before its queue receipt.
+    let (result, requests) = exercise(MessageScenario {
+        delivery: MessageDelivery::Queue,
+        steps: vec![
+            read("idle"),
+            NativeStep {
+                method: "thread/queue/add",
+                reply: NativeReply::NotificationThenResult {
+                    notification: json!({"method":"thread/status/changed","params":{
+                        "threadId":"target","status":{"type":"notLoaded"}}}),
+                    result: json!({"queuedSubmission":{"id":"accepted-while-unloaded"}}),
+                },
+            },
+        ],
+    })
+    .await
+    .unwrap();
+    // Assert: a loaded-at-admission check is not falsely presented as a residency lease.
+    let receipt = result.unwrap();
+    assert!(
+        matches!(receipt.acceptance, NativeSendAcceptance::QueueAccepted { submission_id }
+        if String::from(submission_id.clone()) == "accepted-while-unloaded")
+    );
+    assert!(matches!(
+        receipt.resume_effect,
+        communication_protocol::AcceptedResumeEffect::NotRequested
+    ));
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["params"]["clientUserMessageId"],
+        serde_json::to_value(receipt.client_user_message_id).unwrap()
+    );
+    // The fixture additionally rejects any extra resume, start, queue deletion or replay.
+}
+#[tokio::test]
 async fn auto_resume_preserves_effect_when_submission_rejected() {
     let (result, requests) = exercise(MessageScenario {
         delivery: MessageDelivery::Auto,

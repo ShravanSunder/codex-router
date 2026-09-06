@@ -1,7 +1,6 @@
 //! Bounded sequential Control calls. No request replay or native process ownership.
-use communication_protocol::{
-    ControlFrameDecoder, ControlInitializationResult, EndpointChange, EndpointInventory,
-};
+use crate::endpoint_notification_state::EndpointNotificationState;
+use communication_protocol::{ControlFrameDecoder, ControlInitializationResult, EndpointInventory};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -29,7 +28,7 @@ pub enum ClientError {
 pub struct ControlClient {
     connection: ClientConnection,
     identity: ControlInitializationResult,
-    notification_sequence: u64,
+    notification_state: EndpointNotificationState,
 }
 struct ClientConnection {
     stream: UnixStream,
@@ -78,8 +77,8 @@ impl ControlClient {
         }
         Ok(Self {
             connection,
+            notification_state: EndpointNotificationState::new(&identity),
             identity,
-            notification_sequence: 0,
         })
     }
     #[must_use]
@@ -352,7 +351,18 @@ impl ControlClient {
             self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent endpoint inventory"));
         }
+        if let Err(error) = self.reconcile_endpoint_snapshot(result.sequence) {
+            self.connection.failed = true;
+            return Err(error);
+        }
         Ok(result)
+    }
+    fn reconcile_endpoint_snapshot(&mut self, sequence: u64) -> Result<(), ClientError> {
+        self.notification_state.apply_snapshot(sequence)?;
+        self.notification_state
+            .discard_covered(&mut self.connection.notifications)?;
+        self.notification_state
+            .discard_covered(&mut self.connection.incoming)
     }
     /// Waits for a scoped endpoint notification without submitting another request.
     pub async fn next_notification(&mut self) -> Result<Value, ClientError> {
@@ -366,40 +376,20 @@ impl ControlClient {
         result
     }
     async fn receive_notification(&mut self) -> Result<Value, ClientError> {
-        let frame = loop {
-            if let Some(frame) = self.connection.notifications.pop_front() {
-                break frame;
+        loop {
+            let frame = loop {
+                if let Some(frame) = self.connection.notifications.pop_front() {
+                    break frame;
+                }
+                if let Some(frame) = self.connection.incoming.pop_front() {
+                    break frame;
+                }
+                self.connection.read_frames().await?;
+            };
+            if let Some(frame) = self.notification_state.consume(frame)? {
+                return Ok(frame);
             }
-            if let Some(frame) = self.connection.incoming.pop_front() {
-                break frame;
-            }
-            self.connection.read_frames().await?;
-        };
-        if frame.get("jsonrpc") != Some(&json!("2.0"))
-            || frame.get("method") != Some(&json!("endpoint/changed"))
-            || frame.get("id").is_some()
-            || frame.as_object().is_none_or(|value| value.len() != 3)
-        {
-            return Err(ClientError::Protocol("invalid endpoint notification"));
         }
-        let params: EndpointChange = serde_json::from_value(
-            frame
-                .get("params")
-                .cloned()
-                .ok_or(ClientError::Protocol("missing notification parameters"))?,
-        )
-        .map_err(|_| ClientError::Protocol("invalid notification parameters"))?;
-        if params.service_epoch != self.identity.service_epoch
-            || params.endpoint.endpoint.service_id != self.identity.service_id
-            || params.sequence > 9_007_199_254_740_991
-            || params.sequence != self.notification_sequence + 1
-        {
-            return Err(ClientError::Protocol(
-                "notification scope or sequence mismatch",
-            ));
-        }
-        self.notification_sequence = params.sequence;
-        Ok(frame)
     }
     pub async fn close(mut self) -> Result<(), ClientError> {
         self.connection.stream.shutdown().await?;
