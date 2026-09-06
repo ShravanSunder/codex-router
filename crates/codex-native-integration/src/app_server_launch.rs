@@ -11,28 +11,45 @@ use crate::CodexRouterProfile;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppServerCommandSpec {
     executable: PathBuf,
-    arguments: Vec<OsString>,
+    root_overrides: Vec<String>,
+    app_server_socket: PathBuf,
+    remote_control: bool,
 }
 
 impl AppServerCommandSpec {
     /// Builds the native app-server command from the shared router projection.
     #[must_use]
     pub fn new(paths: &CodexPaths, profile: &CodexRouterProfile, app_server_socket: &Path) -> Self {
-        let mut arguments = Vec::new();
-        for root_override in profile.root_overrides() {
-            arguments.push(OsString::from("-c"));
-            arguments.push(OsString::from(root_override));
-        }
-        arguments.extend([
-            OsString::from("app-server"),
-            OsString::from("--remote-control"),
-            OsString::from("--listen"),
-            OsString::from(format!("unix://{}", app_server_socket.display())),
-        ]);
         Self {
             executable: paths.managed_executable(),
-            arguments,
+            root_overrides: profile.root_overrides(),
+            app_server_socket: app_server_socket.to_owned(),
+            remote_control: true,
         }
+    }
+    #[must_use]
+    pub fn with_debug_profile(mut self, profile: &crate::DebugCodexProfile) -> Self {
+        self.root_overrides = profile.root_overrides();
+        self.remote_control = false;
+        self
+    }
+
+    /// The disabled marker is consumed by native CLI before its worker threads start.
+    #[must_use]
+    pub fn environment(&self) -> Vec<(OsString, OsString)> {
+        if self.remote_control {
+            Vec::new()
+        } else {
+            vec![(
+                "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED".into(),
+                "1".into(),
+            )]
+        }
+    }
+    #[must_use]
+    pub const fn with_remote_control(mut self, enabled: bool) -> Self {
+        self.remote_control = enabled;
+        self
     }
 
     /// Returns the managed executable.
@@ -44,6 +61,19 @@ impl AppServerCommandSpec {
     /// Returns the exact child arguments.
     #[must_use]
     pub fn arguments(&self) -> Vec<OsString> {
-        self.arguments.clone()
+        let mut arguments = Vec::new();
+        for root_override in &self.root_overrides {
+            arguments.push(OsString::from("-c"));
+            arguments.push(OsString::from(root_override));
+        }
+        arguments.push(OsString::from("app-server"));
+        if self.remote_control {
+            arguments.push(OsString::from("--remote-control"));
+        }
+        arguments.extend([
+            OsString::from("--listen"),
+            OsString::from(format!("unix://{}", self.app_server_socket.display())),
+        ]);
+        arguments
     }
 }

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/codex-acp-adapter",
+    "crates/lifecycle-observation",
+    "crates/communication-client",
+    "crates/communication-service",
+    "crates/communication-protocol",
+    "crates/agent-sessions",
     "crates/codex-router-auth",
     "crates/codex-router-cli",
     "crates/codex-native-integration",
@@ -17,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -53,6 +59,9 @@ rustix = { version = "1.1.4", features = ["fs", "process", "stdio"] }
 rusqlite = { version = "0.37.0", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+serde_json_canonicalizer = "0.3.2"
+jsonschema = { version = "0.53.0", default-features = false }
+schemars = "1.2.2"
 sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.18"
@@ -84,3 +93,8 @@ uninlined_format_args = "deny"
 unimplemented = "deny"
 unreachable = "deny"
 unwrap_used = "deny"
+
+# Debug Host restarts hash the managed executable before launch and publication.
+# Keep full content verification fast enough for native TUI reconnect deadlines.
+[profile.dev.package.sha2]
+opt-level = 3

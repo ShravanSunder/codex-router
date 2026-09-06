@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::Path;
 
-/// Explicit configuration profile for native interactive launches.
+/// Explicit configuration profile for native Codex launches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionProfile {
     /// Existing installed Router profile.
@@ -14,7 +14,7 @@ pub enum SessionProfile {
 }
 
 impl SessionProfile {
-    const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Router => "codex-router",
             Self::RouterDebug => "codex-router-debug",

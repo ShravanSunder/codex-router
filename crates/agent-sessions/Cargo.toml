@@ -1,0 +1,37 @@
+[package]
+name = "agent-sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+quota-reset-test-harness = []
+
+[dependencies]
+tokio-util.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+communication-protocol = { path = "../communication-protocol", version = "0.1.14" }
+communication-client = { path = "../communication-client", version = "0.1.14" }
+codex-native-integration.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+crossterm.workspace = true
+iocraft.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+unicode-width.workspace = true
+
+[dev-dependencies]
+lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
+communication-service = { path = "../communication-service", version = "0.1.14" }
+communication-protocol = { path = "../communication-protocol", version = "0.1.14" }
+tokio-util.workspace = true
+futures-util.workspace = true

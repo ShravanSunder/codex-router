@@ -42,34 +42,62 @@ pub(super) async fn run_foreground_host(
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
 ) -> Result<(), HostCommandError> {
+    let isolated_debug = cfg!(all(debug_assertions, not(test)))
+        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none();
+    if isolated_debug {
+        let home = context
+            .env_var("HOME")
+            .ok_or(HostCommandError::CodexHomeUnavailable)?;
+        codex_native_integration::validate_debug_directory(
+            &router_root,
+            &PathBuf::from(home).join(".codex-router"),
+        )
+        .map_err(|message| HostCommandError::RouterRoot(message.to_owned()))?;
+    }
+    let codex_home = resolve_codex_home(context)?;
+    let codex_paths = CodexPaths::from_codex_home(codex_home.clone());
+    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
+        .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
+    let profile = CodexRouterProfile::new(port);
+    let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile, &app_server_socket);
+    let app_server_spec = if isolated_debug {
+        app_server_spec.with_debug_profile(&codex_native_integration::DebugCodexProfile::read(
+            &codex_home,
+            port,
+        )?)
+    } else {
+        app_server_spec
+    };
+    // Validate the native destination before touching state or launch policy.
     tokio::fs::create_dir_all(&router_root).await?;
-    DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
-        .apply()
-        .await?;
+    if !isolated_debug {
+        DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
+            .apply()
+            .await?;
+    }
     let inherited_marker = std::env::var_os(codex_router_host::inherited_lock_environment());
     let instance = match inherited_marker.as_deref() {
         Some(marker) => HostInstance::acquire_inherited(coordination_paths.clone(), marker),
         None => HostInstance::acquire(coordination_paths.clone()),
     }
     .map_err(codex_router_host::HostError::from)?;
-    let codex_paths = CodexPaths::from_codex_home(resolve_codex_home(context)?);
-    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
-        .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
-    let profile = CodexRouterProfile::new(port);
-    let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile, &app_server_socket);
     let running_identity =
         codex_native_integration::executable_identity(&codex_paths.managed_executable()).await?;
     let running_version =
         codex_native_integration::managed_executable_version(&codex_paths.managed_executable())
             .await?;
-    let app_server = AppServerLaunchPlan::new(
-        ChildCommandSpec::new(app_server_spec.executable())
-            .with_arguments(app_server_spec.arguments())
-            .with_output(ChildOutput::Telemetry),
-        running_identity,
-        running_version,
-    );
+    let mut app_server_command = ChildCommandSpec::new(app_server_spec.executable())
+        .with_arguments(app_server_spec.arguments())
+        .with_output(ChildOutput::Telemetry);
+    for (key, value) in app_server_spec.environment() {
+        app_server_command = app_server_command.with_environment(key, value);
+    }
+    let mut app_server =
+        AppServerLaunchPlan::new(app_server_command, running_identity, running_version)
+            .with_schema_directory(router_root.join("agent-communication"));
+    app_server.prepare_schema().await;
     let current_executable = std::env::current_exe()?;
+    let communication_directory = router_root.join("agent-communication");
     let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
         context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
     );
@@ -98,7 +126,8 @@ pub(super) async fn run_foreground_host(
         app_server_socket,
         managed_executable: codex_paths.managed_executable(),
         deadlines: HostDeadlines::production(),
-    });
+    })
+    .with_communication_directory(communication_directory, codex_home);
     let child_launch_plans = ManagedChildLaunchPlans::new(Some(router_command), app_server);
     let mut update_inputs =
         ManagedUpdateInputs::production().with_replacement_command(replacement_command);

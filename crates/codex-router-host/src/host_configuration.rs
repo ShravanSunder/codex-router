@@ -40,6 +40,8 @@ impl HostCoordinationPaths {
 /// Validated host inputs with router-owned and Codex-owned paths kept separate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostConfig {
+    communication_directory: Option<PathBuf>,
+    communication_codex_home: Option<PathBuf>,
     coordination_paths: HostCoordinationPaths,
     router_endpoint: SocketAddr,
     app_server_socket: PathBuf,
@@ -66,12 +68,28 @@ impl HostConfig {
     #[must_use]
     pub fn new(inputs: HostConfigInputs) -> Self {
         Self {
+            communication_directory: None,
+            communication_codex_home: None,
             coordination_paths: inputs.coordination_paths,
             router_endpoint: inputs.router_endpoint,
             app_server_socket: inputs.app_server_socket,
             managed_executable: inputs.managed_executable,
             deadlines: inputs.deadlines,
         }
+    }
+    #[must_use]
+    pub fn with_communication_directory(mut self, directory: PathBuf, codex_home: PathBuf) -> Self {
+        self.communication_codex_home = Some(codex_home);
+        self.communication_directory = Some(directory);
+        self
+    }
+    #[must_use]
+    pub fn communication_codex_home(&self) -> Option<&Path> {
+        self.communication_codex_home.as_deref()
+    }
+    #[must_use]
+    pub fn communication_directory(&self) -> Option<&Path> {
+        self.communication_directory.as_deref()
     }
 
     /// Returns router-root-owned coordination paths.

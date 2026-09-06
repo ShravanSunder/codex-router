@@ -5,6 +5,10 @@ all-features = true
 ignore = []
 
 [licenses]
+exceptions = [
+    # Transitive dependency of the JSON Schema validator; MIT No Attribution.
+    { name = "borrow-or-share", version = "=0.2.4", allow = ["MIT-0"] },
+]
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",

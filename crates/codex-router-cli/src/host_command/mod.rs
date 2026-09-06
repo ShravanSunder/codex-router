@@ -39,7 +39,8 @@ pub(crate) enum HostAction {
 pub(crate) struct HostCommand {
     action: Option<HostAction>,
     router_root: Option<PathBuf>,
-    port: u16,
+    port: Option<u16>,
+    require_debug_isolation: bool,
 }
 
 impl HostCommand {
@@ -51,6 +52,7 @@ impl HostCommand {
             action: parsed.action,
             router_root: parsed.router_root,
             port: parsed.port,
+            require_debug_isolation: parsed.require_debug_isolation,
         })
     }
 
@@ -78,8 +80,14 @@ struct ClapHostCommand {
     action: Option<HostAction>,
     #[arg(long, global = true)]
     router_root: Option<PathBuf>,
-    #[arg(long, default_value_t = DEFAULT_HOST_PORT, global = true)]
-    port: u16,
+    #[arg(
+        long,
+        global = true,
+        help = "Provider port (debug default: 18787; installed default: 8787)"
+    )]
+    port: Option<u16>,
+    #[arg(long, global = true, hide = true)]
+    require_debug_isolation: bool,
 }
 
 pub(crate) async fn run_host_command<W: Write>(
@@ -88,6 +96,14 @@ pub(crate) async fn run_host_command<W: Write>(
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
 ) -> Result<(), HostCommandError> {
+    if command.require_debug_isolation
+        && (!cfg!(all(debug_assertions, not(test)))
+            || context.env_var(crate::USE_HOME_DEFAULT_ENV).is_some())
+    {
+        return Err(HostCommandError::RouterRoot(
+            "debug isolation requires a debug build without home-default mode".to_owned(),
+        ));
+    }
     let router_root = crate::router_root_or_default(command.router_root.clone())
         .map_err(|error| HostCommandError::RouterRoot(error.to_string()))?;
     let coordination_paths =
@@ -95,7 +111,15 @@ pub(crate) async fn run_host_command<W: Write>(
     if command.runs_foreground() {
         return foreground_launch::run_foreground_host(
             router_root,
-            command.port,
+            command.port.unwrap_or_else(|| {
+                if cfg!(all(debug_assertions, not(test)))
+                    && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none()
+                {
+                    18787
+                } else {
+                    DEFAULT_HOST_PORT
+                }
+            }),
             coordination_paths,
             context,
             telemetry,
@@ -135,6 +159,8 @@ const fn operator_request_deadline(action: HostAction) -> Duration {
 
 #[derive(Debug, Error)]
 pub enum HostCommandError {
+    #[error(transparent)]
+    DebugProfile(#[from] codex_native_integration::DebugProfileError),
     #[error("failed resolving host router root: {0}")]
     RouterRoot(String),
     #[error("HOME and CODEX_HOME are unavailable")]

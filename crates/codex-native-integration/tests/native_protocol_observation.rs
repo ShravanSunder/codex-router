@@ -142,7 +142,8 @@ struct TestSocket {
 impl TestSocket {
     fn new(name: &str) -> std::io::Result<Self> {
         let counter = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!(
+        // Use a short parent: Darwin TMPDIR plus the fixture name can exceed sockaddr_un.
+        let directory = PathBuf::from("/tmp").join(format!(
             "codex-native-integration-{name}-{}-{counter}",
             std::process::id()
         ));

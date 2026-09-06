@@ -91,7 +91,21 @@ jobs:
 
       - name: Build release binary
         working-directory: release-source
-        run: cargo build --locked --release -p codex-router-cli --bin codex-router
+        run: cargo build --locked --release -p codex-router-cli -p agent-sessions --bins
+
+      - name: Export communication schemas
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          mkdir -p target/protocol-schemas/communication-control target/protocol-schemas/acp-protocol
+          cargo run --locked --release -p communication-protocol --example export_control_schema \
+            > target/protocol-schemas/communication-control/control-schema.json \
+            2> target/control-schema-export.log
+          cargo run --locked --release -p communication-protocol --example export_protocol_types \
+            > target/protocol-schemas/communication-control/protocol-types.json
+          cp protocol-schemas/acp-protocol/stable-schema.json protocol-schemas/acp-protocol/upstream-license.txt \
+            target/protocol-schemas/acp-protocol/
+          cp protocol-schemas/schema-packaging.md target/protocol-schemas/
 
       - name: Verify and package release binary
         id: artifact
@@ -113,15 +127,29 @@ jobs:
             exit 1
           fi
 
+          sessions_binary="target/release/agent-sessions"
+          if [[ "$(file "${sessions_binary}")" != *"Mach-O 64-bit executable arm64"* ]]; then
+            echo "agent-sessions binary is not Mach-O arm64" >&2
+            exit 1
+          fi
+          codesign --verify --verbose=2 "${sessions_binary}"
+          if [[ "$("${sessions_binary}" --version)" != "agent-sessions ${RELEASE_VERSION}" ]]; then
+            echo "agent-sessions version does not match release tag" >&2
+            exit 1
+          fi
+
           asset_name="codex-router-v${RELEASE_VERSION}-aarch64-apple-darwin.tar.gz"
           release_directory="${RUNNER_TEMP}/codex-router-release"
           payload_directory="${release_directory}/payload"
           mkdir -p "${payload_directory}"
           install -m 0755 "${release_binary}" "${payload_directory}/codex-router"
+          install -m 0755 "${sessions_binary}" "${payload_directory}/agent-sessions"
+          cp -R target/protocol-schemas "${payload_directory}/protocol-schemas"
+          install -m 0644 docs/agent-guidance/agent-communication.md "${payload_directory}/agent-communication-guide.md"
           COPYFILE_DISABLE=1 tar \
             -C "${payload_directory}" \
             -czf "${release_directory}/${asset_name}" \
-            codex-router
+            codex-router agent-sessions protocol-schemas agent-communication-guide.md
           asset_sha256="$(shasum -a 256 "${release_directory}/${asset_name}" | cut -d ' ' -f 1)"
 
           {

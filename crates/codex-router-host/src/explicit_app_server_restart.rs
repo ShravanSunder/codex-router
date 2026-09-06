@@ -44,6 +44,8 @@ pub(crate) fn restart_app_server(
     stop_intent: StopIntent,
 ) -> AppServerRestartFuture {
     Box::pin(async move {
+        let timing = std::time::Instant::now();
+        crate::debug_readiness_timing::record("restartBegin", timing);
         let launch_plan = match tokio::time::timeout(
             config.deadlines().app_server_start(),
             launch_plan.refreshed(config.managed_executable()),
@@ -70,6 +72,7 @@ pub(crate) fn restart_app_server(
                 };
             }
         };
+        crate::debug_readiness_timing::record("restartPrepared", timing);
         let mut shutdown_outcome = None;
         if let Some(mut child) = current_child {
             match child.shutdown().await {
@@ -97,6 +100,7 @@ pub(crate) fn restart_app_server(
             }
         }
 
+        crate::debug_readiness_timing::record("oldBackendStopped", timing);
         if stop_intent.is_requested() {
             return AppServerRestartCompletion {
                 child: None,
@@ -133,6 +137,7 @@ pub(crate) fn restart_app_server(
             };
         }
 
+        crate::debug_readiness_timing::record("endpointUnowned", timing);
         let mut replacement = match launch_plan.spawn() {
             Ok(child) => child,
             Err(_error) => {
@@ -153,13 +158,16 @@ pub(crate) fn restart_app_server(
             )
             .await
         {
-            Ok(readiness) => AppServerRestartCompletion {
-                child: Some(replacement),
-                readiness: Some(readiness),
-                shutdown_outcome,
-                succeeded: true,
-                message: "app-server restarted",
-            },
+            Ok(readiness) => {
+                crate::debug_readiness_timing::record("replacementNativeReady", timing);
+                AppServerRestartCompletion {
+                    child: Some(replacement),
+                    readiness: Some(readiness),
+                    shutdown_outcome,
+                    succeeded: true,
+                    message: "app-server restarted",
+                }
+            }
             Err(_error) => {
                 let replacement_shutdown = replacement.shutdown().await;
                 let child = match replacement_shutdown {

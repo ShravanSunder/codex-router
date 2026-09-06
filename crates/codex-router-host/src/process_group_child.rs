@@ -75,7 +75,12 @@ impl ChildCommandSpec {
     }
 
     pub(crate) fn command(&self) -> Command {
-        let mut command = Command::new(&self.executable);
+        self.command_for_executable(&self.executable)
+    }
+
+    /// Retains argv/environment/output while pinning an owner-captured executable.
+    pub(crate) fn command_for_executable(&self, executable: &std::path::Path) -> Command {
+        let mut command = Command::new(executable);
         command.args(&self.arguments).envs(self.environment.clone());
         match self.output {
             ChildOutput::Inherit => {}

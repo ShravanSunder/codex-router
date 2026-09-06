@@ -14,7 +14,7 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 SOURCE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 FORMULA_URL_PATTERN = re.compile(
     r'^  url "https://github\.com/ShravanSunder/codex-router/releases/download/'
-    r'v[^"]+/codex-router-v[^"]+-aarch64-apple-darwin\.tar\.gz"$',
+    + r'v[^"]+/codex-router-v[^"]+-aarch64-apple-darwin\.tar\.gz"$',
     re.MULTILINE,
 )
 FORMULA_SHA256_PATTERN = re.compile(r'^  sha256 "[0-9a-f]{64}"$', re.MULTILINE)
@@ -23,8 +23,8 @@ FORMULA_SOURCE_COMMIT_PATTERN = re.compile(
     re.MULTILINE,
 )
 REQUIRED_FORMULA_INVARIANTS = (
-    ('  depends_on arch: :arm64', "Apple Silicon requirement"),
-    ('  depends_on :macos', "macOS requirement"),
+    ("  depends_on arch: :arm64", "Apple Silicon requirement"),
+    ("  depends_on :macos", "macOS requirement"),
     ('    bin.install "codex-router"', "direct binary installation"),
 )
 
@@ -61,7 +61,9 @@ def update_codex_router_formula(
     if SHA256_PATTERN.fullmatch(sha256) is None:
         raise FormulaUpdateError("SHA-256 must be 64 lowercase hexadecimal characters")
     if SOURCE_COMMIT_PATTERN.fullmatch(source_commit) is None:
-        raise FormulaUpdateError("source commit must be 40 lowercase hexadecimal characters")
+        raise FormulaUpdateError(
+            "source commit must be 40 lowercase hexadecimal characters"
+        )
 
     for required_text, invariant_name in REQUIRED_FORMULA_INVARIANTS:
         if required_text not in formula_text:
@@ -95,13 +97,21 @@ def update_codex_router_formula(
         )
     else:
         if "# Source commit:" in updated_formula:
-            raise FormulaUpdateError("formula contains malformed source commit provenance")
+            raise FormulaUpdateError(
+                "formula contains malformed source commit provenance"
+            )
         updated_formula = updated_formula.replace(
             release_url_line,
             f"{source_commit_line}\n{release_url_line}",
             1,
         )
 
+    if '    bin.install "agent-sessions"' not in updated_formula:
+        updated_formula = updated_formula.replace(
+            '    bin.install "codex-router"',
+            '    bin.install "codex-router"\n    bin.install "agent-sessions"',
+            1,
+        )
     return updated_formula
 
 
@@ -133,7 +143,7 @@ def update_formula_file(
             prefix=f".{formula_path.name}.",
             delete=False,
         ) as temporary_file:
-            temporary_file.write(updated_formula)
+            _ = temporary_file.write(updated_formula)
             temporary_path = Path(temporary_file.name)
         os.chmod(temporary_path, original_mode)
         os.replace(temporary_path, formula_path)
@@ -144,16 +154,24 @@ def update_formula_file(
     return True
 
 
-def parse_arguments() -> argparse.Namespace:
+class FormulaUpdateArguments(argparse.Namespace):
+    # Argparse populates all four required flags before this namespace is returned.
+    formula: Path = Path()
+    version: str = ""
+    sha256: str = ""
+    source_commit: str = ""
+
+
+def parse_arguments() -> FormulaUpdateArguments:
     """Parse formula update arguments."""
     parser = argparse.ArgumentParser(
         description="Update the codex-router Homebrew formula for one verified release."
     )
-    parser.add_argument("--formula", required=True, type=Path)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--sha256", required=True)
-    parser.add_argument("--source-commit", required=True)
-    return parser.parse_args()
+    _ = parser.add_argument("--formula", required=True, type=Path)
+    _ = parser.add_argument("--version", required=True)
+    _ = parser.add_argument("--sha256", required=True)
+    _ = parser.add_argument("--source-commit", required=True)
+    return parser.parse_args(namespace=FormulaUpdateArguments())
 
 
 def main() -> int:

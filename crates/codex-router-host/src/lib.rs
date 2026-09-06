@@ -89,3 +89,13 @@ pub use process_group_child::ProcessGroupError;
 pub use router_compatibility::RouterProbeError;
 pub use router_compatibility::RouterProbeResult;
 pub use router_compatibility::probe_router;
+mod backend_publication;
+pub use backend_publication::BackendPublication;
+mod communication_runtime;
+pub use communication_runtime::{
+    BackendSchemaEvidence, CommunicationRuntime, CommunicationRuntimeInputs,
+};
+
+mod native_schema_cache;
+
+mod debug_readiness_timing;
