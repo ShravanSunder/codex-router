@@ -299,6 +299,7 @@ async fn sessions_picker_help_toggles_and_escape_closes_help_before_picker() {
     for help_key in [
         ctrl_key('/'),
         ctrl_key('_'),
+        ctrl_key('7'),
         TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::F(1))),
     ] {
         let events =

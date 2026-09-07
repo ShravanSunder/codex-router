@@ -283,7 +283,8 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 KeyCode::F(1) | KeyCode::Char('\u{1f}') => {
                     model_value.handle_key(SessionsPickerKey::ToggleHelp);
                 }
-                KeyCode::Char('/' | '_') if modifiers.contains(KeyModifiers::CONTROL) => {
+                // Crossterm 0.29 decodes legacy byte 0x1f (Ctrl+/ or Ctrl+_) as Ctrl+7.
+                KeyCode::Char('/' | '_' | '7') if modifiers.contains(KeyModifiers::CONTROL) => {
                     model_value.handle_key(SessionsPickerKey::ToggleHelp);
                 }
                 KeyCode::Char('c' | 'd') if modifiers.contains(KeyModifiers::CONTROL) => {
