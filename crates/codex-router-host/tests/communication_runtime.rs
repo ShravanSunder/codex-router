@@ -250,7 +250,7 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
         .shutdown()
         .await
         .unwrap_or_else(|e| panic!("shutdown: {e}"));
-    std::fs::remove_file(root.join("lifecycle-observations.sqlite"))
+    std::fs::remove_file(root.join("session-registry.sqlite"))
         .unwrap_or_else(|e| panic!("database cleanup: {e}"));
     std::fs::remove_file(root.join("service-identity.json"))
         .unwrap_or_else(|e| panic!("identity cleanup: {e}"));

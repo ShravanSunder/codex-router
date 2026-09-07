@@ -66,7 +66,7 @@ impl CommunicationRuntime {
         communication_service::publish_control_schema(&inputs.directory, &control_schema)?;
         let journal = async {
             let database = lifecycle_observation::ObservationJournal::open(
-                &inputs.directory.join("lifecycle-observations.sqlite"),
+                &inputs.directory.join("session-registry.sqlite"),
                 new_service_uuid()?,
             )
             .await

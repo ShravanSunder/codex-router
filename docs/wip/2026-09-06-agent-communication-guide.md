@@ -4,7 +4,9 @@ This guide describes the current feature worktree, not a released installation. 
 
 ## Find the service and target
 
-Run `target/debug/agent-sessions` in a terminal to open the picker. Its default scope is **Repo** and its default runtime view is **All**. The Status column precedes the existing Upd and New columns:
+The Host stores remembered thread addresses, observed thread/server status, and the rolling lifecycle event log in `session-registry.sqlite` inside its communication service directory. Native Codex history and provider-routing state retain their own storage.
+
+With the isolated debug Host running and `CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET` set to that Host’s dedicated backend socket, run `target/debug/agent-sessions` in a terminal to open the picker. Use `target/debug/agent-sessions --local` for browsing without hosted status. Its default scope is **Repo** and its default runtime view is **All**. The Status column precedes the existing Upd and New columns:
 
 - `◆ Blocked`: waiting for approval or user input.
 - `● Active`: running without either waiting flag.
