@@ -8,7 +8,7 @@ use super::*;
 pub(super) struct ShutdownContext<'a> {
     pub(super) activation: &'a mut Option<request_admission::ActiveUpdateActivation>,
     pub(super) active_update: &'a mut Option<request_admission::ActiveUpdate>,
-    pub(super) pending_identity: &'a mut Option<codex_router_codex::ExecutableIdentityTask>,
+    pub(super) pending_identity: &'a mut Option<codex_native_integration::ExecutableIdentityTask>,
     pub(super) retained_updater: &'a mut Option<ProcessGroupChild>,
     pub(super) active_app_server_restart: &'a mut Option<request_admission::ActiveAppServerRestart>,
     pub(super) active_router_restart: &'a mut Option<request_admission::ActiveRouterRestart>,
@@ -202,8 +202,11 @@ pub(super) async fn wait_for_update_activation(
 }
 
 pub(super) async fn wait_for_pending_identity(
-    pending_identity: &mut Option<codex_router_codex::ExecutableIdentityTask>,
-) -> Result<codex_router_codex::ExecutableIdentity, codex_router_codex::ExecutableIdentityError> {
+    pending_identity: &mut Option<codex_native_integration::ExecutableIdentityTask>,
+) -> Result<
+    codex_native_integration::ExecutableIdentity,
+    codex_native_integration::ExecutableIdentityError,
+> {
     match pending_identity.as_mut() {
         Some(task) => task.wait().await,
         None => std::future::pending().await,
@@ -275,7 +278,7 @@ pub(super) async fn settle_active_router_restart_for_shutdown(
 
 pub(super) async fn settle_active_update_for_shutdown(
     active_update: &mut Option<request_admission::ActiveUpdate>,
-    pending_identity: &mut Option<codex_router_codex::ExecutableIdentityTask>,
+    pending_identity: &mut Option<codex_native_integration::ExecutableIdentityTask>,
     retained_updater: &mut Option<ProcessGroupChild>,
 ) {
     let Some(mut active) = active_update.take() else {

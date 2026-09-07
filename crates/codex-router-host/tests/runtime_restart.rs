@@ -44,7 +44,7 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
 
     let current_executable = std::env::current_exe()?;
     let app_server_socket = directory.path().join("app.sock");
-    let identity = codex_router_codex::executable_identity(&current_executable).await?;
+    let identity = codex_native_integration::executable_identity(&current_executable).await?;
     let app_server = AppServerLaunchPlan::new(
         ChildCommandSpec::new(current_executable.clone())
             .with_arguments([

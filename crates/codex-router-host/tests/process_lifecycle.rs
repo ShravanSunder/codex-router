@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use codex_router_codex::executable_identity;
+use codex_native_integration::executable_identity;
 use codex_router_host::APP_SERVER_FORCE_AFTER;
 use codex_router_host::APP_SERVER_SHUTDOWN_TOTAL;
 use codex_router_host::AppServerChild;

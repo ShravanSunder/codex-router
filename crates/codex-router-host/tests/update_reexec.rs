@@ -133,7 +133,7 @@ async fn changed_update_host_child_entrypoint() -> Result<(), Box<dyn std::error
     let managed_executable = required_path("CODEX_HOST_UPDATE_MANAGED")?;
     let router_endpoint = std::env::var("CODEX_HOST_UPDATE_ROUTER")?.parse()?;
     let current_executable = std::env::current_exe()?;
-    let identity = codex_router_codex::executable_identity(&current_executable).await?;
+    let identity = codex_native_integration::executable_identity(&current_executable).await?;
     let app_server = AppServerLaunchPlan::new(
         ChildCommandSpec::new(current_executable.clone())
             .with_arguments([
@@ -215,7 +215,7 @@ async fn run_update_case(
     let app_server_log = directory.path().join("app-pids.log");
     std::fs::write(&app_server_log, b"")?;
     let current_executable = std::env::current_exe()?;
-    let identity = codex_router_codex::executable_identity(&current_executable).await?;
+    let identity = codex_native_integration::executable_identity(&current_executable).await?;
     let app_server = AppServerLaunchPlan::new(
         ChildCommandSpec::new(current_executable)
             .with_arguments([

@@ -4,7 +4,7 @@ from scripts.update_homebrew_formula import FormulaUpdateError
 from scripts.update_homebrew_formula import update_codex_router_formula
 
 
-BASE_FORMULA = '''class CodexRouter < Formula
+BASE_FORMULA = """class CodexRouter < Formula
   desc "Local account and quota router for Codex CLI"
   homepage "https://github.com/ShravanSunder/codex-router"
   url "https://github.com/ShravanSunder/codex-router/releases/download/v0.1.2/codex-router-v0.1.2-aarch64-apple-darwin.tar.gz"
@@ -18,7 +18,7 @@ BASE_FORMULA = '''class CodexRouter < Formula
     bin.install "codex-router"
   end
 end
-'''
+"""
 
 
 class UpdateCodexRouterFormulaTests(unittest.TestCase):
@@ -42,6 +42,18 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
         )
         self.assertIn(f'  sha256 "{expected_sha256}"', updated_formula)
         self.assertIn(f"  # Source commit: {expected_source_commit}", updated_formula)
+
+    def test_installs_both_public_executables(self) -> None:
+        # Arrange / Act
+        updated = update_codex_router_formula(
+            formula_text=BASE_FORMULA,
+            version="0.2.0",
+            sha256="b" * 64,
+            source_commit="c" * 40,
+        )
+        # Assert
+        self.assertIn('    bin.install "agent-sessions"', updated)
+        self.assertEqual(updated.count('bin.install "agent-sessions"'), 1)
 
     def test_second_update_is_idempotent(self) -> None:
         # Arrange
@@ -72,7 +84,7 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
 
         # Act / Assert
         with self.assertRaisesRegex(FormulaUpdateError, "SHA-256"):
-            update_codex_router_formula(
+            _ = update_codex_router_formula(
                 formula_text=BASE_FORMULA,
                 version="0.2.0",
                 sha256=malformed_sha256,
@@ -85,7 +97,7 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
 
         # Act / Assert
         with self.assertRaisesRegex(FormulaUpdateError, "version"):
-            update_codex_router_formula(
+            _ = update_codex_router_formula(
                 formula_text=BASE_FORMULA,
                 version=malformed_version,
                 sha256="a" * 64,
@@ -101,7 +113,7 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
 
         # Act / Assert
         with self.assertRaisesRegex(FormulaUpdateError, "Apple Silicon"):
-            update_codex_router_formula(
+            _ = update_codex_router_formula(
                 formula_text=formula_without_arm64_requirement,
                 version="0.2.0",
                 sha256="a" * 64,
@@ -110,4 +122,4 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()

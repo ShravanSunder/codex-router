@@ -3,9 +3,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use codex_router_codex::ExecutableIdentity;
-use codex_router_codex::ExecutableIdentityTask;
-use codex_router_codex::RemoteControlObservation;
+use codex_native_integration::ExecutableIdentity;
+use codex_native_integration::ExecutableIdentityTask;
+use codex_native_integration::RemoteControlObservation;
 
 use crate::RemoteControlIdentity;
 
@@ -62,7 +62,7 @@ pub(super) fn observe_status(
                 return None;
             }
             Some(
-                codex_router_codex::observe_app_server(
+                codex_native_integration::observe_app_server(
                     config.app_server_socket(),
                     config.deadlines().app_server_start(),
                     config.deadlines().remote_control(),
@@ -142,7 +142,7 @@ pub(super) fn observe_status(
 }
 
 enum IdentityObservation {
-    Resolved(Result<ExecutableIdentity, codex_router_codex::ExecutableIdentityError>),
+    Resolved(Result<ExecutableIdentity, codex_native_integration::ExecutableIdentityError>),
     TimedOut(ExecutableIdentityTask),
     Skipped,
 }
@@ -155,7 +155,7 @@ async fn observe_identity(
     if !enabled {
         return IdentityObservation::Skipped;
     }
-    let mut task = codex_router_codex::start_executable_identity(executable);
+    let mut task = codex_native_integration::start_executable_identity(executable);
     match tokio::time::timeout(deadline, task.wait()).await {
         Ok(result) => IdentityObservation::Resolved(result),
         Err(_) => IdentityObservation::TimedOut(task),

@@ -48,8 +48,12 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
     let managed_executable = directory.path().join("managed-codex");
     write_managed_codex_version_fixture(&managed_executable, "1.2.3")?;
     let current_executable = std::env::current_exe()?;
-    let identity = codex_router_codex::executable_identity(&managed_executable).await?;
-    let command = ChildCommandSpec::new(current_executable)
+    let identity = codex_native_integration::executable_identity(&managed_executable).await?;
+    let command = ChildCommandSpec::new(managed_executable.clone())
+        .with_environment(
+            "CODEX_ROUTER_HOST_RUNTIME_FIXTURE_BINARY",
+            current_executable.as_os_str(),
+        )
         .with_arguments([
             "--exact",
             "runtime_native_app_server_child_entrypoint",
@@ -73,13 +77,18 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         endpoint_inspection: Duration::from_millis(200),
         operator_request: Duration::from_secs(15),
     })?;
+    let communication_directory = directory.path().join("agent-communication");
     let config = HostConfig::new(HostConfigInputs {
         coordination_paths: coordination_paths.clone(),
         router_endpoint: router.address(),
         app_server_socket: app_server_socket.clone(),
         managed_executable: managed_executable.clone(),
         deadlines,
-    });
+    })
+    .with_communication_directory(
+        communication_directory.clone(),
+        communication_directory.clone(),
+    );
     let child_launch_plans = ManagedChildLaunchPlans::new(None, app_server);
 
     let runtime = tokio::spawn(HostRuntime::run(
@@ -87,16 +96,47 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         child_launch_plans,
         ManagedUpdateInputs::production(),
     ));
-    let initial_frames = send_operator_request(
+    let initial_frames = match send_operator_request(
         coordination_paths.operator_socket(),
         OperatorRequest::AwaitHostStart,
         Duration::from_secs(20),
     )
-    .await?;
+    .await
+    {
+        Ok(frames) => frames,
+        Err(error) => {
+            if runtime.is_finished() {
+                return Err(std::io::Error::other(format!(
+                    "startup observation failed: {error}; runtime: {:?}",
+                    runtime.await?
+                ))
+                .into());
+            }
+            runtime.abort();
+            let _stopped = runtime.await;
+            return Err(error);
+        }
+    };
     check_equal(
         terminal_snapshot(&initial_frames)?.hosted_readiness(),
         codex_router_host::HostedReadiness::Ready,
         "host startup must reach full readiness",
+    )?;
+    let mut communication = communication_client::ControlClient::connect(
+        &communication_directory,
+        "host-loop-proof",
+        "1",
+    )
+    .await?;
+    let initial_inventory = communication.list_endpoints().await?;
+    check(
+        initial_inventory.endpoints.iter().any(|endpoint| {
+            matches!(
+                endpoint.availability,
+                communication_protocol::EndpointAvailability::Available { .. }
+            )
+        }),
+        "main Host loop must publish its ready backend",
     )?;
     write_managed_codex_version_fixture(&managed_executable, "2.0.0")?;
     let drift_frames = send_operator_request(
@@ -174,6 +214,16 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         ),
         "second unexpected exit must not start a third app-server",
     )?;
+    let unavailable_inventory = communication.list_endpoints().await?;
+    check(
+        unavailable_inventory.endpoints.iter().all(|endpoint| {
+            matches!(
+                endpoint.availability,
+                communication_protocol::EndpointAvailability::Unavailable { .. }
+            )
+        }),
+        "exhausted recovery must withdraw native admission",
+    )?;
 
     let restart_frames = send_operator_request(
         coordination_paths.operator_socket(),
@@ -186,6 +236,17 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         TerminalClassification::Succeeded,
         "explicit native-ready restart must succeed after recovery exhaustion",
     )?;
+    let restarted_inventory = communication.list_endpoints().await?;
+    check(
+        restarted_inventory.endpoints.iter().any(|endpoint| {
+            matches!(
+                endpoint.availability,
+                communication_protocol::EndpointAvailability::Available { .. }
+            )
+        }),
+        "explicit restart must restore communication publication",
+    )?;
+    communication.close().await?;
     let explicitly_restarted_processes = wait_for_process_ids(&process_log, 3).await?;
     check_equal(
         terminal_snapshot(&restart_frames)?.recovery_budget(),
@@ -252,7 +313,8 @@ async fn runtime_native_app_server_child_entrypoint() -> Result<(), Box<dyn std:
     let managed_executable = std::env::var_os("CODEX_ROUTER_HOST_RUNTIME_MANAGED_EXECUTABLE")
         .ok_or("runtime fixture managed executable is missing")?;
     let version =
-        codex_router_codex::managed_executable_version(Path::new(&managed_executable)).await?;
+        codex_native_integration::managed_executable_version(Path::new(&managed_executable))
+            .await?;
     let process_log = std::env::var_os("CODEX_ROUTER_HOST_RUNTIME_PROCESS_LOG")
         .ok_or("runtime fixture process log is missing")?;
     run_native_app_server_fixture(
@@ -323,7 +385,9 @@ fn write_managed_codex_version_fixture(
 
     std::fs::write(
         executable,
-        format!("#!/bin/sh\necho 'codex-cli {version}'\n"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  echo 'codex-cli {version}'\nelse\n  exec \"$CODEX_ROUTER_HOST_RUNTIME_FIXTURE_BINARY\" \"$@\"\nfi\n"
+        ),
     )?;
     let mut permissions = std::fs::metadata(executable)?.permissions();
     permissions.set_mode(0o700);
@@ -383,8 +447,10 @@ struct TestDirectory {
 impl TestDirectory {
     fn new(name: &str) -> std::io::Result<Self> {
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // The public communication sockets add a directory component. macOS's
+        // per-user temporary root can otherwise exhaust sockaddr_un.sun_path.
         let path =
-            std::env::temp_dir().join(format!("crho-{name}-{}-{counter}", std::process::id()));
+            PathBuf::from("/tmp").join(format!("crho-{name}-{}-{counter}", std::process::id()));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
     }

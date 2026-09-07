@@ -3,9 +3,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use codex_router_codex::ExecutableIdentity;
-use codex_router_codex::RemoteControlObservation;
-use codex_router_codex::observe_app_server;
+use codex_native_integration::ExecutableIdentity;
+use codex_native_integration::RemoteControlObservation;
+use codex_native_integration::observe_app_server;
 use thiserror::Error;
 
 use crate::ChildCommandSpec;
@@ -36,6 +36,7 @@ pub struct AppServerChild {
     identity: ExecutableIdentity,
     pub(crate) expected_exit: Option<ExpectedExit>,
     expected_version: Option<String>,
+    schema_export: Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>>,
 }
 
 /// Cloneable managed app-server launch inputs retained for one recovery attempt.
@@ -44,6 +45,8 @@ pub struct AppServerLaunchPlan {
     command: ChildCommandSpec,
     identity: ExecutableIdentity,
     expected_version: String,
+    schema_directory: Option<std::path::PathBuf>,
+    schema_export: Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>>,
 }
 
 impl AppServerLaunchPlan {
@@ -58,11 +61,65 @@ impl AppServerLaunchPlan {
             command,
             identity,
             expected_version,
+            schema_directory: None,
+            schema_export: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_schema_directory(mut self, directory: std::path::PathBuf) -> Self {
+        self.schema_directory = Some(directory);
+        self
+    }
+
+    pub async fn prepare_schema(&mut self) {
+        let Some(directory) = &self.schema_directory else {
+            return;
+        };
+        if self
+            .schema_export
+            .as_ref()
+            .is_some_and(|export| export.executable() == &self.identity)
+        {
+            return;
+        }
+        self.schema_export = None;
+        let prepared = async {
+            use std::os::unix::fs::DirBuilderExt;
+            match std::fs::DirBuilder::new().mode(0o700).create(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::symlink_metadata(directory)?;
+            if !directory.is_absolute()
+                || !metadata.is_dir()
+                || metadata.permissions().mode() & 0o077 != 0
+            {
+                return Err(std::io::Error::other(
+                    "schema export directory must be private and absolute",
+                ));
+            }
+            let suffix = String::from(communication_service::new_service_uuid()?);
+            let output = directory.join(format!("native-schema-export-{suffix}"));
+            codex_native_integration::NativeSchemaExport::generate(&self.identity, &output)
+                .await
+                .map_err(std::io::Error::other)
+        }
+        .await;
+        match prepared {
+            Ok(export) => self.schema_export = Some(std::sync::Arc::new(export)),
+            Err(_) => {
+                tracing::warn!("native schema export unavailable; retaining raw native access")
+            }
         }
     }
 
     pub(crate) fn spawn(&self) -> Result<AppServerChild, ProcessGroupError> {
-        let mut command = self.command.command();
+        let mut command = self
+            .command
+            .command_for_executable(self.identity.canonical_path());
         let process = if self.command.captures_stderr_telemetry() {
             ProcessGroupChild::spawn_with_stderr_telemetry(&mut command, "app_server")?
         } else {
@@ -73,6 +130,7 @@ impl AppServerLaunchPlan {
             identity: self.identity.clone(),
             expected_exit: None,
             expected_version: Some(self.expected_version.clone()),
+            schema_export: self.schema_export.clone(),
         })
     }
 
@@ -80,11 +138,15 @@ impl AppServerLaunchPlan {
     pub(crate) async fn refreshed(
         &self,
         managed_executable: &Path,
-    ) -> Result<Self, codex_router_codex::ExecutableIdentityError> {
-        let identity = codex_router_codex::executable_identity(managed_executable).await?;
+    ) -> Result<Self, codex_native_integration::ExecutableIdentityError> {
+        let identity = codex_native_integration::executable_identity(managed_executable).await?;
         let expected_version =
-            codex_router_codex::managed_executable_version(managed_executable).await?;
-        Ok(Self::new(self.command.clone(), identity, expected_version))
+            codex_native_integration::managed_executable_version(managed_executable).await?;
+        let mut refreshed = Self::new(self.command.clone(), identity, expected_version);
+        refreshed.schema_directory = self.schema_directory.clone();
+        refreshed.schema_export = self.schema_export.clone();
+        refreshed.prepare_schema().await;
+        Ok(refreshed)
     }
 }
 
@@ -97,6 +159,7 @@ impl AppServerChild {
             identity,
             expected_exit: None,
             expected_version: None,
+            schema_export: None,
         }
     }
 
@@ -111,6 +174,7 @@ impl AppServerChild {
             identity,
             expected_exit: None,
             expected_version: Some(expected_version),
+            schema_export: None,
         })
     }
 
@@ -118,6 +182,11 @@ impl AppServerChild {
     #[must_use]
     pub const fn identity(&self) -> &ExecutableIdentity {
         &self.identity
+    }
+    pub(crate) fn schema_export(
+        &self,
+    ) -> Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>> {
+        self.schema_export.clone()
     }
 
     /// Awaits bounded native readiness while retaining child ownership on failure.
@@ -167,11 +236,12 @@ impl AppServerChild {
                         }
                     });
                 }
-                Err(codex_router_codex::CodexProtocolError::Connect(_))
-                | Err(codex_router_codex::CodexProtocolError::Timeout { stage: "connect" }) => {
+                Err(codex_native_integration::CodexProtocolError::Connect(_))
+                | Err(codex_native_integration::CodexProtocolError::Timeout { stage: "connect" }) =>
+                {
                     tokio::time::sleep(Duration::from_millis(20).min(remaining)).await;
                 }
-                Err(codex_router_codex::CodexProtocolError::Timeout {
+                Err(codex_native_integration::CodexProtocolError::Timeout {
                     stage: "native readiness",
                 }) => return Err(AppServerReadinessError::StartupTimeout),
                 Err(error) => return Err(AppServerReadinessError::Protocol(error)),
@@ -197,7 +267,7 @@ pub enum AppServerReadinessError {
     VersionMismatch,
     /// Reachable endpoint violated the pinned native protocol.
     #[error("managed app-server native protocol failed: {0}")]
-    Protocol(#[source] codex_router_codex::CodexProtocolError),
+    Protocol(#[source] codex_native_integration::CodexProtocolError),
 }
 
 #[cfg(test)]
@@ -207,13 +277,59 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn spawn_uses_captured_executable_after_managed_alias_moves()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::{DirBuilderExt, symlink};
+        let root = std::env::temp_dir().join(format!("captured-executable-{}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+        let original = root.join("original-codex");
+        let replacement = root.join("replacement-codex");
+        let alias = root.join("managed-codex");
+        let marker = root.join("spawn-marker");
+        std::fs::write(
+            &original,
+            "#!/bin/sh\nprintf original > \"$SCHEMA_PROOF_MARKER\"\n",
+        )?;
+        std::fs::write(
+            &replacement,
+            "#!/bin/sh\nprintf replacement > \"$SCHEMA_PROOF_MARKER\"\n",
+        )?;
+        for path in [&original, &replacement] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        symlink(&original, &alias)?;
+        let identity = codex_native_integration::executable_identity(&alias).await?;
+        let plan = AppServerLaunchPlan::new(
+            ChildCommandSpec::new(alias.clone())
+                .with_environment("SCHEMA_PROOF_MARKER", marker.as_os_str()),
+            identity,
+            "fixture".to_owned(),
+        );
+        std::fs::remove_file(&alias)?;
+        symlink(&replacement, &alias)?;
+        let mut child = plan.spawn()?;
+        let status = child.process.wait().await?;
+        let observed = std::fs::read_to_string(&marker)?;
+        for path in [&marker, &alias, &original, &replacement] {
+            std::fs::remove_file(path)?;
+        }
+        std::fs::remove_dir(root)?;
+        if !status.success() || observed != "original" {
+            return Err(
+                "spawn followed a retargeted alias instead of captured executable identity".into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn later_launch_refreshes_installed_identity_and_version()
     -> Result<(), Box<dyn std::error::Error>> {
         let executable =
             std::env::temp_dir().join(format!("codex-router-refresh-plan-{}", std::process::id()));
         std::fs::write(&executable, "#!/bin/sh\necho 'codex-cli 1.2.3'\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-        let original_identity = codex_router_codex::executable_identity(&executable).await?;
+        let original_identity = codex_native_integration::executable_identity(&executable).await?;
         let launch_plan = AppServerLaunchPlan::new(
             ChildCommandSpec::new(executable.clone()),
             original_identity.clone(),

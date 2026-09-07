@@ -6,13 +6,15 @@ The product boundary is intentionally narrow:
 
 - Codex remains the CLI, protocol client, session owner, installer, config owner, hook runner, MCP owner, and log/session/history owner.
 - `codex-router serve` owns local router authentication, upstream OAuth accounts, quota snapshots, account selection, and byte-preserving forwarding of Codex model-provider traffic.
-- The optional foreground `codex-router host` command owns one local router and one native Codex app-server child. Codex clients connect directly to the app-server Unix socket; the host never proxies Codex protocol traffic.
+- The optional foreground `codex-router host` command owns one local router and one native Codex app-server child, and composes owner-local Control, native Codex relay, and ACP channels. Codex still owns native threads, queues, permissions, and agent execution.
+- The separate `agent-sessions` CLI and reusable `communication-client` Rust SDK provide session discovery, explicit messaging, observation, and exact interruption. Lifecycle metadata lives separately from provider state and Codex history.
 - Prodex is source-mining reference material only. This repo is not a Prodex fork.
 
 Current design source of truth:
 
 - [Greenfield product spec](docs/specs/2026-06-20-codex-router-greenfield-spec.md)
 - [Research evidence](docs/specs/references/2026-06-20-research-evidence.md)
+- [Agent communication requirements](docs/specs/2026-09-05-agent-communication-system/2026-09-05-agent-communication-system-requirements.md), [Specification](docs/specs/2026-09-05-agent-communication-system/2026-09-05-agent-communication-system-specification.md), and [Program Design](docs/specs/2026-09-05-agent-communication-system/2026-09-05-agent-communication-system-program-design.md)
 
 ## Current Local Flow
 
@@ -62,12 +64,13 @@ cargo run -p codex-router-cli -- host
 ```
 
 The host starts `codex-router serve` when a compatible router is absent, starts
-the managed Codex app-server with Remote Control enabled, and keeps lifecycle
-control on an owner-only Unix socket. Existing `sessions` new/resume launches
-attach directly to Codex's conventional app-server socket.
+the managed Codex app-server, and keeps lifecycle
+control on an owner-only Unix socket. Hosted `agent-sessions` new/resume launches
+resolve the advertised public native selector. Backend replacement closes native
+connections; the native TUI owns bounded reconnection without a Sessions supervisor.
 
 ```shell
-cargo run -p codex-router-cli -- sessions 019fe7c6-f493-7f02-be72-2feac69d6e6d
+cargo run -p agent-sessions -- --id 019fe7c6-f493-7f02-be72-2feac69d6e6d
 cargo run -p codex-router-cli -- host status
 cargo run -p codex-router-cli -- host restart
 cargo run -p codex-router-cli -- host restart-router
@@ -77,5 +80,10 @@ cargo run -p codex-router-cli -- host update
 `host update` runs the managed Codex updater. If executable content changes,
 the foreground host stops its children and re-execs itself; otherwise the
 running app-server and connected clients are left untouched. This MVP is not a
-background service, launchd agent, client proxy, or cross-machine control
-plane.
+background service, launchd agent, or cross-machine control plane.
+
+For discovery, agent-declared messages, queue/steer, and event listening, see the
+[agent CLI guide](docs/agent-guidance/agent-communication.md). The
+[isolated debug testing guide](docs/wip/2026-09-06-agent-communication-guide.md)
+shows the real two-agent acceptance workflow. V1 ships the Rust SDK and CLI;
+other language SDKs, remote transport, scheduling, and mailboxes follow separately.

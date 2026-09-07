@@ -5,3 +5,6 @@ __pycache__/
 *.py[cod]
 *.log
 .DS_Store
+
+# Local document-reader preferences.
+*.mindle.json
