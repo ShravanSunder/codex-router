@@ -189,6 +189,8 @@ impl PickerRuntimeInventory {
             .chain(stored)
             .map(|mut row| {
                 row.runtime_status = PickerRuntimeStatus::Unknown;
+                row.recency = super::format_recency_at_ms(row.recency_at_ms);
+                row.created = super::format_recency_at_ms(row.created_at_ms);
                 (row.session_id.clone(), row)
             })
             .collect();

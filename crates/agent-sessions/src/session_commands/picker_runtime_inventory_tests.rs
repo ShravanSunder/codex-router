@@ -210,3 +210,22 @@ async fn unavailable_service_retains_remembered_rows_without_stale_active_claims
     assert_eq!(rows[0].session_id, "remembered");
     assert_eq!(rows[0].runtime_status, PickerRuntimeStatus::Unknown);
 }
+
+#[tokio::test]
+async fn remembered_runtime_rows_refresh_age_labels_from_their_timestamps() {
+    let mut row = runtime_record("remembered", "Remembered", "/repo", &json!({}));
+    row.created_at_ms = Some(0);
+    row.recency_at_ms = Some(0);
+    row.created = "now".into();
+    row.recency = "now".into();
+    let mut inventory = PickerRuntimeInventory {
+        remembered: vec![row],
+    };
+
+    let rows = inventory.refresh(None, vec![]).await;
+
+    assert!(rows[0].created.ends_with(" ago"));
+    assert!(rows[0].recency.ends_with(" ago"));
+    assert_eq!(rows[0].created_at_ms, Some(0));
+    assert_eq!(rows[0].recency_at_ms, Some(0));
+}
