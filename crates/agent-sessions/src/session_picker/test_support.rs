@@ -1,3 +1,4 @@
+use crate::picker_runtime_status::PickerRuntimeStatus;
 use crate::presentation::session_picker::picker_request::SessionsPickerRequest;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
 use crate::sessions::RepositoryIdentity;
@@ -84,5 +85,6 @@ pub(crate) fn picker_record(
         conversation_source: None,
         source: Some(source.to_owned()),
         thread_source: Some(source.to_owned()),
+        runtime_status: PickerRuntimeStatus::Unknown,
     }
 }

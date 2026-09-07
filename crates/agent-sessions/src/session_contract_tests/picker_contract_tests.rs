@@ -135,8 +135,11 @@ fn sessions_interactive_picker_launches_selected_session_with_injected_dependenc
     ));
 
     assert!(stdout.is_empty());
-    assert_eq!(picker.offered_session_ids, ["thread-new", "thread-old"]);
-    assert_eq!(picker.offered_labels.len(), 2);
+    assert_eq!(
+        picker.offered_session_ids,
+        ["thread-subagent", "thread-new", "thread-old"]
+    );
+    assert_eq!(picker.offered_labels.len(), 3);
     assert_eq!(picker.offered_labels[0], "PICKER_CANARY_SHOULD_NOT_LEAK");
     assert_eq!(runner.resumed_session_ids, ["thread-old"]);
 }

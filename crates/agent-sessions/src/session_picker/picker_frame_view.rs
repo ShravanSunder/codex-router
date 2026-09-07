@@ -3,8 +3,8 @@ use super::{
     COMPACT_PICKER_WIDTH, MIN_PICKER_WIDTH, MIN_STACKED_DETAILS_HEIGHT, NARROW_PICKER_WIDTH,
     SIDECAR_PICKER_WIDTH, SessionConversationPreview, SessionsPickerModel, SessionsPickerOutcome,
     detail_height, fit_line, footer_lines, picker_body_budget, render_details, render_session_list,
-    render_start_new_details, root_label, session_list_height, session_visible_row_budget,
-    sort_label, source_label,
+    render_start_new_details, root_label, runtime_view_label, session_list_height,
+    session_visible_row_budget, sort_label,
 };
 use iocraft::prelude::*;
 use unicode_width::UnicodeWidthStr;
@@ -20,7 +20,7 @@ pub(super) fn render_picker_view(
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let filter_controls = render_filter_controls(model, content_width);
     let control_height = filter_controls.len();
-    let footer_lines = footer_lines(content_width);
+    let footer_lines = footer_lines(content_width, model.show_help);
     let body_budget = picker_body_budget(
         height,
         control_height,
@@ -129,15 +129,15 @@ pub(super) fn render_filter_controls(
 ) -> Vec<AnyElement<'static>> {
     let filter = format!("Search: [{}]", model.search);
     let scope = format!("[{}]", root_label(model.root));
-    let threads = format!("Threads: [{}]", source_label(model.source));
+    let view = format!("View: [{}]", runtime_view_label(model.runtime_view));
     let sort = format!("Sort: [{}]", sort_label(model.sort));
 
-    if one_line_filter_controls_fit_for_parts(width, [&filter, &scope, &threads, &sort]) {
-        return vec![control_line(vec![filter, scope, threads, sort])];
+    if one_line_filter_controls_fit_for_parts(width, [&filter, &scope, &view, &sort]) {
+        return vec![control_line(vec![filter, scope, view, sort])];
     }
 
     if width < COMPACT_PICKER_WIDTH {
-        return [filter, scope, threads, sort]
+        return [filter, scope, view, sort]
             .into_iter()
             .map(|line| control_line(vec![line]))
             .collect();
@@ -146,14 +146,14 @@ pub(super) fn render_filter_controls(
     if width < NARROW_PICKER_WIDTH {
         return vec![
             control_line(vec![filter]),
-            control_line(vec![scope, threads]),
+            control_line(vec![scope, view]),
             control_line(vec![sort]),
         ];
     }
 
     vec![
         control_line(vec![filter]),
-        control_line(vec![scope, threads, sort]),
+        control_line(vec![scope, view, sort]),
     ]
 }
 

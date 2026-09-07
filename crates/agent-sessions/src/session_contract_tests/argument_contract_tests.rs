@@ -1,13 +1,13 @@
 use super::*;
 
 #[test]
-fn sessions_command_defaults_to_cwd_root_provider_any_interactive_source() {
+fn sessions_picker_defaults_to_repo_scope_without_changing_noninteractive_defaults() {
     let command = match parse_session_arguments([]) {
         Ok(command) => command,
         Err(error) => panic!("sessions command should parse: {error}"),
     };
 
-    assert_eq!(command.root, crate::sessions::SessionsRoot::Cwd);
+    assert_eq!(command.root, crate::sessions::SessionsRoot::Repo);
     assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
     assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
     assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);
@@ -20,6 +20,13 @@ fn sessions_command_defaults_to_cwd_root_provider_any_interactive_source() {
     assert_eq!(command.limit, 100);
     assert!(!command.dry_run);
     assert!(command.codex_args.is_empty());
+}
+
+#[test]
+fn noninteractive_list_keeps_cwd_scope_and_explicit_source_filter() {
+    let command = parse_session_arguments([OsString::from("--list")]).unwrap();
+    assert_eq!(command.root, crate::sessions::SessionsRoot::Cwd);
+    assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
 }
 
 #[test]

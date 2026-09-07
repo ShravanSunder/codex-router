@@ -18,9 +18,9 @@ fn debug_session_profile_selection_matches_router_default_boundary() {
 }
 
 #[test]
-fn interactive_sessions_default_to_cwd_and_reject_checkout() {
+fn interactive_sessions_default_to_repo_and_reject_checkout() {
     let command = SessionsCommand::parse(Vec::new()).expect("interactive command should parse");
-    assert_eq!(command.root, SessionsRoot::Cwd);
+    assert_eq!(command.root, SessionsRoot::Repo);
 
     let error = SessionsCommand::parse(vec!["--checkout".into()])
         .expect_err("interactive checkout cannot be represented by the picker");

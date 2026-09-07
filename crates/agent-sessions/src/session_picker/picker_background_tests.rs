@@ -25,7 +25,7 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
                 release_first_receiver
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .recv()
+                    .recv_timeout(std::time::Duration::from_secs(2))
                     .unwrap_or_else(|error| panic!("first load release should arrive: {error}"));
             }
             active_loads.fetch_sub(1, Ordering::SeqCst);
@@ -85,26 +85,105 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
 }
 
 #[tokio::test]
-async fn sessions_picker_filter_shortcuts_reload_records_from_query_source() {
+async fn periodic_same_generation_refresh_does_not_starve_a_slow_result() {
+    let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
+        generation: 0,
+        query: reload_query("initial"),
+    });
+    let (release_slow_sender, release_slow_receiver) = mpsc::channel::<()>();
+    let release_slow_receiver = Arc::new(Mutex::new(release_slow_receiver));
+    let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let load_count = Arc::new(AtomicUsize::new(0));
+    let active_loads = Arc::new(AtomicUsize::new(0));
+    let maximum_active_loads = Arc::new(AtomicUsize::new(0));
+    let loader: SessionsPickerRecordLoader = Arc::new({
+        let release_slow_receiver = Arc::clone(&release_slow_receiver);
+        let load_count = Arc::clone(&load_count);
+        let active_loads = Arc::clone(&active_loads);
+        let maximum_active_loads = Arc::clone(&maximum_active_loads);
+        move |query| {
+            let active = active_loads.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum_active_loads.fetch_max(active, Ordering::SeqCst);
+            let invocation = load_count.fetch_add(1, Ordering::SeqCst);
+            let _ = started_sender.send(query.search);
+            if invocation == 0 {
+                release_slow_receiver
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap_or_else(|error| panic!("slow refresh should release: {error}"));
+            }
+            active_loads.fetch_sub(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    });
+    let (accepted_sender, mut accepted_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::spawn(async move {
+        run_session_record_reload_worker(receiver, loader, move |request, records| {
+            if request.generation == 1 && records.is_ok() {
+                let _ = accepted_sender.send(request.query.search);
+            }
+        })
+        .await;
+    });
+    let refresh_request = SessionRecordsReloadRequest {
+        generation: 1,
+        query: reload_query("same-query"),
+    };
+
+    sender.send_replace(refresh_request.clone());
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("slow refresh should start: {error}"))
+            .as_deref(),
+        Some("same-query")
+    );
+    sender.send_replace(refresh_request);
+    release_slow_sender
+        .send(())
+        .unwrap_or_else(|error| panic!("slow refresh release should send: {error}"));
+
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), accepted_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("slow result should be accepted: {error}"))
+            .as_deref(),
+        Some("same-query")
+    );
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("pending refresh should start: {error}"))
+            .as_deref(),
+        Some("same-query")
+    );
+    assert_eq!(maximum_active_loads.load(Ordering::SeqCst), 1);
+
+    worker.abort();
+}
+
+#[tokio::test]
+async fn sessions_picker_view_shortcut_filters_the_latest_loaded_records() {
     let observed_queries = Arc::new(Mutex::new(Vec::<SessionsPickerDataQuery>::new()));
-    let loader_called = Arc::new(tokio::sync::Notify::new());
     let loader_queries = Arc::clone(&observed_queries);
-    let loader_called_from_blocking_task = Arc::clone(&loader_called);
     let record_loader: SessionsPickerRecordLoader = Arc::new(move |query| {
         loader_queries
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .push(query);
-        loader_called_from_blocking_task.notify_one();
-        Ok(vec![picker_record(
+        let mut record = picker_record(
             "thread-reloaded",
             "Reloaded SQL result",
             "/repo/project-a",
             "codex-router",
             "subagent",
-        )])
+        );
+        record.runtime_status = crate::picker_runtime_status::PickerRuntimeStatus::Blocked;
+        Ok(vec![record])
     });
     let mut request = picker_request();
+    request.source = SessionsSource::All;
     request.records = vec![picker_record(
         "thread-initial",
         "Initial SQL result",
@@ -113,29 +192,28 @@ async fn sessions_picker_filter_shortcuts_reload_records_from_query_source() {
         "cli",
     )];
 
-    let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
-    let events = futures_util::stream::once(async { ctrl_key('t') }).chain(
-        futures_util::stream::once(async move {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(2), loader_called.notified())
-                    .await;
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc))
-        }),
-    );
-    let actual = element! {
+    let events =
+        futures_util::stream::once(async { ctrl_key('t') }).chain(futures_util::stream::pending());
+    let mut picker = element! {
         SessionsPickerComponent(
             request,
             record_loader: Some(record_loader),
             width: 100usize,
-            selected_outcome_out: &mut selected_outcome,
         )
-    }
-    .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
-    .map(|canvas| canvas.to_string())
-    .collect::<Vec<_>>()
-    .await;
+    };
+    let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+    tokio::pin!(frames);
+    let actual = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(canvas) = frames.next().await {
+            let snapshot = canvas.to_string();
+            if snapshot.contains("View: [Blocked]") && snapshot.contains("Reloaded SQL result") {
+                return snapshot;
+            }
+        }
+        panic!("picker ended before rendering its loaded result");
+    })
+    .await
+    .expect("loaded blocked result must render within the deadline");
 
     let queries = observed_queries
         .lock()
@@ -144,13 +222,11 @@ async fn sessions_picker_filter_shortcuts_reload_records_from_query_source() {
         queries
             .iter()
             .any(|query| query.source == SessionsSource::All),
-        "ctrl-t should reload records for the next thread-source query: {queries:?}"
+        "runtime view changes must preserve the request's source query: {queries:?}"
     );
     assert!(
-        actual
-            .iter()
-            .any(|snapshot| snapshot.contains("Reloaded SQL result")),
-        "the current reload result should become visible in the wired component: {actual:?}"
+        actual.contains("◆ Blocked") && actual.contains("Reloaded SQL result"),
+        "the Blocked view should show the blocked loaded result: {actual:?}"
     );
 }
 

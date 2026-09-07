@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView;
 use crate::presentation::session_picker::picker_request::SessionsPickerRequest;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
 use crate::sessions::SessionPickerRecord;
@@ -59,19 +60,25 @@ pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecor
     }
 }
 
+pub(super) fn runtime_view_matches(
+    view: SessionsPickerRuntimeView,
+    record: &SessionPickerRecord,
+) -> bool {
+    use crate::picker_runtime_status::PickerRuntimeStatus;
+
+    match view {
+        SessionsPickerRuntimeView::Blocked => record.runtime_status == PickerRuntimeStatus::Blocked,
+        SessionsPickerRuntimeView::Active => record.runtime_status == PickerRuntimeStatus::Active,
+        SessionsPickerRuntimeView::Idle => record.runtime_status == PickerRuntimeStatus::Idle,
+        SessionsPickerRuntimeView::All => true,
+    }
+}
+
 pub(super) fn next_root_filter(root: SessionsPickerRoot) -> SessionsPickerRoot {
     match root {
         SessionsPickerRoot::Cwd => SessionsPickerRoot::Repo,
         SessionsPickerRoot::Repo => SessionsPickerRoot::Any,
         SessionsPickerRoot::Any => SessionsPickerRoot::Cwd,
-    }
-}
-
-pub(super) fn next_source_filter(source: SessionsSource) -> SessionsSource {
-    match source {
-        SessionsSource::Interactive => SessionsSource::All,
-        SessionsSource::All => SessionsSource::Subagents,
-        SessionsSource::Subagents => SessionsSource::Interactive,
     }
 }
 

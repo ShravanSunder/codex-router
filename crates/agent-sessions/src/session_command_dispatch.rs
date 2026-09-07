@@ -80,6 +80,9 @@ use session_catalog_query::{
     load_session_records_for_query_with_identity,
 };
 
+#[path = "session_commands/picker_runtime_inventory.rs"]
+mod picker_runtime_inventory;
+
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
 const SESSION_CONVERSATION_MAX_READ_BYTES: u64 = 1024 * 1024;
@@ -124,7 +127,7 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     if command.last {
         return run_last_session(stdout, command, context, &launch_target, runner);
     }
-    run_interactive_session(command, context, runner, picker)
+    run_interactive_session(command, context, &launch_target, runner, picker)
 }
 
 fn run_session_listing<W: Write>(
@@ -190,12 +193,15 @@ fn write_sessions_table<W: Write>(
 }
 
 fn run_interactive_session(
-    command: SessionsCommand,
+    mut command: SessionsCommand,
     context: &CliContext,
+    launch_target: &SessionsLaunchTarget,
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
     picker.ensure_available()?;
+    // The interactive runtime view replaces source cycling; origin is not activity.
+    command.source = SessionsSource::All;
     let picker_root = SessionsPickerRoot::try_from(command.root)?;
     let picker_provider = command.provider.clone();
     let picker_source = command.source;
@@ -224,7 +230,14 @@ fn run_interactive_session(
             .map(SessionPickerRecord::from_record)
             .collect(),
     };
-    let record_loader = session_picker_record_loader(context.clone(), repository_identity);
+    let service_directory = match launch_target {
+        SessionsLaunchTarget::Hosted {
+            service_directory, ..
+        } => Some(service_directory.clone()),
+        SessionsLaunchTarget::Local { .. } => None,
+    };
+    let record_loader =
+        session_picker_record_loader(context.clone(), repository_identity, service_directory);
     let Some(outcome) = picker.select_session(request, Some(record_loader))? else {
         return Err(SessionsCommandError::PickerCanceled);
     };
@@ -245,26 +258,35 @@ fn run_interactive_session(
 fn session_picker_record_loader(
     context: CliContext,
     repository_identity: RepositoryIdentity,
+    service_directory: Option<std::path::PathBuf>,
 ) -> SessionsPickerRecordLoader {
+    let runtime_inventory =
+        std::sync::Mutex::new(picker_runtime_inventory::PickerRuntimeInventory::default());
     std::sync::Arc::new(move |query| {
         let record_query = SessionRecordQuery::from_picker_query(query);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| error.to_string())?;
-        runtime
-            .block_on(load_session_records_for_query_with_identity(
+        let mut inventory = runtime_inventory
+            .lock()
+            .map_err(|_| "runtime inventory lock failed".to_owned())?;
+        runtime.block_on(async {
+            let records = load_session_records_for_query_with_identity(
                 record_query,
                 &context,
                 Some(repository_identity.clone()),
-            ))
-            .map(|records| {
-                records
-                    .iter()
-                    .map(SessionPickerRecord::from_record)
-                    .collect()
-            })
-            .map_err(|error| error.to_string())
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let stored = records
+                .iter()
+                .map(SessionPickerRecord::from_record)
+                .collect();
+            Ok(inventory
+                .refresh(service_directory.as_deref(), stored)
+                .await)
+        })
     })
 }
 

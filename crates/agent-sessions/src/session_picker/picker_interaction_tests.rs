@@ -289,8 +289,61 @@ async fn sessions_picker_iocraft_mock_terminal_ctrl_shortcuts_drive_filters() {
     assert!(
         actual
             .iter()
-            .any(|snapshot| snapshot.contains("[repo]    Threads: [all]    Sort: [created]")),
+            .any(|snapshot| snapshot.contains("[repo]    View: [Blocked]    Sort: [created]")),
         "ctrl shortcuts should cycle scope, threads, and sort: {actual:?}"
+    );
+}
+
+#[tokio::test]
+async fn sessions_picker_help_toggles_and_escape_closes_help_before_picker() {
+    for help_key in [
+        ctrl_key('/'),
+        ctrl_key('_'),
+        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::F(1))),
+    ] {
+        let events =
+            futures_util::stream::iter(vec![help_key]).chain(futures_util::stream::pending());
+        let mut picker = element! {
+            SessionsPickerComponent(request: picker_request(), width: 100usize)
+        };
+        let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+        tokio::pin!(frames);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(canvas) = frames.next().await {
+                if canvas.to_string().contains("ctrl-r refresh") {
+                    return;
+                }
+            }
+            panic!("picker ended before showing help");
+        })
+        .await
+        .expect("help must render within the deadline");
+    }
+
+    // If Esc exits instead of closing help, Ctrl+N cannot produce this outcome.
+    let mut selected_outcome = None;
+    let mut picker = element! {
+        SessionsPickerComponent(request: picker_request(), width: 100usize, selected_outcome_out: &mut selected_outcome)
+    };
+    let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(
+        futures_util::stream::iter(vec![
+            ctrl_key('/'),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ctrl_key('n'),
+        ]),
+    ));
+    let actual = tokio::time::timeout(Duration::from_secs(2), frames.collect::<Vec<_>>())
+        .await
+        .expect("closing help then starting new must finish");
+    drop(picker);
+    assert_eq!(
+        selected_outcome,
+        Some(SessionsPickerOutcome::StartNewSession)
+    );
+    assert!(
+        actual
+            .last()
+            .is_some_and(|canvas| canvas.to_string().contains("ctrl-/ Help"))
     );
 }
 
@@ -396,7 +449,7 @@ async fn sessions_picker_iocraft_mock_terminal_search_keeps_plain_letters() {
     assert!(
         actual
             .iter()
-            .any(|snapshot| snapshot.contains("[📂 cwd]    Threads: [interactive]")),
+            .any(|snapshot| snapshot.contains("[📂 cwd]    View: [All]")),
         "plain search input should leave filters unchanged: {actual:?}"
     );
 }

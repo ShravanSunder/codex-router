@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use iocraft::prelude::*;
 
@@ -19,6 +20,7 @@ use crate::sessions::SessionConversationPreview;
 use crate::sessions::SessionConversationSource;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsSort;
+#[cfg(feature = "quota-reset-test-harness")]
 use crate::sessions::SessionsSource;
 
 #[path = "picker_frame_view.rs"]
@@ -42,7 +44,7 @@ use picker_detail_view::{render_details, render_start_new_details};
 #[path = "picker_display_text.rs"]
 mod picker_display_text;
 use picker_display_text::{
-    compact_age, fit_line, root_label, sort_label, source_label, truncate_end,
+    compact_age, fit_line, root_label, runtime_view_label, sort_label, truncate_end,
 };
 
 const MIN_RENDER_HEIGHT: usize = 24;
@@ -173,10 +175,32 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 }
                 let mut model_value = model.write();
                 if model_value.data_query() == request.query {
-                    model_value.replace_records(records);
+                    match records {
+                        Ok(records) => model_value.replace_records(records),
+                        Err(()) => model_value.invalidate_runtime_statuses(),
+                    }
                 }
             })
             .await;
+        }
+    });
+    hooks.use_future({
+        let reload_port = reload_port.clone();
+        async move {
+            reload_port.send(SessionRecordsReloadRequest {
+                generation: reload_generation.get(),
+                query: model.read().data_query(),
+            });
+            let mut refresh_interval = tokio::time::interval(Duration::from_secs(3));
+            refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            refresh_interval.tick().await;
+            loop {
+                refresh_interval.tick().await;
+                reload_port.send(SessionRecordsReloadRequest {
+                    generation: reload_generation.get(),
+                    query: model.read().data_query(),
+                });
+            }
         }
     });
     let load_conversation = hooks.use_async_handler({
@@ -245,10 +269,22 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     model_value.handle_key(SessionsPickerKey::CycleRoot);
                 }
                 KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    model_value.handle_key(SessionsPickerKey::CycleSource);
+                    model_value.handle_key(SessionsPickerKey::CycleRuntimeView);
                 }
                 KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
                     model_value.handle_key(SessionsPickerKey::CycleSort);
+                }
+                KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    reload_port.send(SessionRecordsReloadRequest {
+                        generation: reload_generation.get(),
+                        query: model_value.data_query(),
+                    });
+                }
+                KeyCode::F(1) | KeyCode::Char('\u{1f}') => {
+                    model_value.handle_key(SessionsPickerKey::ToggleHelp);
+                }
+                KeyCode::Char('/' | '_') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    model_value.handle_key(SessionsPickerKey::ToggleHelp);
                 }
                 KeyCode::Char('c' | 'd') if modifiers.contains(KeyModifiers::CONTROL) => {
                     should_cancel.set(true);
@@ -273,7 +309,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 }
                 KeyCode::Enter => selected_outcome.set(model_value.activation_outcome_for_focus()),
                 KeyCode::Esc => {
-                    if model_value.search.is_empty() {
+                    if model_value.show_help {
+                        model_value.handle_key(SessionsPickerKey::ToggleHelp);
+                    } else if model_value.search.is_empty() {
                         should_cancel.set(true);
                     } else {
                         model_value.handle_key(SessionsPickerKey::ClearSearch);
@@ -355,16 +393,18 @@ pub(crate) fn SessionsPickerComponent<'a>(
 async fn run_session_record_reload_worker(
     mut receiver: tokio::sync::watch::Receiver<SessionRecordsReloadRequest>,
     loader: SessionsPickerRecordLoader,
-    mut accept_records: impl FnMut(SessionRecordsReloadRequest, Vec<SessionPickerRecord>),
+    mut accept_records: impl FnMut(SessionRecordsReloadRequest, Result<Vec<SessionPickerRecord>, ()>),
 ) {
     while receiver.changed().await.is_ok() {
         let request = receiver.borrow_and_update().clone();
         let query = request.query.clone();
         let loader = loader.clone();
         let loaded_records = tokio::task::spawn_blocking(move || loader(query)).await;
-        if let Ok(Ok(records)) = loaded_records {
-            accept_records(request, records);
-        }
+        let records = match loaded_records {
+            Ok(Ok(records)) => Ok(records),
+            Ok(Err(_)) | Err(_) => Err(()),
+        };
+        accept_records(request, records);
     }
 }
 
