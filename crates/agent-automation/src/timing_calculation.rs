@@ -1,6 +1,7 @@
 //! Occurrence calculation keeps relative intervals distinct from calendar cron.
 use chrono::{DateTime, Duration, Utc};
 use croner::parser::{CronParser, Seconds, Year};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TimingError {
@@ -14,10 +15,18 @@ pub enum TimingError {
     OutOfRange,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum TimingRule {
-    At(DateTime<Utc>),
-    After(u32),
-    Interval(u32),
+    At {
+        at: DateTime<Utc>,
+    },
+    After {
+        seconds: u32,
+    },
+    Interval {
+        seconds: u32,
+    },
     Cron {
         expression: String,
         timezone: String,
@@ -33,17 +42,17 @@ impl TimingRule {
         after: Option<DateTime<Utc>>,
     ) -> Result<Option<DateTime<Utc>>, TimingError> {
         match self {
-            Self::At(at) => {
+            Self::At { at } => {
                 Ok(Some(*at).filter(|due| after.is_none_or(|boundary| *due > boundary)))
             }
-            Self::After(seconds) => {
+            Self::After { seconds } => {
                 let seconds = validate_seconds(*seconds)?;
                 let due = anchor
                     .checked_add_signed(Duration::seconds(seconds))
                     .ok_or(TimingError::OutOfRange)?;
                 Ok(Some(due).filter(|at| after.is_none_or(|boundary| *at > boundary)))
             }
-            Self::Interval(seconds) => {
+            Self::Interval { seconds } => {
                 let seconds = validate_seconds(*seconds)?;
                 let elapsed = after.map_or(0, |boundary| {
                     boundary.signed_duration_since(anchor).num_seconds().max(0)

@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+chrono.workspace = true
 agent-automation = { path = "../agent-automation" }
 sqlx.workspace = true
 thiserror.workspace = true

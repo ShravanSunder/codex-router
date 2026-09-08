@@ -8,7 +8,7 @@ fn instant(value: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
 fn interval_resume_preserves_original_anchor_without_replaying_ticks()
 -> Result<(), Box<dyn std::error::Error>> {
     // Arrange: every ten minutes, anchored at 12:03 rather than a cron boundary.
-    let rule = TimingRule::Interval(600);
+    let rule = TimingRule::Interval { seconds: 600 };
     let anchor = instant("2026-09-08T12:03:00Z")?;
     // Act: resume after multiple intentionally skipped ticks.
     let next = rule.next_due(anchor, Some(instant("2026-09-08T12:36:00Z")?))?;
@@ -21,7 +21,7 @@ fn interval_resume_preserves_original_anchor_without_replaying_ticks()
 #[test]
 fn one_shot_has_no_next_occurrence_after_its_due_time() -> Result<(), Box<dyn std::error::Error>> {
     // Arrange: a one-shot after ten minutes.
-    let rule = TimingRule::After(600);
+    let rule = TimingRule::After { seconds: 600 };
     let anchor = instant("2026-09-08T12:00:00Z")?;
     // Act / Assert: it first fires once, then is exhausted.
     if rule.next_due(anchor, None)? != Some(instant("2026-09-08T12:10:00Z")?) {

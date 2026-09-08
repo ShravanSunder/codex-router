@@ -21,6 +21,21 @@ pub enum StorageError {
     InstructionNotFound,
     #[error("instruction changed; inspect the current revision before editing")]
     RevisionConflict,
+    #[error("schedule was not found in this automation database")]
+    ScheduleNotFound,
+    #[error("multiple conflicting Runs prevent safe admission")]
+    RunInvariantConflict {
+        run_ids: Vec<agent_automation::RunId>,
+    },
+    #[error("the previous Run has no required continuity summary; inspect summary recovery")]
+    MissingContinuity,
+    #[error("invalid schedule {field}: {reason}")]
+    InvalidSchedule {
+        field: &'static str,
+        reason: &'static str,
+    },
+    #[error(transparent)]
+    InvalidTiming(#[from] agent_automation::TimingError),
 }
 
 pub struct AutomationStore {

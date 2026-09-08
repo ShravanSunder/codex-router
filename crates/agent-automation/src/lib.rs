@@ -10,3 +10,8 @@ mod instruction_document;
 pub use instruction_document::{InstructionDocument, InstructionText, InstructionTextError};
 mod timing_calculation;
 pub use timing_calculation::{TimingError, TimingRule};
+mod schedule_definition;
+pub use schedule_definition::{
+    CapturedRunInputs, ContinuityInput, ExecutionDestination, FrozenExecutionConfiguration,
+    ScheduleDefinition, ScheduleRecord, SummarySource,
+};
