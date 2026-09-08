@@ -142,6 +142,23 @@ pub async fn serve_control_connection(
             }
             let response = match admit_request(frame, &mut admission) {
                 Err(response) => response,
+                Ok(request) if matches!(request.method.as_str(), "wake/send" | "wake/show") => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response =
+                            crate::wakeup_dispatch::dispatch(crate::wakeup_dispatch::WakeRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            })
+                            .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request)
                     if matches!(
                         request.method.as_str(),
@@ -246,6 +263,9 @@ fn admit_request(frame: Value, admission: &mut ControlAdmission) -> Result<Reque
     }
     if let Err(failure) = admission.admit(&request.id, &request.method) {
         if failure == AdmissionError::Overloaded {
+            if request.method.starts_with("wake/") {
+                return Err(crate::wakeup_dispatch::overloaded(id));
+            }
             if request.method.starts_with("instruction/") {
                 return Err(crate::instruction_dispatch::overloaded(id));
             }

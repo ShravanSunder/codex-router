@@ -1,0 +1,90 @@
+use codex_router_host::{CommunicationRuntime, CommunicationRuntimeInputs};
+use communication_protocol::OperationId;
+use std::os::unix::fs::DirBuilderExt;
+
+#[tokio::test]
+async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::error::Error>> {
+    // Arrange: a real owned Control service and CLI subprocess; no native process/model.
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/wake-cli-{}",
+        OperationId::generate().as_str()
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let runtime = CommunicationRuntime::start(CommunicationRuntimeInputs {
+        directory: root.clone(),
+        codex_home: root.clone(),
+        backend_socket: root.join("absent.sock"),
+        native_schema: None,
+    })
+    .await?;
+    // Act: the documented CLI operation must reach Host-created persistent state.
+    let target=serde_json::json!({"endpoint":{"serviceId":runtime.service_id(),"endpointId":"codex-local"},"sessionId":"fixture-only-new-thread"}).to_string();
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "wake",
+            "send",
+            "--to",
+            &target,
+            "--human-user",
+            "--every",
+            "10m",
+            "--for",
+            "2h",
+            "--text",
+            "Check repository",
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(format!(
+            "CLI create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let record: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let id = record
+        .pointer("/result/definition/wakeupId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing created instruction identity")?;
+    let read = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "wake",
+            "show",
+            "--wakeup-id",
+            id,
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    // Assert: machine-readable read returns the exact text, with no native backend involved.
+    if !read.status.success() {
+        return Err("CLI show failed".into());
+    }
+    let record: serde_json::Value = serde_json::from_slice(&read.stdout)?;
+    if record
+        .pointer("/result/definition/message/content/text")
+        .and_then(serde_json::Value::as_str)
+        != Some("Check repository")
+    {
+        return Err("CLI wake text was not persisted".into());
+    }
+    if record.pointer("/result/firstFire") != Some(&serde_json::Value::Null) {
+        return Err("CLI creation invented a firing".into());
+    }
+    runtime.shutdown().await?;
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            return Err("unexpected cleanup entry".into());
+        }
+        std::fs::remove_file(entry.path())?;
+    }
+    std::fs::remove_dir(root)?;
+    Ok(())
+}

@@ -37,3 +37,6 @@ pub use codex_acp_adapter::{ACP_SCHEMA_DIGEST, NativeStoredSessions};
 mod instruction_dispatch;
 mod session_inventory_dispatch;
 mod stored_inventory_observation;
+
+mod wakeup_dispatch;
+mod wakeup_projection;

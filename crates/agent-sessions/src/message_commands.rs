@@ -1,15 +1,14 @@
 //! Descriptive message submission through the public Rust client.
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use crate::message_input_arguments::{DeliveryChoice, SendArguments, prepare};
+use clap::{Parser, Subcommand};
 use communication_client::{ClientError, ControlClient};
 use communication_protocol::{
-    ChannelDescription, MessageContent, MessageDelivery, NativeSendParams, NativeSendReceipt,
-    SessionRef,
+    ChannelDescription, MessageDelivery, NativeSendParams, NativeSendReceipt,
 };
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
-    io::{self, Read, Write},
-    path::PathBuf,
+    io::{self, Write},
 };
 
 #[derive(Parser)]
@@ -23,49 +22,6 @@ enum MessageCommand {
     /// Submit information. Acceptance is not completion or a peer reply.
     Send(SendArguments),
 }
-#[derive(Clone, Copy, ValueEnum)]
-enum DeliveryChoice {
-    Auto,
-    Queue,
-    Steer,
-}
-#[derive(Args)]
-struct SendArguments {
-    /// Exact recipient as compact SessionRef JSON from discovery.
-    #[arg(long)]
-    to: String,
-    /// Self-declared sender SessionRef JSON; not authenticated identity.
-    #[arg(
-        long = "from",
-        required_unless_present = "human_user",
-        conflicts_with = "human_user"
-    )]
-    sender: Option<String>,
-    /// Explicit human input; omit the agent declaration.
-    #[arg(long)]
-    human_user: bool,
-    /// Auto steers active work or starts/resumes. Queue requires loaded; steer requires active.
-    #[arg(long, value_enum, default_value = "auto")]
-    delivery: DeliveryChoice,
-    #[arg(
-        long,
-        required_unless_present = "text_file",
-        conflicts_with = "text_file"
-    )]
-    text: Option<String>,
-    /// Read content from a file; '-' reads stdin. Content is never shell-interpolated.
-    #[arg(long)]
-    text_file: Option<PathBuf>,
-    #[arg(long)]
-    service_directory: Option<PathBuf>,
-    #[arg(long, requires = "expected_generation")]
-    expected_service_epoch: Option<String>,
-    #[arg(long, requires = "expected_service_epoch")]
-    expected_generation: Option<u64>,
-    #[arg(long)]
-    json: bool,
-}
-
 pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     let parsed = match MessageArguments::try_parse_from(arguments) {
         Ok(value) => value,
@@ -159,48 +115,6 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     report(result, machine, submitted)
 }
 
-fn prepare(args: &SendArguments) -> Result<(PathBuf, SessionRef, MessageContent), String> {
-    let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
-    let target = serde_json::from_str(&args.to).map_err(|_| "Invalid recipient SessionRef JSON")?;
-    if let Some(epoch) = &args.expected_service_epoch {
-        let _: communication_protocol::CodexGeneration = serde_json::from_value(
-            json!({"serviceEpoch":epoch,"generation":args.expected_generation}),
-        )
-        .map_err(|_| "Invalid expected generation")?;
-    }
-    let text = if let Some(text) = &args.text {
-        text.clone()
-    } else {
-        let path = args.text_file.as_ref().ok_or("Message content required")?;
-        let mut reader: Box<dyn Read> = if path.as_os_str() == "-" {
-            Box::new(io::stdin())
-        } else {
-            Box::new(std::fs::File::open(path).map_err(|_| "Message file unavailable")?)
-        };
-        let mut text = String::new();
-        reader
-            .by_ref()
-            .take((communication_protocol::MAX_CONTROL_FRAME_BYTES + 1) as u64)
-            .read_to_string(&mut text)
-            .map_err(|_| "Cannot read UTF-8 message")?;
-        text
-    };
-    let text = text
-        .try_into()
-        .map_err(|_| "Invalid or oversized message text")?;
-    let content = if args.human_user {
-        MessageContent::HumanUser { text }
-    } else {
-        let sender = serde_json::from_str(
-            args.sender
-                .as_deref()
-                .ok_or("Self-declared sender required")?,
-        )
-        .map_err(|_| "Invalid sender SessionRef JSON")?;
-        MessageContent::Agent { sender, text }
-    };
-    Ok((directory, target, content))
-}
 fn report(result: Result<NativeSendReceipt, ClientError>, machine: bool, submitted: bool) -> i32 {
     let (record, code) = match result {
         Ok(receipt) => (json!({"kind":"result","result":receipt}), 0),

@@ -21,7 +21,7 @@ pub use sessions::SessionsCommandError;
 #[must_use]
 pub fn command_help() -> String {
     format!(
-        "{}\nCommunication:\n  instruction create --text TEXT [--operation-id UUID] --json\n  instruction show --instruction-id UUID --json\n  instruction update --instruction-id UUID --expected-revision-id UUID --text TEXT --json\n  conversation prompt --endpoint ID --new|--session ID --cwd PATH --text-file PATH --json\n  sessions list --endpoint ID --view stored|loaded|active --json\n  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n  message send --to ADDRESS --from ADDRESS [--delivery auto|queue|steer] --text TEXT --json\n  message send --human-user --to ADDRESS --text-file PATH --json\n  endpoints list --json [--service-directory PATH]\n  addresses list --endpoint ID --json [--cursor CURSOR]\n  session inspect --endpoint ID --session ID --json\n  turn interrupt --endpoint ID --session ID --turn ID --json\n  native --endpoint ID\n  acp --endpoint ID\n  journal status --json\n  journal read --endpoint ID --journal-id UUID --after SEQUENCE --json\n",
+        "{}\nCommunication:\n  wake send --to ADDRESS --from ADDRESS --text TEXT --every 10m --for 2h --json\n  wake show --wakeup-id UUID --json\n  instruction create --text TEXT [--operation-id UUID] --json\n  instruction show --instruction-id UUID --json\n  instruction update --instruction-id UUID --expected-revision-id UUID --text TEXT --json\n  conversation prompt --endpoint ID --new|--session ID --cwd PATH --text-file PATH --json\n  sessions list --endpoint ID --view stored|loaded|active --json\n  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n  message send --to ADDRESS --from ADDRESS [--delivery auto|queue|steer] --text TEXT --json\n  message send --human-user --to ADDRESS --text-file PATH --json\n  endpoints list --json [--service-directory PATH]\n  addresses list --endpoint ID --json [--cursor CURSOR]\n  session inspect --endpoint ID --session ID --json\n  turn interrupt --endpoint ID --session ID --turn ID --json\n  native --endpoint ID\n  acp --endpoint ID\n  journal status --json\n  journal read --endpoint ID --journal-id UUID --after SEQUENCE --json\n",
         sessions::command_help()
     )
 }
@@ -58,3 +58,8 @@ mod session_contract_tests;
 
 mod instruction_commands;
 pub use instruction_commands::run_instruction_command;
+
+mod message_input_arguments;
+mod wakeup_commands;
+mod wakeup_timing_arguments;
+pub use wakeup_commands::run_wakeup_command;

@@ -19,3 +19,5 @@ mod acp_transport_connection;
 pub use acp_transport_connection::AcpTransportConnection;
 mod instruction_operations;
 pub use instruction_operations::InstructionClientError;
+mod wakeup_operations;
+pub use wakeup_operations::WakeClientError;

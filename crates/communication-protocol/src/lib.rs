@@ -93,3 +93,14 @@ pub use instruction_contract::{
     InstructionFailure, InstructionFailureKind, InstructionNextAction, InstructionStage,
     LocalMutationEvidence, LocalMutationState,
 };
+mod automation_timing_contract;
+pub use automation_timing_contract::{
+    ExpiryRequest, InvalidSeconds, PositiveSeconds, TimingRequest,
+};
+mod wakeup_contract;
+pub use wakeup_contract::{
+    FireKind, FireReceipt, SavedMessage, WakeDefinition, WakeMutationRequest, WakeSendRequest,
+    WakeShowRequest, WakeSnapshot, WakeState,
+};
+mod wakeup_failure;
+pub use wakeup_failure::{WakeFailure, WakeFailureReason, WakeFailureStage, WakeNextAction};

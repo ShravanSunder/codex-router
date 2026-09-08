@@ -27,6 +27,15 @@ pub fn control_schema_document(
         native_uri,
     };
     assembly.add_type::<InstructionFailure>("instruction-failure")?;
+    assembly.add_type::<WakeFailure>("wake-failure")?;
+    assembly.add_method::<WakeSendRequest, WakeSnapshot>(
+        "wake/send",
+        &["invalidField", "automationUnavailable", "operationConflict"],
+    )?;
+    assembly.add_method::<WakeShowRequest, WakeSnapshot>(
+        "wake/show",
+        &["resourceNotFound", "automationUnavailable"],
+    )?;
     assembly
         .add_method::<InstructionCreateParams, InstructionSnapshot>("instruction/create", &[])?;
     assembly
@@ -238,6 +247,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     let mut data = vec![json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties})];
+    if method.starts_with("wake/") {
+        data = vec![reference("wake-failure")];
+    }
     if method.starts_with("instruction/") {
         data = vec![reference("instruction-failure")];
     }
