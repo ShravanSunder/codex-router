@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/agent-automation",
+    "crates/automation-storage",
     "crates/codex-acp-adapter",
     "crates/lifecycle-observation",
     "crates/communication-client",
@@ -29,6 +31,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+uuid = { version = "1.26.0", features = ["v7"] }
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
 codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
 codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
