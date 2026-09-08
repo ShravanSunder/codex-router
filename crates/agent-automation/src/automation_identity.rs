@@ -11,6 +11,13 @@ macro_rules! automation_identity {
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static,str> { stringify!($name).into() }
+            fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({"type":"string","minLength":36,"maxLength":36,
+                    "pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"})
+            }
+        }
         impl TryFrom<String> for $name {
             type Error = AutomationIdentityError;
             fn try_from(value: String) -> Result<Self, Self::Error> {

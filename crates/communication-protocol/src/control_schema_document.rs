@@ -26,6 +26,12 @@ pub fn control_schema_document(
         frames: Vec::new(),
         native_uri,
     };
+    assembly.add_type::<InstructionFailure>("instruction-failure")?;
+    assembly
+        .add_method::<InstructionCreateParams, InstructionSnapshot>("instruction/create", &[])?;
+    assembly
+        .add_method::<InstructionUpdateParams, InstructionSnapshot>("instruction/update", &[])?;
+    assembly.add_method::<InstructionShowParams, InstructionSnapshot>("instruction/show", &[])?;
     assembly.add_type::<JournalBounds>("journal-bounds")?;
     assembly.add_method::<ControlInitializationParams, ControlInitializationResult>(
         "control/initialize",
@@ -232,6 +238,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     let mut data = vec![json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties})];
+    if method.starts_with("instruction/") {
+        data = vec![reference("instruction-failure")];
+    }
     if method == "lifecycleJournal/read" {
         data.push(json!({"type":"object","required":["kind","current"],"additionalProperties":false,
             "properties":{"kind":{"enum":["journalChanged","historyExpired"]},"current":reference("journal-bounds")}}));

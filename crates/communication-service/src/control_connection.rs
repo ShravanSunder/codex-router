@@ -17,8 +17,17 @@ pub struct ServiceIdentity {
     directory: EndpointDirectory,
     journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     native_backend: Option<crate::NativeControlBackend>,
+    automation: Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
 }
 impl ServiceIdentity {
+    pub fn with_automation_store(
+        mut self,
+        store: std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>,
+    ) -> Self {
+        self.automation = Some(store);
+        self
+    }
+
     pub fn with_native_backend(
         mut self,
         backend: crate::NativeControlBackend,
@@ -78,6 +87,7 @@ impl ServiceIdentity {
             schema_digest: digest,
             journal: None,
             native_backend: None,
+            automation: None,
             directory: EndpointDirectory::new(
                 UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?,
             ),
@@ -132,6 +142,28 @@ pub async fn serve_control_connection(
             }
             let response = match admit_request(frame, &mut admission) {
                 Err(response) => response,
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "instruction/create" | "instruction/update" | "instruction/show"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::instruction_dispatch::dispatch(
+                            crate::instruction_dispatch::InstructionRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request)
                     if matches!(
                         request.method.as_str(),
@@ -214,6 +246,9 @@ fn admit_request(frame: Value, admission: &mut ControlAdmission) -> Result<Reque
     }
     if let Err(failure) = admission.admit(&request.id, &request.method) {
         if failure == AdmissionError::Overloaded {
+            if request.method.starts_with("instruction/") {
+                return Err(crate::instruction_dispatch::overloaded(id));
+            }
             if request.method == "control/initialize" {
                 return Err(error(id, -32603, "Request capacity exceeded"));
             }

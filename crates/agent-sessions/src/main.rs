@@ -16,6 +16,9 @@ fn main() {
         print!("{}", agent_sessions::command_help());
         return;
     }
+    if arguments.first().is_some_and(|arg| arg == "instruction") {
+        std::process::exit(agent_sessions::run_instruction_command(arguments));
+    }
     if arguments.first().is_some_and(|arg| arg == "conversation") {
         std::process::exit(agent_sessions::run_conversation_command(arguments));
     }

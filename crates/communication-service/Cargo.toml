@@ -7,6 +7,8 @@ publish.workspace = true
 [lints]
 workspace = true
 [dependencies]
+automation-storage = { path = "../automation-storage" }
+agent-automation = { path = "../agent-automation" }
 base64.workspace = true
 sqlx.workspace = true
 codex-acp-adapter = { path = "../codex-acp-adapter", version = "0.1.14" }

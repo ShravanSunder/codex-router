@@ -38,3 +38,12 @@ pub struct InstructionDocument {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
+
+impl schemars::JsonSchema for InstructionText {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "InstructionText".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type":"string","minLength":1,"maxLength":1048576,"pattern":"^[^\\u0000]+$","x-maxUtf8Bytes":1048576})
+    }
+}

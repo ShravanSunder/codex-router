@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+schemars.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 chrono-tz.workspace = true
 croner.workspace = true

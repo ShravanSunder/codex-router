@@ -264,5 +264,7 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
         .unwrap_or_else(|error| panic!("export cleanup: {error}"));
     std::fs::remove_dir(export_directory)
         .unwrap_or_else(|error| panic!("export directory cleanup: {error}"));
+    std::fs::remove_file(root.join("automation.sqlite"))
+        .unwrap_or_else(|error| panic!("automation database cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|e| panic!("directory cleanup: {e}"));
 }

@@ -95,6 +95,17 @@ impl CommunicationRuntime {
         if let Some(journal) = &journal {
             identity = identity.with_journal(std::sync::Arc::clone(journal));
         }
+        match automation_storage::AutomationStore::open(&inputs.directory.join("automation.sqlite"))
+            .await
+        {
+            Ok(store) => {
+                identity = identity
+                    .with_automation_store(std::sync::Arc::new(tokio::sync::Mutex::new(store)));
+            }
+            Err(_) => {
+                tracing::warn!("automation storage unavailable; communication remains independent")
+            }
+        }
         let endpoint = EndpointRef {
             service_id: service_id.clone(),
             endpoint_id: EndpointId::try_from("codex-local".to_owned())

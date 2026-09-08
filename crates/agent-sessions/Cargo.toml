@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["io-std"] }
 unicode-width.workspace = true
 
 [dev-dependencies]
+codex-router-host.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 communication-service = { path = "../communication-service", version = "0.1.14" }
 communication-protocol = { path = "../communication-protocol", version = "0.1.14" }

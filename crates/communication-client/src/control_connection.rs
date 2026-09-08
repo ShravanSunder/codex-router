@@ -26,11 +26,11 @@ pub enum ClientError {
     Rejected { code: i64, data: Option<Value> },
 }
 pub struct ControlClient {
-    connection: ClientConnection,
+    pub(crate) connection: ClientConnection,
     identity: ControlInitializationResult,
     notification_state: EndpointNotificationState,
 }
-struct ClientConnection {
+pub(crate) struct ClientConnection {
     stream: UnixStream,
     decoder: ControlFrameDecoder,
     incoming: VecDeque<Value>,
@@ -397,7 +397,7 @@ impl ControlClient {
     }
 }
 impl ClientConnection {
-    async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         if self.failed || self.next_id >= 65_536 {
             return Err(ClientError::Protocol("connection is retired"));
         }

@@ -83,3 +83,13 @@ mod acp_schema_catalog;
 pub use acp_schema_catalog::{
     ACP_SCHEMA_BYTES, ACP_SCHEMA_DIGEST, AcpSchemaCatalog, AcpSchemaError,
 };
+
+mod instruction_contract;
+pub use agent_automation::{InstructionId, InstructionText, OperationId, RevisionId};
+pub use instruction_contract::{
+    InstructionCreateParams, InstructionShowParams, InstructionSnapshot, InstructionUpdateParams,
+};
+pub use instruction_contract::{
+    InstructionFailure, InstructionFailureKind, InstructionNextAction, InstructionStage,
+    LocalMutationEvidence, LocalMutationState,
+};
