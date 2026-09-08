@@ -8,3 +8,5 @@ pub use automation_identity::{
 };
 mod instruction_document;
 pub use instruction_document::{InstructionDocument, InstructionText, InstructionTextError};
+mod timing_calculation;
+pub use timing_calculation::{TimingError, TimingRule};

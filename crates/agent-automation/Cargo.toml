@@ -9,6 +9,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+chrono = { workspace = true, features = ["serde"] }
+chrono-tz.workspace = true
+croner.workspace = true
 uuid.workspace = true
 serde.workspace = true
 thiserror.workspace = true

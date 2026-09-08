@@ -31,6 +31,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+croner = "=4.0.0"
+chrono-tz = "0.10.4"
 uuid = { version = "1.26.0", features = ["v7"] }
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
 codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
