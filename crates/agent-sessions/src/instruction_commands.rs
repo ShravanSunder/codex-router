@@ -90,13 +90,23 @@ pub fn run_instruction_command(arguments: Vec<OsString>) -> i32 {
     let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
         Ok(path) => path,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidUsage", &message, 2, args.json);
+            return crate::endpoint_commands::report_failure(
+                "invalidUsage",
+                &message,
+                2,
+                args.json,
+            );
         }
     };
     let prepared = match prepare(args.command) {
         Ok(request) => request,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidField", &message, 2, args.json);
+            return crate::endpoint_commands::report_failure(
+                "invalidField",
+                &message,
+                2,
+                args.json,
+            );
         }
     };
     let operation_id = prepared.operation_id();

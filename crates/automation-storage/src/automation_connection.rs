@@ -36,6 +36,17 @@ pub enum StorageError {
     },
     #[error(transparent)]
     InvalidTiming(#[from] agent_automation::TimingError),
+    #[error("wake-up was not found in this automation database")]
+    WakeNotFound,
+    #[error(
+        "wake-up lifecycle does not permit this action in state {state:?}; inspect or create another reminder"
+    )]
+    WakeLifecycleConflict { state: agent_automation::WakeState },
+    #[error("invalid wake-up {field}: {reason}")]
+    InvalidWake {
+        field: &'static str,
+        reason: &'static str,
+    },
 }
 
 pub struct AutomationStore {

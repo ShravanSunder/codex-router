@@ -15,3 +15,14 @@ pub use schedule_definition::{
     CapturedRunInputs, ContinuityInput, ExecutionDestination, FrozenExecutionConfiguration,
     ScheduleDefinition, ScheduleRecord, SummarySource,
 };
+mod wakeup_definition;
+pub use wakeup_definition::{
+    DurableMessage, ExpiryRule, FirstFire, WakeDefinition, WakeRecord, WakeState,
+};
+mod delivery_state;
+pub use delivery_state::DeliveryStatus;
+mod native_effects;
+pub use native_effects::{
+    AttemptOutcome, CessationEvidence, DeliveryAttempt, NativeEffectEvidence, PreparationEffect,
+    SubmissionEffect,
+};
