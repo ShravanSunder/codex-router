@@ -1,10 +1,11 @@
+use crate::picker_runtime_status::PickerRuntimeStatus;
 use crate::presentation::session_picker::picker_actions::SessionsPickerKey;
 use crate::presentation::session_picker::picker_actions::SessionsPickerOutcome;
 use crate::presentation::session_picker::picker_filters::next_root_filter;
 use crate::presentation::session_picker::picker_filters::next_sort_filter;
-use crate::presentation::session_picker::picker_filters::next_source_filter;
 use crate::presentation::session_picker::picker_filters::provider_matches;
 use crate::presentation::session_picker::picker_filters::root_matches;
+use crate::presentation::session_picker::picker_filters::runtime_view_matches;
 use crate::presentation::session_picker::picker_filters::source_matches;
 #[cfg(test)]
 use crate::presentation::session_picker::picker_rendering::render_model_snapshot;
@@ -18,6 +19,26 @@ use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
 pub(super) const VISIBLE_SESSION_ROWS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum SessionsPickerRuntimeView {
+    Blocked,
+    Active,
+    Idle,
+    #[default]
+    All,
+}
+
+impl SessionsPickerRuntimeView {
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Blocked,
+            Self::Blocked => Self::Active,
+            Self::Active => Self::Idle,
+            Self::Idle => Self::All,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) enum SessionsPickerFocus {
@@ -34,8 +55,10 @@ pub(crate) struct SessionsPickerModel {
     pub(super) root: SessionsPickerRoot,
     pub(super) provider: SessionsProvider,
     pub(super) source: SessionsSource,
+    pub(crate) runtime_view: SessionsPickerRuntimeView,
     pub(super) sort: SessionsSort,
     pub(super) search: String,
+    pub(super) show_help: bool,
     focus: SessionsPickerFocus,
     pointer_window_start: Option<usize>,
     visible_indices: Vec<usize>,
@@ -48,10 +71,12 @@ impl SessionsPickerModel {
             root: request.root,
             provider: request.provider.clone(),
             source: request.source,
+            runtime_view: SessionsPickerRuntimeView::All,
             sort: request.sort,
             request,
             width,
             search: String::new(),
+            show_help: false,
             focus: SessionsPickerFocus::StartNew,
             pointer_window_start: None,
             visible_indices: Vec::new(),
@@ -100,9 +125,9 @@ impl SessionsPickerModel {
                 self.rebuild_visible_rows();
                 self.restore_focus_or_fallback(previous_index);
             }
-            SessionsPickerKey::CycleSource => {
+            SessionsPickerKey::CycleRuntimeView => {
                 let previous_index = self.focused_visible_index();
-                self.source = next_source_filter(self.source);
+                self.runtime_view = self.runtime_view.next();
                 self.rebuild_visible_rows();
                 self.restore_focus_or_fallback(previous_index);
             }
@@ -111,6 +136,9 @@ impl SessionsPickerModel {
                 self.sort = next_sort_filter(self.sort);
                 self.rebuild_visible_rows();
                 self.restore_focus_or_fallback(previous_index);
+            }
+            SessionsPickerKey::ToggleHelp => {
+                self.show_help = !self.show_help;
             }
             SessionsPickerKey::SearchChar(character) => {
                 let previous_index = self.focused_visible_index();
@@ -156,6 +184,23 @@ impl SessionsPickerModel {
         let previous_index = self.focused_visible_index();
         self.pointer_window_start = None;
         self.request.records = records;
+        self.rebuild_visible_rows();
+        self.restore_focus_or_fallback(previous_index);
+    }
+
+    pub(crate) fn invalidate_runtime_statuses(&mut self) {
+        if self
+            .request
+            .records
+            .iter()
+            .all(|record| record.runtime_status == PickerRuntimeStatus::Unknown)
+        {
+            return;
+        }
+        let previous_index = self.focused_visible_index();
+        for record in &mut self.request.records {
+            record.runtime_status = PickerRuntimeStatus::Unknown;
+        }
         self.rebuild_visible_rows();
         self.restore_focus_or_fallback(previous_index);
     }
@@ -272,6 +317,7 @@ impl SessionsPickerModel {
             .filter(|(_index, record)| root_matches(self.root, &self.request, record))
             .filter(|(_index, record)| provider_matches(&self.provider, &self.request, record))
             .filter(|(_index, record)| source_matches(self.source, record))
+            .filter(|(_index, record)| runtime_view_matches(self.runtime_view, record))
             .filter(|(_index, record)| search.is_empty() || record.matches_search(&search))
             .map(|(index, _record)| index)
             .collect::<Vec<_>>();

@@ -53,7 +53,7 @@ async fn executable_discovers_an_isolated_published_service() {
         .try_into()
         .unwrap_or_else(|error| panic!("journal identity: {error}"));
     let journal = lifecycle_observation::ObservationJournal::open(
-        &root.join("lifecycle-observations.sqlite"),
+        &root.join("session-registry.sqlite"),
         journal_id,
     )
     .await
@@ -202,7 +202,7 @@ async fn executable_discovers_an_isolated_published_service() {
         .unwrap_or_else(|_| panic!("store retained"))
         .close()
         .await;
-    std::fs::remove_file(root.join("lifecycle-observations.sqlite"))
+    std::fs::remove_file(root.join("session-registry.sqlite"))
         .unwrap_or_else(|error| panic!("journal cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|e| panic!("cleanup: {e}"));
 }

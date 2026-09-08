@@ -4,6 +4,19 @@ This guide describes the current feature worktree, not a released installation. 
 
 ## Find the service and target
 
+The Host stores remembered thread addresses, observed thread/server status, and the rolling lifecycle event log in `session-registry.sqlite` inside its communication service directory. Native Codex history and provider-routing state retain their own storage.
+
+With the isolated debug Host running and `CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET` set to that Host’s dedicated backend socket, run `target/debug/agent-sessions` in a terminal to open the picker. Use `target/debug/agent-sessions --local` for browsing without hosted status. Its default scope is **Repo** and its default runtime view is **All**. The Status column precedes the existing Upd and New columns:
+
+- `◆ Blocked`: waiting for approval or user input.
+- `● Active`: running without either waiting flag.
+- `○ Idle`: confirmed idle by the selected Host's app-server.
+- Unknown, not loaded and system error remain visible only in All. Unknown is not an idle claim.
+
+Ctrl+T cycles All → Blocked → Active → Idle; Ctrl+S cycles repository/all/current-directory scope; Ctrl+O switches Updated/Created sorting. Ctrl+R refreshes. Ctrl+/ or F1 toggles detailed help; Esc closes help first. Search and selection remain stable across background refreshes when the selected row still matches. Interactive discovery includes all thread sources.
+
+Live status refreshes in the background from the selected local service. Stored history remains browseable when the service is unavailable, with live status shown as Unknown. `--local` does not claim hosted status. Browsing does not resume threads or submit work; Enter still explicitly opens the selected thread through the existing native launch path.
+
 ```sh
 target/debug/agent-sessions endpoints list --json
 target/debug/agent-sessions sessions list --endpoint codex-local --view stored --json

@@ -5,6 +5,18 @@ use super::{
 };
 use iocraft::prelude::*;
 
+const STATUS_COLUMN_WIDTH: usize = 12;
+const AGE_COLUMN_WIDTH: usize = 6;
+
+fn session_column_widths(width: usize) -> (usize, usize, usize) {
+    let inner_width = width.saturating_sub(2);
+    let status_width = if width < 43 { 9 } else { STATUS_COLUMN_WIDTH };
+    let age_width = if width < 43 { 3 } else { AGE_COLUMN_WIDTH };
+    let fixed_width = 2 + status_width + (age_width * 2) + 3;
+    let title_width = inner_width.saturating_sub(fixed_width).max(2);
+    (title_width, status_width, age_width)
+}
+
 pub(super) fn render_session_list(
     model: &SessionsPickerModel,
     mut model_state: State<SessionsPickerModel>,
@@ -131,15 +143,8 @@ pub(super) fn render_start_new_row(
 ) -> AnyElement<'static> {
     let foreground = if selected { Color::White } else { Color::Grey };
     let title_prefix = if selected { "❯ " } else { "  " };
-    let inner_width = width.saturating_sub(4);
-    let title_width = inner_width.saturating_sub(18).max(14);
-    let first_line = fit_line(
-        &format!(
-            "{title_prefix}{:<title_width$} {:>6} {:>6}",
-            "Start new session", "-", "-"
-        ),
-        inner_width,
-    );
+    let inner_width = width.saturating_sub(2);
+    let (title_width, status_width, age_width) = session_column_widths(width);
     let metadata_line = if model.visible_record_len() == 0 {
         format!(
             "    {}  {}",
@@ -162,7 +167,16 @@ pub(super) fn render_start_new_row(
             padding_top: 0,
             padding_bottom: 0,
         ) {
-            Text(content: first_line, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            View(width: 100pct) {
+                View(width: 2) { Text(content: title_prefix, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                View(width: title_width as u32, overflow: Overflow::Hidden) { Text(content: truncate_end("Start new session", title_width), color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                Text(content: " ")
+                View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: "-", color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                Text(content: " ")
+                View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "-", color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                Text(content: " ")
+                View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "-", color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+            }
             Text(content: second_line, color: Color::Grey, weight: Weight::Light, wrap: TextWrap::NoWrap)
         }
     }
@@ -186,19 +200,24 @@ pub(super) fn start_new_args_label(model: &SessionsPickerModel) -> String {
 }
 
 pub(super) fn render_session_header(width: usize) -> AnyElement<'static> {
-    let title_width = width.saturating_sub(18).max(14);
+    let (title_width, status_width, age_width) = session_column_widths(width);
     element! {
         View(
             width: width as u32,
             border_style: BorderStyle::Single,
             border_edges: Edges::Bottom,
             border_color: Color::DarkGrey,
+            padding_left: 1,
+            padding_right: 1,
         ) {
-            Text(
-                content: fit_line(&format!("  {:<title_width$} {:>6} {:>6}", "Session", "Upd", "New"), width),
-                color: Color::Cyan,
-                weight: Weight::Bold,
-            )
+            View(width: 2) { Text(content: "  ", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: title_width as u32) { Text(content: "Session", color: Color::Cyan, weight: Weight::Bold) }
+            Text(content: " ")
+            View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: "Status", color: Color::Cyan, weight: Weight::Bold) }
+            Text(content: " ")
+            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "Upd", color: Color::Cyan, weight: Weight::Bold) }
+            Text(content: " ")
+            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "New", color: Color::Cyan, weight: Weight::Bold) }
         }
     }
     .into_any()
@@ -225,16 +244,12 @@ pub(super) fn render_record_row(
         Color::DarkGrey
     };
     let title_prefix = if selected { "❯ " } else { "  " };
-    let title_width = width.saturating_sub(18).max(14);
+    let (title_width, status_width, age_width) = session_column_widths(width);
     let title = truncate_end(&record.title, title_width);
-    let first_line = fit_line(
-        &format!(
-            "{title_prefix}{:<title_width$} {:>6} {:>6}",
-            title,
-            compact_age(&record.recency),
-            compact_age(&record.created)
-        ),
-        width.saturating_sub(2),
+    let status = format!(
+        "{} {}",
+        record.runtime_status.icon(),
+        record.runtime_status.label()
     );
     let cwd = record.cwd.as_deref().unwrap_or("-");
     let metadata_line = if width < 43 {
@@ -253,7 +268,16 @@ pub(super) fn render_record_row(
             padding_top: 0,
             padding_bottom: 0,
         ) {
-            Text(content: first_line, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            View(width: 100pct) {
+                View(width: 2) { Text(content: title_prefix, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                View(width: title_width as u32, overflow: Overflow::Hidden) { Text(content: title, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                Text(content: " ")
+                View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: status, color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                Text(content: " ")
+                View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: compact_age(&record.recency), color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                Text(content: " ")
+                View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: compact_age(&record.created), color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+            }
             Text(content: second_line, color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
         }
     }

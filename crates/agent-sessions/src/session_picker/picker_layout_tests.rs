@@ -121,8 +121,7 @@ async fn sessions_picker_width_contract_preserves_layout() {
             "session picker capture width {width} overflowed:\n{text}"
         );
         assert!(
-            text.lines()
-                .any(|line| line.contains("❯ Provider migration")),
+            text.lines().any(|line| line.contains("❯ Provider migrat")),
             "capture should select the long-title row:\n{text}"
         );
         assert!(
@@ -130,17 +129,13 @@ async fn sessions_picker_width_contract_preserves_layout() {
             "capture should show the more-below affordance:\n{text}"
         );
         assert!(
-            text.contains("ctrl-n new"),
-            "capture should expose the new-thread shortcut:\n{text}"
-        );
-        assert!(
-            text.contains("opt-enter fork"),
-            "capture should expose the fork shortcut:\n{text}"
+            text.contains("ctrl-/ Help"),
+            "capture should expose help:\n{text}"
         );
         let lines = text.lines().collect::<Vec<_>>();
         let footer_index = lines
             .iter()
-            .rposition(|line| line.contains("ctrl-o sort"))
+            .rposition(|line| line.contains("ctrl-/ Help"))
             .unwrap_or_else(|| panic!("capture should render footer:\n{text}"));
         let bottom_border_index = lines
             .iter()
@@ -363,7 +358,7 @@ async fn sessions_picker_sidecar_clamps_tall_details_to_body_budget() {
         "sidecar details should stay within the 24-row frame:\n{text}"
     );
     assert!(
-        text.contains("Search: id:<id>"),
+        text.contains("ctrl-/ Help"),
         "sidecar details should not clip the footer at 160x24:\n{text}"
     );
 }
@@ -383,7 +378,7 @@ async fn sessions_picker_sidecar_panels_reach_footer_without_unframed_gap() {
     let lines = text.lines().collect::<Vec<_>>();
     let footer_index = lines
         .iter()
-        .position(|line| line.contains("Search: id:<id>"))
+        .position(|line| line.contains("ctrl-/ Help"))
         .unwrap_or_else(|| panic!("sidecar footer should render:\n{text}"));
     let panel_bottom_index = lines[..footer_index]
         .iter()
@@ -414,7 +409,7 @@ async fn sessions_picker_renders_one_line_controls_when_width_allows() {
         text.lines().any(|line| {
             line.contains("Search: []")
                 && line.contains("[all]")
-                && line.contains("Threads:")
+                && line.contains("View:")
                 && line.contains("Sort:")
         }),
         "wide sessions controls should fit on one line:\n{text}"
@@ -424,9 +419,9 @@ async fn sessions_picker_renders_one_line_controls_when_width_allows() {
         "{text}"
     );
     assert!(
-            text.contains("Search: id:<id> | b:<branch> | repo:<name>    opt-enter fork | ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"),
-            "wide footer should group qualified search and shortcuts:\n{text}"
-        );
+        text.contains("ctrl-/ Help"),
+        "wide footer should keep only the compact help hint by default:\n{text}"
+    );
     assert!(!text.contains("type search"), "{text}");
     assert!(!text.contains("enter resume"), "{text}");
     assert!(!text.contains("esc exit"), "{text}");
@@ -456,7 +451,7 @@ async fn sessions_picker_budgets_wrapped_controls_from_actual_search_text() {
         "long search controls should not grow the picker past the 24-row frame:\n{text}"
     );
     assert!(
-        text.contains("Search: id:<id>"),
+        text.contains("ctrl-/ Help"),
         "wrapped controls should not clip the footer at 100x24:\n{text}"
     );
     assert!(

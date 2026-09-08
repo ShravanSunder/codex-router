@@ -11,7 +11,7 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
         .mode(0o700)
         .create(&root)
         .unwrap_or_else(|error| panic!("directory: {error}"));
-    let blocked_database = root.join("lifecycle-observations.sqlite");
+    let blocked_database = root.join("session-registry.sqlite");
     std::fs::create_dir(&blocked_database)
         .unwrap_or_else(|error| panic!("blocked database: {error}"));
     // Act: callers can still discover the service and its explicit storage-unavailable state.

@@ -1,19 +1,24 @@
+use crate::picker_runtime_status::PickerRuntimeStatus;
 use crate::presentation::session_picker::picker_actions::SessionsPickerKey;
 use crate::presentation::session_picker::picker_actions::SessionsPickerOutcome;
 use crate::presentation::session_picker::picker_model::SessionsPickerModel;
+use crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView;
 use crate::presentation::session_picker::test_support::picker_record;
 use crate::presentation::session_picker::test_support::picker_request;
 
 #[test]
-fn sessions_picker_model_shows_and_switches_three_filters() {
-    let mut model = SessionsPickerModel::new(picker_request(), 120);
+fn sessions_picker_model_shows_and_switches_scope_view_and_sort() {
+    let mut request = picker_request();
+    for record in &mut request.records {
+        record.runtime_status = PickerRuntimeStatus::Blocked;
+    }
+    let mut model = SessionsPickerModel::new(request, 120);
 
     let initial = model.render_snapshot();
     assert!(initial.contains("[📂 cwd]"));
-    assert!(initial.contains("Threads: [interactive]"));
+    assert!(initial.contains("View: [All]"));
     assert!(initial.contains("Sort: [updated]"));
-    assert!(initial.contains("Search: id:<id> | b:<branch> | repo:<name>"));
-    assert!(initial.contains("ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort"));
+    assert!(initial.contains("ctrl-/ Help"));
     assert!(!initial.contains("type search"));
     assert!(!initial.contains("enter resume"));
     assert!(!initial.contains("esc exit"));
@@ -22,18 +27,19 @@ fn sessions_picker_model_shows_and_switches_three_filters() {
     assert!(!initial.contains("Subagent planning"));
 
     model.handle_key(SessionsPickerKey::CycleRoot);
-    model.handle_key(SessionsPickerKey::CycleSource);
+    model.handle_key(SessionsPickerKey::CycleRuntimeView);
     model.handle_key(SessionsPickerKey::CycleSort);
 
     let updated = model.render_snapshot();
     assert!(updated.contains("[repo]"));
-    assert!(updated.contains("Threads: [all]"));
+    assert!(updated.contains("View: [Blocked]"));
     assert!(updated.contains("Sort: [created]"));
-    assert!(updated.contains("Subagent planning"));
+    assert!(updated.contains("Feature design session"));
+    assert!(!updated.contains("Subagent planning"));
 }
 
 #[test]
-fn sessions_picker_model_cycles_scope_source_and_sort_without_focus_mode() {
+fn sessions_picker_model_cycles_scope_runtime_view_and_sort_without_focus_mode() {
     let mut model = SessionsPickerModel::new(picker_request(), 120);
 
     for expected_scope in ["repo", "all", "📂 cwd"] {
@@ -45,12 +51,12 @@ fn sessions_picker_model_cycles_scope_source_and_sort_without_focus_mode() {
         );
     }
 
-    for expected_threads in ["all", "subagents", "interactive"] {
-        model.handle_key(SessionsPickerKey::CycleSource);
+    for expected_view in ["Blocked", "Active", "Idle", "All"] {
+        model.handle_key(SessionsPickerKey::CycleRuntimeView);
         assert!(
             model
                 .render_snapshot()
-                .contains(&format!("Threads: [{expected_threads}]"))
+                .contains(&format!("View: [{expected_view}]"))
         );
     }
 
@@ -209,7 +215,93 @@ fn sessions_picker_model_clears_search_without_changing_filters() {
     let snapshot = model.render_snapshot();
     assert!(snapshot.contains("Search: []"));
     assert!(snapshot.contains("[📂 cwd]"));
-    assert!(snapshot.contains("Threads: [interactive]"));
+    assert!(snapshot.contains("View: [All]"));
+}
+
+#[test]
+fn sessions_picker_runtime_views_match_only_their_named_status() {
+    let mut request = picker_request();
+    request.root = crate::presentation::session_picker::picker_request::SessionsPickerRoot::Any;
+    request.source = crate::sessions::SessionsSource::All;
+    request.records[0].runtime_status = PickerRuntimeStatus::Blocked;
+    request.records[1].runtime_status = PickerRuntimeStatus::Active;
+    request.records[2].runtime_status = PickerRuntimeStatus::Idle;
+    request.records.push(picker_record(
+        "thread-unknown",
+        "Unknown runtime",
+        "/repo/project-a",
+        "codex-router",
+        "cli",
+    ));
+    let mut model = SessionsPickerModel::new(request, 120);
+
+    assert_eq!(model.runtime_view, SessionsPickerRuntimeView::All);
+    assert!(model.render_snapshot().contains("Unknown runtime"));
+
+    for (expected_view, visible_title) in [
+        (SessionsPickerRuntimeView::Blocked, "Feature design session"),
+        (
+            SessionsPickerRuntimeView::Active,
+            "Provider migration with very very long provider metadata",
+        ),
+        (SessionsPickerRuntimeView::Idle, "Subagent planning"),
+    ] {
+        model.handle_key(SessionsPickerKey::CycleRuntimeView);
+        assert_eq!(model.runtime_view, expected_view);
+        let snapshot = model.render_snapshot();
+        assert!(snapshot.contains(visible_title), "{snapshot}");
+        assert!(!snapshot.contains("Unknown runtime"), "{snapshot}");
+    }
+}
+
+#[test]
+fn sessions_picker_status_column_precedes_existing_age_columns() {
+    let mut request = picker_request();
+    request.records[0].runtime_status = PickerRuntimeStatus::Blocked;
+    let snapshot = SessionsPickerModel::new(request, 120).render_snapshot();
+    let header = snapshot
+        .lines()
+        .find(|line| line.contains("Session") && line.contains("Status"))
+        .unwrap_or_else(|| panic!("missing session header:\n{snapshot}"));
+
+    assert!(header.find("Status") < header.find("Upd"));
+    assert!(header.find("Upd") < header.find("New"));
+    assert!(snapshot.contains("◆ Blocked"), "{snapshot}");
+}
+
+#[test]
+fn sessions_picker_help_is_compact_by_default_and_expands_on_demand() {
+    let mut model = SessionsPickerModel::new(picker_request(), 120);
+
+    let compact = model.render_snapshot();
+    assert!(compact.contains("ctrl-/ Help"));
+    assert!(!compact.contains("ctrl-r refresh"));
+
+    model.handle_key(SessionsPickerKey::ToggleHelp);
+    let expanded = model.render_snapshot();
+    assert!(expanded.contains("Search: id:<id> | b:<branch> | repo:<name>"));
+    assert!(expanded.contains("ctrl-t view"));
+    assert!(expanded.contains("ctrl-r refresh"));
+    assert!(expanded.contains("F1 close help"));
+}
+
+#[test]
+fn invalidating_runtime_statuses_never_reclassifies_rows_as_idle() {
+    let mut request = picker_request();
+    request.records[0].runtime_status = PickerRuntimeStatus::Active;
+    let mut model = SessionsPickerModel::new(request, 100);
+
+    model.invalidate_runtime_statuses();
+
+    assert_eq!(
+        model.request.records[0].runtime_status,
+        PickerRuntimeStatus::Unknown
+    );
+    model.handle_key(SessionsPickerKey::CycleRuntimeView);
+    model.handle_key(SessionsPickerKey::CycleRuntimeView);
+    model.handle_key(SessionsPickerKey::CycleRuntimeView);
+    assert_eq!(model.runtime_view, SessionsPickerRuntimeView::Idle);
+    assert!(!model.render_snapshot().contains("Feature design session"));
 }
 
 #[test]

@@ -8,6 +8,8 @@ use codex_native_integration::{SessionSearchDocument, SessionSearchExpression};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+use crate::picker_runtime_status::PickerRuntimeStatus;
+
 #[derive(Debug, Serialize)]
 pub(super) struct SessionRecord {
     pub(super) session_id: String,
@@ -98,6 +100,7 @@ pub(crate) struct SessionPickerRecord {
     pub(crate) conversation_source: Option<SessionConversationSource>,
     pub(crate) source: Option<String>,
     pub(crate) thread_source: Option<String>,
+    pub(crate) runtime_status: PickerRuntimeStatus,
 }
 
 /// Sanitized conversation snippets for human-only session detail UI.
@@ -175,6 +178,7 @@ impl SessionPickerRecord {
             conversation_source: record.rollout_path.clone(),
             source: record.source.clone(),
             thread_source: record.thread_source.clone(),
+            runtime_status: PickerRuntimeStatus::Unknown,
         }
     }
 }

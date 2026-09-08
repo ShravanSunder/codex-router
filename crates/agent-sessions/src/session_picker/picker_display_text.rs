@@ -1,5 +1,6 @@
 //! Picker display text.
-use super::{SessionsPickerRoot, SessionsSort, SessionsSource};
+use super::{SessionsPickerRoot, SessionsSort};
+use crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView;
 
 pub(super) fn root_label(root: SessionsPickerRoot) -> &'static str {
     match root {
@@ -9,11 +10,12 @@ pub(super) fn root_label(root: SessionsPickerRoot) -> &'static str {
     }
 }
 
-pub(super) fn source_label(source: SessionsSource) -> &'static str {
-    match source {
-        SessionsSource::Interactive => "interactive",
-        SessionsSource::All => "all",
-        SessionsSource::Subagents => "subagents",
+pub(super) fn runtime_view_label(view: SessionsPickerRuntimeView) -> &'static str {
+    match view {
+        SessionsPickerRuntimeView::Blocked => "Blocked",
+        SessionsPickerRuntimeView::Active => "Active",
+        SessionsPickerRuntimeView::Idle => "Idle",
+        SessionsPickerRuntimeView::All => "All",
     }
 }
 

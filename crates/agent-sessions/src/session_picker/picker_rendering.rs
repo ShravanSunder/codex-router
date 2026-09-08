@@ -1,3 +1,4 @@
+#[cfg(test)]
 use unicode_width::UnicodeWidthStr;
 
 #[cfg(test)]
@@ -10,14 +11,8 @@ use crate::presentation::session_picker::picker_model::visible_window_start;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
 #[cfg(test)]
 use crate::sessions::SessionsSort;
-#[cfg(test)]
-use crate::sessions::SessionsSource;
-
 pub(super) const MIN_PICKER_WIDTH: usize = 24;
-pub(super) const SEARCH_HELP: &str = "Search: id:<id> | b:<branch> | repo:<name>";
-pub(super) const SHORTCUT_HELP: &str =
-    "opt-enter fork | ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort";
-const FULL_HELP: &str = "Search: id:<id> | b:<branch> | repo:<name>    opt-enter fork | ctrl-n new | ctrl-s scope | ctrl-t threads | ctrl-o sort";
+const COMPACT_HELP: &str = "ctrl-/ Help";
 #[cfg(test)]
 const NARROW_PICKER_WIDTH: usize = 72;
 #[cfg(test)]
@@ -34,6 +29,14 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
     lines.extend(render_controls_lines(model));
 
     if visible_len > 0 {
+        let title_width = model.width.saturating_sub(31).max(14);
+        lines.push(fit_line(
+            &format!(
+                "  {:<title_width$} {:<12} {:>6} {:>6}",
+                "Session", "Status", "Upd", "New"
+            ),
+            model.width,
+        ));
         let window_start = visible_window_start(
             model.focused_visible_index(),
             visible_len,
@@ -76,11 +79,15 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
             let Some(record) = model.visible_choice_record_at(visible_index) else {
                 continue;
             };
-            let title_width = model.width.saturating_sub(18).max(14);
             lines.push(fit_line(
                 &format!(
-                    "{marker} {:<title_width$} {:>6} {:>6}",
+                    "{marker} {:<title_width$} {:<12} {:>6} {:>6}",
                     truncate_end(&record.title, title_width),
+                    format!(
+                        "{} {}",
+                        record.runtime_status.icon(),
+                        record.runtime_status.label()
+                    ),
                     compact_age(&record.recency),
                     compact_age(&record.created)
                 ),
@@ -126,7 +133,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
     }
 
     lines.extend(
-        footer_lines(model.width)
+        footer_lines(model.width, model.show_help)
             .into_iter()
             .map(|line| fit_line(&line, model.width)),
     );
@@ -146,56 +153,53 @@ fn start_new_args_label(model: &SessionsPickerModel) -> String {
 fn render_controls_lines(model: &SessionsPickerModel) -> Vec<String> {
     let search = format!("Search: [{}]", model.search);
     let root = format!("[{}]", root_label(model.root));
-    let source = format!("Threads: [{}]", source_label(model.source));
+    let view = format!("View: [{}]", runtime_view_label(model.runtime_view));
     let sort = format!("Sort: [{}]", sort_label(model.sort));
-    let combined = format!("{search}    {root}    {source}    {sort}");
+    let combined = format!("{search}    {root}    {view}    {sort}");
     if UnicodeWidthStr::width(combined.as_str()) <= model.width {
         return vec![fit_line(&combined, model.width)];
     }
     if model.width < ULTRA_NARROW_PICKER_WIDTH {
-        return [search, root, source, sort]
+        return [search, root, view, sort]
             .into_iter()
             .map(|line| fit_line(&line, model.width))
             .collect();
     }
     vec![
         fit_line(&search, model.width),
-        fit_line(&format!("{root}    {source}    {sort}"), model.width),
+        fit_line(&format!("{root}    {view}    {sort}"), model.width),
     ]
 }
 
-pub(super) fn footer_lines(width: usize) -> Vec<String> {
-    if UnicodeWidthStr::width(FULL_HELP) <= width {
-        return vec![FULL_HELP.to_owned()];
+pub(super) fn footer_lines(width: usize, show_help: bool) -> Vec<String> {
+    if !show_help {
+        return vec![COMPACT_HELP.to_owned()];
     }
-
-    let mut lines = if UnicodeWidthStr::width(SEARCH_HELP) <= width {
-        vec![SEARCH_HELP.to_owned()]
-    } else {
-        vec![
-            "Search: id:<id>".to_owned(),
-            "b:<branch> | repo:<name>".to_owned(),
-        ]
-    };
-
-    if UnicodeWidthStr::width(SHORTCUT_HELP) <= width {
-        lines.push(SHORTCUT_HELP.to_owned());
-    } else if width >= 30 {
-        lines.extend([
-            "opt-enter fork | ctrl-n new".to_owned(),
-            "ctrl-s scope | ctrl-t threads".to_owned(),
-            "ctrl-o sort".to_owned(),
-        ]);
-    } else {
-        lines.extend([
-            "opt-enter fork".to_owned(),
-            "ctrl-n new".to_owned(),
-            "| ctrl-s scope".to_owned(),
-            "| ctrl-t threads".to_owned(),
-            "| ctrl-o sort".to_owned(),
-        ]);
+    if width >= 104 {
+        return vec![
+            "Search: id:<id> | b:<branch> | repo:<name>    enter resume | opt-enter fork | ctrl-n new"
+                .to_owned(),
+            "ctrl-s scope | ctrl-t view | ctrl-o sort | ctrl-r refresh    ctrl-/ or F1 close help"
+                .to_owned(),
+        ];
     }
-    lines
+    if width >= 48 {
+        return vec![
+            "Search: id:<id> | b:<branch> | repo:<name>".to_owned(),
+            "enter resume | opt-enter fork | ctrl-n new".to_owned(),
+            "ctrl-s scope | ctrl-t view | ctrl-o sort".to_owned(),
+            "ctrl-r refresh | ctrl-/ or F1 close help".to_owned(),
+        ];
+    }
+    vec![
+        "Search: id:<id>".to_owned(),
+        "b:<branch> | repo:<name>".to_owned(),
+        "enter resume | opt-enter fork".to_owned(),
+        "ctrl-n new | ctrl-s scope".to_owned(),
+        "ctrl-t view | ctrl-o sort".to_owned(),
+        "ctrl-r refresh".to_owned(),
+        "ctrl-/ | F1 close help".to_owned(),
+    ]
 }
 
 #[cfg(test)]
@@ -216,11 +220,16 @@ fn root_label(root: SessionsPickerRoot) -> &'static str {
 }
 
 #[cfg(test)]
-fn source_label(source: SessionsSource) -> &'static str {
-    match source {
-        SessionsSource::Interactive => "interactive",
-        SessionsSource::All => "all",
-        SessionsSource::Subagents => "subagents",
+fn runtime_view_label(
+    view: crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView,
+) -> &'static str {
+    use crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView;
+
+    match view {
+        SessionsPickerRuntimeView::Blocked => "Blocked",
+        SessionsPickerRuntimeView::Active => "Active",
+        SessionsPickerRuntimeView::Idle => "Idle",
+        SessionsPickerRuntimeView::All => "All",
     }
 }
 
@@ -299,24 +308,20 @@ mod tests {
         let narrow = SessionsPickerModel::new(picker_request(), 64).render_snapshot();
         assert!(narrow.contains("Search: []"));
         assert!(narrow.contains("[📂 cwd]"));
-        assert!(narrow.contains("Threads: [interactive]"));
+        assert!(narrow.contains("View: [All]"));
         assert!(narrow.lines().all(|line| line.chars().count() <= 64));
 
         let compact = SessionsPickerModel::new(picker_request(), 52).render_snapshot();
         assert!(compact.contains("[📂 cwd]"));
-        assert!(compact.contains("Threads: [interactive]"));
+        assert!(compact.contains("View: [All]"));
         assert!(compact.contains("Sort: [updated]"));
         assert!(compact.lines().all(|line| line.chars().count() <= 52));
 
         let ultra_narrow = SessionsPickerModel::new(picker_request(), 36).render_snapshot();
         assert!(ultra_narrow.contains("[📂 cwd]"));
-        assert!(ultra_narrow.contains("Threads: [interactive]"));
+        assert!(ultra_narrow.contains("View: [All]"));
         assert!(ultra_narrow.contains("Sort: [updated]"));
-        assert!(ultra_narrow.contains("Search: id:<id>"));
-        assert!(ultra_narrow.contains("b:<branch> | repo:<name>"));
-        assert!(ultra_narrow.contains("opt-enter fork | ctrl-n new"));
-        assert!(ultra_narrow.contains("ctrl-s scope | ctrl-t threads"));
-        assert!(ultra_narrow.contains("ctrl-o sort"));
+        assert!(ultra_narrow.contains("ctrl-/ Help"));
         assert!(ultra_narrow.contains('…'));
         assert!(ultra_narrow.lines().all(|line| line.chars().count() <= 36));
 
@@ -327,17 +332,10 @@ mod tests {
     #[test]
     fn sessions_picker_footer_preserves_help_groups_at_responsive_boundaries() {
         for width in [24, 28, 42, 56, 102] {
-            let lines = footer_lines(width);
+            let lines = footer_lines(width, false);
             let text = lines.join("\n");
 
-            assert!(text.contains("id:<id>"), "width {width}: {text}");
-            assert!(text.contains("b:<branch>"), "width {width}: {text}");
-            assert!(text.contains("repo:<name>"), "width {width}: {text}");
-            assert!(text.contains("opt-enter fork"), "width {width}: {text}");
-            assert!(text.contains("ctrl-n new"), "width {width}: {text}");
-            assert!(text.contains("ctrl-s scope"), "width {width}: {text}");
-            assert!(text.contains("ctrl-t threads"), "width {width}: {text}");
-            assert!(text.contains("ctrl-o sort"), "width {width}: {text}");
+            assert_eq!(text, "ctrl-/ Help", "width {width}: {text}");
             assert!(
                 lines
                     .iter()

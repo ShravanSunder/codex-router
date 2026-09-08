@@ -8,6 +8,7 @@ mod sessions;
 mod presentation {
     pub(crate) use crate::session_picker;
 }
+mod picker_runtime_status;
 mod session_picker;
 #[cfg(feature = "quota-reset-test-harness")]
 pub fn run_sessions_picker_test_harness() -> std::io::Result<()> {

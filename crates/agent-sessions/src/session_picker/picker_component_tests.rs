@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use super::*;
+use crate::picker_runtime_status::PickerRuntimeStatus;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot as SessionsRoot;
 use crate::presentation::session_picker::test_support::picker_record;
 use crate::presentation::session_picker::test_support::picker_request;
@@ -141,6 +142,7 @@ fn capture_record(
         conversation_source: None,
         source: Some(source.to_owned()),
         thread_source: Some(source.to_owned()),
+        runtime_status: PickerRuntimeStatus::Unknown,
     }
 }
 
