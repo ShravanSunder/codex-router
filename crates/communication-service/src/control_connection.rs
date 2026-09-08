@@ -20,6 +20,19 @@ pub struct ServiceIdentity {
     automation: Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
 }
 impl ServiceIdentity {
+    pub fn wake_timing_worker(&self) -> Option<crate::WakeTimingWorker> {
+        self.automation.as_ref().map(|store| {
+            crate::WakeTimingWorker::new(
+                std::sync::Arc::clone(store),
+                crate::wakeup_native_sender::WakeNativeSender {
+                    service_id: self.service_id.clone(),
+                    endpoints: self.directory.clone(),
+                    backend: self.native_backend.clone(),
+                },
+            )
+        })
+    }
+
     pub fn with_automation_store(
         mut self,
         store: std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>,
@@ -142,7 +155,17 @@ pub async fn serve_control_connection(
             }
             let response = match admit_request(frame, &mut admission) {
                 Err(response) => response,
-                Ok(request) if matches!(request.method.as_str(), "wake/send" | "wake/show") => {
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "wake/send"
+                            | "wake/show"
+                            | "wake/pause"
+                            | "wake/resume"
+                            | "wake/cancel"
+                            | "delivery/show"
+                    ) =>
+                {
                     let identity = identity.clone();
                     pending.spawn(async move {
                         let id = request.id.clone();
@@ -263,7 +286,7 @@ fn admit_request(frame: Value, admission: &mut ControlAdmission) -> Result<Reque
     }
     if let Err(failure) = admission.admit(&request.id, &request.method) {
         if failure == AdmissionError::Overloaded {
-            if request.method.starts_with("wake/") {
+            if request.method.starts_with("wake/") || request.method.starts_with("delivery/") {
                 return Err(crate::wakeup_dispatch::overloaded(id));
             }
             if request.method.starts_with("instruction/") {

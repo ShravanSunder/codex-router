@@ -28,6 +28,10 @@ pub fn control_schema_document(
     };
     assembly.add_type::<InstructionFailure>("instruction-failure")?;
     assembly.add_type::<WakeFailure>("wake-failure")?;
+    for method in ["wake/pause", "wake/resume", "wake/cancel"] {
+        assembly.add_method::<WakeMutationRequest, WakeMutationResult>(method, &[])?;
+    }
+    assembly.add_method::<DeliveryShowRequest, DeliveryInspection>("delivery/show", &[])?;
     assembly.add_method::<WakeSendRequest, WakeSnapshot>(
         "wake/send",
         &["invalidField", "automationUnavailable", "operationConflict"],
@@ -247,7 +251,7 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     let mut data = vec![json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties})];
-    if method.starts_with("wake/") {
+    if method.starts_with("wake/") || method.starts_with("delivery/") {
         data = vec![reference("wake-failure")];
     }
     if method.starts_with("instruction/") {

@@ -43,6 +43,38 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
     if current.first_fire.is_some() || current.pending_delivery_id.is_some() {
         return Err("creation fabricated firing or native acceptance".into());
     }
+    let pause_request = communication_protocol::WakeMutationRequest {
+        operation_id: OperationId::generate(),
+        wakeup_id: first.definition.wakeup_id.clone(),
+    };
+    let paused = client.pause_wakeup(pause_request.clone()).await?;
+    let replayed_pause = client.pause_wakeup(pause_request).await?;
+    if serde_json::to_value(&paused)? != serde_json::to_value(replayed_pause)? {
+        return Err("mutation replay changed the original receipt".into());
+    }
+    if paused.wakeup.state != communication_protocol::WakeState::Paused {
+        return Err("pause did not reach storage".into());
+    }
+    let resumed = client
+        .resume_wakeup(communication_protocol::WakeMutationRequest {
+            operation_id: OperationId::generate(),
+            wakeup_id: first.definition.wakeup_id.clone(),
+        })
+        .await?;
+    if resumed.wakeup.state != communication_protocol::WakeState::Active
+        || resumed.wakeup.definition.anchor_at != first.definition.anchor_at
+    {
+        return Err("resume changed original anchor".into());
+    }
+    let cancelled = client
+        .cancel_wakeup(communication_protocol::WakeMutationRequest {
+            operation_id: OperationId::generate(),
+            wakeup_id: first.definition.wakeup_id,
+        })
+        .await?;
+    if cancelled.wakeup.state != communication_protocol::WakeState::Cancelled {
+        return Err("cancel did not reach storage".into());
+    }
     let changed: WakeSendRequest = serde_json::from_value(
         json!({"operationId":OperationId::generate(),"message":current.definition.message,"timing":{"kind":"cron","expression":"* * * * *","timezone":"invalid-zone"},"expiry":{"kind":"none"}}),
     )?;

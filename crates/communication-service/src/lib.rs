@@ -40,3 +40,10 @@ mod stored_inventory_observation;
 
 mod wakeup_dispatch;
 mod wakeup_projection;
+mod wakeup_timing_worker;
+pub use wakeup_timing_worker::WakeTimingWorker;
+
+mod delivery_projection;
+mod wakeup_native_sender;
+
+mod wakeup_lifecycle_dispatch;

@@ -19,16 +19,12 @@ pub struct WakeMutation {
     pub action: WakeAction,
     pub now_ms: i64,
 }
-/// Storage-row snapshot. Service adapters validate JSON fields into their native receipt types.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RetainedDelivery {
-    pub delivery_id: DeliveryId,
-    pub status: DeliveryStatus,
-    pub latest_attempt_json: Option<String>,
-    pub accepted_receipt_json: Option<String>,
-}
+/// Native payloads remain adapter-owned; the complete snapshot is captured inside the mutation transaction.
+pub type RetainedDelivery =
+    crate::DeliveryRecord<serde_json::Value, serde_json::Value, serde_json::Value>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WakeMutationResult<TMessage> {
+    pub observed_at_ms: i64,
     pub wake: WakeRecord<TMessage>,
     pub discarded: Vec<DeliveryId>,
     pub retained: Vec<RetainedDelivery>,
@@ -142,12 +138,8 @@ impl AutomationStore {
                 serde_json::from_value(serde_json::Value::String(row.try_get("delivery_status")?))
                     .map_err(|_| StorageError::InvalidRecord)?;
             if status.may_have_native_effect() {
-                retained.push(RetainedDelivery {
-                    delivery_id: id.clone(),
-                    status,
-                    latest_attempt_json: row.try_get("latest_attempt_json")?,
-                    accepted_receipt_json: row.try_get("accepted_receipt_json")?,
-                });
+                retained
+                    .push(crate::delivery_inspection::read_current(&mut transaction, id).await?);
             }
         }
         if let Some(kind) = kind {
@@ -174,6 +166,7 @@ impl AutomationStore {
         let wake =
             crate::wakeup_repository::read_current(&mut transaction, &request.wakeup_id).await?;
         let result = WakeMutationResult {
+            observed_at_ms: request.now_ms,
             wake,
             discarded,
             retained,

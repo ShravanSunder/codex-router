@@ -104,3 +104,9 @@ pub use wakeup_contract::{
 };
 mod wakeup_failure;
 pub use wakeup_failure::{WakeFailure, WakeFailureReason, WakeFailureStage, WakeNextAction};
+mod delivery_inspection_contract;
+pub use delivery_inspection_contract::{
+    CessationEvidence, DeliveryDisposition, DeliveryEvidence, DeliveryInspection,
+    DeliveryShowRequest, DeliverySource, NativeEffectEvidence, PreparationEffect, SubmissionEffect,
+    WakeMutationResult,
+};

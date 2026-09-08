@@ -17,11 +17,32 @@ pub(crate) struct WakeRequest<'a> {
     pub service_id: &'a UuidIdentity,
     pub store: Option<&'a Arc<Mutex<AutomationStore>>>,
 }
-struct FailureContext {
+pub(crate) struct FailureContext {
     operation_id: Option<OperationId>,
     wakeup_id: Option<WakeupId>,
 }
+impl FailureContext {
+    pub(crate) fn from_params(params: &Value) -> Self {
+        Self {
+            operation_id: params
+                .get("operationId")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+            wakeup_id: params
+                .get("wakeupId")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+        }
+    }
+}
 pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
+    if matches!(request.method, "wake/pause" | "wake/resume" | "wake/cancel") {
+        return crate::wakeup_lifecycle_dispatch::dispatch(request).await;
+    }
+    if request.method == "delivery/show" {
+        return crate::wakeup_lifecycle_dispatch::inspect_delivery(request).await;
+    }
+
     let context = FailureContext {
         operation_id: request
             .params
@@ -148,7 +169,7 @@ pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
         }
     }
 }
-fn failure(
+pub(crate) fn failure(
     id: Value,
     context: FailureContext,
     reason: WakeFailureReason,
@@ -158,6 +179,7 @@ fn failure(
         WakeFailureReason::InvalidField {constraint,..}=>(WakeFailureStage::Validation,WakeNextAction::CorrectRequest,constraint.clone()),
         WakeFailureReason::ResourceNotFound=>(WakeFailureStage::Inspection,WakeNextAction::VerifyResourceAddress,"Wake-up was not found in this service; verify the service and wakeupId.".into()),
         WakeFailureReason::OperationConflict=>(WakeFailureStage::Admission,WakeNextAction::InspectOperation,"Operation identity belongs to a different request; inspect it before submitting new work.".into()),
+        WakeFailureReason::LifecycleConflict=>(WakeFailureStage::Validation,WakeNextAction::InspectWakeup,"This wake cannot perform that lifecycle transition. Inspect its state; cancelled or expired reminders are not implicitly recreated.".into()),
         WakeFailureReason::Overloaded=>(WakeFailureStage::Admission,WakeNextAction::RetryLater,"Request capacity exceeded; no wake mutation was dispatched.".into()),
         _ if matches!(mutation,LocalMutationState::Unknown|LocalMutationState::Committed)=>(WakeFailureStage::Storage,WakeNextAction::InspectOperation,"Local mutation may exist; inspect or replay the same operation identity. Do not create a new identity blindly.".into()),
         _=>(WakeFailureStage::Storage,WakeNextAction::RetryLater,"Automation storage is unavailable or inconsistent; no new native submission was dispatched.".into()),

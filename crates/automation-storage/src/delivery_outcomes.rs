@@ -2,7 +2,7 @@
 use crate::{AutomationStore, StorageError};
 use agent_automation::{
     AttemptId, AttemptOutcome, DeliveryAttempt, DeliveryId, EventId, NativeEffectEvidence,
-    SubmissionEffect,
+    PreparationEffect, SubmissionEffect,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Connection, Row};
@@ -93,7 +93,10 @@ impl AutomationStore {
                 )
             }
             DeliveryResult::Unknown { reason } => {
-                if completion.effects.submission != SubmissionEffect::Unknown {
+                if completion.effects.submission != SubmissionEffect::Unknown
+                    && completion.effects.resume != PreparationEffect::Unknown
+                    && completion.effects.allocation != PreparationEffect::Unknown
+                {
                     return Err(StorageError::InvalidRecord);
                 }
                 (

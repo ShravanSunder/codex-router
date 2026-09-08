@@ -1,11 +1,11 @@
 //! Agent-friendly wake creation and inspection through the public Rust SDK.
 use crate::message_input_arguments::{SendArguments, saved_message};
 use crate::wakeup_timing_arguments::WakeTimingArguments;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use communication_client::{ControlClient, WakeClientError};
 use communication_protocol::{
-    LocalMutationEvidence, LocalMutationState, OperationId, WakeSendRequest, WakeShowRequest,
-    WakeSnapshot,
+    LocalMutationEvidence, LocalMutationState, OperationId, WakeMutationRequest, WakeSendRequest,
+    WakeShowRequest,
 };
 use serde_json::json;
 use std::{
@@ -31,6 +31,12 @@ enum WakeCommand {
         #[arg(long)]
         operation_id: Option<String>,
     },
+    /// Stop future firings and discard undispatched reminders; does not recall native input.
+    Pause(LifecycleArguments),
+    /// Continue original timing without replaying paused ticks or extending expiry.
+    Resume(LifecycleArguments),
+    /// Permanently cancel future firings and discard undispatched reminders.
+    Cancel(LifecycleArguments),
     /// Inspect timing and first firing without prompting a native thread.
     Show {
         #[arg(long)]
@@ -41,9 +47,27 @@ enum WakeCommand {
         json: bool,
     },
 }
+#[derive(Args)]
+struct LifecycleArguments {
+    #[arg(long)]
+    wakeup_id: String,
+    #[arg(long)]
+    operation_id: Option<String>,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Clone, Copy)]
+enum LifecycleAction {
+    Pause,
+    Resume,
+    Cancel,
+}
 enum PreparedWake {
     Send(Box<WakeSendRequest>),
     Show(WakeShowRequest),
+    Mutate(LifecycleAction, WakeMutationRequest),
 }
 struct WakeInvocation {
     directory: PathBuf,
@@ -63,6 +87,9 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     let machine = match &args.command {
         WakeCommand::Send { message, .. } => message.json,
         WakeCommand::Show { json, .. } => *json,
+        WakeCommand::Pause(args) | WakeCommand::Resume(args) | WakeCommand::Cancel(args) => {
+            args.json
+        }
     };
     let invocation = match prepare(args.command) {
         Ok(value) => value,
@@ -90,7 +117,7 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let mut dispatched = false;
-    let result: Result<WakeSnapshot, WakeClientError> = runtime.block_on(async {
+    let result: Result<serde_json::Value, WakeClientError> = runtime.block_on(async {
         let mut client = ControlClient::connect(
             &invocation.directory,
             "agent-sessions-wake",
@@ -99,8 +126,18 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
         .await?;
         dispatched = true;
         let result = match invocation.request {
-            PreparedWake::Send(request) => client.send_wakeup(*request).await,
-            PreparedWake::Show(request) => client.read_wakeup(request).await,
+            PreparedWake::Send(request) => {
+                client.send_wakeup(*request).await.and_then(encode_result)
+            }
+            PreparedWake::Show(request) => {
+                client.read_wakeup(request).await.and_then(encode_result)
+            }
+            PreparedWake::Mutate(action, request) => match action {
+                LifecycleAction::Pause => client.pause_wakeup(request).await,
+                LifecycleAction::Resume => client.resume_wakeup(request).await,
+                LifecycleAction::Cancel => client.cancel_wakeup(request).await,
+            }
+            .and_then(encode_result),
         };
         let _ = client.close().await;
         result
@@ -125,7 +162,7 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
         Err(WakeClientError::Connection(_)) => {
             let uncertain = dispatched && invocation.operation_id.is_some();
             (
-                json!({"kind":"error","operationId":invocation.operation_id,"error":{"kind":if uncertain{"outcomeUnknown"}else{"unavailable"},"message":if uncertain{"Wake creation may have committed. Inspect or replay the same operation ID; do not blindly create another wake."}else{"Wake service unavailable; no mutation dispatched."},"nextAction":if uncertain{"inspectOperation"}else{"retryLater"}}}),
+                json!({"kind":"error","operationId":invocation.operation_id,"error":{"kind":if uncertain{"outcomeUnknown"}else{"unavailable"},"message":if uncertain{"Wake mutation may have committed. Inspect or replay the same operation ID; do not blindly create another wake."}else{"Wake service unavailable; no mutation dispatched."},"nextAction":if uncertain{"inspectOperation"}else{"retryLater"}}}),
                 if uncertain { 5 } else { 3 },
             )
         }
@@ -142,6 +179,9 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
 }
 fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
     match command {
+        WakeCommand::Pause(args) => prepare_lifecycle(args, LifecycleAction::Pause),
+        WakeCommand::Resume(args) => prepare_lifecycle(args, LifecycleAction::Resume),
+        WakeCommand::Cancel(args) => prepare_lifecycle(args, LifecycleAction::Cancel),
         WakeCommand::Send {
             message,
             timing,
@@ -183,4 +223,39 @@ fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
             }),
         }),
     }
+}
+
+fn encode_result<TResult: serde::Serialize>(
+    result: TResult,
+) -> Result<serde_json::Value, WakeClientError> {
+    serde_json::to_value(result).map_err(|_| {
+        communication_client::ClientError::Protocol("cannot encode wake result").into()
+    })
+}
+fn prepare_lifecycle(
+    args: LifecycleArguments,
+    action: LifecycleAction,
+) -> Result<WakeInvocation, String> {
+    let id = args.operation_id.map_or_else(
+        || Ok(OperationId::generate()),
+        |id| {
+            id.try_into()
+                .map_err(|_| "--operation-id requires a canonical UUIDv7")
+        },
+    )?;
+    Ok(WakeInvocation {
+        directory: crate::endpoint_commands::resolve_directory(args.service_directory)?,
+        json: args.json,
+        operation_id: Some(id.clone()),
+        request: PreparedWake::Mutate(
+            action,
+            WakeMutationRequest {
+                operation_id: id,
+                wakeup_id: args
+                    .wakeup_id
+                    .try_into()
+                    .map_err(|_| "--wakeup-id requires a canonical UUIDv7")?,
+            },
+        ),
+    })
 }

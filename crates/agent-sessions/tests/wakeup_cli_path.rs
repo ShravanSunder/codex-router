@@ -77,6 +77,39 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     if record.pointer("/result/firstFire") != Some(&serde_json::Value::Null) {
         return Err("CLI creation invented a firing".into());
     }
+    for (action, state) in [
+        ("pause", "paused"),
+        ("resume", "active"),
+        ("cancel", "cancelled"),
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+            .args([
+                "wake",
+                action,
+                "--wakeup-id",
+                id,
+                "--json",
+                "--service-directory",
+            ])
+            .arg(&root)
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(format!(
+                "wake {action} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        if response
+            .pointer("/result/wakeup/state")
+            .and_then(serde_json::Value::as_str)
+            != Some(state)
+        {
+            return Err(format!("wake {action} returned wrong state").into());
+        }
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;
