@@ -149,12 +149,12 @@ fn append_source_filter(builder: &mut QueryBuilder<Sqlite>, source: StoredThread
         StoredThreadSource::Interactive => {
             builder.push(
                 " AND source IN ('cli', 'vscode') \
-                 AND (thread_source IS NULL OR thread_source NOT IN ('exec', 'app_server', 'subagent'))",
+                 AND (thread_source IS NULL OR thread_source NOT IN ('exec', 'app_server', 'subagent', 'guardian_review', 'memory_consolidation'))",
             );
         }
         StoredThreadSource::Subagents => {
             builder.push(
-                " AND (thread_source = 'subagent' \
+                " AND (thread_source IN ('subagent', 'guardian_review', 'memory_consolidation') \
                  OR source = 'subagent' \
                  OR source LIKE ",
             );

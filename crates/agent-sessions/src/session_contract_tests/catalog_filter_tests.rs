@@ -259,6 +259,24 @@ fn sessions_list_json_applies_scope_provider_and_source_filters() {
             )
             .with_thread_source(None),
             CodexStateThreadFixture::new(
+                "thread-helper-review",
+                &project_a_src,
+                "codex-router",
+                "vscode",
+                "guardian_review",
+                "main",
+                1700,
+            ),
+            CodexStateThreadFixture::new(
+                "thread-helper-memory",
+                &project_a_src,
+                "codex-router",
+                "cli",
+                "memory_consolidation",
+                "main",
+                1600,
+            ),
+            CodexStateThreadFixture::new(
                 "thread-b-src",
                 &project_b_src,
                 "codex-router",
@@ -320,7 +338,12 @@ fn sessions_list_json_applies_scope_provider_and_source_filters() {
     );
     assert_session_ids(
         &subagent_output.stdout,
-        &["thread-a-json-subagent", "thread-a-subagent"],
+        &[
+            "thread-helper-review",
+            "thread-helper-memory",
+            "thread-a-json-subagent",
+            "thread-a-subagent",
+        ],
     );
 }
 

@@ -18,7 +18,12 @@ pub(super) fn render_picker_view(
     minimum_render_height: usize,
 ) -> Element<'static, View> {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
-    let filter_controls = render_filter_controls(model, content_width);
+    let mut filter_controls = render_filter_controls(model, content_width);
+    if let Some(notice) = model.runtime_coverage.notice() {
+        filter_controls.push(element! {
+            Text(content: fit_line(notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap)
+        }.into_any());
+    }
     let control_height = filter_controls.len();
     let footer_lines = footer_lines(content_width, model.show_help);
     let body_budget = picker_body_budget(
@@ -193,7 +198,7 @@ pub(super) fn render_footer(width: usize, lines: Vec<String>) -> AnyElement<'sta
     element! {
         View(
             width: 100pct,
-            flex_grow: 1.0,
+            flex_grow: 1.0_f32,
             flex_direction: FlexDirection::Column,
             justify_content: JustifyContent::FlexEnd,
         ) {

@@ -2,7 +2,6 @@
 
 use crossterm::event::MouseButton;
 use futures_util::StreamExt;
-use iocraft::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -11,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::picker_runtime_status::PickerRuntimeStatus;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot as SessionsRoot;
+use crate::presentation::session_picker::test_support::observed_records;
 use crate::presentation::session_picker::test_support::picker_record;
 use crate::presentation::session_picker::test_support::picker_request;
 use crate::sessions::SessionConversationPreview;

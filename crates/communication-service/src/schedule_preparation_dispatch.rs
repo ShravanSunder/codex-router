@@ -258,7 +258,7 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
                     ScheduleFailureKind::UnsupportedCapability
                 },
                 error.explanation,
-                error.effects,
+                *error.effects,
                 error.uncertain,
             )
             .await;

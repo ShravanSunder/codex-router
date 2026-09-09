@@ -1,5 +1,31 @@
 use communication_protocol::{NativeActiveFlag, NativeThreadStatus};
 
+/// Availability of the selected Host's observation, separate from any thread's state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PickerRuntimeCoverage {
+    #[default]
+    Unobserved,
+    Available,
+    Unavailable,
+    LocalOnly,
+}
+
+impl PickerRuntimeCoverage {
+    pub(crate) const fn notice(self) -> Option<&'static str> {
+        match self {
+            Self::Unobserved | Self::Available => None,
+            Self::Unavailable => Some("Live status unavailable"),
+            Self::LocalOnly => Some("Local mode: no live status"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PickerRecordsSnapshot {
+    pub(crate) records: Vec<crate::sessions::SessionPickerRecord>,
+    pub(crate) runtime_coverage: PickerRuntimeCoverage,
+}
+
 /// Picker-owned projection of the native runtime states that affect browsing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum PickerRuntimeStatus {

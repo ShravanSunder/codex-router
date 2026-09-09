@@ -13,7 +13,7 @@ pub(crate) struct NativePreparationInput<'a> {
 }
 pub(crate) struct NativePreparationFailure {
     pub explanation: &'static str,
-    pub effects: NativeEffectEvidence,
+    pub effects: Box<NativeEffectEvidence>,
     pub uncertain: bool,
 }
 pub(crate) fn initial_effects(destination: &DestinationPreparation) -> NativeEffectEvidence {
@@ -74,7 +74,7 @@ pub(crate) async fn prepare(
     let Some(schemas) = input.admission.schemas() else {
         return Err(NativePreparationFailure {
             explanation: "Native preparation schema unavailable; no native mutation dispatched.",
-            effects,
+            effects: Box::new(effects),
             uncertain: false,
         });
     };
@@ -86,7 +86,7 @@ pub(crate) async fn prepare(
         Err(_) => {
             return Err(NativePreparationFailure {
                 explanation: "Native connection unavailable; no native mutation dispatched.",
-                effects,
+                effects: Box::new(effects),
                 uncertain: false,
             });
         }
@@ -120,7 +120,7 @@ pub(crate) async fn prepare(
                 } else {
                     "Native preparation rejected or unavailable; inspect the target and exported capabilities."
                 },
-                effects,
+                effects: Box::new(effects),
                 uncertain,
             });
         }
@@ -156,14 +156,14 @@ pub(crate) async fn prepare(
     if actual_cwd != Some(cwd(input.destination)) || !matches_existing || target.is_none() {
         return Err(NativePreparationFailure {
             explanation: "Native response did not establish the requested identity/workspace; inspect retained effects before retrying.",
-            effects,
+            effects: Box::new(effects),
             uncertain: allocation,
         });
     }
     Ok((
         target.ok_or_else(|| NativePreparationFailure {
             explanation: "Native target missing",
-            effects: effects.clone(),
+            effects: Box::new(effects.clone()),
             uncertain: allocation,
         })?,
         effects,

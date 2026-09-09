@@ -29,13 +29,13 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
                     .unwrap_or_else(|error| panic!("first load release should arrive: {error}"));
             }
             active_loads.fetch_sub(1, Ordering::SeqCst);
-            Ok(vec![picker_record(
+            Ok(observed_records(vec![picker_record(
                 &format!("thread-{search}"),
                 &format!("result {search}"),
                 "/repo/project-a",
                 "codex-router",
                 "cli",
-            )])
+            )]))
         }
     });
     let current_generation = Arc::new(AtomicU64::new(0));
@@ -114,7 +114,7 @@ async fn periodic_same_generation_refresh_does_not_starve_a_slow_result() {
                     .unwrap_or_else(|error| panic!("slow refresh should release: {error}"));
             }
             active_loads.fetch_sub(1, Ordering::SeqCst);
-            Ok(Vec::new())
+            Ok(observed_records(Vec::new()))
         }
     });
     let (accepted_sender, mut accepted_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -180,7 +180,7 @@ async fn sessions_picker_view_shortcut_filters_the_latest_loaded_records() {
             "subagent",
         );
         record.runtime_status = crate::picker_runtime_status::PickerRuntimeStatus::Blocked;
-        Ok(vec![record])
+        Ok(observed_records(vec![record]))
     });
     let mut request = picker_request();
     request.source = SessionsSource::All;
@@ -225,9 +225,73 @@ async fn sessions_picker_view_shortcut_filters_the_latest_loaded_records() {
         "runtime view changes must preserve the request's source query: {queries:?}"
     );
     assert!(
-        actual.contains("◆ Blocked") && actual.contains("Reloaded SQL result"),
+        actual.contains('◆')
+            && !actual.contains("◆ Blocked")
+            && actual.contains("Reloaded SQL result"),
         "the Blocked view should show the blocked loaded result: {actual:?}"
     );
+}
+
+#[tokio::test]
+async fn picker_explains_unavailable_live_status_and_clears_notice_after_recovery() {
+    use crate::picker_runtime_status::{PickerRecordsSnapshot, PickerRuntimeCoverage};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let record_loader: SessionsPickerRecordLoader = Arc::new(move |_| {
+        let available = attempts.fetch_add(1, Ordering::SeqCst) > 0;
+        let mut record = picker_record(
+            "saved",
+            "Saved session",
+            "/repo/project-a",
+            "codex-router",
+            "cli",
+        );
+        if available {
+            record.runtime_status = PickerRuntimeStatus::Idle;
+        }
+        Ok(PickerRecordsSnapshot {
+            records: vec![record],
+            runtime_coverage: if available {
+                PickerRuntimeCoverage::Available
+            } else {
+                PickerRuntimeCoverage::Unavailable
+            },
+        })
+    });
+    let (send_event, receive_event) = tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(receive_event, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let mut picker = element! {
+        SessionsPickerComponent(request: picker_request(), record_loader: Some(record_loader), width: 100usize)
+    };
+    let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+    tokio::pin!(frames);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut observed_unavailable = false;
+        while let Some(canvas) = frames.next().await {
+            let text = canvas.to_string();
+            if !observed_unavailable
+                && text.contains("Live status unavailable")
+                && text.contains("Saved session")
+            {
+                assert!(!text.contains("? Unknown"), "{text}");
+                observed_unavailable = true;
+                send_event
+                    .send(ctrl_key('r'))
+                    .expect("picker event stream available");
+            } else if observed_unavailable
+                && text.contains("Saved session")
+                && text.contains('○')
+                && !text.contains("Live status unavailable")
+            {
+                assert!(!text.contains("○ Idle"), "{text}");
+                return;
+            }
+        }
+        panic!("picker closed before live-status recovery");
+    })
+    .await
+    .expect("unavailability and recovery must both reach the rendered picker");
 }
 
 #[test]

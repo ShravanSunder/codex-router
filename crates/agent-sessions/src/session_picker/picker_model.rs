@@ -1,4 +1,6 @@
-use crate::picker_runtime_status::PickerRuntimeStatus;
+use crate::picker_runtime_status::{
+    PickerRecordsSnapshot, PickerRuntimeCoverage, PickerRuntimeStatus,
+};
 use crate::presentation::session_picker::picker_actions::SessionsPickerKey;
 use crate::presentation::session_picker::picker_actions::SessionsPickerOutcome;
 use crate::presentation::session_picker::picker_filters::next_root_filter;
@@ -59,6 +61,7 @@ pub(crate) struct SessionsPickerModel {
     pub(super) sort: SessionsSort,
     pub(super) search: String,
     pub(super) show_help: bool,
+    pub(super) runtime_coverage: PickerRuntimeCoverage,
     focus: SessionsPickerFocus,
     pointer_window_start: Option<usize>,
     visible_indices: Vec<usize>,
@@ -77,6 +80,7 @@ impl SessionsPickerModel {
             width,
             search: String::new(),
             show_help: false,
+            runtime_coverage: PickerRuntimeCoverage::Unobserved,
             focus: SessionsPickerFocus::StartNew,
             pointer_window_start: None,
             visible_indices: Vec::new(),
@@ -180,15 +184,17 @@ impl SessionsPickerModel {
         }
     }
 
-    pub(crate) fn replace_records(&mut self, records: Vec<SessionPickerRecord>) {
+    pub(crate) fn replace_records(&mut self, snapshot: PickerRecordsSnapshot) {
         let previous_index = self.focused_visible_index();
         self.pointer_window_start = None;
-        self.request.records = records;
+        self.request.records = snapshot.records;
+        self.runtime_coverage = snapshot.runtime_coverage;
         self.rebuild_visible_rows();
         self.restore_focus_or_fallback(previous_index);
     }
 
     pub(crate) fn invalidate_runtime_statuses(&mut self) {
+        self.runtime_coverage = PickerRuntimeCoverage::Unavailable;
         if self
             .request
             .records

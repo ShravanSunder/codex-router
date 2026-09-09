@@ -394,7 +394,10 @@ pub(crate) fn SessionsPickerComponent<'a>(
 async fn run_session_record_reload_worker(
     mut receiver: tokio::sync::watch::Receiver<SessionRecordsReloadRequest>,
     loader: SessionsPickerRecordLoader,
-    mut accept_records: impl FnMut(SessionRecordsReloadRequest, Result<Vec<SessionPickerRecord>, ()>),
+    mut accept_records: impl FnMut(
+        SessionRecordsReloadRequest,
+        Result<crate::picker_runtime_status::PickerRecordsSnapshot, ()>,
+    ),
 ) {
     while receiver.changed().await.is_ok() {
         let request = receiver.borrow_and_update().clone();

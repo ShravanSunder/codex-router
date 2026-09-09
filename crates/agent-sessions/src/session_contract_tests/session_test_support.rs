@@ -286,6 +286,7 @@ impl crate::sessions::SessionsPicker for FakeSessionsPicker {
                 })?;
                 self.loaded_session_ids.push(
                     records
+                        .records
                         .into_iter()
                         .map(|record| record.session_id)
                         .collect(),

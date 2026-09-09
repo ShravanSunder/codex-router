@@ -1,13 +1,13 @@
 use super::*;
 
 #[test]
-fn sessions_picker_defaults_to_repo_scope_without_changing_noninteractive_defaults() {
+fn sessions_picker_defaults_to_cwd_scope_like_noninteractive_commands() {
     let command = match parse_session_arguments([]) {
         Ok(command) => command,
         Err(error) => panic!("sessions command should parse: {error}"),
     };
 
-    assert_eq!(command.root, crate::sessions::SessionsRoot::Repo);
+    assert_eq!(command.root, crate::sessions::SessionsRoot::Cwd);
     assert_eq!(command.provider, crate::sessions::SessionsProvider::Any);
     assert_eq!(command.source, crate::sessions::SessionsSource::Interactive);
     assert_eq!(command.sort, crate::sessions::SessionsSort::Updated);

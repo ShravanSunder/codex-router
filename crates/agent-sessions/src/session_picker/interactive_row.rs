@@ -36,7 +36,7 @@ pub(super) fn InteractiveSessionChoiceRow<'a>(
         }
     });
 
-    match props.children.iter_mut().next() {
+    match props.children.first_mut() {
         Some(child) => child.into(),
         None => element!(View).into_any(),
     }

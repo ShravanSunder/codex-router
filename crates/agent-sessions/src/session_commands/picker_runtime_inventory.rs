@@ -1,6 +1,8 @@
 //! Read-only runtime inventory joined with the existing stored picker catalog.
 use super::{SessionPickerRecord, SessionRecord};
-use crate::picker_runtime_status::PickerRuntimeStatus;
+use crate::picker_runtime_status::{
+    PickerRecordsSnapshot, PickerRuntimeCoverage, PickerRuntimeStatus,
+};
 use communication_client::{ClientError, ControlClient};
 use communication_protocol::{
     ChannelDescription, CodexGeneration, EndpointAvailability, EndpointInventory, EndpointRef,
@@ -151,8 +153,21 @@ fn runtime_record(
         cwd: Some(cwd.to_owned()),
         provider: text("modelProvider"),
         model: text("model"),
-        source: text("source"),
-        thread_source: None,
+        source: thread.get("source").and_then(|source| {
+            source
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| serde_json::to_string(source).ok())
+        }),
+        thread_source: if thread
+            .get("parentThreadId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        {
+            Some("subagent".to_owned())
+        } else {
+            text("threadSource")
+        },
         git_branch: thread
             .pointer("/gitInfo/branch")
             .and_then(serde_json::Value::as_str)
@@ -181,7 +196,7 @@ impl PickerRuntimeInventory {
         &mut self,
         directory: Option<&Path>,
         stored: Vec<SessionPickerRecord>,
-    ) -> Vec<SessionPickerRecord> {
+    ) -> PickerRecordsSnapshot {
         let mut combined: BTreeMap<String, SessionPickerRecord> = self
             .remembered
             .iter()
@@ -210,6 +225,13 @@ impl PickerRuntimeInventory {
         } else {
             None
         };
+        let runtime_coverage = if directory.is_none() {
+            PickerRuntimeCoverage::LocalOnly
+        } else if result.is_some() {
+            PickerRuntimeCoverage::Available
+        } else {
+            PickerRuntimeCoverage::Unavailable
+        };
         if let Some(runtime) = result {
             self.remembered = runtime.clone();
             for row in runtime {
@@ -220,7 +242,10 @@ impl PickerRuntimeInventory {
                 row.runtime_status = PickerRuntimeStatus::Unknown;
             }
         }
-        combined.into_values().collect()
+        PickerRecordsSnapshot {
+            records: combined.into_values().collect(),
+            runtime_coverage,
+        }
     }
 }
 
