@@ -3,16 +3,33 @@
 mod busy_thread_delivery;
 #[path = "automation_live_support/debug_backend_restart.rs"]
 mod debug_backend_restart;
+#[path = "automation_live_support/durable_delivery_recovery.rs"]
+mod durable_delivery_recovery;
 #[path = "automation_live_support/proof_context.rs"]
 mod proof_context;
 #[path = "automation_live_support/scheduled_continuity.rs"]
 mod scheduled_continuity;
+#[path = "automation_live_support/summary_failure_recovery.rs"]
+mod summary_failure_recovery;
+#[path = "automation_live_support/worker_timeout_proof.rs"]
+mod worker_timeout_proof;
 use communication_protocol::{
     AutomationPageRequest, DeliveryEvidence, DeliveryListRequest, MessageContent, MessageDelivery,
     NativeSendParams, NativeSendReceipt,
 };
 use proof_context::{ProofContext, ProofResult, shell_quote};
 use serde_json::{Value, json};
+
+#[tokio::test]
+#[ignore = "requires an isolated debug Host; interrupts only its own Luna summary and opens a controlled delivery gate"]
+async fn summary_recovery_and_durable_delivery_preserve_original_work() -> ProofResult<()> {
+    let mut proof = ProofContext::connect().await?;
+    worker_timeout_proof::exercise(&mut proof).await?;
+    let portable = summary_failure_recovery::exercise(&mut proof).await?;
+    durable_delivery_recovery::exercise(&mut proof, portable).await?;
+    proof.client.close().await?;
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires an isolated debug Host; exercises busy Luna input and owned backend replacement"]

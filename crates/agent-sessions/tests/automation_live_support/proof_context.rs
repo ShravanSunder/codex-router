@@ -9,6 +9,7 @@ use std::{
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
+    sync::Arc,
     time::Duration,
 };
 pub type ProofResult<TValue> = Result<TValue, Box<dyn std::error::Error + Send + Sync>>;
@@ -21,7 +22,7 @@ pub struct ProofContext {
     pub generation: CodexGeneration,
     pub client: ControlClient,
     pub native: NativeProtocolConnection,
-    pub schemas: NativePayloadSchemas,
+    pub schemas: Arc<NativePayloadSchemas>,
 }
 impl ProofContext {
     pub async fn connect() -> ProofResult<Self> {
@@ -97,7 +98,7 @@ impl ProofContext {
             generation,
             client,
             native,
-            schemas,
+            schemas: Arc::new(schemas),
         })
     }
     pub async fn start_thread(&mut self, role: &str) -> ProofResult<SessionRef> {

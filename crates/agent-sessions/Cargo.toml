@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["io-std"] }
 unicode-width.workspace = true
 
 [dev-dependencies]
+uuid.workspace = true
 chrono.workspace = true
 agent-automation = { path = "../agent-automation", version = "0.1.15" }
 automation-storage = { path = "../automation-storage", version = "0.1.15" }
