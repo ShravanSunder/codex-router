@@ -122,11 +122,19 @@ pub(crate) fn resolve_directory(explicit: Option<PathBuf>) -> Result<PathBuf, St
 }
 pub(crate) fn report_failure(kind: &str, message: &str, code: i32, machine_output: bool) -> i32 {
     if machine_output {
-        let _printed = writeln!(
-            io::stdout(),
-            "{}",
-            json!({"kind":"error","error":{"kind":kind,"message":message}})
-        );
+        let error = if code == 2 && matches!(kind, "invalidField" | "invalidUsage") {
+            let field = message
+                .split_whitespace()
+                .find(|word| word.starts_with("--"))
+                .unwrap_or("arguments");
+            json!({"kind":kind,"message":message,"stage":"validation",
+                "field":field,"constraint":message,
+                "effects":{"kind":"local","mutation":"none"},
+                "nextAction":"correctRequest"})
+        } else {
+            json!({"kind":kind,"message":message})
+        };
+        let _printed = writeln!(io::stdout(), "{}", json!({"kind":"error","error":error}));
     } else {
         let _printed = writeln!(io::stderr(), "{message}");
     }

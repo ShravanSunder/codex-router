@@ -34,14 +34,11 @@ enum DeliveryCommand {
     },
 }
 pub fn run_delivery_command(arguments: Vec<OsString>) -> i32 {
-    let args = match DeliveryArguments::try_parse_from(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _ = error.print();
-            return code;
-        }
-    };
+    let args: DeliveryArguments =
+        match crate::automation_argument_feedback::parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(code) => return code,
+        };
     let command = match args.command {
         DeliveryCommand::Reconcile { delivery_id } => {
             CollectionCommand::DeliveryReconcile(delivery_id)
@@ -74,14 +71,11 @@ enum RevisionCommand {
     List(RevisionListOptions),
 }
 pub fn run_revision_command(arguments: Vec<OsString>) -> i32 {
-    let args = match RevisionArguments::try_parse_from(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _ = error.print();
-            return code;
-        }
-    };
+    let args: RevisionArguments =
+        match crate::automation_argument_feedback::parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(code) => return code,
+        };
     let RevisionCommand::List(options) = args.command;
     run_collection_command(
         CollectionCommand::Revisions(options),
@@ -119,14 +113,11 @@ enum OperationCommand {
     },
 }
 pub fn run_operation_command(arguments: Vec<OsString>) -> i32 {
-    let args = match OperationArguments::try_parse_from(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _ = error.print();
-            return code;
-        }
-    };
+    let args: OperationArguments =
+        match crate::automation_argument_feedback::parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(code) => return code,
+        };
     let command = match args.command {
         OperationCommand::Show { operation_id } => CollectionCommand::OperationShow(operation_id),
         OperationCommand::Reconcile { operation_id } => {
