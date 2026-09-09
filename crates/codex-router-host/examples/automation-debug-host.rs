@@ -104,6 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             debug_root.join("state.sqlite").into_os_string(),
             OsString::from("--secret-root"),
             debug_root.join("secrets").into_os_string(),
+            OsString::from("--audit-file"),
+            options
+                .run_directory
+                .join("router-audit.jsonl")
+                .into_os_string(),
         ])
         .with_output(ChildOutput::Telemetry);
     let config = HostConfig::new(HostConfigInputs {

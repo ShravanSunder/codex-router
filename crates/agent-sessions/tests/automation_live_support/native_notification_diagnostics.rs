@@ -47,9 +47,36 @@ pub(super) fn for_target(notification: &Value, thread_id: &str) -> Option<Value>
         .and_then(|details| details.get("httpStatusCode"))
         .and_then(Value::as_u64)
         .filter(|status| (100..=599).contains(status));
+    let details = notification
+        .pointer("/params/error/additionalDetails")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let hints: Vec<&str> = [
+        ("connection refused", "connectionRefused"),
+        ("connection reset", "connectionReset"),
+        ("closed by server", "serverClosed"),
+        ("response.completed", "missingCompletionEvent"),
+        ("timed out", "requestTimeout"),
+        ("timeout", "timeout"),
+        ("websocket", "websocket"),
+        ("error sending request", "requestTransportError"),
+        ("certificate", "certificateError"),
+        ("dns", "dnsError"),
+        ("502", "mentions502"),
+        ("503", "mentions503"),
+        ("401", "mentions401"),
+        ("403", "mentions403"),
+        ("429", "mentions429"),
+        ("decode", "decodeError"),
+        ("parse", "parseError"),
+    ]
+    .into_iter()
+    .filter_map(|(needle, hint)| details.contains(needle).then_some(hint))
+    .collect();
     Some(
         json!({"threadId":thread_id,"errorKind":kind,"httpStatusCode":status,
-        "willRetry":notification.pointer("/params/willRetry").and_then(Value::as_bool)}),
+        "willRetry":notification.pointer("/params/willRetry").and_then(Value::as_bool),"detailHints":hints}),
     )
 }
 
@@ -65,7 +92,7 @@ mod tests {
         assert_eq!(
             for_target(&message, "owned"),
             Some(json!({"threadId":"owned",
-            "errorKind":"httpConnectionFailed","httpStatusCode":503,"willRetry":true}))
+            "errorKind":"httpConnectionFailed","httpStatusCode":503,"willRetry":true,"detailHints":[]}))
         );
         assert!(for_target(&message, "another-thread").is_none());
     }
@@ -77,7 +104,19 @@ mod tests {
         assert_eq!(
             for_target(&message, "owned"),
             Some(json!({"threadId":"owned",
-            "errorKind":"unclassified","httpStatusCode":null,"willRetry":false}))
+            "errorKind":"unclassified","httpStatusCode":null,"willRetry":false,"detailHints":[]}))
+        );
+    }
+
+    #[test]
+    fn underlying_transport_hints_do_not_retain_urls_or_error_bodies() {
+        let message = json!({"method":"error","params":{"threadId":"owned","willRetry":true,
+            "error":{"codexErrorInfo":"other","additionalDetails":"websocket closed by server before response.completed: PRIVATE_URL PRIVATE_TOKEN"}}});
+        assert_eq!(
+            for_target(&message, "owned"),
+            Some(json!({"threadId":"owned",
+            "errorKind":"other","httpStatusCode":null,"willRetry":true,
+            "detailHints":["serverClosed","missingCompletionEvent","websocket"]}))
         );
     }
 }
