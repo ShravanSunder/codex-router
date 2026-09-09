@@ -1,6 +1,10 @@
 //! Owner-local communication service, independent of the Host executable.
 mod control_connection;
-pub use control_connection::{ServiceIdentity, serve_control_connection};
+pub use control_connection::serve_control_connection;
+mod automation_retention_worker;
+mod control_service_context;
+pub use automation_retention_worker::AutomationRetentionWorker;
+pub use control_service_context::ServiceIdentity;
 mod endpoint_directory;
 pub use endpoint_directory::{
     EndpointDirectory, EndpointSnapshot, EndpointSubscription, EndpointUpdate,

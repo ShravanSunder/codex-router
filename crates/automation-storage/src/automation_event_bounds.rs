@@ -1,6 +1,20 @@
 //! Retention boundaries use two calendar months, independent of whether cleanup has already run.
 use crate::{AutomationStore, StorageError};
 impl AutomationStore {
+    /// Removes a bounded batch strictly before the UTC calendar cutoff; owner records are never pruned.
+    pub async fn prune_automation_events(
+        &mut self,
+        now_ms: i64,
+        batch_limit: u32,
+    ) -> Result<u64, StorageError> {
+        if !(1..=1000).contains(&batch_limit) {
+            return Err(StorageError::InvalidRecord);
+        }
+        let cutoff = retention_cutoff(now_ms)?;
+        let removed = sqlx::query("DELETE FROM automation_events WHERE event_sequence IN (SELECT event_sequence FROM automation_events WHERE recorded_at_ms < ? ORDER BY event_sequence LIMIT ?)")
+            .bind(cutoff).bind(batch_limit).execute(&mut self.connection).await?;
+        Ok(removed.rows_affected())
+    }
     pub async fn automation_event_floor(
         &mut self,
         now_ms: i64,
