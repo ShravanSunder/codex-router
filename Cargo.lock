@@ -478,6 +478,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "toml",
  "tracing",
 ]
 

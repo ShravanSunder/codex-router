@@ -73,6 +73,83 @@ new request. Send exit codes are 0 acceptance, 2 usage/unsupported, 3 unavailabl
 4 known rejection and 5 uncertainty. Observation deadlines use 124 and caller
 cancellation uses 130.
 
+## Timed messages and scheduled work
+
+A wake-up is a timed ordinary message. It uses the same sender, recipient,
+content and `--delivery auto|steer|queue` options:
+
+```sh
+agent-sessions wake send \
+  --from "$AGENT_SELF_ADDRESS" --to "$AGENT_TARGET_ADDRESS" \
+  --text-file reminder-message.txt --after 10m --json
+agent-sessions wake send \
+  --from "$AGENT_SELF_ADDRESS" --to "$AGENT_TARGET_ADDRESS" \
+  --text-file reminder-message.txt --every 10m --for 2h --json
+```
+
+Creation means the reminder is durably arranged. Add `--wait-until-first-fire`
+to wait for its first firing; that does not wait for native acceptance or a
+reply. Pause/cancel before the first firing returns an error. Pausing discards
+undispatched reminders; resume preserves the original timing and expiry.
+
+Save the returned `operationId`. If creation's outcome is uncertain, inspect
+that operation and reuse the same ID and request for any deliberate retry.
+A new ID is a new request. Do not resend uncertain native input.
+
+```sh
+agent-sessions wake list --json
+agent-sessions wake show --wakeup-id WAKE_UUID --json
+agent-sessions delivery list --wakeup-id WAKE_UUID --json
+agent-sessions delivery reconcile --delivery-id DELIVERY_UUID --json
+agent-sessions operation show --operation-id OPERATION_UUID --json
+```
+
+Reusable scheduled work separates instruction text, schedule timing and each
+execution Run. Create instructions, then a disabled schedule definition, prepare
+its destination, and enable future triggers:
+
+```sh
+agent-sessions instruction create --text-file task-instructions.txt --json
+agent-sessions schedule create --definition-file schedule-definition.json --json
+agent-sessions schedule prepare --schedule-id SCHEDULE_UUID --fresh --cwd "$PWD" --json
+agent-sessions schedule enable --schedule-id SCHEDULE_UUID --json
+agent-sessions run list --schedule-id SCHEDULE_UUID --json
+```
+
+A minimal `schedule-definition.json` uses the instruction UUID from creation:
+
+```json
+{
+  "instructionId": "INSTRUCTION_UUID",
+  "timing": {"kind": "interval", "seconds": 600},
+  "enabled": false,
+  "destination": {"kind": "unprepared"},
+  "executionTimeoutSeconds": null
+}
+```
+
+Disabling a schedule stops future triggers and preserves created Runs. One Run
+occupies its schedule through any required summarization; uncertain cessation
+keeps that occupancy. The execution default is one hour and the separate Luna
+summary default is fifteen minutes. Use `automation status/configure` to inspect
+or change future defaults. Ordinary messages remain allowed during scheduled work.
+
+Use `run show/reconcile/summaries`, `delivery show/attempts/reconcile`,
+`revision list` and `automation events` to inspect current state and retained
+history. Reconciliation reads native evidence without starting, interrupting or
+repeating native work. An old queued item may already have been consumed, so
+absence does not establish non-submission.
+
+`schedule export --schedule-id ...` emits JSONL. Import with
+`schedule import --package-file ...`; an existing UUID requires `--overwrite`.
+Import preserves the schedule identity, creates a new local edit token, and
+leaves it disabled until its destination is prepared. The package does not move
+native session files. Event history expires after two calendar months; current
+Runs, summaries and latest effect evidence remain.
+
+Completion wake-ups, shared message boards and remote federation are later work.
+B still sends its own reply explicitly.
+
 ## Human input, interruption and other protocols
 
 Only select human input when explicitly submitting a human user's input:
@@ -94,7 +171,10 @@ its unattended permission handler cancels requests. `agent-sessions acp` and
 protocols and their callbacks. Use each command's `--help` for its parameters.
 
 Use `--service-directory` to select an explicitly supplied owner-private service.
-Running the CLI does not confer socket access. These instructions do not grant
-permissions, install tools or create transport access. V1 is local, with a Rust
-SDK and CLI; remote transport, scheduling, durable mailboxes and other language
-SDK implementations are separate deliveries.
+Running the CLI does not confer socket access. The caller's sandbox must permit
+that exact service's `control.sock`; the default network-disabled Codex workspace
+sandbox does not. The [debug testing guide](../testing/automation-debug-testing.md)
+shows a scoped native permission profile and its positive/negative proof. These
+instructions do not grant permissions or install tools. The interfaces are local
+Rust SDK and CLI today; remote transport and other language SDK implementations
+follow separately.

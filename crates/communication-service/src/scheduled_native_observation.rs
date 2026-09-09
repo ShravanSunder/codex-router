@@ -13,7 +13,8 @@ pub(crate) async fn read_turn(
         .ok_or(NativeConnectionError::InvalidInput)?;
     let mut connection = NativeProtocolConnection::connect(admission.backend_path()).await?;
     let thread_id = String::from(target.session_id.clone());
-    // Codex 0.153.4 exports history-list schemas but may reject list_turns at runtime.
+    // Fresh accepted turns can briefly reject history until native metadata is materialized.
+    // The caller retains the Run and retries observation; this read never resubmits input.
     // The native carrier bounds the complete response; oversized history remains an explicit failure.
     let result = connection
         .request_validated(

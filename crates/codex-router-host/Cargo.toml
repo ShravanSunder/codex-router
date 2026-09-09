@@ -27,6 +27,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+toml = "1.1.2"
 sqlx.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 futures-util.workspace = true
