@@ -28,6 +28,7 @@ pub fn control_schema_document(
     };
     assembly.add_type::<InstructionFailure>("instruction-failure")?;
     assembly.add_type::<WakeFailure>("wake-failure")?;
+    assembly.add_method::<AutomationPageRequest, AutomationPage<WakeSnapshot>>("wake/list", &[])?;
     assembly.add_type::<WaitUnavailable>("wait-unavailable")?;
     assembly.add_type::<WakeNotFound>("wake-not-found")?;
     assembly.add_type::<WakeChanged>("wake-changed")?;

@@ -36,6 +36,9 @@ impl FailureContext {
     }
 }
 pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
+    if request.method == "wake/list" {
+        return crate::wakeup_list_dispatch::dispatch(request).await;
+    }
     if matches!(request.method, "wake/pause" | "wake/resume" | "wake/cancel") {
         return crate::wakeup_lifecycle_dispatch::dispatch(request).await;
     }

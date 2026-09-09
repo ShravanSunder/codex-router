@@ -46,6 +46,12 @@ impl ControlClient {
     ) -> Result<communication_protocol::DeliveryInspection, WakeClientError> {
         self.wakeup_call("delivery/show", request).await
     }
+    pub async fn list_wakeups(
+        &mut self,
+        request: communication_protocol::AutomationPageRequest,
+    ) -> Result<communication_protocol::AutomationPage<WakeSnapshot>, WakeClientError> {
+        self.wakeup_call("wake/list", request).await
+    }
     async fn wakeup_call<TRequest: Serialize, TResponse: DeserializeOwned>(
         &mut self,
         method: &str,

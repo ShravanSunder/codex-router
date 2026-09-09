@@ -43,6 +43,20 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
     if current.first_fire.is_some() || current.pending_delivery_id.is_some() {
         return Err("creation fabricated firing or native acceptance".into());
     }
+    let listed = client
+        .list_wakeups(communication_protocol::AutomationPageRequest {
+            cursor: None,
+            limit: 50.try_into()?,
+        })
+        .await?;
+    if listed.records.len() != 1
+        || listed
+            .records
+            .first()
+            .is_none_or(|record| record.definition.wakeup_id != first.definition.wakeup_id)
+    {
+        return Err("SDK wake list omitted created wake".into());
+    }
     let pause_request = communication_protocol::WakeMutationRequest {
         operation_id: OperationId::generate(),
         wakeup_id: first.definition.wakeup_id.clone(),

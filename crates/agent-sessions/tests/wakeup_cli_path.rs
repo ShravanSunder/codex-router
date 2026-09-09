@@ -148,6 +148,37 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     {
         return Err("wait returned before firing receipt".into());
     }
+    let listing = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "wake",
+            "list",
+            "--limit",
+            "1",
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !listing.status.success() {
+        return Err(format!(
+            "wake list failed: {}",
+            String::from_utf8_lossy(&listing.stderr)
+        )
+        .into());
+    }
+    let listing: serde_json::Value = serde_json::from_slice(&listing.stdout)?;
+    if listing
+        .pointer("/result/records")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        != Some(1)
+        || listing
+            .pointer("/result/nextCursor")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        return Err("CLI bounded listing missing page or cursor".into());
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

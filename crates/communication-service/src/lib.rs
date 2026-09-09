@@ -49,3 +49,5 @@ mod wakeup_native_sender;
 mod wakeup_lifecycle_dispatch;
 
 mod wakeup_subscription;
+
+mod wakeup_list_dispatch;

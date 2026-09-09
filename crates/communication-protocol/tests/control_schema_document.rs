@@ -7,8 +7,9 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 19);
+    assert_eq!(methods.len(), 20);
     for method in [
+        "wake/list",
         "wake/subscribe",
         "wake/pause",
         "wake/resume",

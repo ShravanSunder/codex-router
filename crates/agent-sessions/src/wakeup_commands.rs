@@ -40,6 +40,17 @@ enum WakeCommand {
     Resume(LifecycleArguments),
     /// Permanently cancel future firings and discard undispatched reminders.
     Cancel(LifecycleArguments),
+    /// List saved wake-ups; pass the returned cursor to continue the same bounded listing.
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        #[arg(long)]
+        service_directory: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect timing and first firing without prompting a native thread.
     Show {
         #[arg(long)]
@@ -70,6 +81,7 @@ enum LifecycleAction {
 enum PreparedWake {
     Send(Box<WakeSendRequest>),
     Show(WakeShowRequest),
+    List(communication_protocol::AutomationPageRequest),
     Mutate(LifecycleAction, WakeMutationRequest),
 }
 struct WakeInvocation {
@@ -90,7 +102,7 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     };
     let machine = match &args.command {
         WakeCommand::Send { message, .. } => message.json,
-        WakeCommand::Show { json, .. } => *json,
+        WakeCommand::Show { json, .. } | WakeCommand::List { json, .. } => *json,
         WakeCommand::Pause(args) | WakeCommand::Resume(args) | WakeCommand::Cancel(args) => {
             args.json
         }
@@ -135,6 +147,9 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
             }
             PreparedWake::Show(request) => {
                 client.read_wakeup(request).await.and_then(encode_result)
+            }
+            PreparedWake::List(request) => {
+                client.list_wakeups(request).await.and_then(encode_result)
             }
             PreparedWake::Mutate(action, request) => match action {
                 LifecycleAction::Pause => client.pause_wakeup(request).await,
@@ -234,6 +249,23 @@ fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
                 })),
             })
         }
+        WakeCommand::List {
+            cursor,
+            limit,
+            service_directory,
+            json,
+        } => Ok(WakeInvocation {
+            directory: crate::endpoint_commands::resolve_directory(service_directory)?,
+            json,
+            operation_id: None,
+            wait_until_first_fire: false,
+            request: PreparedWake::List(communication_protocol::AutomationPageRequest {
+                cursor,
+                limit: limit
+                    .try_into()
+                    .map_err(|_| "--limit must be between 1 and 100")?,
+            }),
+        }),
         WakeCommand::Show {
             wakeup_id,
             service_directory,

@@ -30,3 +30,5 @@ mod delivery_inspection;
 pub use delivery_inspection::DeliveryRecord;
 mod wakeup_observation;
 pub use wakeup_observation::WakeTransition;
+mod wakeup_listing;
+pub use wakeup_listing::{WakeListPage, WakeListPosition};

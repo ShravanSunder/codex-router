@@ -120,3 +120,7 @@ pub use wakeup_subscription_contract::{
 pub use wakeup_subscription_contract::{
     UnknownFirstFire, VerifyWakeupAddress, WakeNotFound, WakeNotFoundKind,
 };
+mod automation_page_contract;
+pub use automation_page_contract::{
+    AutomationPage, AutomationPageRequest, InvalidPageLimit, PageLimit,
+};

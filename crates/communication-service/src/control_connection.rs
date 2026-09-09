@@ -227,6 +227,7 @@ pub async fn serve_control_connection(
                     if matches!(
                         request.method.as_str(),
                         "wake/send"
+                            | "wake/list"
                             | "wake/show"
                             | "wake/pause"
                             | "wake/resume"
