@@ -42,11 +42,22 @@ async fn resumed_worker_uses_frozen_inputs_after_schedule_mode_edit()
     )
     .await
 }
+#[tokio::test]
+async fn known_resume_rejection_returns_to_preparation_and_can_complete()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_scheduled_run(
+        false,
+        PreparationOutcome::Accepted,
+        RunScenario::ResumeRejected,
+    )
+    .await
+}
 #[derive(Clone, Copy)]
 enum RunScenario {
     Normal,
     SkipFailedSummary,
     FrozenInputs,
+    ResumeRejected,
 }
 #[derive(Clone, Copy)]
 enum PreparationOutcome {
@@ -71,6 +82,7 @@ async fn exercise_scheduled_run(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let skip_failed_summary = matches!(scenario, RunScenario::SkipFailedSummary);
     let frozen_inputs = matches!(scenario, RunScenario::FrozenInputs);
+    let resume_rejected = matches!(scenario, RunScenario::ResumeRejected);
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "scheduled-run-fixture-{}",
         OperationId::generate().as_str()
@@ -141,8 +153,8 @@ async fn exercise_scheduled_run(
         .await?;
     let backend_store = Arc::clone(&store);
     let backend = tokio::spawn(async move {
-        for stage in 0..if busy_first { 8 } else { 7 } {
-            let logical_stage = if busy_first && stage >= 2 {
+        for stage in 0..if busy_first || resume_rejected { 8 } else { 7 } {
+            let logical_stage = if (busy_first || resume_rejected) && stage >= 2 {
                 stage - 1
             } else {
                 stage
@@ -226,7 +238,9 @@ async fn exercise_scheduled_run(
                     json!({"thread":{"id":"scheduled-new-thread","turns":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}]}})
                 }
             };
-            let result = if busy_first && stage == 1 {
+            let result = if resume_rejected && stage == 1 {
+                json!({"thread":{"id":"scheduled-new-thread","status":{"type":"notLoaded"}}})
+            } else if busy_first && stage == 1 {
                 json!({"thread":{"id":"scheduled-new-thread","status":{"type":"active"}}})
             } else {
                 result
@@ -238,6 +252,20 @@ async fn exercise_scheduled_run(
                         .into(),
                 ))
                 .await?;
+            if resume_rejected && stage == 1 {
+                let resume: Value = serde_json::from_str(
+                    socket
+                        .next()
+                        .await
+                        .ok_or("resume request missing")??
+                        .to_text()?,
+                )?;
+                if resume.get("method").and_then(Value::as_str) != Some("thread/resume") {
+                    return Err("unloaded worker did not request resume".into());
+                }
+                socket.send(Message::Text(json!({"id":resume.get("id"),"error":{"code":-32602,"message":"known resume rejection"}}).to_string().into())).await?;
+                continue;
+            }
             if busy_first && stage == 1 {
                 if let Some(Ok(message)) =
                     tokio::time::timeout(Duration::from_secs(2), socket.next()).await?

@@ -92,41 +92,80 @@ pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
         Ok(page) => {
             let now = chrono::Utc::now().timestamp_millis();
             let projected = (|| {
-                let records = page
+                let positions: Vec<_> = page
+                    .records
+                    .iter()
+                    .map(|record| {
+                        (
+                            record.definition.created_at_ms,
+                            record.definition.wakeup_id.clone(),
+                        )
+                    })
+                    .collect();
+                let upper = page
+                    .next
+                    .as_ref()
+                    .map(|position| {
+                        (
+                            position.upper_created_at_ms,
+                            position.upper_wakeup_id.clone(),
+                        )
+                    })
+                    .or_else(|| positions.last().cloned());
+                let mut records = page
                     .records
                     .into_iter()
                     .map(|record| {
                         crate::wakeup_projection::snapshot(record, request.service_id, now)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let next_cursor = page
-                    .next
-                    .map(|position| {
-                        crate::automation_collection_cursor::encode(
-                            &crate::automation_collection_cursor::CollectionCursor {
-                                version: 1,
-                                service_id: request.service_id.clone(),
-                                collection: "wake/list".into(),
-                                upper_key: (
-                                    position.upper_created_at_ms,
-                                    position.upper_wakeup_id.as_str().into(),
-                                ),
-                                last_key: (
-                                    position.created_at_ms,
-                                    position.wakeup_id.as_str().into(),
-                                ),
-                                filter_digest: digest,
-                            },
-                        )
-                    })
-                    .transpose()?;
-                Ok::<_, ()>(AutomationPage {
-                    records,
-                    next_cursor,
-                })
+                let mut next = page.next;
+                loop {
+                    let next_cursor = next
+                        .as_ref()
+                        .map(|position| {
+                            crate::automation_collection_cursor::encode(
+                                &crate::automation_collection_cursor::CollectionCursor {
+                                    version: 1,
+                                    service_id: request.service_id.clone(),
+                                    collection: "wake/list".into(),
+                                    upper_key: (
+                                        position.upper_created_at_ms,
+                                        position.upper_wakeup_id.as_str().into(),
+                                    ),
+                                    last_key: (
+                                        position.created_at_ms,
+                                        position.wakeup_id.as_str().into(),
+                                    ),
+                                    filter_digest: digest.clone(),
+                                },
+                            )
+                        })
+                        .transpose()?;
+                    let response = json!({"jsonrpc":"2.0","id":request.id,"result":AutomationPage {
+                        records: records.clone(), next_cursor,
+                    }});
+                    if serde_json::to_vec(&response).map_err(|_| ())?.len()
+                        <= communication_protocol::MAX_CONTROL_FRAME_BYTES
+                    {
+                        return Ok::<_, ()>(response);
+                    }
+                    records.pop();
+                    let Some(index) = records.len().checked_sub(1) else {
+                        return Err(());
+                    };
+                    let (created_at_ms, wakeup_id) = positions.get(index).ok_or(())?;
+                    let (upper_created_at_ms, upper_wakeup_id) = upper.as_ref().ok_or(())?;
+                    next = Some(WakeListPosition {
+                        upper_created_at_ms: *upper_created_at_ms,
+                        upper_wakeup_id: upper_wakeup_id.clone(),
+                        created_at_ms: *created_at_ms,
+                        wakeup_id: wakeup_id.clone(),
+                    });
+                }
             })();
             match projected {
-                Ok(page) => json!({"jsonrpc":"2.0","id":request.id,"result":page}),
+                Ok(response) => response,
                 Err(()) => failure(
                     request.id,
                     context,

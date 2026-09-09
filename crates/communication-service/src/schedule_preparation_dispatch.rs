@@ -282,6 +282,11 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
         .await;
     match result {
         Ok(result)=>match crate::schedule_projection::snapshot(result){Ok(result)=>json!({"jsonrpc":"2.0","id":request.id,"result":result}),Err(())=>reject(request.id,&params,ScheduleFailureKind::OutcomeUnknown,"Preparation committed but its response could not be projected; inspect operation.",effects)},
+        Err(automation_storage::StorageError::ThreadOwnershipConflict { .. }) => finish_failure(
+            store, request.id, &params, ScheduleFailureKind::OwnershipConflict,
+            "The thread belongs to another schedule. Select a different thread; no binding was committed for this schedule.",
+            effects, false,
+        ).await,
         Err(_)=>finish_failure(store,request.id,&params,ScheduleFailureKind::OutcomeUnknown,"Native preparation completed but binding commit was not established; inspect retained target and operation before retrying.",effects,true).await,
     }
 }
@@ -302,7 +307,10 @@ fn error(
         constraint: None,
         details: communication_protocol::ScheduleFailureDetails::None,
         effects: ScheduleEffects::Native { evidence: effects },
-        next_action: ScheduleNextAction::InspectOperation,
+        next_action: match kind {
+            ScheduleFailureKind::OwnershipConflict => ScheduleNextAction::SelectDifferentThread,
+            _ => ScheduleNextAction::InspectOperation,
+        },
     }
 }
 fn reject(

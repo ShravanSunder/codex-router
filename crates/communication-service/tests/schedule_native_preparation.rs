@@ -15,15 +15,21 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::test]
 async fn preparation_replay_uses_recorded_native_thread_without_forking_again()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_preparation(false).await
+    exercise_preparation(false, false).await
 }
 #[tokio::test]
 async fn lost_preparation_response_is_retained_without_reallocation()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_preparation(true).await
+    exercise_preparation(true, false).await
+}
+#[tokio::test]
+async fn ownership_rejection_allows_preparing_a_different_thread()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_preparation(false, true).await
 }
 async fn exercise_preparation(
     lose_response: bool,
+    ownership_conflict: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "schedule-native-fixture-{}",
@@ -90,43 +96,100 @@ async fn exercise_preparation(
         })
         .await?;
     let schedule=client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null}}))?).await?;
-    let backend = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        let mut socket = tokio_tungstenite::accept_async(stream).await?;
-        let init: Value =
-            serde_json::from_str(socket.next().await.ok_or("missing init")??.to_text()?)?;
-        socket
-            .send(Message::Text(
-                json!({"id":init.get("id"),"result":{}}).to_string().into(),
-            ))
+    if ownership_conflict {
+        let owner = client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null}}))?).await?;
+        store
+            .lock()
+            .await
+            .claim_thread_binding(&automation_storage::ThreadBindingClaim {
+                schedule_id: owner.schedule_id,
+                service_id: service_id.into(),
+                endpoint_id: "codex-local".into(),
+                thread_id: "owned-thread".into(),
+                now_ms: 0,
+            })
             .await?;
-        let _initialized = socket.next().await.ok_or("missing initialized")??;
-        let request: Value = serde_json::from_str(
+    }
+    let backend = tokio::spawn(async move {
+        for _ in 0..if ownership_conflict { 2 } else { 1 } {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = tokio_tungstenite::accept_async(stream).await?;
+            let init: Value =
+                serde_json::from_str(socket.next().await.ok_or("missing init")??.to_text()?)?;
             socket
-                .next()
-                .await
-                .ok_or("missing thread start")??
-                .to_text()?,
-        )?;
-        if request.get("method").and_then(Value::as_str) != Some("thread/start")
-            || request.pointer("/params/cwd").and_then(Value::as_str) != Some("/fresh-fixture")
-        {
-            return Err("wrong preparation call or cwd".into());
-        }
-        if !lose_response {
-            socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":"prepared-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-luna"}}).to_string().into())).await?;
+                .send(Message::Text(
+                    json!({"id":init.get("id"),"result":{}}).to_string().into(),
+                ))
+                .await?;
+            let _initialized = socket.next().await.ok_or("missing initialized")??;
+            let request: Value = serde_json::from_str(
+                socket
+                    .next()
+                    .await
+                    .ok_or("missing thread start")??
+                    .to_text()?,
+            )?;
+            if ownership_conflict {
+                if request.get("method").and_then(Value::as_str) != Some("thread/read") {
+                    return Err("existing preparation must only read native thread".into());
+                }
+                socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":request.pointer("/params/threadId"),"cwd":"/fresh-fixture"}}}).to_string().into())).await?;
+            } else {
+                if request.get("method").and_then(Value::as_str) != Some("thread/start")
+                    || request.pointer("/params/cwd").and_then(Value::as_str)
+                        != Some("/fresh-fixture")
+                {
+                    return Err("wrong preparation call or cwd".into());
+                }
+                if !lose_response {
+                    socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":"prepared-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-luna"}}).to_string().into())).await?;
+                }
+            }
         }
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
+    let destination = if ownership_conflict {
+        json!({"kind":"existing","target":{"endpoint":target.endpoint,"sessionId":"owned-thread"},"cwd":"/fresh-fixture"})
+    } else {
+        json!({"kind":"fresh","endpoint":target.endpoint,"cwd":"/fresh-fixture"})
+    };
     let request: SchedulePrepareRequest = serde_json::from_value(
-        json!({"operationId":OperationId::generate(),"scheduleId":schedule.schedule_id,"destination":{"kind":"fresh","endpoint":target.endpoint,"cwd":"/fresh-fixture"}}),
+        json!({"operationId":OperationId::generate(),"scheduleId":schedule.schedule_id,"destination":destination}),
     )?;
     let first = tokio::time::timeout(
         Duration::from_secs(3),
         client.prepare_schedule(request.clone()),
     )
     .await?;
-    if lose_response {
+    if ownership_conflict {
+        let error = match first {
+            Err(communication_client::ScheduleClientError::Rejected(error)) => error,
+            _ => return Err("ownership conflict did not return a typed rejection".into()),
+        };
+        if !matches!(
+            error.kind,
+            communication_protocol::ScheduleFailureKind::OwnershipConflict
+        ) || !matches!(
+            error.next_action,
+            communication_protocol::ScheduleNextAction::SelectDifferentThread
+        ) {
+            return Err("known ownership conflict became unrecoverable uncertainty".into());
+        }
+        let (retry_socket, retry_server) = tokio::net::UnixStream::pair()?;
+        let retry_service = tokio::spawn(serve_control_connection(retry_server, identity.clone()));
+        let mut retry_client =
+            ControlClient::initialize(retry_socket, "ownership-recovery", "1").await?;
+        let retry = retry_client.prepare_schedule(serde_json::from_value(json!({
+            "operationId":OperationId::generate(),"scheduleId":schedule.schedule_id,
+            "destination":{"kind":"existing","target":{"endpoint":target.endpoint,"sessionId":"different-thread"},"cwd":"/fresh-fixture"}
+        }))?).await?;
+        if !matches!(retry.definition.destination, communication_protocol::ExecutionDestination::OwnedThread { target, .. } if String::from(target.session_id.clone()) == "different-thread")
+        {
+            return Err("different thread could not be prepared after known rejection".into());
+        }
+        retry_client.close().await?;
+        retry_service.await??;
+    } else if lose_response {
         let error = match first {
             Err(communication_client::ScheduleClientError::Rejected(error)) => error,
             _ => return Err("lost allocation response lacked typed evidence".into()),

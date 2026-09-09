@@ -77,13 +77,21 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
                 json!({"threadId":id}),
             )
             .await;
-        let Ok(resumed) = resumed else {
-            return Ok(());
-        };
-        if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(id.as_str()) {
-            return Ok(());
+        match resumed {
+            Ok(resumed) => {
+                if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(id.as_str()) {
+                    return Ok(());
+                }
+                input.effects.resume = PreparationEffect::Accepted;
+            }
+            Err(NativeConnectionError::Rejected { .. }) => {
+                input.effects.resume = PreparationEffect::Rejected;
+            }
+            Err(NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable) => {
+                input.effects.resume = PreparationEffect::NotDispatched;
+            }
+            Err(_) => return Ok(()),
         }
-        input.effects.resume = PreparationEffect::Accepted;
         input
             .store
             .lock()
@@ -102,7 +110,8 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
                 },
             )
             .await?;
-        // Recheck residency on the next pass; a resumed thread may already be doing unrelated work.
+        // Known non-submission returns to preparation without an execution budget.
+        // Recheck residency next pass; a resumed thread may already be busy.
         return Ok(());
     }
     if state != Some("idle") {
