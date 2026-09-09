@@ -19,6 +19,12 @@ fn main() {
     if arguments.first().is_some_and(|arg| arg == "automation") {
         std::process::exit(agent_sessions::run_automation_command(arguments));
     }
+    if arguments.first().is_some_and(|arg| arg == "delivery") {
+        std::process::exit(agent_sessions::run_delivery_command(arguments));
+    }
+    if arguments.first().is_some_and(|arg| arg == "revision") {
+        std::process::exit(agent_sessions::run_revision_command(arguments));
+    }
     if arguments.first().is_some_and(|arg| arg == "run") {
         std::process::exit(agent_sessions::run_workflow_command(arguments));
     }

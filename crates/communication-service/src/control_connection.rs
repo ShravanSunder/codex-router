@@ -196,6 +196,33 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "instruction/list"
+                            | "schedule/list"
+                            | "run/list"
+                            | "revision/list"
+                            | "delivery/list"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::automation_collection_dispatch::dispatch(
+                            crate::automation_collection_dispatch::CollectionRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method == "schedule/prepare" => {
                     let identity = identity.clone();
                     pending.spawn(async move {

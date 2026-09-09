@@ -81,3 +81,6 @@ pub use automation_configuration::{
 mod automation_configuration_dispatch;
 
 mod automation_collection_cursor;
+mod automation_collection_dispatch;
+mod automation_collection_projection;
+mod automation_inspection_failure;

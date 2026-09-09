@@ -7,10 +7,15 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 33);
+    assert_eq!(methods.len(), 38);
     for method in [
         "automation/configure",
         "automation/status",
+        "instruction/list",
+        "schedule/list",
+        "run/list",
+        "revision/list",
+        "delivery/list",
         "run/show",
         "run/summaryRetry",
         "run/summarySkip",

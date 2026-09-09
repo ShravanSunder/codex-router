@@ -79,11 +79,17 @@ async fn firing_persists_one_obligation_and_coalesces_until_delivery_resolves()
     if receipt.is_some() {
         return Err("firing invented native acceptance".into());
     }
-    sqlx::query("DELETE FROM automation_events")
-        .execute(&mut check)
-        .await?;
     check.close().await?;
     let mut store = AutomationStore::open(&path).await?;
+    let maintenance_time =
+        chrono::DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")?.timestamp_millis();
+    if store
+        .prune_automation_events(maintenance_time, 1000)
+        .await?
+        == 0
+    {
+        return Err("wake retention proof did not remove old events".into());
+    }
     let current = store
         .read_wakeup::<Message>(&wake.definition.wakeup_id)
         .await?;

@@ -83,6 +83,45 @@ async fn overwrite_preserves_admitted_inputs_and_waiting_identity_after_restart(
     }
     store.close().await?;
     let mut store = AutomationStore::open(&path).await?;
+    let maintenance_time =
+        chrono::DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")?.timestamp_millis();
+    if store
+        .prune_automation_events(maintenance_time, 1000)
+        .await?
+        == 0
+    {
+        return Err("continuity proof did not remove expired events".into());
+    }
+    let run_page = store
+        .list_collection_keys(
+            &automation_storage::AutomationCollection::Runs(schedule.schedule_id.clone()),
+            None,
+            1,
+        )
+        .await?;
+    if run_page.records.len() != 1
+        || run_page.records[0].resource_id != active.as_str()
+        || run_page.records[0].created_at_ms <= 140_000
+    {
+        return Err("Run listing used due time instead of its UUIDv7 creation key".into());
+    }
+    let position = automation_storage::AutomationListPosition {
+        upper: run_page.upper.ok_or("missing run upper key")?,
+        last: run_page.records[0].clone(),
+    };
+    let run_page = store
+        .list_collection_keys(
+            &automation_storage::AutomationCollection::Runs(schedule.schedule_id.clone()),
+            Some(position),
+            1,
+        )
+        .await?;
+    if run_page.records.len() != 1
+        || run_page.records[0].resource_id != waiting.as_str()
+        || run_page.has_more
+    {
+        return Err("Run continuation cursor lost its waiting successor".into());
+    }
     if serde_json::to_value(
         store
             .read_run::<String, String, String, String>(&active)

@@ -27,6 +27,22 @@ pub fn control_schema_document(
         native_uri,
     };
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
+    assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
+    assembly.add_method::<AutomationPageRequest, AutomationPage<InstructionSnapshot>>(
+        "instruction/list",
+        &[],
+    )?;
+    assembly.add_method::<AutomationPageRequest, AutomationPage<ScheduleSnapshot>>(
+        "schedule/list",
+        &[],
+    )?;
+    assembly.add_method::<RunListRequest, AutomationPage<RunSnapshot>>("run/list", &[])?;
+    assembly
+        .add_method::<RevisionListRequest, AutomationPage<RevisionRecord>>("revision/list", &[])?;
+    assembly.add_method::<DeliveryListRequest, AutomationPage<DeliveryInspection>>(
+        "delivery/list",
+        &[],
+    )?;
     assembly.add_method::<AutomationConfigureRequest, AutomationConfiguration>(
         "automation/configure",
         &[],
@@ -296,6 +312,12 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if method.starts_with("instruction/") {
         data = vec![reference("instruction-failure")];
+    }
+    if matches!(
+        method,
+        "instruction/list" | "schedule/list" | "run/list" | "revision/list" | "delivery/list"
+    ) {
+        data = vec![reference("automation-inspection-failure")];
     }
     if method == "lifecycleJournal/read" {
         data.push(json!({"type":"object","required":["kind","current"],"additionalProperties":false,

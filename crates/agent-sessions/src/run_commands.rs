@@ -23,6 +23,13 @@ struct RunArguments {
 }
 #[derive(Subcommand)]
 enum RunCommand {
+    /// List current records using a service-scoped pagination cursor.
+    List(crate::automation_collection_commands::RunListOptions),
+    #[command(flatten)]
+    Action(RunAction),
+}
+#[derive(Subcommand)]
+enum RunAction {
     /// Inspect exact worker state, native effects and the current continuity summary.
     Show {
         #[arg(long)]
@@ -57,7 +64,19 @@ pub fn run_workflow_command(arguments: Vec<OsString>) -> i32 {
             return code;
         }
     };
-    let prepared = match prepare(args.command) {
+    let command = match args.command {
+        RunCommand::List(options) => {
+            return crate::automation_collection_commands::run_collection_command(
+                crate::automation_collection_commands::CollectionCommand::Runs(options),
+                crate::automation_collection_commands::CollectionContext {
+                    service_directory: args.service_directory,
+                    json: args.json,
+                },
+            );
+        }
+        RunCommand::Action(command) => command,
+    };
+    let prepared = match prepare(command) {
         Ok(request) => request,
         Err(message) => {
             return crate::endpoint_commands::report_failure(
@@ -163,19 +182,19 @@ fn operation(value: Option<String>) -> Result<OperationId, String> {
         },
     )
 }
-fn prepare(command: RunCommand) -> Result<PreparedRun, String> {
+fn prepare(command: RunAction) -> Result<PreparedRun, String> {
     Ok(match command {
-        RunCommand::Show { run_id } => PreparedRun::Show(RunShowRequest {
+        RunAction::Show { run_id } => PreparedRun::Show(RunShowRequest {
             run_id: run_id.try_into().map_err(|_| "--run-id requires UUIDv7")?,
         }),
-        RunCommand::SummaryRetry {
+        RunAction::SummaryRetry {
             run_id,
             operation_id,
         } => PreparedRun::Retry(RunRecoveryRequest {
             run_id: run_id.try_into().map_err(|_| "--run-id requires UUIDv7")?,
             operation_id: operation(operation_id)?,
         }),
-        RunCommand::SummarySkip {
+        RunAction::SummarySkip {
             run_id,
             operation_id,
         } => PreparedRun::Skip(RunRecoveryRequest {

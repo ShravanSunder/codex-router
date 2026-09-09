@@ -24,6 +24,13 @@ struct ScheduleArguments {
 }
 #[derive(Subcommand)]
 enum ScheduleCommand {
+    /// List current records using a service-scoped pagination cursor.
+    List(crate::automation_collection_commands::PageOptions),
+    #[command(flatten)]
+    Action(ScheduleAction),
+}
+#[derive(Subcommand)]
+enum ScheduleAction {
     /// Write a portable JSONL package to stdout. Redirect it to a file or another machine.
     Export {
         #[arg(long)]
@@ -121,6 +128,18 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
             return code;
         }
     };
+    let command = match args.command {
+        ScheduleCommand::List(options) => {
+            return crate::automation_collection_commands::run_collection_command(
+                crate::automation_collection_commands::CollectionCommand::Schedules(options),
+                crate::automation_collection_commands::CollectionContext {
+                    service_directory: args.service_directory,
+                    json: args.json,
+                },
+            );
+        }
+        ScheduleCommand::Action(command) => command,
+    };
     let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
         Ok(directory) => directory,
         Err(message) => {
@@ -132,7 +151,7 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
             );
         }
     };
-    let prepared = match prepare(args.command) {
+    let prepared = match prepare(command) {
         Ok(request) => request,
         Err(message) => {
             return crate::endpoint_commands::report_failure(
@@ -270,16 +289,16 @@ fn operation(value: Option<String>) -> Result<OperationId, String> {
         },
     )
 }
-fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
+fn prepare(command: ScheduleAction) -> Result<PreparedSchedule, String> {
     match command {
-        ScheduleCommand::Export { schedule_id } => {
+        ScheduleAction::Export { schedule_id } => {
             Ok(PreparedSchedule::Export(ScheduleShowRequest {
                 schedule_id: schedule_id
                     .try_into()
                     .map_err(|_| "--schedule-id requires UUIDv7")?,
             }))
         }
-        ScheduleCommand::Import {
+        ScheduleAction::Import {
             package_file,
             overwrite,
             operation_id,
@@ -290,7 +309,7 @@ fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
                 overwrite,
             },
         )),
-        ScheduleCommand::Prepare(args) => {
+        ScheduleAction::Prepare(args) => {
             let destination = args.destination()?;
             Ok(PreparedSchedule::Prepare {
                 operation_id: operation(args.operation_id)?,
@@ -301,14 +320,14 @@ fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
                 destination,
             })
         }
-        ScheduleCommand::Create {
+        ScheduleAction::Create {
             definition_file,
             operation_id,
         } => Ok(PreparedSchedule::Create(Box::new(ScheduleCreateRequest {
             operation_id: operation(operation_id)?,
             definition: read_definition(definition_file)?,
         }))),
-        ScheduleCommand::Update {
+        ScheduleAction::Update {
             schedule_id,
             expected_change_id,
             definition_file,
@@ -323,12 +342,12 @@ fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
                 .map_err(|_| "--expected-change-id requires UUIDv7")?,
             definition: read_definition(definition_file)?,
         }))),
-        ScheduleCommand::Show { schedule_id } => Ok(PreparedSchedule::Show(ScheduleShowRequest {
+        ScheduleAction::Show { schedule_id } => Ok(PreparedSchedule::Show(ScheduleShowRequest {
             schedule_id: schedule_id
                 .try_into()
                 .map_err(|_| "--schedule-id requires UUIDv7")?,
         })),
-        ScheduleCommand::Enable {
+        ScheduleAction::Enable {
             schedule_id,
             operation_id,
         } => Ok(PreparedSchedule::Enable(ScheduleEnableRequest {
@@ -337,7 +356,7 @@ fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
                 .map_err(|_| "--schedule-id requires UUIDv7")?,
             operation_id: operation(operation_id)?,
         })),
-        ScheduleCommand::Disable {
+        ScheduleAction::Disable {
             schedule_id,
             operation_id,
         } => Ok(PreparedSchedule::Disable(ScheduleEnableRequest {

@@ -27,6 +27,13 @@ struct InstructionArguments {
 }
 #[derive(Subcommand)]
 enum InstructionCommand {
+    /// List current records using a service-scoped pagination cursor.
+    List(crate::automation_collection_commands::PageOptions),
+    #[command(flatten)]
+    Action(InstructionAction),
+}
+#[derive(Subcommand)]
+enum InstructionAction {
     /// Create reusable instruction text. Reuse operation-id to replay a lost response safely.
     Create {
         #[arg(long)]
@@ -87,6 +94,18 @@ pub fn run_instruction_command(arguments: Vec<OsString>) -> i32 {
             return code;
         }
     };
+    let command = match args.command {
+        InstructionCommand::List(options) => {
+            return crate::automation_collection_commands::run_collection_command(
+                crate::automation_collection_commands::CollectionCommand::Instructions(options),
+                crate::automation_collection_commands::CollectionContext {
+                    service_directory: args.service_directory,
+                    json: args.json,
+                },
+            );
+        }
+        InstructionCommand::Action(command) => command,
+    };
     let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
         Ok(path) => path,
         Err(message) => {
@@ -98,7 +117,7 @@ pub fn run_instruction_command(arguments: Vec<OsString>) -> i32 {
             );
         }
     };
-    let prepared = match prepare(args.command) {
+    let prepared = match prepare(command) {
         Ok(request) => request,
         Err(message) => {
             return crate::endpoint_commands::report_failure(
@@ -188,16 +207,16 @@ fn operation(value: Option<String>) -> Result<OperationId, String> {
         },
     )
 }
-fn prepare(command: InstructionCommand) -> Result<PreparedInstruction, String> {
+fn prepare(command: InstructionAction) -> Result<PreparedInstruction, String> {
     Ok(match command {
-        InstructionCommand::Create {
+        InstructionAction::Create {
             operation_id,
             content,
         } => PreparedInstruction::Create(InstructionCreateParams {
             operation_id: operation(operation_id)?,
             text: read_text(content)?,
         }),
-        InstructionCommand::Update {
+        InstructionAction::Update {
             operation_id,
             instruction_id,
             expected_revision_id,
@@ -212,7 +231,7 @@ fn prepare(command: InstructionCommand) -> Result<PreparedInstruction, String> {
                 .map_err(|_| "--expected-revision-id must be UUIDv7")?,
             text: read_text(content)?,
         }),
-        InstructionCommand::Show { instruction_id } => {
+        InstructionAction::Show { instruction_id } => {
             PreparedInstruction::Show(InstructionShowParams {
                 instruction_id: instruction_id
                     .try_into()

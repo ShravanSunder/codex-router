@@ -2,7 +2,9 @@
 mod automation_connection;
 pub use automation_connection::{AutomationStore, StorageError};
 mod instruction_repository;
+mod instruction_revision_read;
 mod instruction_updates;
+pub use instruction_revision_read::InstructionRevisionRecord;
 mod schema_initialization;
 pub use instruction_updates::InstructionUpdate;
 mod run_admission;
@@ -73,7 +75,11 @@ mod summary_recovery;
 pub use summary_recovery::{SummaryRecoveryAction, SummaryRecoveryRequest};
 mod configuration_receipts;
 pub use configuration_receipts::{ConfigurationAdmission, ConfigurationOperation};
+mod automation_collection_listing;
 mod automation_event_bounds;
+pub use automation_collection_listing::{
+    AutomationCollection, AutomationKeyPage, AutomationListKey, AutomationListPosition,
+};
 mod schedule_export;
 mod schedule_import;
 pub use schedule_import::ScheduleImport;

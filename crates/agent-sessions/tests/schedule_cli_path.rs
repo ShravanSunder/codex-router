@@ -116,6 +116,38 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
             return Err("CLI import changed identity or enabled the schedule".into());
         }
     }
+    for (group, parent, count) in [
+        ("instruction", None, 1),
+        ("schedule", None, 1),
+        ("run", Some(("--schedule-id", id)), 0),
+        (
+            "revision",
+            Some(("--instruction-id", instruction.instruction_id.as_str())),
+            1,
+        ),
+        ("delivery", None, 0),
+    ] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"));
+        command
+            .args([group, "list", "--json", "--service-directory"])
+            .arg(&root);
+        if let Some((flag, value)) = parent {
+            command.args([flag, value]);
+        }
+        let output = command.output().await?;
+        if !output.status.success() {
+            return Err(format!("{group} list failed").into());
+        }
+        let page: Value = serde_json::from_slice(&output.stdout)?;
+        if page
+            .pointer("/result/records")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(count)
+        {
+            return Err(format!("{group} list returned the wrong records").into());
+        }
+    }
     let prepared = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
         .env_remove("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
         .env_remove("CODEX_ROUTER_USE_HOME_DEFAULT")

@@ -125,8 +125,14 @@ pub use automation_page_contract::{
     AutomationPage, AutomationPageRequest, InvalidPageLimit, PageLimit,
 };
 
+mod automation_inspection_contract;
 mod schedule_contract;
 mod schedule_package_contract;
+pub use automation_inspection_contract::{
+    AutomationInspectionFailure, AutomationInspectionFailureKind, AutomationInspectionNextAction,
+    AutomationInspectionStage, DeliveryListRequest, RevisionListRequest, RevisionRecord,
+    RunListRequest,
+};
 pub use schedule_contract::{
     ExecutionDestination, ImportedContinuity, ScheduleCreateRequest, ScheduleDefinition,
     ScheduleEnableRequest, ScheduleShowRequest, ScheduleSnapshot, ScheduleUpdateRequest,
