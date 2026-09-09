@@ -25,6 +25,10 @@ pub enum StorageError {
     ScheduleNotFound,
     #[error("schedule changed; inspect the latest change identity before editing")]
     ScheduleChangeConflict,
+    #[error(
+        "native endpoint or execution capabilities unavailable; inspect endpoint before enabling this schedule"
+    )]
+    ActivationUnavailable,
     #[error("native thread is already owned by schedule {schedule_id:?}")]
     ThreadOwnershipConflict {
         schedule_id: agent_automation::ScheduleId,

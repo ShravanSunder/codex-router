@@ -21,6 +21,15 @@ pub struct ServiceIdentity {
     automation: Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
 }
 impl ServiceIdentity {
+    pub fn schedule_timing_worker(&self) -> Option<crate::ScheduleTimingWorker> {
+        self.automation.as_ref().map(|store| {
+            crate::ScheduleTimingWorker::new(
+                std::sync::Arc::clone(store),
+                self.native_backend.clone(),
+            )
+        })
+    }
+
     pub fn wake_timing_worker(&self) -> Option<crate::WakeTimingWorker> {
         self.automation.as_ref().map(|store| {
             crate::WakeTimingWorker::new(
@@ -251,6 +260,27 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "run/show" | "run/summaryRetry" | "run/summarySkip"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response =
+                            crate::run_dispatch::dispatch(crate::run_dispatch::RunRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                store: identity.automation.as_ref(),
+                            })
+                            .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method == "schedule/prepare" => {
                     let identity = identity.clone();
                     pending.spawn(async move {
@@ -284,6 +314,8 @@ pub async fn serve_control_connection(
                         let id = request.id.clone();
                         let response = crate::schedule_dispatch::dispatch(
                             crate::schedule_dispatch::ScheduleRequest {
+                                service_id: &identity.service_id,
+                                backend: identity.native_backend.as_ref(),
                                 id: json!(id),
                                 method: &request.method,
                                 params: request.params,

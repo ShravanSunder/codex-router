@@ -26,3 +26,5 @@ mod wakeup_waiting;
 pub use wakeup_waiting::{WakeWaitConnection, WakeWaitError};
 mod schedule_operations;
 pub use schedule_operations::ScheduleClientError;
+mod run_operations;
+pub use run_operations::RunClientError;

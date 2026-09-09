@@ -20,6 +20,8 @@ dependencies = [
 name = "agent-sessions"
 version = "0.1.15"
 dependencies = [
+ "agent-automation",
+ "automation-storage",
  "clap",
  "codex-native-integration",
  "codex-router-host",

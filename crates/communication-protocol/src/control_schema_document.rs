@@ -26,6 +26,11 @@ pub fn control_schema_document(
         frames: Vec::new(),
         native_uri,
     };
+    assembly.add_type::<RunFailure>("run-failure")?;
+    assembly.add_method::<RunShowRequest, RunSnapshot>("run/show", &[])?;
+    for method in ["run/summaryRetry", "run/summarySkip"] {
+        assembly.add_method::<RunRecoveryRequest, RunSnapshot>(method, &[])?;
+    }
     assembly.add_type::<ScheduleFailure>("schedule-failure")?;
     assembly.add_method::<SchedulePrepareRequest, ScheduleSnapshot>("schedule/prepare", &[])?;
     assembly.add_method::<ScheduleCreateRequest, ScheduleSnapshot>("schedule/create", &[])?;
@@ -271,6 +276,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if method == "wake/subscribe" {
         data = vec![reference("wait-unavailable"), reference("wake-not-found")];
+    }
+    if method.starts_with("run/") {
+        data = vec![reference("run-failure")];
     }
     if method.starts_with("schedule/") {
         data = vec![reference("schedule-failure")];

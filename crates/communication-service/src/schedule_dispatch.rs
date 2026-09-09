@@ -15,6 +15,8 @@ pub(crate) struct ScheduleRequest<'a> {
     pub id: Value,
     pub method: &'a str,
     pub params: Value,
+    pub service_id: &'a communication_protocol::UuidIdentity,
+    pub backend: Option<&'a crate::NativeControlBackend>,
     pub store: Option<&'a Arc<Mutex<AutomationStore>>>,
 }
 pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
@@ -53,6 +55,20 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                     Ok(definition) => definition,
                     Err(_) => return invalid(request.id, context),
                 };
+            if let Err(error) = crate::schedule_activation::validate(
+                store,
+                crate::schedule_activation::ActivationRequest {
+                    definition: &definition,
+                    schedule_id: None,
+                    operation_id: &params.operation_id,
+                    service_id: request.service_id,
+                    backend: request.backend,
+                },
+            )
+            .await
+            {
+                return failure(request.id, context, error, LocalMutationState::None, None);
+            }
             store
                 .lock()
                 .await
@@ -90,6 +106,20 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                     Ok(definition) => definition,
                     Err(_) => return invalid(request.id, context),
                 };
+            if let Err(error) = crate::schedule_activation::validate(
+                store,
+                crate::schedule_activation::ActivationRequest {
+                    definition: &definition,
+                    schedule_id: Some(&params.schedule_id),
+                    operation_id: &params.operation_id,
+                    service_id: request.service_id,
+                    backend: request.backend,
+                },
+            )
+            .await
+            {
+                return failure(request.id, context, error, LocalMutationState::None, None);
+            }
             store
                 .lock()
                 .await
@@ -109,6 +139,30 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                 Ok(params) => params,
                 Err(_) => return invalid(request.id, context),
             };
+            if request.method == "schedule/enable" {
+                let current = store
+                    .lock()
+                    .await
+                    .inspect_schedule::<SessionRef, EndpointRef>(&params.schedule_id)
+                    .await;
+                if let Ok(mut current) = current {
+                    current.record.definition.enabled = true;
+                    if let Err(error) = crate::schedule_activation::validate(
+                        store,
+                        crate::schedule_activation::ActivationRequest {
+                            definition: &current.record.definition,
+                            schedule_id: Some(&params.schedule_id),
+                            operation_id: &params.operation_id,
+                            service_id: request.service_id,
+                            backend: request.backend,
+                        },
+                    )
+                    .await
+                    {
+                        return failure(request.id, context, error, LocalMutationState::None, None);
+                    }
+                }
+            }
             store
                 .lock()
                 .await
@@ -203,6 +257,13 @@ fn failure(
             ScheduleNextAction::CorrectRequest,
             Some("timing".into()),
             Some(error.to_string()),
+        ),
+        StorageError::ActivationUnavailable => (
+            ScheduleFailureKind::UnsupportedCapability,
+            ScheduleFailureStage::Admission,
+            ScheduleNextAction::InspectEndpointCapabilities,
+            None,
+            None,
         ),
         StorageError::ScheduleChangeConflict => (
             ScheduleFailureKind::ChangeConflict,

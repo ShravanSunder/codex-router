@@ -139,3 +139,12 @@ pub use schedule_failure::{
 mod schedule_preparation_contract;
 pub use schedule_failure::ScheduleEffects;
 pub use schedule_preparation_contract::{DestinationPreparation, SchedulePrepareRequest};
+
+mod run_execution_contract;
+pub use run_execution_contract::{
+    CapturedRunInputs, ContinuityInput, ExecutionTiming, FrozenExecutionConfiguration,
+    NativeExecution, RetainedSummary, RunExecutionEvidence, RunRecoveryRequest, RunShowRequest,
+    RunSnapshot, RunState, WorkerOutcome,
+};
+mod run_failure_contract;
+pub use run_failure_contract::{RunFailure, RunFailureKind, RunFailureStage, RunNextAction};

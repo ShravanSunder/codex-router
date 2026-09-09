@@ -8,6 +8,8 @@ pub enum NativeOperation {
     ResumeThread,
     StartThread,
     ForkThread,
+    ListTurns,
+    ListItems,
     ListLoadedThreads,
     StartTurn,
     SteerTurn,
@@ -28,6 +30,16 @@ impl NativeOperation {
                 "ThreadResumeParams",
                 "ThreadResumeResponse",
             ),
+            Self::ListTurns => (
+                "thread/turns/list",
+                "ThreadTurnsListParams",
+                "ThreadTurnsListResponse",
+            ),
+            Self::ListItems => (
+                "thread/items/list",
+                "ThreadItemsListParams",
+                "ThreadItemsListResponse",
+            ),
             Self::ForkThread => ("thread/fork", "ThreadForkParams", "ThreadForkResponse"),
             Self::StartThread => ("thread/start", "ThreadStartParams", "ThreadStartResponse"),
             Self::ListLoadedThreads => (
@@ -45,7 +57,10 @@ impl NativeOperation {
         }
     }
     pub(crate) fn has_effects(self) -> bool {
-        !matches!(self, Self::ReadThread | Self::ListLoadedThreads)
+        !matches!(
+            self,
+            Self::ReadThread | Self::ListLoadedThreads | Self::ListTurns | Self::ListItems
+        )
     }
 }
 
@@ -76,7 +91,12 @@ impl NativePayloadSchemas {
                 ),
             );
         }
-        for operation in [NativeOperation::QueueAdd, NativeOperation::ForkThread] {
+        for operation in [
+            NativeOperation::QueueAdd,
+            NativeOperation::ForkThread,
+            NativeOperation::ListTurns,
+            NativeOperation::ListItems,
+        ] {
             let (_, params_name, result_name) = operation.contract();
             if let (Ok(params), Ok(result)) = (
                 bundle.validator_for_v2(params_name),

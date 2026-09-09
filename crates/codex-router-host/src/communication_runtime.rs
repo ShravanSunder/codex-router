@@ -35,6 +35,7 @@ pub struct CommunicationRuntime {
     journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     maintenance: Option<tokio::task::JoinHandle<Result<(), lifecycle_observation::JournalError>>>,
     automation_task: Option<tokio::task::JoinHandle<()>>,
+    schedule_task: Option<tokio::task::JoinHandle<()>>,
     current_generation: Option<CodexGeneration>,
     observer_task: Option<tokio::task::JoinHandle<()>>,
     manifest: Option<communication_service::ManifestPublication>,
@@ -126,6 +127,7 @@ impl CommunicationRuntime {
             })
             .map_err(io::Error::other)?;
         let wake_worker = identity.wake_timing_worker();
+        let schedule_worker = identity.schedule_timing_worker();
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
         let control = LocalControlService::bind(&inputs.directory.join("control.sock"), identity)?
             .with_connection_budget(std::sync::Arc::clone(&permits));
@@ -161,6 +163,8 @@ impl CommunicationRuntime {
         let shutdown = CancellationToken::new();
         // Binding above establishes this runtime owns the listeners before recovery can mutate state.
         let automation_task = wake_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
+        let schedule_task =
+            schedule_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
         let mut tasks = JoinSet::new();
         tasks.spawn(control.run(shutdown.clone()));
         tasks.spawn(native.run(shutdown.clone()));
@@ -183,6 +187,7 @@ impl CommunicationRuntime {
             journal,
             maintenance,
             automation_task,
+            schedule_task,
             current_generation: None,
             observer_task: None,
         })
@@ -433,6 +438,11 @@ impl CommunicationRuntime {
             && task.await.is_err()
         {
             failure.get_or_insert(io::Error::other("automation worker shutdown failed"));
+        }
+        if let Some(task) = self.schedule_task.take()
+            && task.await.is_err()
+        {
+            failure.get_or_insert(io::Error::other("schedule worker shutdown failed"));
         }
         match failure {
             Some(error) => Err(error),
