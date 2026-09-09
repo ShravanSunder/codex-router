@@ -38,13 +38,11 @@ enum AutomationCommand {
     },
 }
 pub fn run_automation_command(arguments: Vec<OsString>) -> i32 {
-    let args = match AutomationArguments::try_parse_from(arguments) {
+    let args = match crate::automation_argument_feedback::parse_arguments::<AutomationArguments>(
+        arguments,
+    ) {
         Ok(args) => args,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _ = error.print();
-            return code;
-        }
+        Err(code) => return code,
     };
     let request = match args.command {
         AutomationCommand::Events(options) => {

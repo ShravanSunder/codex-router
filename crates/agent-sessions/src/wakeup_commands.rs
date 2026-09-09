@@ -92,14 +92,11 @@ struct WakeInvocation {
     wait_until_first_fire: bool,
 }
 pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
-    let args = match WakeArguments::try_parse_from(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _ = error.print();
-            return code;
-        }
-    };
+    let args =
+        match crate::automation_argument_feedback::parse_arguments::<WakeArguments>(arguments) {
+            Ok(args) => args,
+            Err(code) => return code,
+        };
     let machine = match &args.command {
         WakeCommand::Send { message, .. } => message.json,
         WakeCommand::Show { json, .. } | WakeCommand::List { json, .. } => *json,

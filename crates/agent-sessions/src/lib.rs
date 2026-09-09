@@ -56,6 +56,7 @@ pub use acp_stdio_bridge::run_acp_command;
 #[cfg(test)]
 mod session_contract_tests;
 
+mod automation_argument_feedback;
 mod automation_collection_commands;
 mod automation_history_commands;
 mod instruction_commands;

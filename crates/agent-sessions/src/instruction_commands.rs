@@ -86,13 +86,11 @@ impl PreparedInstruction {
 }
 
 pub fn run_instruction_command(arguments: Vec<OsString>) -> i32 {
-    let args = match InstructionArguments::try_parse_from(arguments) {
+    let args = match crate::automation_argument_feedback::parse_arguments::<InstructionArguments>(
+        arguments,
+    ) {
         Ok(args) => args,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _ = error.print();
-            return code;
-        }
+        Err(code) => return code,
     };
     let command = match args.command {
         InstructionCommand::List(options) => {
