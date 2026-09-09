@@ -1,12 +1,20 @@
 //! Opt-in live proof. Run only against automation-debug-host, never production or an existing thread.
 #[path = "automation_live_support/proof_context.rs"]
 mod proof_context;
+#[path = "automation_live_support/scheduled_continuity.rs"]
+mod scheduled_continuity;
 use communication_protocol::{
     AutomationPageRequest, DeliveryEvidence, DeliveryListRequest, MessageContent, MessageDelivery,
     NativeSendParams, NativeSendReceipt,
 };
 use proof_context::{ProofContext, ProofResult, shell_quote};
 use serde_json::{Value, json};
+
+#[tokio::test]
+#[ignore = "requires an isolated debug Host; runs two fresh Luna workflows and their summaries"]
+async fn fresh_scheduled_run_uses_previous_luna_summary() -> ProofResult<()> {
+    scheduled_continuity::exercise().await
+}
 
 #[tokio::test]
 #[ignore = "requires an isolated debug Host; submits one minimal Luna turn and observes its history"]

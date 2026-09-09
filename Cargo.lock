@@ -23,6 +23,7 @@ version = "0.1.15"
 dependencies = [
  "agent-automation",
  "automation-storage",
+ "chrono",
  "clap",
  "codex-native-integration",
  "codex-router-host",

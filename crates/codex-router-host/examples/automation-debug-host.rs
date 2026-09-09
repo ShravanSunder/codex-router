@@ -81,8 +81,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_debug_profile(&profile);
     let executable = codex_native_integration::executable_identity(&spec.executable()).await?;
     let version = codex_native_integration::managed_executable_version(&spec.executable()).await?;
+    // Home hooks can inject extra work after a test task ends. Disable them only
+    // for this owned acceptance app-server, without editing the home profile.
+    let mut native_arguments = vec![OsString::from("-c"), OsString::from("features.hooks=false")];
+    native_arguments.extend(spec.arguments());
     let mut native = ChildCommandSpec::new(spec.executable())
-        .with_arguments(spec.arguments())
+        .with_arguments(native_arguments)
         .with_output(ChildOutput::Telemetry);
     for (key, value) in spec.environment() {
         native = native.with_environment(key, value);

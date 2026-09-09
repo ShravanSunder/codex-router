@@ -1,6 +1,6 @@
 # Testing scheduled automation locally
 
-Use the existing `codex-router-debug` profile and fresh test threads. The opt-in acceptance Host selects `gpt-5.6-luna` in memory, keeps normal Codex home, and puts its sockets, automation database and workspace in a new private directory under `/tmp`. It uses the existing debug router credentials. It never edits the home profile or replaces the production router.
+Use the existing `codex-router-debug` profile and fresh test threads. The opt-in acceptance Host selects `gpt-5.6-luna` in memory, keeps normal Codex home, and puts its sockets, automation database and workspace in a new private directory under `/tmp`. It disables home hooks only in its owned test app-server so they cannot inject extra work. It uses the existing debug router credentials. It never edits the home profile or replaces the production router.
 
 ## Build once
 
