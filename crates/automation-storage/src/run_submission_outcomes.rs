@@ -44,7 +44,7 @@ impl AutomationStore {
                 record.evidence.acceptance = Some(receipt);
                 ("executing", Some(turn_id), None)
             }
-            RunSubmissionOutcome::Rejected { explanation } => {
+            RunSubmissionOutcome::Rejected { explanation: _ } => {
                 if !matches!(
                     request.effects.submission,
                     agent_automation::SubmissionEffect::Rejected
@@ -52,13 +52,9 @@ impl AutomationStore {
                 ) {
                     return Err(StorageError::InvalidRecord);
                 }
-                (
-                    "preparationFailed",
-                    None,
-                    Some(agent_automation::WorkerOutcome::Failed {
-                        explanation: Some(explanation),
-                    }),
-                )
+                record.evidence.timing = None;
+                record.evidence.acceptance = None;
+                ("preparing", None, None::<agent_automation::WorkerOutcome>)
             }
             RunSubmissionOutcome::Unknown { explanation: _ } => {
                 ("uncertain", request.effects.native_turn_id.clone(), None)
@@ -67,8 +63,13 @@ impl AutomationStore {
         record.evidence.native = request.effects;
         let evidence =
             serde_json::to_string(&record.evidence).map_err(|_| StorageError::InvalidRecord)?;
-        sqlx::query("UPDATE workflow_runs SET run_status=?,native_turn_id=?,execution_evidence_json=?,worker_outcome_json=? WHERE run_id=? AND run_status='preparing'")
-            .bind(phase).bind(turn_id).bind(evidence).bind(outcome.map(|outcome|serde_json::to_string(&outcome)).transpose().map_err(|_|StorageError::InvalidRecord)?).bind(request.run_id.as_str()).execute(&mut *transaction).await?;
+        let timing = record.evidence.timing.as_ref();
+        sqlx::query("UPDATE workflow_runs SET run_status=?,native_turn_id=?,execution_evidence_json=?,worker_outcome_json=?,execution_started_at_ms=?,execution_deadline_at_ms=?,effective_timeout_seconds=? WHERE run_id=? AND run_status='preparing'")
+            .bind(phase).bind(turn_id).bind(evidence).bind(outcome.map(|outcome|serde_json::to_string(&outcome)).transpose().map_err(|_|StorageError::InvalidRecord)?)
+            .bind(timing.map(|value| value.dispatch_started_at_ms))
+            .bind(timing.map(|value| value.deadline_at_ms))
+            .bind(timing.map(|value| i64::from(value.effective_timeout_seconds)))
+            .bind(request.run_id.as_str()).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(())
     }

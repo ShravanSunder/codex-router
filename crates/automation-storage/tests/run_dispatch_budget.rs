@@ -98,6 +98,34 @@ async fn execution_budget_starts_at_dispatch_not_trigger_and_cannot_restart()
     if read.evidence.timing.is_none() {
         return Err("budget and SQL projections diverged".into());
     }
+    let captured_inputs = serde_json::to_value(&read.inputs)?;
+    let mut rejected_effects = read.evidence.native;
+    rejected_effects.submission = SubmissionEffect::Rejected;
+    rejected_effects.cessation = CessationEvidence::Confirmed;
+    store
+        .record_run_submission::<String, String, String, String>(
+            automation_storage::RunSubmissionResult {
+                run_id: run.clone(),
+                effects: rejected_effects,
+                outcome: automation_storage::RunSubmissionOutcome::Rejected {
+                    explanation: "Native turn start rejected before execution".into(),
+                },
+            },
+        )
+        .await?;
+    let retained = store
+        .read_run::<String, String, String, String>(&run)
+        .await?;
+    if retained.phase != agent_automation::RunPhase::Preparing
+        || retained.evidence.timing.is_some()
+        || retained.evidence.acceptance.is_some()
+        || retained.worker_outcome.is_some()
+        || serde_json::to_value(&retained.inputs)? != captured_inputs
+    {
+        return Err(
+            "known rejected start must preserve preparation without an execution budget".into(),
+        );
+    }
     store.close().await?;
     std::fs::remove_file(path)?;
     Ok(())
