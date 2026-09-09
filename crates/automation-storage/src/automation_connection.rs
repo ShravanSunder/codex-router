@@ -23,6 +23,17 @@ pub enum StorageError {
     RevisionConflict,
     #[error("schedule was not found in this automation database")]
     ScheduleNotFound,
+    #[error("schedule UUID already exists; pass --overwrite for an intentional replacement")]
+    ScheduleImportExists,
+    #[error(
+        "imported instruction differs from existing shared instruction {instruction_id:?}; explicitly edit it or use a new instruction identity"
+    )]
+    InstructionImportConflict {
+        instruction_id: agent_automation::InstructionId,
+        schedule_ids: Vec<agent_automation::ScheduleId>,
+    },
+    #[error(transparent)]
+    InvalidPackage(#[from] agent_automation::PackageError),
     #[error("schedule changed; inspect the latest change identity before editing")]
     ScheduleChangeConflict,
     #[error(

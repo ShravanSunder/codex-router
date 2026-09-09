@@ -41,6 +41,8 @@ pub fn control_schema_document(
     assembly.add_method::<SchedulePrepareRequest, ScheduleSnapshot>("schedule/prepare", &[])?;
     assembly.add_method::<ScheduleCreateRequest, ScheduleSnapshot>("schedule/create", &[])?;
     assembly.add_method::<ScheduleShowRequest, ScheduleSnapshot>("schedule/show", &[])?;
+    assembly.add_method::<ScheduleShowRequest, ScheduleExportResult>("schedule/export", &[])?;
+    assembly.add_method::<ScheduleImportRequest, ScheduleSnapshot>("schedule/import", &[])?;
     assembly.add_method::<ScheduleUpdateRequest, ScheduleSnapshot>("schedule/update", &[])?;
     for method in ["schedule/enable", "schedule/disable"] {
         assembly.add_method::<ScheduleEnableRequest, ScheduleSnapshot>(method, &[])?;

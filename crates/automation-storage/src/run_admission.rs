@@ -10,6 +10,9 @@ use sqlx::{Connection, Row, SqliteConnection};
 
 pub enum RunAdmission<TTarget, TEndpoint> {
     NoWaitingRun,
+    DestinationUnprepared {
+        run_id: RunId,
+    },
     Occupied {
         run_id: RunId,
     },
@@ -47,7 +50,8 @@ impl AutomationStore {
             serde_json::from_str(&schedule.try_get::<String, _>("definition_json")?)
                 .map_err(|_| StorageError::InvalidRecord)?;
         if matches!(definition.destination, ExecutionDestination::Unprepared) {
-            return Err(StorageError::InvalidRecord);
+            transaction.commit().await?;
+            return Ok(RunAdmission::DestinationUnprepared { run_id });
         }
         let require_summary = matches!(
             definition.destination,

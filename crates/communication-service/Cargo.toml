@@ -10,6 +10,7 @@ workspace = true
 automation-storage = { path = "../automation-storage" }
 agent-automation = { path = "../agent-automation" }
 base64.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 codex-acp-adapter = { path = "../codex-acp-adapter", version = "0.1.14" }
 codex-native-integration.workspace = true

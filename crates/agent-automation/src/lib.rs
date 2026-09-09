@@ -30,3 +30,10 @@ mod run_execution;
 pub use run_execution::{ExecutionTiming, RunExecutionEvidence, RunRecord, WorkerOutcome};
 mod summary_attempt;
 pub use summary_attempt::{SummaryAttempt, SummaryPhase};
+
+mod portable_schedule_package;
+pub use portable_schedule_package::{
+    PackageError, PortableContinuity, PortableInstruction, PortableSchedulePackage,
+};
+mod portable_schedule_encoding;
+pub use portable_schedule_encoding::{decode_schedule_package, encode_schedule_package};

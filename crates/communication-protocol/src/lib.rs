@@ -126,10 +126,13 @@ pub use automation_page_contract::{
 };
 
 mod schedule_contract;
+mod schedule_package_contract;
 pub use schedule_contract::{
     ExecutionDestination, ImportedContinuity, ScheduleCreateRequest, ScheduleDefinition,
     ScheduleEnableRequest, ScheduleShowRequest, ScheduleSnapshot, ScheduleUpdateRequest,
 };
+pub use schedule_failure::ScheduleFailureDetails;
+pub use schedule_package_contract::{ScheduleExportResult, ScheduleImportRequest};
 mod schedule_failure;
 pub use agent_automation::{ChangeId, RunId, ScheduleId};
 pub use schedule_failure::{

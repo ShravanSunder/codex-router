@@ -20,6 +20,9 @@ pub(crate) struct ScheduleRequest<'a> {
     pub store: Option<&'a Arc<Mutex<AutomationStore>>>,
 }
 pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
+    if matches!(request.method, "schedule/export" | "schedule/import") {
+        return crate::schedule_package_dispatch::dispatch(request).await;
+    }
     let context = FailureContext {
         operation_id: request
             .params
@@ -220,11 +223,11 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
         }
     }
 }
-struct FailureContext {
-    operation_id: Option<communication_protocol::OperationId>,
-    schedule_id: Option<communication_protocol::ScheduleId>,
+pub(crate) struct FailureContext {
+    pub operation_id: Option<communication_protocol::OperationId>,
+    pub schedule_id: Option<communication_protocol::ScheduleId>,
 }
-fn invalid(id: Value, context: FailureContext) -> Value {
+pub(crate) fn invalid(id: Value, context: FailureContext) -> Value {
     failure(
         id,
         context,
@@ -236,7 +239,7 @@ fn invalid(id: Value, context: FailureContext) -> Value {
         None,
     )
 }
-fn failure(
+pub(crate) fn failure(
     id: Value,
     context: FailureContext,
     error: StorageError,
@@ -244,6 +247,20 @@ fn failure(
     current_change_id: Option<communication_protocol::ChangeId>,
 ) -> Value {
     let (kind, stage, next_action, field, constraint) = match &error {
+        StorageError::ScheduleImportExists => (
+            ScheduleFailureKind::InvalidField, ScheduleFailureStage::Admission,
+            ScheduleNextAction::CorrectRequest, Some("overwrite".into()),
+            Some("An existing schedule UUID requires explicit --overwrite, even for identical content.".into()),
+        ),
+        StorageError::InstructionImportConflict { .. } => (
+            ScheduleFailureKind::InstructionConflict, ScheduleFailureStage::Admission,
+            ScheduleNextAction::CorrectRequest, Some("packageUtf8".into()),
+            Some("Edit the shared instructions explicitly or import a deliberately new instruction identity; --overwrite applies only to the schedule.".into()),
+        ),
+        StorageError::InvalidPackage(error) => (
+            ScheduleFailureKind::InvalidField, ScheduleFailureStage::Validation,
+            ScheduleNextAction::CorrectRequest, Some("packageUtf8".into()), Some(error.to_string()),
+        ),
         StorageError::InvalidSchedule { field, reason } => (
             ScheduleFailureKind::InvalidField,
             ScheduleFailureStage::Validation,
@@ -318,6 +335,16 @@ fn failure(
         current_change_id,
         field,
         constraint,
+        details: match error {
+            StorageError::InstructionImportConflict {
+                instruction_id,
+                schedule_ids,
+            } => communication_protocol::ScheduleFailureDetails::InstructionConflict {
+                instruction_id,
+                schedule_ids,
+            },
+            _ => communication_protocol::ScheduleFailureDetails::None,
+        },
         effects: ScheduleEffects::Local { mutation },
         next_action,
     };

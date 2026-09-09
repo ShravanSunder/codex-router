@@ -69,6 +69,9 @@ async fn two_connections_admit_only_one_run_and_capture_current_inputs()
                 }
             }
             RunAdmission::NoWaitingRun => return Err("waiting Run was lost".into()),
+            RunAdmission::DestinationUnprepared { .. } => {
+                return Err("prepared destination was unexpectedly lost".into());
+            }
         }
     }
     // Assert: one winner, one occupant observation, no stored definition pointers.

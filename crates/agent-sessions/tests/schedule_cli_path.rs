@@ -75,6 +75,47 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
     {
         return Err("disabled schedule inspection invented active work".into());
     }
+    let exported = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "schedule",
+            "export",
+            "--schedule-id",
+            id,
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !exported.status.success() {
+        return Err("schedule CLI export failed".into());
+    }
+    let package_file = root.join("schedule-package.jsonl");
+    std::fs::write(&package_file, &exported.stdout)?;
+    for overwrite in [false, true] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"));
+        command
+            .args(["schedule", "import", "--package-file"])
+            .arg(&package_file)
+            .args(["--json", "--service-directory"])
+            .arg(&root);
+        if overwrite {
+            command.arg("--overwrite");
+        }
+        let imported = command.output().await?;
+        if imported.status.success() != overwrite {
+            return Err("schedule import did not require explicit --overwrite".into());
+        }
+        let imported: Value = serde_json::from_slice(&imported.stdout)?;
+        if overwrite
+            && (imported
+                .pointer("/result/scheduleId")
+                .and_then(Value::as_str)
+                != Some(id)
+                || imported.pointer("/result/definition/enabled") != Some(&json!(false)))
+        {
+            return Err("CLI import changed identity or enabled the schedule".into());
+        }
+    }
     let prepared = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
         .env_remove("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
         .env_remove("CODEX_ROUTER_USE_HOME_DEFAULT")

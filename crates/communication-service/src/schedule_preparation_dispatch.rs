@@ -300,6 +300,7 @@ fn error(
         current_change_id: None,
         field: None,
         constraint: None,
+        details: communication_protocol::ScheduleFailureDetails::None,
         effects: ScheduleEffects::Native { evidence: effects },
         next_action: ScheduleNextAction::InspectOperation,
     }

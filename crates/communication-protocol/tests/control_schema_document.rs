@@ -7,7 +7,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 31);
+    assert_eq!(methods.len(), 33);
     for method in [
         "automation/configure",
         "automation/status",
@@ -17,6 +17,8 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "schedule/prepare",
         "schedule/create",
         "schedule/show",
+        "schedule/export",
+        "schedule/import",
         "schedule/update",
         "schedule/enable",
         "schedule/disable",

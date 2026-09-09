@@ -447,6 +447,16 @@ impl ClientConnection {
             }
         }
     }
+    pub(crate) fn encoded_request_len(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Result<usize, ClientError> {
+        let id = format!("client-{}", self.next_id);
+        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .map(|bytes| bytes.len())
+            .map_err(|_| ClientError::Protocol("request encoding"))
+    }
     async fn exchange(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         let id = format!("client-{}", self.next_id);
         self.next_id += 1;

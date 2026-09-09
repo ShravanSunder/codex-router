@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::{Connection, Row};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WakeListPosition {
-    pub upper_row_id: i64,
+    pub upper_created_at_ms: i64,
+    pub upper_wakeup_id: WakeupId,
     pub created_at_ms: i64,
     pub wakeup_id: WakeupId,
 }
@@ -24,21 +25,38 @@ impl AutomationStore {
         }
         let mut transaction = self.connection.begin().await?;
         let upper = if let Some(position) = &after {
-            position.upper_row_id
+            Some((
+                position.upper_created_at_ms,
+                position.upper_wakeup_id.clone(),
+            ))
         } else {
-            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(rowid),0) FROM wakeup_definitions")
-                .fetch_one(&mut *transaction)
-                .await?
+            let row=sqlx::query("SELECT created_at_ms,wakeup_id FROM wakeup_definitions ORDER BY created_at_ms DESC,wakeup_id DESC LIMIT 1").fetch_optional(&mut *transaction).await?;
+            row.map(|row| {
+                Ok::<_, StorageError>((
+                    row.try_get::<i64, _>("created_at_ms")?,
+                    row.try_get::<String, _>("wakeup_id")?
+                        .try_into()
+                        .map_err(|_| StorageError::InvalidRecord)?,
+                ))
+            })
+            .transpose()?
         };
-        if upper < 0
+        let Some((upper_created_at_ms, upper_wakeup_id)) = upper else {
+            transaction.commit().await?;
+            return Ok(WakeListPage {
+                records: Vec::new(),
+                next: None,
+            });
+        };
+        if upper_created_at_ms < 0
             || after
                 .as_ref()
                 .is_some_and(|position| position.created_at_ms < 0)
         {
             return Err(StorageError::InvalidRecord);
         }
-        let rows=sqlx::query("SELECT wakeup_id,created_at_ms FROM wakeup_definitions WHERE rowid<=? AND (? IS NULL OR (created_at_ms,wakeup_id)>(?,?)) ORDER BY created_at_ms,wakeup_id LIMIT ?")
-            .bind(upper).bind(after.as_ref().map(|position|position.created_at_ms)).bind(after.as_ref().map(|position|position.created_at_ms)).bind(after.as_ref().map(|position|position.wakeup_id.as_str())).bind(i64::from(limit)+1).fetch_all(&mut *transaction).await?;
+        let rows=sqlx::query("SELECT wakeup_id,created_at_ms FROM wakeup_definitions WHERE (created_at_ms,wakeup_id)<=(?,?) AND (? IS NULL OR (created_at_ms,wakeup_id)>(?,?)) ORDER BY created_at_ms,wakeup_id LIMIT ?")
+            .bind(upper_created_at_ms).bind(upper_wakeup_id.as_str()).bind(after.as_ref().map(|position|position.created_at_ms)).bind(after.as_ref().map(|position|position.created_at_ms)).bind(after.as_ref().map(|position|position.wakeup_id.as_str())).bind(i64::from(limit)+1).fetch_all(&mut *transaction).await?;
         let has_more =
             rows.len() > usize::try_from(limit).map_err(|_| StorageError::InvalidRecord)?;
         let mut records = Vec::new();
@@ -54,7 +72,8 @@ impl AutomationStore {
             let created_at_ms = row.try_get("created_at_ms")?;
             records.push(crate::wakeup_repository::read_current(&mut transaction, &id).await?);
             next = Some(WakeListPosition {
-                upper_row_id: upper,
+                upper_created_at_ms,
+                upper_wakeup_id: upper_wakeup_id.clone(),
                 created_at_ms,
                 wakeup_id: id,
             });

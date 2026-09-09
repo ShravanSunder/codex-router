@@ -2,19 +2,9 @@
 use crate::wakeup_dispatch::{FailureContext, WakeRequest, failure};
 use automation_storage::WakeListPosition;
 use communication_protocol::{
-    AutomationPage, AutomationPageRequest, LocalMutationState, SavedMessage, UuidIdentity,
-    WakeFailureReason,
+    AutomationPage, AutomationPageRequest, LocalMutationState, SavedMessage, WakeFailureReason,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WakeCursor {
-    version: u8,
-    service: UuidIdentity,
-    collection: String,
-    position: WakeListPosition,
-}
 pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
     let context = FailureContext::from_params(&request.params);
     let Some(store) = request.store else {
@@ -39,21 +29,45 @@ pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
             );
         }
     };
+    let digest = match crate::automation_collection_cursor::filter_digest(&json!({})) {
+        Ok(digest) => digest,
+        Err(()) => {
+            return failure(
+                request.id,
+                context,
+                WakeFailureReason::InvalidRecord,
+                LocalMutationState::None,
+            );
+        }
+    };
     let after = match params.cursor {
         None => None,
         Some(cursor) => {
-            let decoded = if cursor.len() <= 4096 {
-                serde_json::from_str::<WakeCursor>(&cursor).ok()
-            } else {
-                None
-            };
+            let decoded = crate::automation_collection_cursor::decode(
+                &cursor,
+                request.service_id,
+                "wake/list",
+                &digest,
+            );
             match decoded {
-                Some(decoded)
-                    if decoded.version == 1
-                        && decoded.service == *request.service_id
-                        && decoded.collection == "wake/list" =>
-                {
-                    Some(decoded.position)
+                Ok(decoded) => {
+                    let (Ok(upper), Ok(last)) = (
+                        decoded.upper_key.1.try_into(),
+                        decoded.last_key.1.try_into(),
+                    ) else {
+                        return failure(
+                            request.id,
+                            context,
+                            invalid("cursor", "Cursor wake identities must be UUIDv7."),
+                            LocalMutationState::None,
+                        );
+                    };
+                    Some(WakeListPosition {
+                        upper_created_at_ms: decoded.upper_key.0,
+                        upper_wakeup_id: upper,
+                        created_at_ms: decoded.last_key.0,
+                        wakeup_id: last,
+                    })
                 }
                 _ => {
                     return failure(
@@ -88,15 +102,24 @@ pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
                 let next_cursor = page
                     .next
                     .map(|position| {
-                        serde_json::to_string(&WakeCursor {
-                            version: 1,
-                            service: request.service_id.clone(),
-                            collection: "wake/list".into(),
-                            position,
-                        })
+                        crate::automation_collection_cursor::encode(
+                            &crate::automation_collection_cursor::CollectionCursor {
+                                version: 1,
+                                service_id: request.service_id.clone(),
+                                collection: "wake/list".into(),
+                                upper_key: (
+                                    position.upper_created_at_ms,
+                                    position.upper_wakeup_id.as_str().into(),
+                                ),
+                                last_key: (
+                                    position.created_at_ms,
+                                    position.wakeup_id.as_str().into(),
+                                ),
+                                filter_digest: digest,
+                            },
+                        )
                     })
-                    .transpose()
-                    .map_err(|_| ())?;
+                    .transpose()?;
                 Ok::<_, ()>(AutomationPage {
                     records,
                     next_cursor,

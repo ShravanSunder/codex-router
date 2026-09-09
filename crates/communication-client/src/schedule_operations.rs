@@ -12,6 +12,18 @@ pub enum ScheduleClientError {
     Connection(#[from] ClientError),
 }
 impl ControlClient {
+    pub async fn import_schedule(
+        &mut self,
+        request: communication_protocol::ScheduleImportRequest,
+    ) -> Result<ScheduleSnapshot, ScheduleClientError> {
+        self.schedule_call("schedule/import", request).await
+    }
+    pub async fn export_schedule(
+        &mut self,
+        request: ScheduleShowRequest,
+    ) -> Result<communication_protocol::ScheduleExportResult, ScheduleClientError> {
+        self.schedule_call("schedule/export", request).await
+    }
     pub async fn create_schedule(
         &mut self,
         request: ScheduleCreateRequest,
@@ -48,13 +60,25 @@ impl ControlClient {
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
         self.schedule_call("schedule/prepare", request).await
     }
-    async fn schedule_call<TRequest: serde::Serialize>(
+    async fn schedule_call<TRequest: serde::Serialize, TResult: serde::de::DeserializeOwned>(
         &mut self,
         method: &str,
         request: TRequest,
-    ) -> Result<ScheduleSnapshot, ScheduleClientError> {
+    ) -> Result<TResult, ScheduleClientError> {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::Protocol("invalid schedule request"))?;
+        if method == "schedule/import" {
+            let encoded_bytes = self.connection.encoded_request_len(method, &params)?;
+            if encoded_bytes > communication_protocol::MAX_CONTROL_FRAME_BYTES {
+                let operation_id = params
+                    .get("operationId")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok());
+                return Err(ScheduleClientError::Rejected(Box::new(
+                    ScheduleFailure::package_frame_limit(operation_id, encoded_bytes),
+                )));
+            }
+        }
         let result = match self.connection.call(method, params).await {
             Ok(result) => result,
             Err(ClientError::Rejected {

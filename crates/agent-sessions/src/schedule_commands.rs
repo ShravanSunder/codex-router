@@ -24,6 +24,21 @@ struct ScheduleArguments {
 }
 #[derive(Subcommand)]
 enum ScheduleCommand {
+    /// Write a portable JSONL package to stdout. Redirect it to a file or another machine.
+    Export {
+        #[arg(long)]
+        schedule_id: String,
+    },
+    /// Import disabled work without allocating a thread. Existing UUIDs require --overwrite.
+    Import {
+        /// UTF-8 JSONL package; '-' reads stdin. Native destination preparation is a later step.
+        #[arg(long)]
+        package_file: PathBuf,
+        #[arg(long)]
+        overwrite: bool,
+        #[arg(long)]
+        operation_id: Option<String>,
+    },
     /// Prepare a fresh, forked or explicitly adopted native thread without enabling its schedule.
     Prepare(PreparationArguments),
     /// Save schedule configuration. An unprepared destination must be disabled.
@@ -66,6 +81,8 @@ enum ScheduleCommand {
     },
 }
 enum PreparedSchedule {
+    Export(ScheduleShowRequest),
+    Import(communication_protocol::ScheduleImportRequest),
     Prepare {
         operation_id: OperationId,
         schedule_id: communication_protocol::ScheduleId,
@@ -83,10 +100,17 @@ impl PreparedSchedule {
             Self::Prepare { operation_id, .. } => Some(operation_id.clone()),
             Self::Create(request) => Some(request.operation_id.clone()),
             Self::Update(request) => Some(request.operation_id.clone()),
-            Self::Show(_) => None,
+            Self::Import(request) => Some(request.operation_id.clone()),
+            Self::Show(_) | Self::Export(_) => None,
             Self::Enable(request) | Self::Disable(request) => Some(request.operation_id.clone()),
         }
     }
+}
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum ScheduleOutput {
+    Snapshot(Box<ScheduleSnapshot>),
+    Package(communication_protocol::ScheduleExportResult),
 }
 pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
     let args = match ScheduleArguments::try_parse_from(arguments) {
@@ -140,7 +164,7 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let mut dispatched = false;
-    let result: Result<ScheduleSnapshot, ScheduleClientError> = runtime.block_on(async {
+    let result: Result<ScheduleOutput, ScheduleClientError> = runtime.block_on(async {
         let mut client = ControlClient::connect(
             &directory,
             "agent-sessions-schedule",
@@ -148,29 +172,59 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
         )
         .await?;
         dispatched = true;
+        let snapshot_output =
+            |snapshot: ScheduleSnapshot| ScheduleOutput::Snapshot(Box::new(snapshot));
         let result = match prepared {
+            PreparedSchedule::Import(request) => {
+                client.import_schedule(request).await.map(snapshot_output)
+            }
+            PreparedSchedule::Export(request) => client
+                .export_schedule(request)
+                .await
+                .map(ScheduleOutput::Package),
             PreparedSchedule::Prepare {
                 operation_id,
                 schedule_id,
                 destination,
-            } => {
-                client
-                    .prepare_schedule(communication_protocol::SchedulePrepareRequest {
-                        operation_id,
-                        schedule_id,
-                        destination: destination.resolve(client.identity().service_id.clone()),
-                    })
-                    .await
+            } => client
+                .prepare_schedule(communication_protocol::SchedulePrepareRequest {
+                    operation_id,
+                    schedule_id,
+                    destination: destination.resolve(client.identity().service_id.clone()),
+                })
+                .await
+                .map(snapshot_output),
+            PreparedSchedule::Create(request) => {
+                client.create_schedule(*request).await.map(snapshot_output)
             }
-            PreparedSchedule::Create(request) => client.create_schedule(*request).await,
-            PreparedSchedule::Update(request) => client.update_schedule(*request).await,
-            PreparedSchedule::Show(request) => client.read_schedule(request).await,
-            PreparedSchedule::Enable(request) => client.enable_schedule(request).await,
-            PreparedSchedule::Disable(request) => client.disable_schedule(request).await,
+            PreparedSchedule::Update(request) => {
+                client.update_schedule(*request).await.map(snapshot_output)
+            }
+            PreparedSchedule::Show(request) => {
+                client.read_schedule(request).await.map(snapshot_output)
+            }
+            PreparedSchedule::Enable(request) => {
+                client.enable_schedule(request).await.map(snapshot_output)
+            }
+            PreparedSchedule::Disable(request) => {
+                client.disable_schedule(request).await.map(snapshot_output)
+            }
         };
         let _ = client.close().await;
         result
     });
+    if let Ok(ScheduleOutput::Package(package)) = &result
+        && !args.json
+    {
+        return if io::stdout()
+            .write_all(package.package_utf8.as_bytes())
+            .is_ok()
+        {
+            0
+        } else {
+            5
+        };
+    }
     let (record, code) = match result {
         Ok(result) => (
             json!({"kind":"result","operationId":operation_id,"result":result}),
@@ -218,6 +272,24 @@ fn operation(value: Option<String>) -> Result<OperationId, String> {
 }
 fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
     match command {
+        ScheduleCommand::Export { schedule_id } => {
+            Ok(PreparedSchedule::Export(ScheduleShowRequest {
+                schedule_id: schedule_id
+                    .try_into()
+                    .map_err(|_| "--schedule-id requires UUIDv7")?,
+            }))
+        }
+        ScheduleCommand::Import {
+            package_file,
+            overwrite,
+            operation_id,
+        } => Ok(PreparedSchedule::Import(
+            communication_protocol::ScheduleImportRequest {
+                operation_id: operation(operation_id)?,
+                package_utf8: read_document(package_file, "packageUtf8")?,
+                overwrite,
+            },
+        )),
         ScheduleCommand::Prepare(args) => {
             let destination = args.destination()?;
             Ok(PreparedSchedule::Prepare {
@@ -277,19 +349,25 @@ fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
     }
 }
 fn read_definition(path: PathBuf) -> Result<ScheduleDefinition, String> {
+    let text = read_document(path, "definition")?;
+    serde_json::from_str(&text).map_err(|_|"Definition must be closed ScheduleDefinition JSON with instructionId, timing, enabled, destination and nullable executionTimeoutSeconds; inspect the Control schema.".into())
+}
+fn read_document(path: PathBuf, field: &str) -> Result<String, String> {
     let mut reader: Box<dyn Read> = if path.as_os_str() == "-" {
         Box::new(io::stdin())
     } else {
-        Box::new(std::fs::File::open(path).map_err(|_| "Schedule definition file unavailable")?)
+        Box::new(std::fs::File::open(path).map_err(|_| format!("{field} file unavailable"))?)
     };
     let mut text = String::new();
     reader
         .by_ref()
         .take(1_048_577)
         .read_to_string(&mut text)
-        .map_err(|_| "Schedule definition must be readable UTF-8")?;
+        .map_err(|_| format!("{field} must be readable UTF-8"))?;
     if text.len() > 1_048_576 {
-        return Err("Schedule definition exceeds Control frame limit".into());
+        return Err(format!(
+            "{field} exceeds the 1048576-byte Control frame limit before envelope encoding"
+        ));
     }
-    serde_json::from_str(&text).map_err(|_|"Definition must be closed ScheduleDefinition JSON with instructionId, timing, enabled, destination and nullable executionTimeoutSeconds; inspect the Control schema.".into())
+    Ok(text)
 }

@@ -74,3 +74,6 @@ pub use summary_recovery::{SummaryRecoveryAction, SummaryRecoveryRequest};
 mod configuration_receipts;
 pub use configuration_receipts::{ConfigurationAdmission, ConfigurationOperation};
 mod automation_event_bounds;
+mod schedule_export;
+mod schedule_import;
+pub use schedule_import::ScheduleImport;

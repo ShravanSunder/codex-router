@@ -350,6 +350,8 @@ pub async fn serve_control_connection(
                             | "schedule/update"
                             | "schedule/enable"
                             | "schedule/disable"
+                            | "schedule/export"
+                            | "schedule/import"
                     ) =>
                 {
                     let identity = identity.clone();

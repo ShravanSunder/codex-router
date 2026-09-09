@@ -53,6 +53,7 @@ mod wakeup_subscription;
 mod wakeup_list_dispatch;
 
 mod schedule_dispatch;
+mod schedule_package_dispatch;
 mod schedule_projection;
 
 mod native_thread_preparation;
@@ -74,3 +75,5 @@ pub use automation_configuration::{
     AutomationConfigurationBackend, AutomationConfigurationHandle, ConfigurationAdmissionLease,
 };
 mod automation_configuration_dispatch;
+
+mod automation_collection_cursor;
