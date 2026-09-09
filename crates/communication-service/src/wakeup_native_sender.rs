@@ -20,6 +20,7 @@ pub(crate) struct WakeNativeSender {
     pub service_id: UuidIdentity,
     pub endpoints: EndpointDirectory,
     pub backend: Option<NativeControlBackend>,
+    pub configuration: crate::AutomationConfigurationHandle,
 }
 impl WakeNativeSender {
     pub async fn dispatch(
@@ -27,6 +28,10 @@ impl WakeNativeSender {
         store: Arc<Mutex<AutomationStore>>,
         id: DeliveryId,
     ) -> Result<(), StorageError> {
+        let configuration_lease = self.configuration.admission_lease().await;
+        if configuration_lease.configuration().is_none() {
+            return Ok(());
+        }
         let claim = store
             .lock()
             .await
@@ -35,6 +40,7 @@ impl WakeNativeSender {
                 chrono::Utc::now().timestamp_millis(),
             )
             .await?;
+        drop(configuration_lease);
         let Some(claim) = claim else {
             return Ok(());
         };

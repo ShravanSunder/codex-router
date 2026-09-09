@@ -71,3 +71,6 @@ mod summary_completion;
 pub use summary_completion::SummaryCompletion;
 mod summary_recovery;
 pub use summary_recovery::{SummaryRecoveryAction, SummaryRecoveryRequest};
+mod configuration_receipts;
+pub use configuration_receipts::{ConfigurationAdmission, ConfigurationOperation};
+mod automation_event_bounds;

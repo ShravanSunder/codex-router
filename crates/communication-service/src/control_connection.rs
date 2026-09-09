@@ -12,6 +12,8 @@ use tokio::net::UnixStream;
 #[derive(Clone)]
 pub struct ServiceIdentity {
     service_id: UuidIdentity,
+    configuration: crate::AutomationConfigurationHandle,
+    configuration_backend: Option<std::sync::Arc<dyn crate::AutomationConfigurationBackend>>,
     service_epoch: UuidIdentity,
     schema_digest: communication_protocol::SchemaDigest,
     directory: EndpointDirectory,
@@ -21,11 +23,22 @@ pub struct ServiceIdentity {
     automation: Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
 }
 impl ServiceIdentity {
+    pub fn with_automation_configuration(
+        mut self,
+        handle: crate::AutomationConfigurationHandle,
+        backend: std::sync::Arc<dyn crate::AutomationConfigurationBackend>,
+    ) -> Self {
+        self.configuration = handle;
+        self.configuration_backend = Some(backend);
+        self
+    }
+
     pub fn schedule_timing_worker(&self) -> Option<crate::ScheduleTimingWorker> {
         self.automation.as_ref().map(|store| {
             crate::ScheduleTimingWorker::new(
                 std::sync::Arc::clone(store),
                 self.native_backend.clone(),
+                self.configuration.clone(),
             )
         })
     }
@@ -38,6 +51,7 @@ impl ServiceIdentity {
                     service_id: self.service_id.clone(),
                     endpoints: self.directory.clone(),
                     backend: self.native_backend.clone(),
+                    configuration: self.configuration.clone(),
                 },
             )
         })
@@ -103,6 +117,8 @@ impl ServiceIdentity {
         let digest = communication_protocol::SchemaDigest::try_from(schema_digest.to_owned())
             .map_err(str::to_owned)?;
         Ok(Self {
+            configuration: crate::AutomationConfigurationHandle::default(),
+            configuration_backend: None,
             service_id: UuidIdentity::try_from(service_id.to_owned())
                 .map_err(|error| error.to_string())?,
             service_epoch: UuidIdentity::try_from(service_epoch.to_owned())
@@ -263,6 +279,31 @@ pub async fn serve_control_connection(
                 Ok(request)
                     if matches!(
                         request.method.as_str(),
+                        "automation/configure" | "automation/status"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::automation_configuration_dispatch::dispatch(
+                            crate::automation_configuration_dispatch::ConfigurationRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                handle: &identity.configuration,
+                                backend: identity.configuration_backend.as_ref(),
+                                store: identity.automation.as_ref(),
+                                service_id: &identity.service_id,
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
                         "run/show" | "run/summaryRetry" | "run/summarySkip"
                     ) =>
                 {
@@ -271,6 +312,7 @@ pub async fn serve_control_connection(
                         let id = request.id.clone();
                         let response =
                             crate::run_dispatch::dispatch(crate::run_dispatch::RunRequest {
+                                configuration: &identity.configuration,
                                 id: json!(id),
                                 method: &request.method,
                                 params: request.params,
@@ -287,6 +329,7 @@ pub async fn serve_control_connection(
                         let id = request.id.clone();
                         let response = crate::schedule_preparation_dispatch::dispatch(
                             crate::schedule_preparation_dispatch::PreparationRequest {
+                                configuration: &identity.configuration,
                                 id: json!(id),
                                 params: request.params,
                                 service_id: &identity.service_id,

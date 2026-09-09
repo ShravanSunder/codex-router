@@ -67,5 +67,10 @@ pub use schedule_timing_worker::ScheduleTimingWorker;
 
 mod summary_native_worker;
 
+mod automation_configuration;
 mod run_dispatch;
 mod run_projection;
+pub use automation_configuration::{
+    AutomationConfigurationBackend, AutomationConfigurationHandle, ConfigurationAdmissionLease,
+};
+mod automation_configuration_dispatch;

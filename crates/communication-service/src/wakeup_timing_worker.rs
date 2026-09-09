@@ -39,6 +39,9 @@ impl WakeTimingWorker {
             }
             let now = chrono::Utc::now().timestamp_millis();
             let result = if recovered {
+                if self.native.configuration.current().await.is_none() {
+                    continue;
+                }
                 match self.evaluate_due(now).await {
                     Ok(()) => self.dispatch_pending(&mut dispatches, now).await,
                     Err(error) => Err(error),

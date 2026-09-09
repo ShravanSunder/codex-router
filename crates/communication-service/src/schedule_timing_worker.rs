@@ -14,14 +14,14 @@ impl ScheduleTimingWorker {
     pub(crate) fn new(
         store: Arc<Mutex<AutomationStore>>,
         backend: Option<crate::NativeControlBackend>,
+        configuration: crate::AutomationConfigurationHandle,
     ) -> Self {
         Self {
             store: Arc::clone(&store),
             runner: ScheduledRunWorker {
                 store,
                 backend,
-                timeout_seconds: 3600,
-                summary_timeout_seconds: 900,
+                configuration,
             },
         }
     }
@@ -74,6 +74,10 @@ impl ScheduleTimingWorker {
         }
         let waiting = self.store.lock().await.waiting_schedule_ids().await?;
         for id in waiting {
+            let configuration_lease = self.runner.configuration.admission_lease().await;
+            if configuration_lease.configuration().is_none() {
+                break;
+            }
             self.store
                 .lock()
                 .await

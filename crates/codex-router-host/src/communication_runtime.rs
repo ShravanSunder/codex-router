@@ -97,12 +97,23 @@ impl CommunicationRuntime {
         if let Some(journal) = &journal {
             identity = identity.with_journal(std::sync::Arc::clone(journal));
         }
+        let mut settings_backend = None;
         match automation_storage::AutomationStore::open(&inputs.directory.join("automation.sqlite"))
             .await
         {
             Ok(store) => {
+                let store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+                let handle = communication_service::AutomationConfigurationHandle::default();
+                handle.suspend().await;
+                let backend = std::sync::Arc::new(crate::AutomationSettingsFile::new(
+                    &inputs.directory,
+                    std::sync::Arc::clone(&store),
+                    handle.clone(),
+                ));
                 identity = identity
-                    .with_automation_store(std::sync::Arc::new(tokio::sync::Mutex::new(store)));
+                    .with_automation_store(store)
+                    .with_automation_configuration(handle, backend.clone());
+                settings_backend = Some(backend);
             }
             Err(_) => {
                 tracing::warn!("automation storage unavailable; communication remains independent")
@@ -147,6 +158,13 @@ impl CommunicationRuntime {
         )?
         .with_connection_budget(permits);
         let publication = publication.with_acp_listener()?;
+        if let Some(settings) = settings_backend
+            && settings.recover().await.is_err()
+        {
+            tracing::warn!(
+                "automation configuration recovery unavailable; new automation admission is paused"
+            );
+        }
         let manifest = communication_service::ManifestPublication::publish(
             &inputs.directory,
             &communication_protocol::ServiceManifest {

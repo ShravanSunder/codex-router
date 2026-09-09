@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 pub(crate) struct PreparationRequest<'a> {
     pub id: Value,
     pub params: Value,
+    pub configuration: &'a crate::AutomationConfigurationHandle,
     pub service_id: &'a UuidIdentity,
     pub backend: Option<&'a crate::NativeControlBackend>,
     pub store: Option<&'a Arc<Mutex<AutomationStore>>>,
@@ -203,6 +204,19 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
     ) {
         intent.allocation = PreparationEffect::Unknown;
     }
+    let configuration_lease = request.configuration.admission_lease().await;
+    if configuration_lease.configuration().is_none() {
+        return finish_failure(
+            store,
+            request.id,
+            &params,
+            ScheduleFailureKind::AutomationUnavailable,
+            "Configuration reconciliation is pending; native preparation was not dispatched.",
+            intent,
+            false,
+        )
+        .await;
+    }
     match store
         .lock()
         .await
@@ -224,6 +238,7 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
             );
         }
     }
+    drop(configuration_lease);
     let prepared = native_thread_preparation::prepare(NativePreparationInput {
         admission: &admission,
         destination: &params.destination,

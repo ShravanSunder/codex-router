@@ -14,8 +14,7 @@ use tokio::sync::Mutex;
 pub(crate) struct ScheduledRunWorker {
     pub store: Arc<Mutex<AutomationStore>>,
     pub backend: Option<NativeControlBackend>,
-    pub timeout_seconds: u32,
-    pub summary_timeout_seconds: u32,
+    pub configuration: crate::AutomationConfigurationHandle,
 }
 impl ScheduledRunWorker {
     pub async fn step(&self, id: RunId) -> Result<(), StorageError> {
@@ -31,15 +30,33 @@ impl ScheduledRunWorker {
         let Ok(admission) = backend.gate.acquire() else {
             return Ok(());
         };
-        if matches!(
-            record.phase,
-            RunPhase::SummaryRequired | RunPhase::SummaryRunning | RunPhase::SummaryBlocked
-        ) {
+        if record.phase == RunPhase::SummaryRequired {
+            let lease = self.configuration.admission_lease().await;
+            let Some(configuration) = lease.configuration() else {
+                return Ok(());
+            };
             return crate::summary_native_worker::step(crate::summary_native_worker::SummaryStep {
                 store: &self.store,
                 admission: &admission,
                 record,
-                timeout_seconds: self.summary_timeout_seconds,
+                timeout_seconds: u32::from(configuration.summary_timeout_seconds),
+            })
+            .await;
+        }
+        if matches!(
+            record.phase,
+            RunPhase::SummaryRunning | RunPhase::SummaryBlocked
+        ) {
+            let seconds = record
+                .summary_attempt
+                .as_ref()
+                .ok_or(StorageError::InvalidRecord)?
+                .effective_timeout_seconds;
+            return crate::summary_native_worker::step(crate::summary_native_worker::SummaryStep {
+                store: &self.store,
+                admission: &admission,
+                record,
+                timeout_seconds: seconds,
             })
             .await;
         }
@@ -151,6 +168,10 @@ impl ScheduledRunWorker {
             if matches!(destination, DestinationPreparation::Fresh { .. }) {
                 intent.allocation = PreparationEffect::Unknown;
             }
+            let configuration_lease = self.configuration.admission_lease().await;
+            if configuration_lease.configuration().is_none() {
+                return Ok(());
+            }
             if !self
                 .store
                 .lock()
@@ -165,6 +186,7 @@ impl ScheduledRunWorker {
             {
                 return Ok(());
             }
+            drop(configuration_lease);
             let text =
                 render_instructions(&inputs, record.schedule_id.as_str(), id.as_str(), None)?;
             let prepared = crate::native_thread_preparation::prepare(
@@ -237,7 +259,7 @@ impl ScheduledRunWorker {
                 target,
                 text,
                 effects: record.evidence.native,
-                timeout_seconds: self.timeout_seconds,
+                configuration: &self.configuration,
             },
         )
         .await

@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
 pub struct PositiveSeconds(u32);
+impl PositiveSeconds {
+    pub const DEFAULT_EXECUTION_TIMEOUT: Self = Self(3600);
+    pub const DEFAULT_SUMMARY_TIMEOUT: Self = Self(900);
+}
 impl JsonSchema for PositiveSeconds {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "PositiveSeconds".into()

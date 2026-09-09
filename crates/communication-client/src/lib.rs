@@ -28,3 +28,5 @@ mod schedule_operations;
 pub use schedule_operations::ScheduleClientError;
 mod run_operations;
 pub use run_operations::RunClientError;
+mod automation_configuration_operations;
+pub use automation_configuration_operations::ConfigurationClientError;

@@ -23,7 +23,7 @@ pub(crate) struct ScheduledDispatch<'a> {
     pub target: SessionRef,
     pub text: String,
     pub effects: NativeEffectEvidence<SessionRef, CodexGeneration>,
-    pub timeout_seconds: u32,
+    pub configuration: &'a crate::AutomationConfigurationHandle,
 }
 pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), StorageError> {
     let Some(schemas) = input.admission.schemas() else {
@@ -52,6 +52,10 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
         return Ok(());
     }
     if state == Some("notLoaded") {
+        let configuration_lease = input.configuration.admission_lease().await;
+        if configuration_lease.configuration().is_none() {
+            return Ok(());
+        }
         input.effects.resume = PreparationEffect::Unknown;
         // Resume has an effect even though it does not consume the execution budget.
         input
@@ -65,6 +69,7 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
                 },
             )
             .await?;
+        drop(configuration_lease);
         let resumed = connection
             .request_validated(
                 &schemas,
@@ -107,6 +112,10 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
     input.effects.submission = SubmissionEffect::Dispatching;
     input.effects.client_user_message_id = Some(input.run_id.as_str().into());
     input.effects.cessation = CessationEvidence::Unconfirmed;
+    let configuration_lease = input.configuration.admission_lease().await;
+    let Some(configuration) = configuration_lease.configuration() else {
+        return Ok(());
+    };
     input
         .store
         .lock()
@@ -114,10 +123,11 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
         .begin_run_dispatch::<_, EndpointRef, _, NativeSendReceipt>(RunDispatchIntent {
             run_id: input.run_id.clone(),
             effects: input.effects.clone(),
-            configured_timeout_seconds: input.timeout_seconds,
+            configured_timeout_seconds: u32::from(configuration.execution_timeout_seconds),
             now_ms: chrono::Utc::now().timestamp_millis(),
         })
         .await?;
+    drop(configuration_lease);
     let retired = input.admission.retirement();
     let response=tokio::time::timeout(std::time::Duration::from_secs(30),async{tokio::select!{biased;result=connection.request_validated(&schemas,NativeOperation::StartTurn,json!({"threadId":id,"input":[{"type":"text","text":input.text}],"clientUserMessageId":input.run_id.as_str()}))=>result,_=retired.cancelled()=>Err(NativeConnectionError::OutcomeUnknown)}}).await.unwrap_or(Err(NativeConnectionError::OutcomeUnknown));
     let outcome = match response {

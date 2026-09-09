@@ -148,3 +148,9 @@ pub use run_execution_contract::{
 };
 mod run_failure_contract;
 pub use run_failure_contract::{RunFailure, RunFailureKind, RunFailureStage, RunNextAction};
+
+mod automation_configuration_contract;
+pub use automation_configuration_contract::{
+    AutomationConfiguration, AutomationConfigureRequest, AutomationStatus, ConfigurationFailure,
+    ConfigurationFailureKind, ConfigurationFileState, ConfigurationNextAction,
+};

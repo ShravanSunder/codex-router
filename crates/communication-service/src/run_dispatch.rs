@@ -14,6 +14,7 @@ pub(crate) struct RunRequest<'a> {
     pub id: Value,
     pub method: &'a str,
     pub params: Value,
+    pub configuration: &'a crate::AutomationConfigurationHandle,
     pub store: Option<&'a Arc<Mutex<AutomationStore>>>,
 }
 pub(crate) async fn dispatch(request: RunRequest<'_>) -> Value {
@@ -62,6 +63,23 @@ pub(crate) async fn dispatch(request: RunRequest<'_>) -> Value {
                 Ok(params) => params,
                 Err(_) => return failure(request.id, context),
             };
+            let lease = if request.method == "run/summaryRetry" {
+                Some(request.configuration.admission_lease().await)
+            } else {
+                None
+            };
+            let action = if let Some(lease) = &lease {
+                let Some(configuration) = lease.configuration() else {
+                    context.kind = RunFailureKind::AutomationUnavailable;
+                    context.message="Configuration reconciliation is pending; summary retry has not been admitted.".into();
+                    return failure(request.id, context);
+                };
+                SummaryRecoveryAction::Retry {
+                    timeout_seconds: u32::from(configuration.summary_timeout_seconds),
+                }
+            } else {
+                SummaryRecoveryAction::Skip
+            };
             store
                 .lock()
                 .await
@@ -69,13 +87,7 @@ pub(crate) async fn dispatch(request: RunRequest<'_>) -> Value {
                     &SummaryRecoveryRequest {
                         operation_id: params.operation_id,
                         run_id: params.run_id,
-                        action: if request.method == "run/summaryRetry" {
-                            SummaryRecoveryAction::Retry {
-                                timeout_seconds: 900,
-                            }
-                        } else {
-                            SummaryRecoveryAction::Skip
-                        },
+                        action,
                         now_ms: chrono::Utc::now().timestamp_millis(),
                     },
                 )
