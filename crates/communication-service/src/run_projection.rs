@@ -84,7 +84,7 @@ pub(crate) fn snapshot(
         RunPhase::PreparationFailed=>RunState::PreparationFailed{explanation:match outcome { Some(communication_protocol::WorkerOutcome::Failed { explanation: Some(explanation) })=>explanation, _=>"Native work was not submitted; inspect preparation evidence.".into()}},
         RunPhase::Uncertain=>RunState::Uncertain{inputs:inputs.ok_or(())?,known_execution:execution,explanation:"Native effects are unresolved; no automatic replay or release of schedule ownership.".into()},
     };
-    Ok(RunSnapshot {
+    let snapshot = RunSnapshot {
         run_id: record.run_id,
         schedule_id: record.schedule_id,
         due_at: timestamp(record.due_at_ms)?,
@@ -98,5 +98,7 @@ pub(crate) fn snapshot(
             acceptance: record.evidence.acceptance,
         },
         summary,
-    })
+    };
+    snapshot.validate_evidence().map_err(|_| ())?;
+    Ok(snapshot)
 }

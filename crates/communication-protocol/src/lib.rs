@@ -170,6 +170,7 @@ mod schedule_preparation_contract;
 pub use schedule_failure::ScheduleEffects;
 pub use schedule_preparation_contract::{DestinationPreparation, SchedulePrepareRequest};
 
+mod run_evidence_validation;
 mod run_execution_contract;
 pub use run_execution_contract::{
     CapturedRunInputs, ContinuityInput, ExecutionTiming, FrozenExecutionConfiguration,

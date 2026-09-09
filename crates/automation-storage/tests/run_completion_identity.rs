@@ -76,6 +76,26 @@ async fn exact_completed_turn_releases_owned_run_without_touching_other_work()
     let mut accepted = effects;
     accepted.submission = SubmissionEffect::Accepted;
     accepted.native_turn_id = Some("native-run-turn".into());
+    for (turn, target) in [("another-turn", "B"), ("native-run-turn", "another-thread")] {
+        let mut mismatched = accepted.clone();
+        mismatched.native_turn_id = Some(turn.to_owned());
+        mismatched.target = Some(target.to_owned());
+        let rejected = store
+            .record_run_submission::<String, String, String, String>(
+                automation_storage::RunSubmissionResult {
+                    run_id: run.clone(),
+                    effects: mismatched,
+                    outcome: automation_storage::RunSubmissionOutcome::Accepted {
+                        turn_id: "native-run-turn".into(),
+                        receipt: "native-receipt".into(),
+                    },
+                },
+            )
+            .await;
+        if rejected.is_ok() {
+            return Err("submission accepted conflicting native turn or dispatch target".into());
+        }
+    }
     store
         .record_run_submission::<_, String, _, _>(automation_storage::RunSubmissionResult {
             run_id: run.clone(),

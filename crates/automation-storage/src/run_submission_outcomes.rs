@@ -38,6 +38,17 @@ impl AutomationStore {
             RunSubmissionOutcome::Accepted { turn_id, receipt } => {
                 if turn_id.is_empty()
                     || request.effects.submission != agent_automation::SubmissionEffect::Accepted
+                    || request.effects.native_turn_id.as_deref() != Some(turn_id.as_str())
+                    || serde_json::to_value(&request.effects.target)
+                        .map_err(|_| StorageError::InvalidRecord)?
+                        != serde_json::to_value(&record.evidence.native.target)
+                            .map_err(|_| StorageError::InvalidRecord)?
+                    || serde_json::to_value(&request.effects.generation)
+                        .map_err(|_| StorageError::InvalidRecord)?
+                        != serde_json::to_value(&record.evidence.native.generation)
+                            .map_err(|_| StorageError::InvalidRecord)?
+                    || request.effects.client_user_message_id
+                        != record.evidence.native.client_user_message_id
                 {
                     return Err(StorageError::InvalidRecord);
                 }

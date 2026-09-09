@@ -129,6 +129,27 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         .into());
     }
     let value: Value = serde_json::from_slice(&output.stdout)?;
+    let snapshot = value.get("result").ok_or("missing Run result")?;
+    let _: communication_protocol::RunSnapshot = serde_json::from_value(snapshot.clone())?;
+    for (pointer, replacement) in [
+        ("/state/execution/nativeTurnId", json!("another-turn")),
+        ("/state/execution/target/sessionId", json!("another-thread")),
+        ("/state/execution/deadlineAt", json!("2026-09-09T23:59:59Z")),
+        (
+            "/executionEvidence/acceptance/acceptance/turnId",
+            json!("another-turn"),
+        ),
+    ] {
+        let mut contradictory = snapshot.clone();
+        *contradictory
+            .pointer_mut(pointer)
+            .ok_or("missing evidence field")? = replacement;
+        if serde_json::from_value::<communication_protocol::RunSnapshot>(contradictory).is_ok() {
+            return Err(
+                format!("Run snapshot accepted contradictory evidence at {pointer}").into(),
+            );
+        }
+    }
     if value.pointer("/result/state/kind").and_then(Value::as_str) != Some("finished")
         || value
             .pointer("/result/executionEvidence/acceptance/acceptance/turnId")

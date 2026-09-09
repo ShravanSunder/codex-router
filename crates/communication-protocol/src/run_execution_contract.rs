@@ -152,7 +152,7 @@ pub struct RetainedSummary {
     pub source_turn_id: String,
     pub summary_attempt_id: AttemptId,
 }
-#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunSnapshot {
     pub run_id: RunId,
