@@ -1,4 +1,8 @@
 //! Opt-in live proof. Run only against automation-debug-host, never production or an existing thread.
+#[path = "automation_live_support/busy_thread_delivery.rs"]
+mod busy_thread_delivery;
+#[path = "automation_live_support/debug_backend_restart.rs"]
+mod debug_backend_restart;
 #[path = "automation_live_support/proof_context.rs"]
 mod proof_context;
 #[path = "automation_live_support/scheduled_continuity.rs"]
@@ -9,6 +13,12 @@ use communication_protocol::{
 };
 use proof_context::{ProofContext, ProofResult, shell_quote};
 use serde_json::{Value, json};
+
+#[tokio::test]
+#[ignore = "requires an isolated debug Host; exercises busy Luna input and owned backend replacement"]
+async fn scheduled_work_waits_while_ordinary_messages_steer() -> ProofResult<()> {
+    busy_thread_delivery::exercise().await
+}
 
 #[tokio::test]
 #[ignore = "requires an isolated debug Host; runs two fresh Luna workflows and their summaries"]
