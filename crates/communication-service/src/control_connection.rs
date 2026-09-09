@@ -6,6 +6,9 @@ use serde_json::{Value, json};
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+#[cfg(test)]
+#[path = "wake_creation_crash_tests.rs"]
+mod wake_creation_crash_tests;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,6 +139,8 @@ pub async fn serve_control_connection(
                     let identity = identity.clone();
                     pending.spawn(async move {
                         let id = request.id.clone();
+                        #[cfg(test)]
+                        wake_creation_crash_tests::checkpoint("before-dispatch", &request.method);
                         let response =
                             crate::wakeup_dispatch::dispatch(crate::wakeup_dispatch::WakeRequest {
                                 id: json!(id),
@@ -145,6 +150,8 @@ pub async fn serve_control_connection(
                                 store: identity.automation.as_ref(),
                             })
                             .await;
+                        #[cfg(test)]
+                        wake_creation_crash_tests::checkpoint("after-dispatch", &request.method);
                         (id, response)
                     });
                     continue;
