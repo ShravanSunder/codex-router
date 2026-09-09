@@ -15,17 +15,38 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::test]
 async fn scheduled_fresh_thread_finishes_after_separate_luna_summary()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false, PreparationOutcome::Accepted, false).await
+    exercise_scheduled_run(false, PreparationOutcome::Accepted, RunScenario::Normal).await
 }
 #[tokio::test]
 async fn busy_target_waits_without_dispatch_budget_or_steer()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(true, PreparationOutcome::Accepted, false).await
+    exercise_scheduled_run(true, PreparationOutcome::Accepted, RunScenario::Normal).await
 }
 #[tokio::test]
 async fn explicit_sdk_summary_skip_preserves_worker_result_and_releases_occupancy()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false, PreparationOutcome::Accepted, true).await
+    exercise_scheduled_run(
+        false,
+        PreparationOutcome::Accepted,
+        RunScenario::SkipFailedSummary,
+    )
+    .await
+}
+#[tokio::test]
+async fn resumed_worker_uses_frozen_inputs_after_schedule_mode_edit()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_scheduled_run(
+        false,
+        PreparationOutcome::Accepted,
+        RunScenario::FrozenInputs,
+    )
+    .await
+}
+#[derive(Clone, Copy)]
+enum RunScenario {
+    Normal,
+    SkipFailedSummary,
+    FrozenInputs,
 }
 #[derive(Clone, Copy)]
 enum PreparationOutcome {
@@ -36,18 +57,20 @@ enum PreparationOutcome {
 #[tokio::test]
 async fn known_native_preparation_rejection_finishes_without_execution()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false, PreparationOutcome::Rejected, false).await
+    exercise_scheduled_run(false, PreparationOutcome::Rejected, RunScenario::Normal).await
 }
 #[tokio::test]
 async fn lost_native_preparation_response_preserves_occupancy()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false, PreparationOutcome::ResponseLost, false).await
+    exercise_scheduled_run(false, PreparationOutcome::ResponseLost, RunScenario::Normal).await
 }
 async fn exercise_scheduled_run(
     busy_first: bool,
     preparation: PreparationOutcome,
-    skip_failed_summary: bool,
+    scenario: RunScenario,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let skip_failed_summary = matches!(scenario, RunScenario::SkipFailedSummary);
+    let frozen_inputs = matches!(scenario, RunScenario::FrozenInputs);
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "scheduled-run-fixture-{}",
         OperationId::generate().as_str()
@@ -104,12 +127,9 @@ async fn exercise_scheduled_run(
         codex_home: root.clone(),
     })?;
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let worker = tokio::spawn(
-        identity
-            .schedule_timing_worker()
-            .ok_or("scheduler missing")?
-            .run(shutdown.clone()),
-    );
+    let schedule_worker = identity
+        .schedule_timing_worker()
+        .ok_or("scheduler missing")?;
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let service = tokio::spawn(serve_control_connection(server, identity));
     let mut client = ControlClient::initialize(socket, "scheduled-run-fixture", "1").await?;
@@ -161,6 +181,17 @@ async fn exercise_scheduled_run(
                     socket.send(Message::Text(json!({"id":request.get("id"),"error":{"code":-32602,"message":"Fixture preparation rejected"}}).to_string().into())).await?;
                 }
                 return Ok(());
+            }
+            if frozen_inputs && logical_stage == 0 {
+                let encoded = request.to_string();
+                if request.pointer("/params/cwd").and_then(Value::as_str) != Some("/fresh-fixture")
+                    || encoded.contains("FUTURE_INSTRUCTION")
+                    || encoded.contains("/future-fixture")
+                {
+                    return Err(
+                        "allocation used edited configuration instead of captured inputs".into(),
+                    );
+                }
             }
             if logical_stage == 3
                 && (request.pointer("/params/model").and_then(Value::as_str)
@@ -230,6 +261,16 @@ async fn exercise_scheduled_run(
                         .ok_or("missing turn start")??
                         .to_text()?,
                 )?;
+                if frozen_inputs {
+                    let encoded = start.to_string();
+                    if !encoded.contains("Inspect the task")
+                        || encoded.contains("FUTURE_INSTRUCTION")
+                    {
+                        return Err(
+                            "execution used edited instructions instead of captured input".into(),
+                        );
+                    }
+                }
                 if start.get("method").and_then(Value::as_str) != Some("turn/start") {
                     return Err("scheduled worker steered instead of starting".into());
                 }
@@ -245,6 +286,55 @@ async fn exercise_scheduled_run(
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
     let schedule=client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"at","at":"2026-01-01T00:00:00.000Z"},"enabled":true,"destination":{"kind":"freshEachRun","endpoint":target.endpoint,"cwd":"/fresh-fixture"},"executionTimeoutSeconds":120}}))?).await?;
+    if frozen_inputs {
+        // Admit with the original fresh-thread definition, then edit only future work.
+        let now = chrono::Utc::now().timestamp_millis();
+        store
+            .lock()
+            .await
+            .enqueue_due_run::<SessionRef, communication_protocol::EndpointRef>(
+                &schedule.schedule_id,
+                now,
+            )
+            .await?
+            .ok_or("frozen Run missing")?;
+        store
+            .lock()
+            .await
+            .admit_waiting_run::<SessionRef, communication_protocol::EndpointRef>(
+                &schedule.schedule_id,
+                now,
+            )
+            .await?;
+        let future_instruction = client
+            .create_instruction(InstructionCreateParams {
+                operation_id: OperationId::generate(),
+                text: "FUTURE_INSTRUCTION".to_owned().try_into()?,
+            })
+            .await?;
+        let mut future = schedule.definition.clone();
+        future.enabled = false;
+        future.instruction_id = future_instruction.instruction_id;
+        future.execution_timeout_seconds = Some(1.try_into()?);
+        future.destination = communication_protocol::ExecutionDestination::OwnedThread {
+            target: target.clone(),
+            cwd: "/future-fixture".into(),
+        };
+        client
+            .update_schedule(communication_protocol::ScheduleUpdateRequest {
+                operation_id: OperationId::generate(),
+                schedule_id: schedule.schedule_id.clone(),
+                expected_change_id: schedule.change_id.clone(),
+                definition: future,
+            })
+            .await?;
+        // The worker has never run. Replace the repository connection so its first step
+        // must load persisted admission state rather than continue with a captured local value.
+        let reopened = AutomationStore::open(&database).await?;
+        let old = std::mem::replace(&mut *store.lock().await, reopened);
+        old.close().await?;
+    }
+    let worker = tokio::spawn(schedule_worker.run(shutdown.clone()));
     let record=tokio::time::timeout(Duration::from_secs(6),async{
         let mut poll=tokio::time::interval(Duration::from_millis(20));
         let mut known_run=None;
@@ -327,6 +417,15 @@ async fn exercise_scheduled_run(
             .is_some()
     {
         return Err("explicit summary skip did not release confirmed stopped Run occupancy".into());
+    }
+    if frozen_inputs
+        && record
+            .evidence
+            .timing
+            .as_ref()
+            .is_none_or(|timing| timing.effective_timeout_seconds != 120)
+    {
+        return Err("resumed Run used edited timeout instead of captured override".into());
     }
     let public = client
         .read_run(communication_protocol::RunShowRequest {
