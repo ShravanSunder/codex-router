@@ -110,6 +110,44 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
             return Err(format!("wake {action} returned wrong state").into());
         }
     }
+    let fire = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "wake",
+            "send",
+            "--to",
+            &target,
+            "--human-user",
+            "--text",
+            "Check after timer",
+            "--after",
+            "1s",
+            "--wait-until-first-fire",
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !fire.status.success() {
+        return Err(format!(
+            "first-fire CLI failed: {}",
+            String::from_utf8_lossy(&fire.stderr)
+        )
+        .into());
+    }
+    let last = String::from_utf8(fire.stdout)?
+        .lines()
+        .last()
+        .ok_or("missing firing output")?
+        .to_owned();
+    let fired: serde_json::Value = serde_json::from_str(&last)?;
+    if fired
+        .pointer("/result/kind")
+        .and_then(serde_json::Value::as_str)
+        != Some("wakeFired")
+    {
+        return Err("wait returned before firing receipt".into());
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

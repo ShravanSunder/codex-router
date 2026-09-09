@@ -15,6 +15,7 @@ pub struct ServiceIdentity {
     service_epoch: UuidIdentity,
     schema_digest: communication_protocol::SchemaDigest,
     directory: EndpointDirectory,
+    wake_wait_permits: std::sync::Arc<tokio::sync::Semaphore>,
     journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     native_backend: Option<crate::NativeControlBackend>,
     automation: Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
@@ -100,6 +101,7 @@ impl ServiceIdentity {
             schema_digest: digest,
             journal: None,
             native_backend: None,
+            wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
             directory: EndpointDirectory::new(
                 UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?,
@@ -121,6 +123,9 @@ pub async fn serve_control_connection(
     identity: ServiceIdentity,
 ) -> io::Result<()> {
     let mut subscription = identity.directory.subscribe()?;
+    let mut wake_subscription: Option<crate::wakeup_subscription::WakeSubscriptionState> = None;
+    let mut wake_poll = tokio::time::interval(std::time::Duration::from_millis(50));
+    wake_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut decoder = ControlFrameDecoder::default();
     let mut admission = ControlAdmission::default();
     let mut buffer = [0_u8; 8192];
@@ -128,6 +133,15 @@ pub async fn serve_control_connection(
     loop {
         let count = tokio::select! {
             result = stream.read(&mut buffer) => result?,
+            _=wake_poll.tick(), if wake_subscription.is_some()=>{
+                if let Some(wake)=&mut wake_subscription {
+                    for change in wake.next_changes().await? {
+                        let mut output=serde_json::to_vec(&json!({"jsonrpc":"2.0","method":"wake/changed","params":change})).map_err(io::Error::other)?;
+                        output.push(b'\n');stream.write_all(&output).await?;
+                    }
+                }
+                continue;
+            },
             completion = pending.join_next(), if !pending.is_empty() => {
                 let (id,response)=completion.ok_or_else(||io::Error::other("pending task missing"))?.map_err(|_|io::Error::other("Control task failed"))?;
                 admission.complete(&id);
@@ -155,6 +169,60 @@ pub async fn serve_control_connection(
             }
             let response = match admit_request(frame, &mut admission) {
                 Err(response) => response,
+                Ok(request) if request.method == "wake/subscribe" => {
+                    admission.complete(&request.id);
+                    match serde_json::from_value::<communication_protocol::WakeShowRequest>(
+                        request.params,
+                    ) {
+                        Err(_) => error(
+                            json!(request.id),
+                            -32602,
+                            "Provide exact wakeupId for first-fire subscription",
+                        ),
+                        Ok(params) => {
+                            let wakeup_id = params.wakeup_id.clone();
+                            let permit = std::sync::Arc::clone(&identity.wake_wait_permits)
+                                .try_acquire_owned();
+                            if wake_subscription.is_some() {
+                                crate::wakeup_subscription::unavailable(
+                                    json!(request.id),
+                                    wakeup_id,
+                                )
+                            } else if let (Some(store), Ok(permit)) =
+                                (identity.automation.as_ref(), permit)
+                            {
+                                match crate::wakeup_subscription::start(
+                                    std::sync::Arc::clone(store),
+                                    identity.service_id.clone(),
+                                    params,
+                                    permit,
+                                )
+                                .await
+                                {
+                                    Ok((state, result)) => {
+                                        wake_subscription = Some(state);
+                                        json!({"jsonrpc":"2.0","id":request.id,"result":result})
+                                    }
+                                    Err(automation_storage::StorageError::WakeNotFound) => {
+                                        crate::wakeup_subscription::not_found(
+                                            json!(request.id),
+                                            wakeup_id,
+                                        )
+                                    }
+                                    Err(_) => crate::wakeup_subscription::unavailable(
+                                        json!(request.id),
+                                        wakeup_id,
+                                    ),
+                                }
+                            } else {
+                                crate::wakeup_subscription::unavailable(
+                                    json!(request.id),
+                                    wakeup_id,
+                                )
+                            }
+                        }
+                    }
+                }
                 Ok(request)
                     if matches!(
                         request.method.as_str(),

@@ -30,6 +30,9 @@ enum WakeCommand {
         /// Reuse this UUIDv7 to recover a lost creation response safely.
         #[arg(long)]
         operation_id: Option<String>,
+        /// Block until the first firing is recorded; native acceptance remains separate.
+        #[arg(long)]
+        wait_until_first_fire: bool,
     },
     /// Stop future firings and discard undispatched reminders; does not recall native input.
     Pause(LifecycleArguments),
@@ -74,6 +77,7 @@ struct WakeInvocation {
     json: bool,
     operation_id: Option<OperationId>,
     request: PreparedWake,
+    wait_until_first_fire: bool,
 }
 pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     let args = match WakeArguments::try_parse_from(arguments) {
@@ -167,13 +171,33 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
             )
         }
     };
+    let wait_id = if invocation.wait_until_first_fire && code == 0 {
+        record
+            .pointer("/result/definition/wakeupId")
+            .cloned()
+            .and_then(|id| serde_json::from_value::<communication_protocol::WakeupId>(id).ok())
+    } else {
+        None
+    };
     let text = if machine {
         serde_json::to_string(&record)
     } else {
         serde_json::to_string_pretty(&record)
     };
     match text {
-        Ok(text) if writeln!(io::stdout(), "{text}").is_ok() => code,
+        Ok(text) if writeln!(io::stdout(), "{text}").is_ok() => {
+            if let Some(id) = wait_id {
+                runtime.block_on(crate::wakeup_wait_output::wait(
+                    &invocation.directory,
+                    id,
+                    machine,
+                ))
+            } else if invocation.wait_until_first_fire && code == 0 {
+                5
+            } else {
+                code
+            }
+        }
         _ => 5,
     }
 }
@@ -186,6 +210,7 @@ fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
             message,
             timing,
             operation_id,
+            wait_until_first_fire,
         } => {
             let (directory, saved) = saved_message(&message)?;
             let (timing, expiry) = timing.prepare()?;
@@ -198,6 +223,7 @@ fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
             )?;
             Ok(WakeInvocation {
                 directory,
+                wait_until_first_fire,
                 json: message.json,
                 operation_id: Some(id.clone()),
                 request: PreparedWake::Send(Box::new(WakeSendRequest {
@@ -216,6 +242,7 @@ fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
             directory: crate::endpoint_commands::resolve_directory(service_directory)?,
             json,
             operation_id: None,
+            wait_until_first_fire: false,
             request: PreparedWake::Show(WakeShowRequest {
                 wakeup_id: wakeup_id
                     .try_into()
@@ -247,6 +274,7 @@ fn prepare_lifecycle(
         directory: crate::endpoint_commands::resolve_directory(args.service_directory)?,
         json: args.json,
         operation_id: Some(id.clone()),
+        wait_until_first_fire: false,
         request: PreparedWake::Mutate(
             action,
             WakeMutationRequest {

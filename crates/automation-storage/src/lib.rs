@@ -28,3 +28,5 @@ mod wakeup_worker_inventory;
 pub use delivery_preparation::DeliveryPreparation;
 mod delivery_inspection;
 pub use delivery_inspection::DeliveryRecord;
+mod wakeup_observation;
+pub use wakeup_observation::WakeTransition;

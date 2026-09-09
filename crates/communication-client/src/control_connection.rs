@@ -391,6 +391,33 @@ impl ControlClient {
             }
         }
     }
+    pub(crate) async fn next_wake_notification(&mut self) -> Result<Value, ClientError> {
+        if self.connection.failed {
+            return Err(ClientError::Protocol("connection is retired"));
+        }
+        loop {
+            let frame = if let Some(frame) = self.connection.notifications.pop_front() {
+                frame
+            } else if let Some(frame) = self.connection.incoming.pop_front() {
+                frame
+            } else {
+                self.connection.read_frames().await?;
+                continue;
+            };
+            if frame.get("method").and_then(Value::as_str) == Some("endpoint/changed") {
+                self.notification_state.consume(frame)?;
+                continue;
+            }
+            if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+                || frame.get("method").and_then(Value::as_str) != Some("wake/changed")
+                || frame.get("id").is_some()
+                || frame.as_object().is_none_or(|object| object.len() != 3)
+            {
+                return Err(ClientError::Protocol("invalid wake notification envelope"));
+            }
+            return Ok(frame);
+        }
+    }
     pub async fn close(mut self) -> Result<(), ClientError> {
         self.connection.stream.shutdown().await?;
         Ok(())

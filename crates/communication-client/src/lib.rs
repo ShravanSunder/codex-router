@@ -21,3 +21,6 @@ mod instruction_operations;
 pub use instruction_operations::InstructionClientError;
 mod wakeup_operations;
 pub use wakeup_operations::WakeClientError;
+
+mod wakeup_waiting;
+pub use wakeup_waiting::{WakeWaitConnection, WakeWaitError};

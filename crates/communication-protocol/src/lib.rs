@@ -85,7 +85,7 @@ pub use acp_schema_catalog::{
 };
 
 mod instruction_contract;
-pub use agent_automation::{InstructionId, InstructionText, OperationId, RevisionId};
+pub use agent_automation::{InstructionId, InstructionText, OperationId, RevisionId, WakeupId};
 pub use instruction_contract::{
     InstructionCreateParams, InstructionShowParams, InstructionSnapshot, InstructionUpdateParams,
 };
@@ -109,4 +109,14 @@ pub use delivery_inspection_contract::{
     CessationEvidence, DeliveryDisposition, DeliveryEvidence, DeliveryInspection,
     DeliveryShowRequest, DeliverySource, NativeEffectEvidence, PreparationEffect, SubmissionEffect,
     WakeMutationResult,
+};
+
+mod wakeup_subscription_contract;
+pub use wakeup_subscription_contract::{
+    NoMutation, UnknownFire, WaitNextAction, WaitStage, WaitUnavailable, WaitUnavailableEffects,
+    WaitUnavailableKind, WakeChange, WakeChanged, WakeSubscription,
+};
+
+pub use wakeup_subscription_contract::{
+    UnknownFirstFire, VerifyWakeupAddress, WakeNotFound, WakeNotFoundKind,
 };

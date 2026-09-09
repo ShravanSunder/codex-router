@@ -28,6 +28,10 @@ pub fn control_schema_document(
     };
     assembly.add_type::<InstructionFailure>("instruction-failure")?;
     assembly.add_type::<WakeFailure>("wake-failure")?;
+    assembly.add_type::<WaitUnavailable>("wait-unavailable")?;
+    assembly.add_type::<WakeNotFound>("wake-not-found")?;
+    assembly.add_type::<WakeChanged>("wake-changed")?;
+    assembly.add_method::<WakeShowRequest, WakeSubscription>("wake/subscribe", &[])?;
     for method in ["wake/pause", "wake/resume", "wake/cancel"] {
         assembly.add_method::<WakeMutationRequest, WakeMutationResult>(method, &[])?;
     }
@@ -132,6 +136,8 @@ pub fn control_schema_document(
     assembly
         .frames
         .push(reference("endpoint-change-notification"));
+    assembly.definitions.insert("wake-change-notification".into(),json!({"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"wake/changed"},"params":reference("wake-changed")}}));
+    assembly.frames.push(reference("wake-change-notification"));
     Ok(json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
         "$id":"urn:agent-communication:control:1",
@@ -142,7 +148,7 @@ pub fn control_schema_document(
         "x-protocolVersion":{"major":1,"minor":0},
         "x-nativeSchemaDigest":native_digest,
         "x-methods":assembly.methods,
-        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification")},
+        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification"),"wake/changed":reference("wake-change-notification")},
         "x-maxFrameUtf8Bytes":1048576,
         "x-maxPendingRequests":64,
         "x-maxRequestsPerConnection":65536
@@ -253,6 +259,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
         "additionalProperties":false,"properties":properties})];
     if method.starts_with("wake/") || method.starts_with("delivery/") {
         data = vec![reference("wake-failure")];
+    }
+    if method == "wake/subscribe" {
+        data = vec![reference("wait-unavailable"), reference("wake-not-found")];
     }
     if method.starts_with("instruction/") {
         data = vec![reference("instruction-failure")];

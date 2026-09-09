@@ -54,5 +54,6 @@ automation_identity!(
     OccurrenceId,
     AttemptId,
     ChangeId,
-    EventId
+    EventId,
+    SubscriptionId
 );
