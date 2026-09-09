@@ -198,7 +198,7 @@ async fn exercise_scheduled_run(
                 {
                     return Err("busy target received native mutation".into());
                 }
-                let ids = backend_store.lock().await.observable_run_ids().await?;
+                let ids = backend_store.lock().await.observable_run_ids(None).await?;
                 let run_id = ids.first().ok_or("busy Run missing")?;
                 let run=backend_store.lock().await.read_run::<SessionRef,communication_protocol::EndpointRef,CodexGeneration,communication_protocol::NativeSendReceipt>(run_id).await?;
                 if run.evidence.timing.is_some() {

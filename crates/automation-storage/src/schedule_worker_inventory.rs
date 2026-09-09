@@ -8,14 +8,20 @@ impl AutomationStore {
             .map(|id| id.try_into().map_err(|_| StorageError::InvalidRecord))
             .collect()
     }
-    pub async fn waiting_schedule_ids(&mut self) -> Result<Vec<ScheduleId>, StorageError> {
-        let ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT schedule_id FROM workflow_runs WHERE run_status='waiting' ORDER BY schedule_id LIMIT 100").fetch_all(&mut self.connection).await?;
+    pub async fn waiting_schedule_ids(
+        &mut self,
+        after: Option<&ScheduleId>,
+    ) -> Result<Vec<ScheduleId>, StorageError> {
+        let ids:Vec<String>=sqlx::query_scalar("SELECT DISTINCT schedule_id FROM workflow_runs WHERE run_status='waiting' AND (? IS NULL OR schedule_id>?) ORDER BY schedule_id LIMIT 100").bind(after.map(ScheduleId::as_str)).bind(after.map(ScheduleId::as_str)).fetch_all(&mut self.connection).await?;
         ids.into_iter()
             .map(|id| id.try_into().map_err(|_| StorageError::InvalidRecord))
             .collect()
     }
-    pub async fn observable_run_ids(&mut self) -> Result<Vec<RunId>, StorageError> {
-        let ids:Vec<String>=sqlx::query_scalar("SELECT run_id FROM workflow_runs WHERE run_status IN ('preparing','executing','stopping','summaryRequired','summaryRunning','summaryBlocked') OR (run_status='uncertain' AND native_turn_id IS NOT NULL) ORDER BY due_at_ms,run_id LIMIT 100").fetch_all(&mut self.connection).await?;
+    pub async fn observable_run_ids(
+        &mut self,
+        after: Option<&RunId>,
+    ) -> Result<Vec<RunId>, StorageError> {
+        let ids:Vec<String>=sqlx::query_scalar("SELECT run_id FROM workflow_runs WHERE (run_status IN ('preparing','executing','stopping','summaryRequired','summaryRunning','summaryBlocked') OR (run_status='uncertain' AND native_turn_id IS NOT NULL)) AND (? IS NULL OR run_id>?) ORDER BY run_id LIMIT 100").bind(after.map(RunId::as_str)).bind(after.map(RunId::as_str)).fetch_all(&mut self.connection).await?;
         ids.into_iter()
             .map(|id| id.try_into().map_err(|_| StorageError::InvalidRecord))
             .collect()
