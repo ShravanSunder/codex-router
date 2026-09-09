@@ -31,8 +31,8 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
-agent-automation = { path = "../agent-automation" }
-automation-storage = { path = "../automation-storage" }
+agent-automation = { path = "../agent-automation", version = "0.1.15" }
+automation-storage = { path = "../automation-storage", version = "0.1.15" }
 codex-router-host.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 communication-service = { path = "../communication-service", version = "0.1.14" }
