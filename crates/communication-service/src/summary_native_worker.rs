@@ -13,6 +13,9 @@ use communication_protocol::{CodexGeneration, EndpointRef, NativeSendReceipt, Se
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+#[cfg(test)]
+#[path = "summary_deadline_tests.rs"]
+mod summary_deadline_tests;
 pub(crate) struct SummaryStep<'a> {
     pub work: SummaryWork,
     pub store: &'a Arc<Mutex<AutomationStore>>,
@@ -75,16 +78,19 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
             _ = retired.cancelled() => return Ok(()),
             observed = tokio::time::timeout(std::time::Duration::from_secs(20), crate::scheduled_native_observation::read_turn(input.admission, target, turn_id)) => observed,
         };
-        let Ok(Ok(Some(turn))) = observed else {
-            return Ok(());
-        };
+        // Missing history is not evidence of cessation and must not suppress the deadline.
+        let turn = observed.ok().and_then(Result::ok).flatten();
         if retired.is_cancelled() {
             return Ok(());
         }
-        let status = turn.get("status").and_then(Value::as_str);
+        let status = turn
+            .as_ref()
+            .and_then(|turn| turn.get("status"))
+            .and_then(Value::as_str);
         if status == Some("completed") && attempt.phase != SummaryPhase::Stopping {
             let text = turn
-                .get("items")
+                .as_ref()
+                .and_then(|turn| turn.get("items"))
                 .and_then(Value::as_array)
                 .and_then(|items| {
                     items.iter().rev().find(|item| {
