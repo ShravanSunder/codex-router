@@ -11,7 +11,7 @@ workspace = true
 [dependencies]
 uuid.workspace = true
 chrono.workspace = true
-agent-automation = { path = "../agent-automation", version = "0.1.15" }
+agent-automation = { path = "../agent-automation", version = "0.1.16" }
 sqlx.workspace = true
 thiserror.workspace = true
 serde.workspace = true

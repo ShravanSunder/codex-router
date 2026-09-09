@@ -7,8 +7,8 @@ publish.workspace = true
 [lints]
 workspace = true
 [dependencies]
-automation-storage = { path = "../automation-storage", version = "0.1.15" }
-agent-automation = { path = "../agent-automation", version = "0.1.15" }
+automation-storage = { path = "../automation-storage", version = "0.1.16" }
+agent-automation = { path = "../agent-automation", version = "0.1.16" }
 base64.workspace = true
 sha2.workspace = true
 sqlx.workspace = true

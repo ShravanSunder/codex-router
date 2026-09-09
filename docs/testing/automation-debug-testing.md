@@ -65,6 +65,45 @@ The test uses each root once. After a failure, inspect its private `proof-events
 
 Stop the foreground debug Host with Ctrl-C when finished. It shuts down its retained children. The private test artifacts remain for inspection, and Codex retains its ordinary session records. No directory deletion or production restart is part of this procedure.
 
+## Run the schedule and recovery scenarios
+
+Start a new debug Host with a previously unused `proof_root` for **each** command below, using the same launch and readiness checks above. Stop the previous test Host first. Do not run the whole ignored test binary against one root: scenarios change test-owned settings or restart its backend, and some diagnostic tests require their own recorded identities.
+
+Fresh scheduled execution with continuity:
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-sessions --test debug_luna_acceptance \
+  fresh_scheduled_run_uses_previous_luna_summary \
+  -- --ignored --exact --nocapture
+```
+
+The first worker produces a unique token. A separate Luna summary carries it into a different native execution thread after the current instructions have been changed to omit the token. The test requires actual worker output and holds the Run's execution slot through required summarization.
+
+Busy-thread behavior and owned app-server replacement:
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-sessions --test debug_luna_acceptance \
+  scheduled_work_waits_while_ordinary_messages_steer \
+  -- --ignored --exact --nocapture
+```
+
+The schedule waits while ordinary input steers the busy thread. The driver interrupts only its exact original test turn, confirms cessation, then observes a distinct scheduled turn. It uses the existing Host restart command with verified test ownership to replace that app-server. It checks the new native generation, unchanged completed Run evidence, and queue rejection for the now-unloaded saved thread. This establishes app-server replacement behavior, not automatic TUI reconnection or a full Host-process crash.
+
+Worker timeout, summary retry, import and durable delivery:
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-sessions --test debug_luna_acceptance \
+  summary_recovery_and_durable_delivery_preserve_original_work \
+  -- --ignored --exact --nocapture
+```
+
+The scheduler interrupts a worker using its captured two-second override. The driver separately interrupts an exact test summary; an explicit retry preserves the worker result and Run identity. The exported real summary is imported disabled into a separate test-owned automation store without creating synthetic Runs.
+
+For delivery recovery, this scenario uses production service code over paired Unix streams with the real debug Codex backend and its generated validators. A controlled backend-admission gate proves first firing before acceptance, known non-submission, and later acceptance under the same delivery ID with exactly one correlated native input. It also verifies the typed pause-before-first-fire error. This controlled transport does not prove Host discovery or a whole-process restart; those boundaries have separate coverage.
+
 ## Inspect durable outcomes
 
 The following commands use the same Rust SDK as applications. Replace each identity with the UUID from its creation or listing response:

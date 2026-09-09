@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-automation-storage = { path = "../automation-storage", version = "0.1.15" }
+automation-storage = { path = "../automation-storage", version = "0.1.16" }
 chrono.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 communication-protocol = { path = "../communication-protocol", version = "0.1.14" }
