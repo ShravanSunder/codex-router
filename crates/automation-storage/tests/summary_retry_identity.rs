@@ -129,14 +129,33 @@ async fn summary_retry_keeps_same_run_and_rejects_stale_attempt()
         now_ms: 601000,
     };
     let mut other = AutomationStore::open(&path).await?;
+    let waiting = store
+        .enqueue_due_run::<String, String>(&schedule.schedule_id, 601000)
+        .await?
+        .ok_or("successor Run missing")?;
+    if waiting == run {
+        return Err("successor reused occupying Run identity".into());
+    }
+    let mut successor = AutomationStore::open(&path).await?;
     let competing = automation_storage::SummaryRecoveryRequest {
         operation_id: OperationId::generate(),
         ..request.clone()
     };
-    let (first, second) = tokio::join!(
+    let (first, second, admission) = tokio::join!(
         store.recover_summary::<String, String, String, String>(&request),
-        other.recover_summary::<String, String, String, String>(&competing)
+        other.recover_summary::<String, String, String, String>(&competing),
+        successor.admit_waiting_run::<String, String>(&schedule.schedule_id, 601000)
     );
+    if !matches!(admission?, RunAdmission::Occupied { run_id } if run_id == run) {
+        return Err("successor bypassed occupying Run during concurrent summary recovery".into());
+    }
+    let successor_record = successor
+        .read_run::<String, String, String, String>(&waiting)
+        .await?;
+    if successor_record.phase != agent_automation::RunPhase::Waiting {
+        return Err("summary retry permitted successor execution".into());
+    }
+    successor.close().await?;
     let (retried, winner) = match (first, second) {
         (Ok(record), Err(_)) => (record, &request),
         (Err(_), Ok(record)) => (record, &competing),
