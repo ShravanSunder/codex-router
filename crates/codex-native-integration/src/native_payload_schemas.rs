@@ -7,6 +7,7 @@ pub enum NativeOperation {
     ReadThread,
     ResumeThread,
     StartThread,
+    ForkThread,
     ListLoadedThreads,
     StartTurn,
     SteerTurn,
@@ -27,6 +28,7 @@ impl NativeOperation {
                 "ThreadResumeParams",
                 "ThreadResumeResponse",
             ),
+            Self::ForkThread => ("thread/fork", "ThreadForkParams", "ThreadForkResponse"),
             Self::StartThread => ("thread/start", "ThreadStartParams", "ThreadStartResponse"),
             Self::ListLoadedThreads => (
                 "thread/loaded/list",
@@ -74,11 +76,14 @@ impl NativePayloadSchemas {
                 ),
             );
         }
-        if let (Ok(params), Ok(result)) = (
-            bundle.validator_for_v2("ThreadQueueAddParams"),
-            bundle.validator_for_v2("ThreadQueueAddResponse"),
-        ) {
-            operations.insert(NativeOperation::QueueAdd, (params, result));
+        for operation in [NativeOperation::QueueAdd, NativeOperation::ForkThread] {
+            let (_, params_name, result_name) = operation.contract();
+            if let (Ok(params), Ok(result)) = (
+                bundle.validator_for_v2(params_name),
+                bundle.validator_for_v2(result_name),
+            ) {
+                operations.insert(operation, (params, result));
+            }
         }
         let schema_digest = format!(
             "sha256:{}",

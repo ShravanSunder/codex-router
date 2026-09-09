@@ -1,5 +1,5 @@
 //! Actionable schedule failures preserve local mutation uncertainty and stale-edit identity.
-use crate::{LocalMutationEvidence, OperationId};
+use crate::OperationId;
 use agent_automation::{ChangeId, ScheduleId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum ScheduleFailureKind {
     InvalidField,
     OperationConflict,
+    OutcomeUnknown,
     ResourceNotFound,
     ChangeConflict,
     AutomationUnavailable,
@@ -51,6 +52,17 @@ pub struct ScheduleFailure {
     pub field: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub constraint: Option<String>,
-    pub effects: LocalMutationEvidence,
+    pub effects: ScheduleEffects,
     pub next_action: ScheduleNextAction,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ScheduleEffects {
+    Local {
+        mutation: crate::LocalMutationState,
+    },
+    Native {
+        evidence: crate::NativeEffectEvidence,
+    },
 }

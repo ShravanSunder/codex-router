@@ -36,3 +36,14 @@ mod schedule_inspection;
 pub use schedule_inspection::ScheduleInspection;
 mod schedule_mutations;
 pub use schedule_mutations::{ScheduleEdit, ScheduleMutation};
+mod thread_binding_repository;
+pub use thread_binding_repository::ThreadBindingClaim;
+mod external_operation_receipts;
+pub use external_operation_receipts::{
+    ExternalAdmission, ExternalAdmissionResult, ExternalOperationRecord,
+};
+
+mod preparation_completion;
+pub use preparation_completion::{PreparationIntent, PreparedThread};
+mod preparation_failures;
+pub use preparation_failures::{PreparationFailureDisposition, PreparationFailureRecord};

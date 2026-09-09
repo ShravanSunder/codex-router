@@ -135,3 +135,7 @@ pub use agent_automation::{ChangeId, RunId, ScheduleId};
 pub use schedule_failure::{
     ScheduleFailure, ScheduleFailureKind, ScheduleFailureStage, ScheduleNextAction,
 };
+
+mod schedule_preparation_contract;
+pub use schedule_failure::ScheduleEffects;
+pub use schedule_preparation_contract::{DestinationPreparation, SchedulePrepareRequest};

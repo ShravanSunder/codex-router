@@ -42,6 +42,12 @@ impl ControlClient {
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
         self.schedule_call("schedule/disable", request).await
     }
+    pub async fn prepare_schedule(
+        &mut self,
+        request: communication_protocol::SchedulePrepareRequest,
+    ) -> Result<ScheduleSnapshot, ScheduleClientError> {
+        self.schedule_call("schedule/prepare", request).await
+    }
     async fn schedule_call<TRequest: serde::Serialize>(
         &mut self,
         method: &str,

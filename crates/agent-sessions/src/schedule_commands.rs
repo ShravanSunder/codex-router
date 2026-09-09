@@ -1,10 +1,10 @@
 //! Schedule configuration through typed SDK calls; thread preparation remains a separate command.
+use crate::schedule_preparation_arguments::{PreparationArguments, PreparedDestination};
 use clap::{Parser, Subcommand};
 use communication_client::{ControlClient, ScheduleClientError};
 use communication_protocol::{
-    LocalMutationEvidence, LocalMutationState, OperationId, ScheduleCreateRequest,
-    ScheduleDefinition, ScheduleEnableRequest, ScheduleShowRequest, ScheduleSnapshot,
-    ScheduleUpdateRequest,
+    LocalMutationState, OperationId, ScheduleCreateRequest, ScheduleDefinition, ScheduleEffects,
+    ScheduleEnableRequest, ScheduleShowRequest, ScheduleSnapshot, ScheduleUpdateRequest,
 };
 use serde_json::json;
 use std::{
@@ -24,6 +24,8 @@ struct ScheduleArguments {
 }
 #[derive(Subcommand)]
 enum ScheduleCommand {
+    /// Prepare a fresh, forked or explicitly adopted native thread without enabling its schedule.
+    Prepare(PreparationArguments),
     /// Save schedule configuration. An unprepared destination must be disabled.
     Create {
         /// UTF-8 ScheduleDefinition JSON; '-' reads stdin. See the published Control schema.
@@ -64,6 +66,11 @@ enum ScheduleCommand {
     },
 }
 enum PreparedSchedule {
+    Prepare {
+        operation_id: OperationId,
+        schedule_id: communication_protocol::ScheduleId,
+        destination: PreparedDestination,
+    },
     Create(Box<ScheduleCreateRequest>),
     Update(Box<ScheduleUpdateRequest>),
     Show(ScheduleShowRequest),
@@ -73,6 +80,7 @@ enum PreparedSchedule {
 impl PreparedSchedule {
     fn operation_id(&self) -> Option<OperationId> {
         match self {
+            Self::Prepare { operation_id, .. } => Some(operation_id.clone()),
             Self::Create(request) => Some(request.operation_id.clone()),
             Self::Update(request) => Some(request.operation_id.clone()),
             Self::Show(_) => None,
@@ -92,13 +100,23 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
     let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
         Ok(directory) => directory,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidUsage", &message, 2, args.json);
+            return crate::endpoint_commands::report_failure(
+                "invalidUsage",
+                &message,
+                2,
+                args.json,
+            );
         }
     };
     let prepared = match prepare(args.command) {
         Ok(request) => request,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidField", &message, 2, args.json);
+            return crate::endpoint_commands::report_failure(
+                "invalidField",
+                &message,
+                2,
+                args.json,
+            );
         }
     };
     let operation_id = prepared.operation_id();
@@ -131,6 +149,19 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
         .await?;
         dispatched = true;
         let result = match prepared {
+            PreparedSchedule::Prepare {
+                operation_id,
+                schedule_id,
+                destination,
+            } => {
+                client
+                    .prepare_schedule(communication_protocol::SchedulePrepareRequest {
+                        operation_id,
+                        schedule_id,
+                        destination: destination.resolve(client.identity().service_id.clone()),
+                    })
+                    .await
+            }
             PreparedSchedule::Create(request) => client.create_schedule(*request).await,
             PreparedSchedule::Update(request) => client.update_schedule(*request).await,
             PreparedSchedule::Show(request) => client.read_schedule(request).await,
@@ -148,10 +179,10 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
         Err(ScheduleClientError::Rejected(error)) => {
             let uncertain = matches!(
                 error.effects,
-                LocalMutationEvidence::Local {
+                ScheduleEffects::Local {
                     mutation: LocalMutationState::Unknown | LocalMutationState::Committed
                 }
-            );
+            ) || matches!(&error.effects,ScheduleEffects::Native{evidence} if matches!(evidence.allocation,communication_protocol::PreparationEffect::Accepted|communication_protocol::PreparationEffect::Unknown) || matches!(evidence.resume,communication_protocol::PreparationEffect::Accepted|communication_protocol::PreparationEffect::Unknown) || matches!(evidence.submission,communication_protocol::SubmissionEffect::Accepted|communication_protocol::SubmissionEffect::Dispatching|communication_protocol::SubmissionEffect::Unknown));
             (
                 json!({"kind":"error","operationId":operation_id,"error":error}),
                 if uncertain { 5 } else { 4 },
@@ -187,6 +218,17 @@ fn operation(value: Option<String>) -> Result<OperationId, String> {
 }
 fn prepare(command: ScheduleCommand) -> Result<PreparedSchedule, String> {
     match command {
+        ScheduleCommand::Prepare(args) => {
+            let destination = args.destination()?;
+            Ok(PreparedSchedule::Prepare {
+                operation_id: operation(args.operation_id)?,
+                schedule_id: args
+                    .schedule_id
+                    .try_into()
+                    .map_err(|_| "--schedule-id requires UUIDv7")?,
+                destination,
+            })
+        }
         ScheduleCommand::Create {
             definition_file,
             operation_id,

@@ -251,6 +251,24 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request) if request.method == "schedule/prepare" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::schedule_preparation_dispatch::dispatch(
+                            crate::schedule_preparation_dispatch::PreparationRequest {
+                                id: json!(id),
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                backend: identity.native_backend.as_ref(),
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request)
                     if matches!(
                         request.method.as_str(),

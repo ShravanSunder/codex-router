@@ -75,6 +75,34 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
     {
         return Err("disabled schedule inspection invented active work".into());
     }
+    let prepared = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .env_remove("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
+        .env_remove("CODEX_ROUTER_USE_HOME_DEFAULT")
+        .args([
+            "schedule",
+            "prepare",
+            "--schedule-id",
+            id,
+            "--fresh",
+            "--cwd",
+        ])
+        .arg(&root)
+        .args(["--json", "--service-directory"])
+        .arg(&root)
+        .output()
+        .await?;
+    if prepared.status.success() {
+        return Err("prepare succeeded without a native backend".into());
+    }
+    let prepared: Value = serde_json::from_slice(&prepared.stdout)?;
+    if prepared.pointer("/error/kind").and_then(Value::as_str) != Some("unsupportedCapability")
+        || prepared
+            .pointer("/error/effects/evidence/allocation")
+            .and_then(Value::as_str)
+            != Some("notRequested")
+    {
+        return Err("unavailable prepare did not preserve no-allocation evidence".into());
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

@@ -4,9 +4,9 @@ use automation_storage::{
     StorageError,
 };
 use communication_protocol::{
-    EndpointRef, LocalMutationEvidence, LocalMutationState, ScheduleCreateRequest,
-    ScheduleEnableRequest, ScheduleFailure, ScheduleFailureKind, ScheduleFailureStage,
-    ScheduleNextAction, ScheduleShowRequest, ScheduleUpdateRequest, SessionRef,
+    EndpointRef, LocalMutationState, ScheduleCreateRequest, ScheduleEffects, ScheduleEnableRequest,
+    ScheduleFailure, ScheduleFailureKind, ScheduleFailureStage, ScheduleNextAction,
+    ScheduleShowRequest, ScheduleUpdateRequest, SessionRef,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -257,7 +257,7 @@ fn failure(
         current_change_id,
         field,
         constraint,
-        effects: LocalMutationEvidence::Local { mutation },
+        effects: ScheduleEffects::Local { mutation },
         next_action,
     };
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Schedule operation failed","data":data}})

@@ -25,6 +25,10 @@ pub enum StorageError {
     ScheduleNotFound,
     #[error("schedule changed; inspect the latest change identity before editing")]
     ScheduleChangeConflict,
+    #[error("native thread is already owned by schedule {schedule_id:?}")]
+    ThreadOwnershipConflict {
+        schedule_id: agent_automation::ScheduleId,
+    },
     #[error("multiple conflicting Runs prevent safe admission")]
     RunInvariantConflict {
         run_ids: Vec<agent_automation::RunId>,

@@ -27,6 +27,7 @@ pub fn control_schema_document(
         native_uri,
     };
     assembly.add_type::<ScheduleFailure>("schedule-failure")?;
+    assembly.add_method::<SchedulePrepareRequest, ScheduleSnapshot>("schedule/prepare", &[])?;
     assembly.add_method::<ScheduleCreateRequest, ScheduleSnapshot>("schedule/create", &[])?;
     assembly.add_method::<ScheduleShowRequest, ScheduleSnapshot>("schedule/show", &[])?;
     assembly.add_method::<ScheduleUpdateRequest, ScheduleSnapshot>("schedule/update", &[])?;
