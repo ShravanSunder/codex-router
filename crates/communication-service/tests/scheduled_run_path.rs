@@ -15,15 +15,32 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::test]
 async fn scheduled_fresh_thread_finishes_after_separate_luna_summary()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false).await
+    exercise_scheduled_run(false, PreparationOutcome::Accepted).await
 }
 #[tokio::test]
 async fn busy_target_waits_without_dispatch_budget_or_steer()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(true).await
+    exercise_scheduled_run(true, PreparationOutcome::Accepted).await
+}
+#[derive(Clone, Copy)]
+enum PreparationOutcome {
+    Accepted,
+    Rejected,
+    ResponseLost,
+}
+#[tokio::test]
+async fn known_native_preparation_rejection_finishes_without_execution()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_scheduled_run(false, PreparationOutcome::Rejected).await
+}
+#[tokio::test]
+async fn lost_native_preparation_response_preserves_occupancy()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_scheduled_run(false, PreparationOutcome::ResponseLost).await
 }
 async fn exercise_scheduled_run(
     busy_first: bool,
+    preparation: PreparationOutcome,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "scheduled-run-fixture-{}",
@@ -126,6 +143,12 @@ async fn exercise_scheduled_run(
             if request.get("method").and_then(Value::as_str) != Some(expected) {
                 return Err(format!("expected {expected}").into());
             }
+            if logical_stage == 0 && !matches!(preparation, PreparationOutcome::Accepted) {
+                if matches!(preparation, PreparationOutcome::Rejected) {
+                    socket.send(Message::Text(json!({"id":request.get("id"),"error":{"code":-32602,"message":"Fixture preparation rejected"}}).to_string().into())).await?;
+                }
+                return Ok(());
+            }
             if logical_stage == 3
                 && (request.pointer("/params/model").and_then(Value::as_str)
                     != Some("gpt-5.6-luna")
@@ -213,12 +236,51 @@ async fn exercise_scheduled_run(
             poll.tick().await;
             let current=store.lock().await.inspect_schedule::<SessionRef,communication_protocol::EndpointRef>(&schedule.schedule_id).await?;
             if current.active_run_id.is_some(){known_run=current.active_run_id;}
+            if known_run.is_none() {
+                let page = client.list_runs(communication_protocol::RunListRequest { schedule_id: schedule.schedule_id.clone(), cursor: None, limit: 1.try_into().map_err(|_|automation_storage::StorageError::InvalidRecord)? }).await.map_err(|_|automation_storage::StorageError::InvalidRecord)?;
+                known_run = page.records.first().map(|run|run.run_id.clone());
+            }
             if let Some(run_id)=&known_run{
                 let run=store.lock().await.read_run::<SessionRef,communication_protocol::EndpointRef,CodexGeneration,communication_protocol::NativeSendReceipt>(run_id).await?;
-                if run.phase==agent_automation::RunPhase::Finished{return Ok::<_,automation_storage::StorageError>(run);}
+                if matches!(run.phase,agent_automation::RunPhase::Finished | agent_automation::RunPhase::PreparationFailed | agent_automation::RunPhase::Uncertain){return Ok::<_,automation_storage::StorageError>(run);}
             }
         }
     }).await??;
+    if !matches!(preparation, PreparationOutcome::Accepted) {
+        let expected = if matches!(preparation, PreparationOutcome::Rejected) {
+            agent_automation::RunPhase::PreparationFailed
+        } else {
+            agent_automation::RunPhase::Uncertain
+        };
+        let current = store
+            .lock()
+            .await
+            .inspect_schedule::<SessionRef, communication_protocol::EndpointRef>(
+                &schedule.schedule_id,
+            )
+            .await?;
+        if record.phase != expected
+            || record.evidence.timing.is_some()
+            || record.native_turn_id.is_some()
+            || current.active_run_id.is_some()
+                != matches!(preparation, PreparationOutcome::ResponseLost)
+        {
+            return Err(
+                "native preparation outcome lost its no-execution/uncertainty distinction".into(),
+            );
+        }
+        shutdown.cancel();
+        worker.await?;
+        client.close().await?;
+        service.await??;
+        backend.await??;
+        drop(store);
+        for entry in std::fs::read_dir(&root)? {
+            std::fs::remove_file(entry?.path())?;
+        }
+        std::fs::remove_dir(root)?;
+        return Ok(());
+    }
     if record.native_turn_id.as_deref() != Some("scheduled-turn")
         || record.worker_outcome.is_none()
         || record.completed_at_ms.is_none()

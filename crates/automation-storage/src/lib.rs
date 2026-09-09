@@ -62,7 +62,7 @@ mod run_completion_state;
 pub use run_completion_state::RunCompletion;
 
 mod run_preparation_state;
-pub use run_preparation_state::{RunPreparationIntent, RunPreparedTarget};
+pub use run_preparation_state::{RunPreparationFailure, RunPreparationIntent, RunPreparedTarget};
 mod run_uncertainty_state;
 pub use run_uncertainty_state::RunUncertainty;
 mod run_stop_state;

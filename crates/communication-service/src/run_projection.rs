@@ -81,7 +81,7 @@ pub(crate) fn snapshot(
         RunPhase::SummaryRunning=>RunState::SummaryRunning{inputs:inputs.ok_or(())?,execution:execution.ok_or(())?,outcome:outcome.ok_or(())?,summary_attempt_id:record.summary_attempt.ok_or(())?.attempt_id},
         RunPhase::SummaryBlocked=>RunState::SummaryBlocked{inputs:inputs.ok_or(())?,execution:execution.ok_or(())?,outcome:outcome.ok_or(())?,explanation:record.summary_attempt.and_then(|attempt|attempt.explanation).unwrap_or_else(||"Summary is blocked; inspect its attempt and cessation evidence before retry or skip.".into())},
         RunPhase::Finished=>RunState::Finished{inputs:inputs.ok_or(())?,execution:execution.ok_or(())?,outcome:outcome.ok_or(())?,summary_run_id:summary.as_ref().map(|summary|summary.source_run_id.clone())},
-        RunPhase::PreparationFailed=>RunState::PreparationFailed{explanation:"Native work was not submitted; inspect preparation evidence.".into()},
+        RunPhase::PreparationFailed=>RunState::PreparationFailed{explanation:match outcome { Some(communication_protocol::WorkerOutcome::Failed { explanation: Some(explanation) })=>explanation, _=>"Native work was not submitted; inspect preparation evidence.".into()}},
         RunPhase::Uncertain=>RunState::Uncertain{inputs:inputs.ok_or(())?,known_execution:execution,explanation:"Native effects are unresolved; no automatic replay or release of schedule ownership.".into()},
     };
     Ok(RunSnapshot {

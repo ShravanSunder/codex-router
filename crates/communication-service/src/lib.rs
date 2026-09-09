@@ -1,5 +1,6 @@
 //! Owner-local communication service, independent of the Host executable.
 mod control_connection;
+mod control_overload_response;
 pub use control_connection::serve_control_connection;
 mod automation_retention_worker;
 mod control_service_context;

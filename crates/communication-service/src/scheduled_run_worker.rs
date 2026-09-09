@@ -210,6 +210,12 @@ impl ScheduledRunWorker {
                             .map_err(|_| StorageError::InvalidRecord)?,
                     )
                     .map_err(|_| StorageError::InvalidRecord)?;
+                    if !error.uncertain {
+                        self.store.lock().await.fail_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(automation_storage::RunPreparationFailure {
+                            run_id: id, effects, explanation: error.explanation.into(), now_ms: chrono::Utc::now().timestamp_millis(),
+                        }).await?;
+                        return Ok(());
+                    }
                     self.store
                         .lock()
                         .await

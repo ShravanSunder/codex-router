@@ -468,23 +468,11 @@ fn admit_request(frame: Value, admission: &mut ControlAdmission) -> Result<Reque
     }
     if let Err(failure) = admission.admit(&request.id, &request.method) {
         if failure == AdmissionError::Overloaded {
-            if request.method.starts_with("wake/") || request.method.starts_with("delivery/") {
-                return Err(crate::wakeup_dispatch::overloaded(id));
-            }
-            if request.method.starts_with("instruction/") {
-                return Err(crate::instruction_dispatch::overloaded(id));
-            }
-            if request.method == "control/initialize" {
-                return Err(error(id, -32603, "Request capacity exceeded"));
-            }
-            let data = if request.method == "codex/messageSend" {
-                json!({"kind":"overloaded","stage":"discovery","message":"Request capacity exceeded","effects":{"resume":"notRequested","submission":"notDispatched"}})
-            } else {
-                json!({"kind":"overloaded","stage":"discovery","message":"Request capacity exceeded"})
-            };
-            return Err(
-                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Request capacity exceeded","data":data}}),
-            );
+            return Err(crate::control_overload_response::response(
+                id,
+                &request.method,
+                &request.params,
+            ));
         }
         return Err(error(id, -32600, &failure.to_string()));
     }
@@ -542,6 +530,34 @@ fn initialize(
 #[cfg(test)]
 mod admission_error_tests {
     use super::*;
+
+    #[test]
+    fn saturated_methods_preserve_their_published_error_contracts() {
+        let mut admission = ControlAdmission::default();
+        admission.admit("init", "control/initialize").unwrap();
+        admission.initialized();
+        admission.complete("init");
+        for number in 0..64 {
+            admission
+                .admit(&format!("pending-{number}"), "codex/sessionInspect")
+                .unwrap();
+        }
+        let schema = communication_protocol::control_schema_document(None).unwrap();
+        let methods = schema.get("x-methods").and_then(Value::as_object).unwrap();
+        for method in methods.keys() {
+            let response = admit_request(
+                json!({"jsonrpc":"2.0","id":format!("overloaded-{method}"),"method":method,"params":{"wakeupId":communication_protocol::WakeupId::generate()}}),
+                &mut admission,
+            );
+            let Err(response) = response else {
+                panic!("overloaded request admitted");
+            };
+            assert!(
+                communication_protocol::control_error_is_valid(method, &response),
+                "invalid overload response for {method}: {response}"
+            );
+        }
+    }
 
     #[test]
     fn saturated_message_admission_reports_that_no_native_effect_was_dispatched() {
