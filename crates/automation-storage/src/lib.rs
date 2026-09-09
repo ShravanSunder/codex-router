@@ -32,3 +32,7 @@ mod wakeup_observation;
 pub use wakeup_observation::WakeTransition;
 mod wakeup_listing;
 pub use wakeup_listing::{WakeListPage, WakeListPosition};
+mod schedule_inspection;
+pub use schedule_inspection::ScheduleInspection;
+mod schedule_mutations;
+pub use schedule_mutations::{ScheduleEdit, ScheduleMutation};

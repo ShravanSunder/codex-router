@@ -23,6 +23,8 @@ pub enum StorageError {
     RevisionConflict,
     #[error("schedule was not found in this automation database")]
     ScheduleNotFound,
+    #[error("schedule changed; inspect the latest change identity before editing")]
+    ScheduleChangeConflict,
     #[error("multiple conflicting Runs prevent safe admission")]
     RunInvariantConflict {
         run_ids: Vec<agent_automation::RunId>,

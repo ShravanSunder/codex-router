@@ -28,34 +28,7 @@ impl AutomationStore {
         let anchor = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(request.now_ms)
             .ok_or(StorageError::InvalidRecord)?;
         let calculated = request.definition.timing.next_due(anchor, None)?;
-        match &request.definition.destination {
-            ExecutionDestination::Unprepared if request.definition.enabled => {
-                return Err(StorageError::InvalidSchedule {
-                    field: "enabled",
-                    reason: "unprepared schedules must be disabled",
-                });
-            }
-            ExecutionDestination::OwnedThread { cwd, .. }
-            | ExecutionDestination::FreshEachRun { cwd, .. }
-                if !std::path::Path::new(cwd).is_absolute() =>
-            {
-                return Err(StorageError::InvalidSchedule {
-                    field: "destination.cwd",
-                    reason: "workspace path must be absolute",
-                });
-            }
-            _ => {}
-        }
-        if request
-            .definition
-            .execution_timeout_seconds
-            .is_some_and(|seconds| !(1..=31_536_000).contains(&seconds))
-        {
-            return Err(StorageError::InvalidSchedule {
-                field: "executionTimeoutSeconds",
-                reason: "must be between 1 and 31536000 seconds",
-            });
-        }
+        validate_definition(&request.definition)?;
         if !matches!(
             request.imported_continuity,
             ContinuityInput::None | ContinuityInput::ImportedSummary { .. }
@@ -112,4 +85,37 @@ impl AutomationStore {
         transaction.commit().await?;
         Ok(record)
     }
+}
+
+pub(crate) fn validate_definition<TTarget, TEndpoint>(
+    definition: &ScheduleDefinition<TTarget, TEndpoint>,
+) -> Result<(), StorageError> {
+    match &definition.destination {
+        ExecutionDestination::Unprepared if definition.enabled => {
+            return Err(StorageError::InvalidSchedule {
+                field: "enabled",
+                reason: "unprepared schedules must be disabled",
+            });
+        }
+        ExecutionDestination::OwnedThread { cwd, .. }
+        | ExecutionDestination::FreshEachRun { cwd, .. }
+            if !std::path::Path::new(cwd).is_absolute() =>
+        {
+            return Err(StorageError::InvalidSchedule {
+                field: "destination.cwd",
+                reason: "workspace path must be absolute",
+            });
+        }
+        _ => {}
+    }
+    if definition
+        .execution_timeout_seconds
+        .is_some_and(|seconds| !(1..=31_536_000).contains(&seconds))
+    {
+        return Err(StorageError::InvalidSchedule {
+            field: "executionTimeoutSeconds",
+            reason: "must be between 1 and 31536000 seconds",
+        });
+    }
+    Ok(())
 }

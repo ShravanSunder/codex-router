@@ -26,6 +26,13 @@ pub fn control_schema_document(
         frames: Vec::new(),
         native_uri,
     };
+    assembly.add_type::<ScheduleFailure>("schedule-failure")?;
+    assembly.add_method::<ScheduleCreateRequest, ScheduleSnapshot>("schedule/create", &[])?;
+    assembly.add_method::<ScheduleShowRequest, ScheduleSnapshot>("schedule/show", &[])?;
+    assembly.add_method::<ScheduleUpdateRequest, ScheduleSnapshot>("schedule/update", &[])?;
+    for method in ["schedule/enable", "schedule/disable"] {
+        assembly.add_method::<ScheduleEnableRequest, ScheduleSnapshot>(method, &[])?;
+    }
     assembly.add_type::<InstructionFailure>("instruction-failure")?;
     assembly.add_type::<WakeFailure>("wake-failure")?;
     assembly.add_method::<AutomationPageRequest, AutomationPage<WakeSnapshot>>("wake/list", &[])?;
@@ -263,6 +270,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if method == "wake/subscribe" {
         data = vec![reference("wait-unavailable"), reference("wake-not-found")];
+    }
+    if method.starts_with("schedule/") {
+        data = vec![reference("schedule-failure")];
     }
     if method.starts_with("instruction/") {
         data = vec![reference("instruction-failure")];

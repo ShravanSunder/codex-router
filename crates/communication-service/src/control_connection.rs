@@ -254,6 +254,32 @@ pub async fn serve_control_connection(
                 Ok(request)
                     if matches!(
                         request.method.as_str(),
+                        "schedule/create"
+                            | "schedule/show"
+                            | "schedule/update"
+                            | "schedule/enable"
+                            | "schedule/disable"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::schedule_dispatch::dispatch(
+                            crate::schedule_dispatch::ScheduleRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
                         "instruction/create" | "instruction/update" | "instruction/show"
                     ) =>
                 {

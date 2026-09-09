@@ -7,8 +7,13 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 20);
+    assert_eq!(methods.len(), 25);
     for method in [
+        "schedule/create",
+        "schedule/show",
+        "schedule/update",
+        "schedule/enable",
+        "schedule/disable",
         "wake/list",
         "wake/subscribe",
         "wake/pause",

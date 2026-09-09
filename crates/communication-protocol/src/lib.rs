@@ -124,3 +124,14 @@ mod automation_page_contract;
 pub use automation_page_contract::{
     AutomationPage, AutomationPageRequest, InvalidPageLimit, PageLimit,
 };
+
+mod schedule_contract;
+pub use schedule_contract::{
+    ExecutionDestination, ImportedContinuity, ScheduleCreateRequest, ScheduleDefinition,
+    ScheduleEnableRequest, ScheduleShowRequest, ScheduleSnapshot, ScheduleUpdateRequest,
+};
+mod schedule_failure;
+pub use agent_automation::{ChangeId, RunId, ScheduleId};
+pub use schedule_failure::{
+    ScheduleFailure, ScheduleFailureKind, ScheduleFailureStage, ScheduleNextAction,
+};

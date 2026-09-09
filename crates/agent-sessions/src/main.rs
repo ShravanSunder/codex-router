@@ -16,6 +16,9 @@ fn main() {
         print!("{}", agent_sessions::command_help());
         return;
     }
+    if arguments.first().is_some_and(|arg| arg == "schedule") {
+        std::process::exit(agent_sessions::run_schedule_command(arguments));
+    }
     if arguments.first().is_some_and(|arg| arg == "wake") {
         std::process::exit(agent_sessions::run_wakeup_command(arguments));
     }
