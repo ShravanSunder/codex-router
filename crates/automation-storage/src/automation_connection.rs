@@ -17,6 +17,16 @@ pub enum StorageError {
     OperationConflict,
     #[error("automation record is invalid or inconsistent")]
     InvalidRecord,
+    #[error("event cursor must reference a retained sequence with a consistent observation time")]
+    InvalidEventCursor,
+    #[error(
+        "attempt cursor must preserve its observation time, latest attempt and last emitted identity"
+    )]
+    InvalidAttemptCursor,
+    #[error("workflow Run was not found in this automation database")]
+    RunNotFound,
+    #[error("delivery was not found in this automation database")]
+    DeliveryNotFound,
     #[error("instruction was not found in this automation database")]
     InstructionNotFound,
     #[error("instruction changed; inspect the current revision before editing")]

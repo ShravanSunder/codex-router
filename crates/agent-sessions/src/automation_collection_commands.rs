@@ -20,6 +20,14 @@ pub(crate) struct PageOptions {
     #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub limit: u32,
 }
+#[derive(clap::Args)]
+pub(crate) struct EventReadOptions {
+    /// Event cursor from a previous response; expired history returns an explicit error.
+    #[arg(long)]
+    pub after: Option<String>,
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+    pub limit: u32,
+}
 impl PageOptions {
     fn request(self) -> Result<AutomationPageRequest, String> {
         Ok(AutomationPageRequest {
@@ -39,6 +47,20 @@ pub(crate) struct RunListOptions {
     pub page: PageOptions,
 }
 #[derive(clap::Args)]
+pub(crate) struct RunSummaryOptions {
+    #[arg(long)]
+    pub run_id: String,
+    #[command(flatten)]
+    pub page: PageOptions,
+}
+#[derive(clap::Args)]
+pub(crate) struct DeliveryAttemptOptions {
+    #[arg(long)]
+    pub delivery_id: String,
+    #[command(flatten)]
+    pub page: PageOptions,
+}
+#[derive(clap::Args)]
 pub(crate) struct RevisionListOptions {
     #[arg(long)]
     pub instruction_id: String,
@@ -53,6 +75,9 @@ pub(crate) struct DeliveryListOptions {
     pub page: PageOptions,
 }
 pub(crate) enum CollectionCommand {
+    RunSummaries(RunSummaryOptions),
+    DeliveryAttempts(DeliveryAttemptOptions),
+    Events(EventReadOptions),
     Instructions(PageOptions),
     Schedules(PageOptions),
     Runs(RunListOptions),
@@ -65,6 +90,9 @@ pub(crate) struct CollectionContext {
     pub json: bool,
 }
 enum PreparedCollection {
+    RunSummaries(communication_protocol::RunSummariesRequest),
+    DeliveryAttempts(communication_protocol::DeliveryAttemptsRequest),
+    Events(communication_protocol::AutomationEventsRequest),
     Instructions(AutomationPageRequest),
     Schedules(AutomationPageRequest),
     Runs(RunListRequest),
@@ -147,6 +175,15 @@ pub(crate) fn run_collection_command(
         )
         .await?;
         let result = match request {
+            PreparedCollection::RunSummaries(request) => {
+                read_value(client.read_run_summaries(request)).await
+            }
+            PreparedCollection::DeliveryAttempts(request) => {
+                read_value(client.read_delivery_attempts(request)).await
+            }
+            PreparedCollection::Events(request) => {
+                read_value(client.read_automation_events(request)).await
+            }
             PreparedCollection::Instructions(request) => {
                 read_value(client.list_instructions(request)).await
             }
@@ -203,6 +240,41 @@ async fn read_value<TResult: serde::Serialize, TError: Into<ReadCommandError>>(
 }
 fn prepare(command: CollectionCommand) -> Result<PreparedCollection, String> {
     match command {
+        CollectionCommand::RunSummaries(options) => {
+            let page = options.page.request()?;
+            Ok(PreparedCollection::RunSummaries(
+                communication_protocol::RunSummariesRequest {
+                    run_id: options
+                        .run_id
+                        .try_into()
+                        .map_err(|_| "--run-id requires UUIDv7")?,
+                    cursor: page.cursor,
+                    limit: page.limit,
+                },
+            ))
+        }
+        CollectionCommand::DeliveryAttempts(options) => {
+            let page = options.page.request()?;
+            Ok(PreparedCollection::DeliveryAttempts(
+                communication_protocol::DeliveryAttemptsRequest {
+                    delivery_id: options
+                        .delivery_id
+                        .try_into()
+                        .map_err(|_| "--delivery-id requires UUIDv7")?,
+                    cursor: page.cursor,
+                    limit: page.limit,
+                },
+            ))
+        }
+        CollectionCommand::Events(options) => Ok(PreparedCollection::Events(
+            communication_protocol::AutomationEventsRequest {
+                after: options.after,
+                limit: options
+                    .limit
+                    .try_into()
+                    .map_err(|_| "--limit must be 1..100")?,
+            },
+        )),
         CollectionCommand::Instructions(page) => {
             Ok(PreparedCollection::Instructions(page.request()?))
         }

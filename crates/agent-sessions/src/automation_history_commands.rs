@@ -18,6 +18,8 @@ struct DeliveryArguments {
 }
 #[derive(Subcommand)]
 enum DeliveryCommand {
+    /// Inspect attempts without replaying input; older evidence may have expired.
+    Attempts(crate::automation_collection_commands::DeliveryAttemptOptions),
     /// List durable obligations, optionally restricted to an exact wake-up.
     List(DeliveryListOptions),
     /// Inspect pending, accepted or uncertain delivery evidence without sending it again.
@@ -36,6 +38,7 @@ pub fn run_delivery_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let command = match args.command {
+        DeliveryCommand::Attempts(options) => CollectionCommand::DeliveryAttempts(options),
         DeliveryCommand::List(options) => CollectionCommand::Deliveries(options),
         DeliveryCommand::Show { delivery_id } => CollectionCommand::DeliveryShow(delivery_id),
     };

@@ -23,6 +23,8 @@ struct AutomationArguments {
 }
 #[derive(Subcommand)]
 enum AutomationCommand {
+    /// Read retained domain events; this does not send input or activate native work.
+    Events(crate::automation_collection_commands::EventReadOptions),
     /// Inspect durable automation storage and effective default budgets.
     Status,
     /// Replace defaults for future attempts; active attempts retain captured budgets.
@@ -45,6 +47,15 @@ pub fn run_automation_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let request = match args.command {
+        AutomationCommand::Events(options) => {
+            return crate::automation_collection_commands::run_collection_command(
+                crate::automation_collection_commands::CollectionCommand::Events(options),
+                crate::automation_collection_commands::CollectionContext {
+                    service_directory: args.service_directory,
+                    json: args.json,
+                },
+            );
+        }
         AutomationCommand::Status => None,
         AutomationCommand::Configure {
             operation_id,

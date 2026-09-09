@@ -223,6 +223,46 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "delivery/attempts" | "run/summaries"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::attempt_history_dispatch::dispatch(
+                            crate::attempt_history_dispatch::AttemptRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request) if request.method == "automation/events" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::automation_event_dispatch::dispatch(
+                            crate::automation_event_dispatch::EventRequest {
+                                id: json!(id),
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method == "schedule/prepare" => {
                     let identity = identity.clone();
                     pending.spawn(async move {

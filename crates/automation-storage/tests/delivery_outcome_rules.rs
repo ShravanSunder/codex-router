@@ -106,7 +106,7 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
     if !store
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
-            attempt_id: next.attempt_id,
+            attempt_id: next.attempt_id.clone(),
             effects: effects(SubmissionEffect::Unknown),
             result: DeliveryResult::Unknown {
                 reason: "response lost".into(),
@@ -116,6 +116,72 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .await?
     {
         return Err("unknown outcome not recorded".into());
+    }
+    let page = store
+        .read_attempt_history(&automation_storage::AttemptHistoryQuery {
+            collection: automation_storage::AttemptCollection::Delivery(id.clone()),
+            position: None,
+            now_ms: 100000,
+            limit: 1,
+        })
+        .await?;
+    let automation_storage::AttemptHistoryRead::Page(page) = page else {
+        return Err("fresh attempt history expired".into());
+    };
+    if page.records.len() != 1 || page.records[0].attempt_id != first.attempt_id || !page.has_more {
+        return Err("attempt history failed to deduplicate completed/archived evidence".into());
+    }
+    let position = automation_storage::AttemptHistoryPosition {
+        as_of_ms: page.as_of_ms,
+        latest_attempt_id: page
+            .latest_attempt_id
+            .ok_or("missing pinned latest attempt")?,
+        last_started_at_ms: page.records[0].started_at_ms,
+        last_attempt_id: page.records[0].attempt_id.clone(),
+    };
+    let page = store
+        .read_attempt_history(&automation_storage::AttemptHistoryQuery {
+            collection: automation_storage::AttemptCollection::Delivery(id.clone()),
+            position: Some(position.clone()),
+            now_ms: 100000,
+            limit: 1,
+        })
+        .await?;
+    let automation_storage::AttemptHistoryRead::Page(page) = page else {
+        return Err("continued attempt history expired".into());
+    };
+    if page.records.len() != 1 || page.records[0].attempt_id != next.attempt_id || page.has_more {
+        return Err("attempt history lost the pinned latest attempt".into());
+    }
+    let maintenance_time =
+        chrono::DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")?.timestamp_millis();
+    store
+        .prune_automation_events(maintenance_time, 1000)
+        .await?;
+    let expired = store
+        .read_attempt_history(&automation_storage::AttemptHistoryQuery {
+            collection: automation_storage::AttemptCollection::Delivery(id.clone()),
+            position: Some(position),
+            now_ms: maintenance_time,
+            limit: 50,
+        })
+        .await?;
+    if !matches!(expired, automation_storage::AttemptHistoryRead::Expired) {
+        return Err("expired attempt cursor silently skipped history".into());
+    }
+    let page = store
+        .read_attempt_history(&automation_storage::AttemptHistoryQuery {
+            collection: automation_storage::AttemptCollection::Delivery(id.clone()),
+            position: None,
+            now_ms: maintenance_time,
+            limit: 50,
+        })
+        .await?;
+    let automation_storage::AttemptHistoryRead::Page(page) = page else {
+        return Err("fresh latest-attempt inspection expired".into());
+    };
+    if page.records.len() != 1 || page.records[0].attempt_id != next.attempt_id {
+        return Err("cleanup removed durable latest attempt evidence".into());
     }
     // Assert: even a much later worker cannot replay uncertainty or accept stale completion.
     if store

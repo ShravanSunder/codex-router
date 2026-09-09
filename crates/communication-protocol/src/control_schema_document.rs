@@ -28,6 +28,16 @@ pub fn control_schema_document(
     };
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
+    assembly
+        .add_method::<AutomationEventsRequest, AutomationEventsPage>("automation/events", &[])?;
+    assembly.add_method::<DeliveryAttemptsRequest, AttemptHistoryPage<AttemptInspection>>(
+        "delivery/attempts",
+        &[],
+    )?;
+    assembly.add_method::<RunSummariesRequest, AttemptHistoryPage<SummaryInspection>>(
+        "run/summaries",
+        &[],
+    )?;
     assembly.add_method::<AutomationPageRequest, AutomationPage<InstructionSnapshot>>(
         "instruction/list",
         &[],
@@ -315,7 +325,14 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if matches!(
         method,
-        "instruction/list" | "schedule/list" | "run/list" | "revision/list" | "delivery/list"
+        "instruction/list"
+            | "schedule/list"
+            | "run/list"
+            | "revision/list"
+            | "delivery/list"
+            | "automation/events"
+            | "delivery/attempts"
+            | "run/summaries"
     ) {
         data = vec![reference("automation-inspection-failure")];
     }

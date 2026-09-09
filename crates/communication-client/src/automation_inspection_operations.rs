@@ -14,6 +14,33 @@ pub enum AutomationInspectionClientError {
     Connection(#[from] ClientError),
 }
 impl ControlClient {
+    pub async fn read_automation_events(
+        &mut self,
+        request: communication_protocol::AutomationEventsRequest,
+    ) -> Result<communication_protocol::AutomationEventsPage, AutomationInspectionClientError> {
+        self.automation_inspection_call("automation/events", request)
+            .await
+    }
+    pub async fn read_delivery_attempts(
+        &mut self,
+        request: communication_protocol::DeliveryAttemptsRequest,
+    ) -> Result<
+        communication_protocol::AttemptHistoryPage<communication_protocol::AttemptInspection>,
+        AutomationInspectionClientError,
+    > {
+        self.automation_inspection_call("delivery/attempts", request)
+            .await
+    }
+    pub async fn read_run_summaries(
+        &mut self,
+        request: communication_protocol::RunSummariesRequest,
+    ) -> Result<
+        communication_protocol::AttemptHistoryPage<communication_protocol::SummaryInspection>,
+        AutomationInspectionClientError,
+    > {
+        self.automation_inspection_call("run/summaries", request)
+            .await
+    }
     pub async fn list_instructions(
         &mut self,
         request: AutomationPageRequest,

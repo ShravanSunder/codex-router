@@ -80,7 +80,12 @@ pub use automation_configuration::{
 };
 mod automation_configuration_dispatch;
 
+mod attempt_history_dispatch;
+mod attempt_history_projection;
 mod automation_collection_cursor;
 mod automation_collection_dispatch;
 mod automation_collection_projection;
+mod automation_event_cursor;
+mod automation_event_dispatch;
+mod automation_event_projection;
 mod automation_inspection_failure;

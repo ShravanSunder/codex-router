@@ -148,6 +148,26 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
             return Err(format!("{group} list returned the wrong records").into());
         }
     }
+    let events = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args(["automation", "events", "--json", "--service-directory"])
+        .arg(&root)
+        .output()
+        .await?;
+    if !events.status.success() {
+        return Err("automation events CLI failed".into());
+    }
+    let events: Value = serde_json::from_slice(&events.stdout)?;
+    if events
+        .pointer("/result/records")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+        || events
+            .pointer("/result/earliestRetainedCursor")
+            .and_then(Value::as_str)
+            .is_none()
+    {
+        return Err("CLI event history omitted records or retention cursor".into());
+    }
     let prepared = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
         .env_remove("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
         .env_remove("CODEX_ROUTER_USE_HOME_DEFAULT")

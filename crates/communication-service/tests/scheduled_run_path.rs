@@ -239,6 +239,25 @@ async fn exercise_scheduled_run(
     {
         return Err("public Run snapshot lost finished worker or summary".into());
     }
+    let summaries = client
+        .read_run_summaries(communication_protocol::RunSummariesRequest {
+            run_id: record.run_id.clone(),
+            cursor: None,
+            limit: 50.try_into()?,
+        })
+        .await?;
+    let [summary] = summaries.records.as_slice() else {
+        return Err("expected one retained summary attempt".into());
+    };
+    if summary.retry_eligible
+        || !matches!(
+            summary.state,
+            communication_protocol::SummaryInspectionState::Completed
+        )
+        || !summaries.coverage.latest_attempt_included
+    {
+        return Err("summary history lost completed attempt or advertised an unsafe retry".into());
+    }
     shutdown.cancel();
     worker.await?;
     client.close().await?;

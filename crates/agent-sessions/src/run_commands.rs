@@ -23,6 +23,8 @@ struct RunArguments {
 }
 #[derive(Subcommand)]
 enum RunCommand {
+    /// Inspect latest and retained prior summary attempts with explicit history coverage.
+    Summaries(crate::automation_collection_commands::RunSummaryOptions),
     /// List current records using a service-scoped pagination cursor.
     List(crate::automation_collection_commands::RunListOptions),
     #[command(flatten)]
@@ -65,6 +67,15 @@ pub fn run_workflow_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let command = match args.command {
+        RunCommand::Summaries(options) => {
+            return crate::automation_collection_commands::run_collection_command(
+                crate::automation_collection_commands::CollectionCommand::RunSummaries(options),
+                crate::automation_collection_commands::CollectionContext {
+                    service_directory: args.service_directory,
+                    json: args.json,
+                },
+            );
+        }
         RunCommand::List(options) => {
             return crate::automation_collection_commands::run_collection_command(
                 crate::automation_collection_commands::CollectionCommand::Runs(options),

@@ -85,6 +85,7 @@ pub use acp_schema_catalog::{
 };
 
 mod instruction_contract;
+pub use agent_automation::{AttemptId, DeliveryId, EventId};
 pub use agent_automation::{InstructionId, InstructionText, OperationId, RevisionId, WakeupId};
 pub use instruction_contract::{
     InstructionCreateParams, InstructionShowParams, InstructionSnapshot, InstructionUpdateParams,
@@ -125,7 +126,17 @@ pub use automation_page_contract::{
     AutomationPage, AutomationPageRequest, InvalidPageLimit, PageLimit,
 };
 
+mod attempt_history_contract;
 mod automation_inspection_contract;
+pub use attempt_history_contract::{
+    AttemptHistoryCoverage, AttemptHistoryPage, AttemptInspection, DeliveryAttemptsRequest,
+    EarlierAttempts, RunSummariesRequest, SummaryInspection, SummaryInspectionState,
+};
+mod automation_event_contract;
+pub use automation_event_contract::{
+    AutomationEvent, AutomationEventDetails, AutomationEventSubject, AutomationEventSubjectKind,
+    AutomationEventsPage, AutomationEventsRequest,
+};
 mod schedule_contract;
 mod schedule_package_contract;
 pub use automation_inspection_contract::{

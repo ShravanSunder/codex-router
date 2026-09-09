@@ -179,6 +179,56 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     {
         return Err("CLI bounded listing missing page or cursor".into());
     }
+    let fired_id = fired
+        .pointer("/result/wakeupId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing fired wake identity")?;
+    let deliveries = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "delivery",
+            "list",
+            "--wakeup-id",
+            fired_id,
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !deliveries.status.success() {
+        return Err("delivery list CLI failed".into());
+    }
+    let deliveries: serde_json::Value = serde_json::from_slice(&deliveries.stdout)?;
+    let delivery_id = deliveries
+        .pointer("/result/records/0/deliveryId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing fired delivery")?;
+    for action in ["show", "attempts"] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+            .args([
+                "delivery",
+                action,
+                "--delivery-id",
+                delivery_id,
+                "--json",
+                "--service-directory",
+            ])
+            .arg(&root)
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(format!("delivery {action} CLI failed").into());
+        }
+        let output: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        if action == "attempts"
+            && output
+                .pointer("/result/coverage/earlierAttempts")
+                .and_then(serde_json::Value::as_str)
+                != Some("mayBeUnavailable")
+        {
+            return Err("delivery attempts CLI omitted retention coverage".into());
+        }
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

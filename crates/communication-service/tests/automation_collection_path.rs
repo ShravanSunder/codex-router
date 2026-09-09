@@ -90,6 +90,31 @@ async fn sdk_lists_local_collections_and_rejects_cross_collection_cursor()
     if !runs.records.is_empty() || !deliveries.records.is_empty() {
         return Err("listing invented native or timed work".into());
     }
+    let history = client
+        .read_automation_events(communication_protocol::AutomationEventsRequest {
+            after: None,
+            limit: 50.try_into()?,
+        })
+        .await?;
+    if history.records.len() != 3
+        || !history.records.iter().any(|event| {
+            matches!(
+                event.details,
+                communication_protocol::AutomationEventDetails::ScheduleEdit { .. }
+            )
+        })
+    {
+        return Err("event history omitted typed schedule definition evidence".into());
+    }
+    let continued = client
+        .read_automation_events(communication_protocol::AutomationEventsRequest {
+            after: Some(history.next_cursor),
+            limit: 50.try_into()?,
+        })
+        .await?;
+    if !continued.records.is_empty() {
+        return Err("event cursor replayed consumed records".into());
+    }
     let rejected = client
         .list_schedules(AutomationPageRequest {
             cursor: Some(cursor),

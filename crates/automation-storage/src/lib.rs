@@ -75,10 +75,19 @@ mod summary_recovery;
 pub use summary_recovery::{SummaryRecoveryAction, SummaryRecoveryRequest};
 mod configuration_receipts;
 pub use configuration_receipts::{ConfigurationAdmission, ConfigurationOperation};
+mod attempt_history_read;
 mod automation_collection_listing;
 mod automation_event_bounds;
+mod automation_event_history;
+pub use attempt_history_read::{
+    AttemptCollection, AttemptHistoryPosition, AttemptHistoryQuery, AttemptHistoryRead,
+    StoredAttemptPage, StoredAttemptRecord,
+};
 pub use automation_collection_listing::{
     AutomationCollection, AutomationKeyPage, AutomationListKey, AutomationListPosition,
+};
+pub use automation_event_history::{
+    EventHistoryPage, EventHistoryQuery, EventHistoryRead, EventPosition, StoredAutomationEvent,
 };
 mod schedule_export;
 mod schedule_import;

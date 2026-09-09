@@ -137,6 +137,33 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
     {
         return Err("CLI lost exact completed Run evidence".into());
     }
+    let summaries = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "run",
+            "summaries",
+            "--run-id",
+            run.as_str(),
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !summaries.status.success() {
+        return Err("run summaries CLI failed".into());
+    }
+    let summaries: Value = serde_json::from_slice(&summaries.stdout)?;
+    if summaries
+        .pointer("/result/records")
+        .and_then(Value::as_array)
+        .is_none_or(|records| !records.is_empty())
+        || summaries
+            .pointer("/result/coverage/earlierAttempts")
+            .and_then(Value::as_str)
+            != Some("mayBeUnavailable")
+    {
+        return Err("empty summary history omitted coverage or invented an attempt".into());
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

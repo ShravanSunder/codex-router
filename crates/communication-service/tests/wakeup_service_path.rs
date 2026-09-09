@@ -89,6 +89,54 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
     if cancelled.wakeup.state != communication_protocol::WakeState::Cancelled {
         return Err("cancel did not reach storage".into());
     }
+    let past = (chrono::Utc::now() - chrono::Duration::seconds(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let immediate: WakeSendRequest = serde_json::from_value(
+        json!({"operationId":OperationId::generate(),"message":current.definition.message,"timing":{"kind":"at","at":past},"expiry":{"kind":"none"}}),
+    )?;
+    let immediate = client.send_wakeup(immediate).await?;
+    let delivery = match store
+        .lock()
+        .await
+        .evaluate_wakeup::<communication_protocol::SavedMessage>(
+            &immediate.definition.wakeup_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await?
+    {
+        automation_storage::WakeEvaluation::Fired { delivery_id, .. } => delivery_id,
+        _ => return Err("immediate fixture wake did not fire".into()),
+    };
+    let empty = client
+        .read_delivery_attempts(communication_protocol::DeliveryAttemptsRequest {
+            delivery_id: delivery.clone(),
+            cursor: None,
+            limit: 50.try_into()?,
+        })
+        .await?;
+    if !empty.records.is_empty() || empty.coverage.latest_attempt_included {
+        return Err("empty attempt history invented submission evidence".into());
+    }
+    let claimed = store.lock().await.claim_delivery::<communication_protocol::SessionRef,communication_protocol::MessageContent,communication_protocol::CodexGeneration>(&delivery, chrono::Utc::now().timestamp_millis()).await?.ok_or("fixture claim missing")?;
+    let attempts = client
+        .read_delivery_attempts(communication_protocol::DeliveryAttemptsRequest {
+            delivery_id: delivery,
+            cursor: None,
+            limit: 50.try_into()?,
+        })
+        .await?;
+    let [attempt] = attempts.records.as_slice() else {
+        return Err("expected one admitted delivery attempt".into());
+    };
+    if attempt.attempt_id != claimed.attempt_id
+        || !attempts.coverage.latest_attempt_included
+        || !matches!(
+            attempt.evidence,
+            communication_protocol::DeliveryEvidence::Dispatching { .. }
+        )
+    {
+        return Err("attempt inspection lost admitted submission evidence".into());
+    }
     let changed: WakeSendRequest = serde_json::from_value(
         json!({"operationId":OperationId::generate(),"message":current.definition.message,"timing":{"kind":"cron","expression":"* * * * *","timezone":"invalid-zone"},"expiry":{"kind":"none"}}),
     )?;

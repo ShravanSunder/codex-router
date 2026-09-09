@@ -23,7 +23,9 @@ pub(crate) fn storage(error: automation_storage::StorageError) -> AutomationInsp
     let (kind, next_action) = match &error {
         automation_storage::StorageError::InstructionNotFound
         | automation_storage::StorageError::ScheduleNotFound
-        | automation_storage::StorageError::WakeNotFound => (
+        | automation_storage::StorageError::WakeNotFound
+        | automation_storage::StorageError::RunNotFound
+        | automation_storage::StorageError::DeliveryNotFound => (
             AutomationInspectionFailureKind::ResourceNotFound,
             AutomationInspectionNextAction::VerifyResourceAddress,
         ),
