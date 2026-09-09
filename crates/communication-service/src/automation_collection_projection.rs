@@ -15,13 +15,10 @@ pub(crate) async fn project_record(
                 .try_into()
                 .map_err(|_| StorageError::InvalidRecord)?;
             let record = store.read_instruction(&id).await?;
-            serde_json::to_value(communication_protocol::InstructionSnapshot {
-                instruction_id: record.instruction_id,
-                revision_id: record.revision_id,
-                text: record.text,
-                created_at: timestamp(record.created_at_ms)?,
-                updated_at: timestamp(record.updated_at_ms)?,
-            })
+            serde_json::to_value(
+                crate::instruction_dispatch::snapshot(record)
+                    .map_err(|_| StorageError::InvalidRecord)?,
+            )
         }
         AutomationCollection::Schedules => {
             let id = id

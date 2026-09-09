@@ -28,6 +28,7 @@ pub fn control_schema_document(
     };
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
+    assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/show", &[])?;
     assembly
         .add_method::<AutomationEventsRequest, AutomationEventsPage>("automation/events", &[])?;
     assembly.add_method::<DeliveryAttemptsRequest, AttemptHistoryPage<AttemptInspection>>(
@@ -333,6 +334,7 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
             | "automation/events"
             | "delivery/attempts"
             | "run/summaries"
+            | "operation/show"
     ) {
         data = vec![reference("automation-inspection-failure")];
     }

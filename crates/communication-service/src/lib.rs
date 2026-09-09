@@ -89,3 +89,5 @@ mod automation_event_cursor;
 mod automation_event_dispatch;
 mod automation_event_projection;
 mod automation_inspection_failure;
+mod operation_inspection_dispatch;
+mod operation_receipt_projection;

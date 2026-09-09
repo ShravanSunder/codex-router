@@ -55,28 +55,7 @@ pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
         .await;
     match result {
         Ok(result) => {
-            let projected = (|| {
-                let wakeup = crate::wakeup_projection::snapshot(
-                    result.wake,
-                    request.service_id,
-                    result.observed_at_ms,
-                )?;
-                let dispatched_deliveries = result
-                    .retained
-                    .into_iter()
-                    .map(|record| {
-                        let typed =
-                            serde_json::from_value(serde_json::to_value(record).map_err(|_| ())?)
-                                .map_err(|_| ())?;
-                        crate::delivery_projection::snapshot(typed)
-                    })
-                    .collect::<Result<Vec<_>, ()>>()?;
-                Ok::<_, ()>(WakeMutationResult {
-                    wakeup,
-                    discarded_delivery_ids: result.discarded,
-                    dispatched_deliveries,
-                })
-            })();
+            let projected = project_mutation(result, request.service_id);
             match projected {
                 Ok(result) => json!({"jsonrpc":"2.0","id":request.id,"result":result}),
                 Err(()) => failure(
@@ -148,4 +127,26 @@ pub(crate) async fn inspect_delivery(request: WakeRequest<'_>) -> Value {
             LocalMutationState::None,
         ),
     }
+}
+
+pub(crate) fn project_mutation(
+    result: automation_storage::WakeMutationResult<SavedMessage>,
+    service_id: &communication_protocol::UuidIdentity,
+) -> Result<WakeMutationResult, ()> {
+    let wakeup =
+        crate::wakeup_projection::snapshot(result.wake, service_id, result.observed_at_ms)?;
+    let dispatched_deliveries = result
+        .retained
+        .into_iter()
+        .map(|record| {
+            let typed = serde_json::from_value(serde_json::to_value(record).map_err(|_| ())?)
+                .map_err(|_| ())?;
+            crate::delivery_projection::snapshot(typed)
+        })
+        .collect::<Result<Vec<_>, ()>>()?;
+    Ok::<_, ()>(WakeMutationResult {
+        wakeup,
+        discarded_delivery_ids: result.discarded,
+        dispatched_deliveries,
+    })
 }

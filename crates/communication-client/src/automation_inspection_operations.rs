@@ -14,6 +14,22 @@ pub enum AutomationInspectionClientError {
     Connection(#[from] ClientError),
 }
 impl ControlClient {
+    pub async fn read_operation(
+        &mut self,
+        request: communication_protocol::OperationShowRequest,
+    ) -> Result<communication_protocol::OperationSnapshot, AutomationInspectionClientError> {
+        let expected = request.operation_id.clone();
+        let result: communication_protocol::OperationSnapshot = self
+            .automation_inspection_call("operation/show", request)
+            .await?;
+        if result.operation_id != expected || !result.has_consistent_outcome() {
+            self.connection.retire();
+            return Err(
+                ClientError::Protocol("operation result identity or method mismatch").into(),
+            );
+        }
+        Ok(result)
+    }
     pub async fn read_automation_events(
         &mut self,
         request: communication_protocol::AutomationEventsRequest,
@@ -98,7 +114,12 @@ impl ControlClient {
             }
             Err(error) => return Err(error.into()),
         };
-        serde_json::from_value(result)
-            .map_err(|_| ClientError::Protocol("invalid inspection response").into())
+        match serde_json::from_value(result) {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                self.connection.retire();
+                Err(ClientError::Protocol("invalid inspection response").into())
+            }
+        }
     }
 }

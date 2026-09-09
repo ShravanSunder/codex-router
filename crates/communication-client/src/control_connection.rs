@@ -424,6 +424,9 @@ impl ControlClient {
     }
 }
 impl ClientConnection {
+    pub(crate) fn retire(&mut self) {
+        self.failed = true;
+    }
     pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         if self.failed || self.next_id >= 65_536 {
             return Err(ClientError::Protocol("connection is retired"));

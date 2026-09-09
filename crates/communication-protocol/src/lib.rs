@@ -133,9 +133,19 @@ pub use attempt_history_contract::{
     EarlierAttempts, RunSummariesRequest, SummaryInspection, SummaryInspectionState,
 };
 mod automation_event_contract;
+mod operation_outcome_contract;
+pub use operation_outcome_contract::{
+    AutomationOperationMethod, ConfigurationOperation, InstructionOperation, OperationSuccess,
+    RunRecoveryOperation, ScheduleOperation, WakeCreationOperation, WakeMutationOperation,
+};
+mod operation_inspection_contract;
 pub use automation_event_contract::{
     AutomationEvent, AutomationEventDetails, AutomationEventSubject, AutomationEventSubjectKind,
     AutomationEventsPage, AutomationEventsRequest,
+};
+pub use operation_inspection_contract::{
+    OperationEffects, OperationFailure, OperationLocalMutation, OperationShowRequest,
+    OperationSnapshot, OperationState,
 };
 mod schedule_contract;
 mod schedule_package_contract;

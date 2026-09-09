@@ -236,7 +236,7 @@ pub(crate) fn overloaded(id: Value) -> Value {
         },
     )
 }
-fn snapshot(document: InstructionDocument) -> Result<InstructionSnapshot, ()> {
+pub(crate) fn snapshot(document: InstructionDocument) -> Result<InstructionSnapshot, ()> {
     fn time(value: i64) -> Result<ObservationTimestamp, ()> {
         chrono::DateTime::<chrono::Utc>::from_timestamp_millis(value)
             .ok_or(())?

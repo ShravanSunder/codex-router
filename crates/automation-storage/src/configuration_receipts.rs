@@ -12,7 +12,30 @@ pub enum ConfigurationAdmission<TConfiguration> {
     Existing(TConfiguration),
     Pending(ConfigurationOperation<TConfiguration>),
 }
+pub enum ConfigurationProgress {
+    Writing,
+    WriteUncertain,
+    ReceiptUncertain,
+}
 impl AutomationStore {
+    pub async fn record_configuration_progress<TConfiguration: Serialize>(
+        &mut self,
+        id: &OperationId,
+        configuration: &TConfiguration,
+        progress: ConfigurationProgress,
+    ) -> Result<bool, StorageError> {
+        let canonical =
+            serde_json::to_vec(configuration).map_err(|_| StorageError::InvalidRecord)?;
+        let (status, file_state) = match progress {
+            ConfigurationProgress::Writing => ("inProgress", "unknown"),
+            ConfigurationProgress::WriteUncertain => ("uncertain", "unknown"),
+            ConfigurationProgress::ReceiptUncertain => ("uncertain", "replaced"),
+        };
+        let evidence = serde_json::json!({"kind":"configuration","fileState":file_state,"intended":configuration});
+        let updated = sqlx::query("UPDATE operation_receipts SET operation_status=?,effect_evidence_json=? WHERE operation_id=? AND method_name='automation/configure' AND canonical_request=? AND operation_status IN ('admitted','inProgress','uncertain')")
+            .bind(status).bind(evidence.to_string()).bind(id.as_str()).bind(canonical).execute(&mut self.connection).await?.rows_affected();
+        Ok(updated == 1)
+    }
     pub async fn admit_configuration<TConfiguration: Serialize + DeserializeOwned>(
         &mut self,
         id: &OperationId,

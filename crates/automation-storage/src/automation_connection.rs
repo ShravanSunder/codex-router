@@ -15,6 +15,10 @@ pub enum StorageError {
     InvalidSchema,
     #[error("operation identity already belongs to a different request")]
     OperationConflict,
+    #[error(
+        "operation was not found; absence of a receipt does not establish native non-execution"
+    )]
+    OperationNotFound,
     #[error("automation record is invalid or inconsistent")]
     InvalidRecord,
     #[error("event cursor must reference a retained sequence with a consistent observation time")]

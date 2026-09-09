@@ -41,9 +41,11 @@ pub use schedule_mutations::{ScheduleEdit, ScheduleMutation};
 mod thread_binding_repository;
 pub use thread_binding_repository::ThreadBindingClaim;
 mod external_operation_receipts;
+mod operation_receipt_read;
 pub use external_operation_receipts::{
     ExternalAdmission, ExternalAdmissionResult, ExternalOperationRecord,
 };
+pub use operation_receipt_read::{StoredOperationRecord, StoredOperationState};
 
 mod preparation_completion;
 pub use preparation_completion::{PreparationIntent, PreparedThread};
@@ -74,7 +76,9 @@ pub use summary_completion::SummaryCompletion;
 mod summary_recovery;
 pub use summary_recovery::{SummaryRecoveryAction, SummaryRecoveryRequest};
 mod configuration_receipts;
-pub use configuration_receipts::{ConfigurationAdmission, ConfigurationOperation};
+pub use configuration_receipts::{
+    ConfigurationAdmission, ConfigurationOperation, ConfigurationProgress,
+};
 mod attempt_history_read;
 mod automation_collection_listing;
 mod automation_event_bounds;

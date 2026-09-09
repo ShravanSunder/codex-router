@@ -75,6 +75,7 @@ pub(crate) struct DeliveryListOptions {
     pub page: PageOptions,
 }
 pub(crate) enum CollectionCommand {
+    OperationShow(String),
     RunSummaries(RunSummaryOptions),
     DeliveryAttempts(DeliveryAttemptOptions),
     Events(EventReadOptions),
@@ -90,6 +91,7 @@ pub(crate) struct CollectionContext {
     pub json: bool,
 }
 enum PreparedCollection {
+    OperationShow(communication_protocol::OperationShowRequest),
     RunSummaries(communication_protocol::RunSummariesRequest),
     DeliveryAttempts(communication_protocol::DeliveryAttemptsRequest),
     Events(communication_protocol::AutomationEventsRequest),
@@ -175,6 +177,9 @@ pub(crate) fn run_collection_command(
         )
         .await?;
         let result = match request {
+            PreparedCollection::OperationShow(request) => {
+                read_value(client.read_operation(request)).await
+            }
             PreparedCollection::RunSummaries(request) => {
                 read_value(client.read_run_summaries(request)).await
             }
@@ -240,6 +245,13 @@ async fn read_value<TResult: serde::Serialize, TError: Into<ReadCommandError>>(
 }
 fn prepare(command: CollectionCommand) -> Result<PreparedCollection, String> {
     match command {
+        CollectionCommand::OperationShow(id) => Ok(PreparedCollection::OperationShow(
+            communication_protocol::OperationShowRequest {
+                operation_id: id
+                    .try_into()
+                    .map_err(|_| "--operation-id requires UUIDv7")?,
+            },
+        )),
         CollectionCommand::RunSummaries(options) => {
             let page = options.page.request()?;
             Ok(PreparedCollection::RunSummaries(

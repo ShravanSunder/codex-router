@@ -78,25 +78,14 @@ impl AutomationSettingsFile {
                 return Err(unavailable(Some(pending.operation_id)));
             }
             if !matches_pending {
-                write_document(
-                    &self.path,
-                    &SettingsDocument {
-                        operation_id: pending.operation_id.clone(),
-                        configuration: pending.configuration,
-                    },
-                )
-                .map_err(|_| unavailable(Some(pending.operation_id.clone())))?;
+                self.replace_file(&pending.operation_id, pending.configuration)
+                    .await?;
+            } else {
+                sync_document(&self.path)
+                    .map_err(|_| unavailable(Some(pending.operation_id.clone())))?;
             }
-            self.store
-                .lock()
-                .await
-                .complete_configuration(
-                    &pending.operation_id,
-                    &pending.configuration,
-                    chrono::Utc::now().timestamp_millis(),
-                )
-                .await
-                .map_err(|_| unavailable(Some(pending.operation_id)))?;
+            self.finish_receipt(&pending.operation_id, pending.configuration)
+                .await?;
             self.handle.publish(pending.configuration).await;
             return Ok(());
         }
@@ -151,17 +140,90 @@ impl AutomationSettingsFile {
             }
             Err(_) => return Err(unavailable(Some(request.operation_id))),
         }
-        write_document(
-            &self.path,
-            &SettingsDocument {
-                operation_id: request.operation_id.clone(),
-                configuration,
-            },
-        )
-        .map_err(|_| unavailable(Some(request.operation_id.clone())))?;
-        self.store.lock().await.complete_configuration(&request.operation_id,&configuration,chrono::Utc::now().timestamp_millis()).await.map_err(|_|ConfigurationFailure{kind:ConfigurationFailureKind::OutcomeUnknown,message:"Settings file was replaced, but its receipt was not confirmed. Inspect or replay the same operation ID.".into(),operation_id:Some(request.operation_id),file_state:ConfigurationFileState::Replaced,next_action:ConfigurationNextAction::InspectOperation})?;
+        self.replace_file(&request.operation_id, configuration)
+            .await?;
+        self.finish_receipt(&request.operation_id, configuration)
+            .await?;
         self.handle.publish(configuration).await;
         Ok(configuration)
+    }
+    async fn replace_file(
+        &self,
+        id: &OperationId,
+        configuration: AutomationConfiguration,
+    ) -> Result<(), ConfigurationFailure> {
+        let marked = self
+            .store
+            .lock()
+            .await
+            .record_configuration_progress(
+                id,
+                &configuration,
+                automation_storage::ConfigurationProgress::Writing,
+            )
+            .await
+            .map_err(|_| unavailable(Some(id.clone())))?;
+        if !marked {
+            return Err(unavailable(Some(id.clone())));
+        }
+        if let Err(error) = write_document(
+            &self.path,
+            &SettingsDocument {
+                operation_id: id.clone(),
+                configuration,
+            },
+        ) {
+            let _ = self
+                .store
+                .lock()
+                .await
+                .record_configuration_progress(
+                    id,
+                    &configuration,
+                    automation_storage::ConfigurationProgress::WriteUncertain,
+                )
+                .await;
+            return Err(ConfigurationFailure {
+                kind: ConfigurationFailureKind::AutomationUnavailable,
+                message: format!(
+                    "Settings file update failed ({:?}); inspect and reconcile this operation before another configuration change.",
+                    error.kind()
+                ),
+                operation_id: Some(id.clone()),
+                file_state: ConfigurationFileState::Unknown,
+                next_action: ConfigurationNextAction::InspectOperation,
+            });
+        }
+        Ok(())
+    }
+    async fn finish_receipt(
+        &self,
+        id: &OperationId,
+        configuration: AutomationConfiguration,
+    ) -> Result<(), ConfigurationFailure> {
+        if self
+            .store
+            .lock()
+            .await
+            .complete_configuration(id, &configuration, chrono::Utc::now().timestamp_millis())
+            .await
+            .is_err()
+        {
+            let _ = self
+                .store
+                .lock()
+                .await
+                .record_configuration_progress(
+                    id,
+                    &configuration,
+                    automation_storage::ConfigurationProgress::ReceiptUncertain,
+                )
+                .await;
+            return Err(ConfigurationFailure { kind: ConfigurationFailureKind::OutcomeUnknown,
+                message: "Settings file was replaced, but its receipt was not confirmed. Inspect or reconcile the same operation ID.".into(),
+                operation_id: Some(id.clone()), file_state: ConfigurationFileState::Replaced, next_action: ConfigurationNextAction::InspectOperation });
+        }
+        Ok(())
     }
 }
 impl AutomationConfigurationBackend for AutomationSettingsFile {
@@ -216,4 +278,12 @@ fn write_document(path: &Path, document: &SettingsDocument) -> io::Result<()> {
         let _cleanup = std::fs::remove_file(&temporary);
     }
     result
+}
+fn sync_document(path: &Path) -> io::Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    std::fs::File::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("settings parent missing"))?,
+    )?
+    .sync_all()
 }

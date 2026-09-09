@@ -263,6 +263,23 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request) if request.method == "operation/show" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::operation_inspection_dispatch::dispatch(
+                            crate::operation_inspection_dispatch::OperationRequest {
+                                id: json!(id),
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method == "schedule/prepare" => {
                     let identity = identity.clone();
                     pending.spawn(async move {

@@ -28,9 +28,10 @@ async fn sdk_lists_local_collections_and_rejects_cross_collection_cursor()
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let task = tokio::spawn(serve_control_connection(server, identity));
     let mut client = ControlClient::initialize(socket, "collection-test", "1").await?;
+    let first_operation_id = OperationId::generate();
     let first = client
         .create_instruction(InstructionCreateParams {
-            operation_id: OperationId::generate(),
+            operation_id: first_operation_id.clone(),
             text: InstructionText::try_from("First task".to_owned())?,
         })
         .await?;
@@ -114,6 +115,23 @@ async fn sdk_lists_local_collections_and_rejects_cross_collection_cursor()
         .await?;
     if !continued.records.is_empty() {
         return Err("event cursor replayed consumed records".into());
+    }
+    let operation = client
+        .read_operation(communication_protocol::OperationShowRequest {
+            operation_id: first_operation_id,
+        })
+        .await?;
+    if !matches!(
+        operation.state,
+        communication_protocol::OperationState::Succeeded {
+            outcome: communication_protocol::OperationSuccess::Instruction {
+                method: communication_protocol::InstructionOperation::Create,
+                ..
+            }
+        }
+    ) || operation.resource_id != first.instruction_id.as_str()
+    {
+        return Err("operation inspection lost method-specific success evidence".into());
     }
     let rejected = client
         .list_schedules(AutomationPageRequest {
