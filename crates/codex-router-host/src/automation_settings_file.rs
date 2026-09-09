@@ -14,6 +14,9 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
+#[cfg(test)]
+#[path = "automation_settings_crash_tests.rs"]
+mod crash_tests;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SettingsDocument {
@@ -172,10 +175,14 @@ impl AutomationSettingsFile {
             }
             Err(_) => return Err(unavailable(Some(request.operation_id))),
         }
+        #[cfg(test)]
+        crash_tests::checkpoint("receipt-admitted");
         self.replace_file(&request.operation_id, configuration)
             .await?;
         self.finish_receipt(&request.operation_id, configuration)
             .await?;
+        #[cfg(test)]
+        crash_tests::checkpoint("receipt-committed");
         self.handle.publish(configuration).await;
         Ok(configuration)
     }
@@ -308,8 +315,14 @@ fn write_document(path: &Path, document: &SettingsDocument) -> io::Result<()> {
         file.write_all(&serde_json::to_vec(document).map_err(io::Error::other)?)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        #[cfg(test)]
+        crash_tests::checkpoint("temporary-synced");
         std::fs::rename(&temporary, path)?;
+        #[cfg(test)]
+        crash_tests::checkpoint("file-renamed");
         std::fs::File::open(parent)?.sync_all()?;
+        #[cfg(test)]
+        crash_tests::checkpoint("directory-synced");
         Ok(())
     })();
     if result.is_err() {
