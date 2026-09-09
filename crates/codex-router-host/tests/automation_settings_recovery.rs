@@ -68,7 +68,9 @@ async fn settings_recovery_reconciles_file_and_receipt_without_rolling_back_repl
     let path = root.join("automation-settings.json");
     std::fs::write(
         &path,
-        serde_json::to_vec(&json!({"operationId":third_id,"configuration":third}))?,
+        serde_json::to_vec(&json!({"formatVersion":1,"operationId":third_id,
+            "executionTimeoutSeconds":third.execution_timeout_seconds,
+            "summaryTimeoutSeconds":third.summary_timeout_seconds}))?,
     )?;
     let inode = std::fs::metadata(&path)?.ino();
     backend
@@ -92,6 +94,12 @@ async fn settings_recovery_reconciles_file_and_receipt_without_rolling_back_repl
         .map_err(|error| format!("old replay: {error:?}"))?;
     if replay != first || handle.current().await != Some(third) {
         return Err("old command replay rolled back current settings".into());
+    }
+    let mut invalid: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    invalid["formatVersion"] = json!(2);
+    std::fs::write(&path, serde_json::to_vec(&invalid)?)?;
+    if backend.recover().await.is_ok() || handle.current().await.is_some() {
+        return Err("unknown settings version admitted automation".into());
     }
     drop(backend);
     drop(store);

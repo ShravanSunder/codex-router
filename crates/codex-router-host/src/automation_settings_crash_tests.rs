@@ -86,7 +86,7 @@ async fn settings_recover_after_each_interrupted_persistence_boundary() -> TestR
         let document: SettingsDocument = serde_json::from_slice(&installed)?;
         let after = store.lock().await.read_operation(&operation).await?;
         if document.operation_id != operation
-            || document.configuration != request.configuration()
+            || document.configuration() != request.configuration()
             || handle.current().await != Some(request.configuration())
             || !matches!(after.state, StoredOperationState::Succeeded { .. })
         {

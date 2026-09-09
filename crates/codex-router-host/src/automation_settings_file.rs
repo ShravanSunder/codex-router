@@ -20,8 +20,18 @@ mod crash_tests;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SettingsDocument {
+    format_version: u8,
     operation_id: OperationId,
-    configuration: AutomationConfiguration,
+    execution_timeout_seconds: communication_protocol::PositiveSeconds,
+    summary_timeout_seconds: communication_protocol::PositiveSeconds,
+}
+impl SettingsDocument {
+    fn configuration(&self) -> AutomationConfiguration {
+        AutomationConfiguration {
+            execution_timeout_seconds: self.execution_timeout_seconds,
+            summary_timeout_seconds: self.summary_timeout_seconds,
+        }
+    }
 }
 pub struct AutomationSettingsFile {
     path: PathBuf,
@@ -99,13 +109,13 @@ impl AutomationSettingsFile {
         if let Some(pending) = pending {
             let matches_pending = file.as_ref().is_some_and(|file| {
                 file.operation_id == pending.operation_id
-                    && file.configuration == pending.configuration
+                    && file.configuration() == pending.configuration
             });
             let matches_previous = match (&file, &latest) {
                 (None, None) => true,
                 (Some(file), Some(latest)) => {
                     file.operation_id == latest.operation_id
-                        && file.configuration == latest.configuration
+                        && file.configuration() == latest.configuration
                 }
                 _ => false,
             };
@@ -132,9 +142,9 @@ impl AutomationSettingsFile {
             }
             (Some(file), Some(latest))
                 if file.operation_id == latest.operation_id
-                    && file.configuration == latest.configuration =>
+                    && file.configuration() == latest.configuration =>
             {
-                self.handle.publish(file.configuration).await
+                self.handle.publish(file.configuration()).await
             }
             _ => return Err(unavailable(None)),
         }
@@ -208,8 +218,10 @@ impl AutomationSettingsFile {
         if let Err(error) = write_document(
             &self.path,
             &SettingsDocument {
+                format_version: 1,
                 operation_id: id.clone(),
-                configuration,
+                execution_timeout_seconds: configuration.execution_timeout_seconds,
+                summary_timeout_seconds: configuration.summary_timeout_seconds,
             },
         ) {
             let _ = self
@@ -293,9 +305,14 @@ fn read_document(path: &Path) -> io::Result<Option<SettingsDocument>> {
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 8192 {
         return Err(io::Error::other("invalid automation settings file"));
     }
-    serde_json::from_slice(&std::fs::read(path)?)
-        .map(Some)
-        .map_err(io::Error::other)
+    let document: SettingsDocument =
+        serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)?;
+    if document.format_version != 1 {
+        return Err(io::Error::other(
+            "unsupported automation settings formatVersion; expected 1",
+        ));
+    }
+    Ok(Some(document))
 }
 fn write_document(path: &Path, document: &SettingsDocument) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
