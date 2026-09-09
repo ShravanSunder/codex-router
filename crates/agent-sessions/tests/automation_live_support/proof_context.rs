@@ -1,4 +1,6 @@
 //! Explicit live-test admission and fresh-thread helpers; fixture tests never call this module.
+#[path = "native_notification_diagnostics.rs"]
+mod native_notification_diagnostics;
 use codex_native_integration::{
     NativeOperation, NativePayloadSchemas, NativeProtocolConnection, NativeSchemaExport,
 };
@@ -156,6 +158,12 @@ impl ProofContext {
     }
     pub async fn turns(&mut self, target: &SessionRef) -> ProofResult<Vec<Value>> {
         while let Some(message) = self.native.take_buffered_message() {
+            if let Some(diagnostic) = native_notification_diagnostics::for_target(
+                &message,
+                &String::from(target.session_id.clone()),
+            ) {
+                self.record("nativeErrorNotification", diagnostic)?;
+            }
             if message.get("id").is_some() && message.get("method").is_some() {
                 self.record(
                     "unexpectedNativeRequest",
