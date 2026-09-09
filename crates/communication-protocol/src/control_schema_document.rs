@@ -29,6 +29,9 @@ pub fn control_schema_document(
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
     assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/show", &[])?;
+    assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/reconcile", &[])?;
+    assembly.add_method::<DeliveryShowRequest, DeliveryInspection>("delivery/reconcile", &[])?;
+    assembly.add_method::<RunShowRequest, RunSnapshot>("run/reconcile", &[])?;
     assembly
         .add_method::<AutomationEventsRequest, AutomationEventsPage>("automation/events", &[])?;
     assembly.add_method::<DeliveryAttemptsRequest, AttemptHistoryPage<AttemptInspection>>(
@@ -335,6 +338,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
             | "delivery/attempts"
             | "run/summaries"
             | "operation/show"
+            | "operation/reconcile"
+            | "delivery/reconcile"
+            | "run/reconcile"
     ) {
         data = vec![reference("automation-inspection-failure")];
     }

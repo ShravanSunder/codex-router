@@ -2,8 +2,8 @@
 use crate::NativeControlBackend;
 use agent_automation::{ExecutionDestination, PreparationEffect, RunId, RunPhase};
 use automation_storage::{
-    AutomationStore, RunCompletion, RunPreparationIntent, RunPreparedTarget, RunUncertainty,
-    StorageError, ThreadBindingClaim,
+    AutomationStore, RunPreparationIntent, RunPreparedTarget, RunUncertainty, StorageError,
+    ThreadBindingClaim,
 };
 use communication_protocol::{
     CodexGeneration, DestinationPreparation, EndpointRef, NativeSendReceipt, SessionRef,
@@ -36,6 +36,7 @@ impl ScheduledRunWorker {
                 return Ok(());
             };
             return crate::summary_native_worker::step(crate::summary_native_worker::SummaryStep {
+                work: crate::summary_native_worker::SummaryWork::Advance,
                 store: &self.store,
                 admission: &admission,
                 record,
@@ -53,6 +54,7 @@ impl ScheduledRunWorker {
                 .ok_or(StorageError::InvalidRecord)?
                 .effective_timeout_seconds;
             return crate::summary_native_worker::step(crate::summary_native_worker::SummaryStep {
+                work: crate::summary_native_worker::SummaryWork::Advance,
                 store: &self.store,
                 admission: &admission,
                 record,
@@ -69,6 +71,12 @@ impl ScheduledRunWorker {
             else {
                 return Ok(());
             };
+            if target.endpoint != backend.endpoint {
+                return Ok(());
+            }
+            if crate::run_reconciliation::observe_worker(&self.store, &admission, &record).await? {
+                return Ok(());
+            }
             if record.phase != RunPhase::Stopping
                 && record.evidence.timing.as_ref().is_some_and(|time| {
                     time.deadline_at_ms <= chrono::Utc::now().timestamp_millis()
@@ -92,31 +100,6 @@ impl ScheduledRunWorker {
                     let _response=connection.request_validated(&schemas,codex_native_integration::NativeOperation::InterruptTurn,serde_json::json!({"threadId":String::from(target.session_id.clone()),"turnId":turn_id})).await;
                 }
                 return Ok(());
-            }
-            let turn = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                crate::scheduled_native_observation::read_turn(&admission, target, turn_id),
-            )
-            .await;
-            let turn = match turn {
-                Ok(Ok(Some(turn))) => turn,
-                _ => return Ok(()),
-            };
-            let status = turn.get("status").and_then(serde_json::Value::as_str);
-            let outcome = match status {
-                Some("completed") => {
-                    Some(agent_automation::WorkerOutcome::Completed { explanation: None })
-                }
-                Some("failed") => Some(agent_automation::WorkerOutcome::Failed {
-                    explanation: Some("Native turn failed; inspect its recorded output.".into()),
-                }),
-                Some("interrupted") => Some(agent_automation::WorkerOutcome::Interrupted {
-                    explanation: Some("Native turn was interrupted.".into()),
-                }),
-                _ => None,
-            };
-            if let Some(outcome) = outcome {
-                self.store.lock().await.complete_run_turn::<SessionRef,EndpointRef,CodexGeneration,NativeSendReceipt>(RunCompletion{run_id:id,native_turn_id:turn_id.clone(),outcome,now_ms:chrono::Utc::now().timestamp_millis()}).await?;
             }
             return Ok(());
         }

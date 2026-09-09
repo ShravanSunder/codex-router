@@ -21,10 +21,28 @@ async fn timed_worker_retains_lost_native_response_without_replay()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     exercise_delivery(NativeOutcome::ResponseLost).await
 }
+#[tokio::test]
+async fn lost_queue_receipt_reconciles_exact_saved_input()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_delivery(NativeOutcome::ReconcileFound).await
+}
+#[tokio::test]
+async fn queue_absence_never_proves_non_submission()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_delivery(NativeOutcome::ReconcileAbsent).await
+}
+#[tokio::test]
+async fn matching_correlation_with_different_content_stays_uncertain()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_delivery(NativeOutcome::ReconcileMismatch).await
+}
 #[derive(Clone, Copy)]
 enum NativeOutcome {
     Accepted,
     ResponseLost,
+    ReconcileFound,
+    ReconcileAbsent,
+    ReconcileMismatch,
 }
 async fn exercise_delivery(
     outcome: NativeOutcome,
@@ -56,6 +74,7 @@ async fn exercise_delivery(
         "TurnSteer",
         "TurnInterrupt",
         "ThreadQueueAdd",
+        "ThreadQueueList",
     ] {
         definitions.insert(format!("{name}Params"), json!({"type":"object"}));
         definitions.insert(format!("{name}Response"), json!({"type":"object"}));
@@ -106,6 +125,7 @@ async fn exercise_delivery(
             .run(shutdown.clone()),
     );
     let backend_database = database.clone();
+    let (queue_sender, queue_receiver) = tokio::sync::oneshot::channel();
     let backend = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;
@@ -163,7 +183,69 @@ async fn exercise_delivery(
         if matches!(outcome, NativeOutcome::Accepted) {
             socket.send(Message::Text(json!({"id":queued.pointer("/id"),"result":{"queuedSubmission":{"id":"native-queue-receipt"}}}).to_string().into())).await?;
         }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(queued)
+        let _ = queue_sender.send(queued.clone());
+        drop(socket);
+        if matches!(
+            outcome,
+            NativeOutcome::ReconcileFound
+                | NativeOutcome::ReconcileAbsent
+                | NativeOutcome::ReconcileMismatch
+        ) {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = tokio_tungstenite::accept_async(stream).await?;
+            let init: Value = serde_json::from_str(
+                socket
+                    .next()
+                    .await
+                    .ok_or("missing reconcile init")??
+                    .to_text()?,
+            )?;
+            socket
+                .send(Message::Text(
+                    json!({"id":init.get("id"),"result":{}}).to_string().into(),
+                ))
+                .await?;
+            let _initialized = socket.next().await.ok_or("missing initialized")??;
+            let request: Value = serde_json::from_str(
+                socket
+                    .next()
+                    .await
+                    .ok_or("missing queue inspection")??
+                    .to_text()?,
+            )?;
+            if request.get("method").and_then(Value::as_str) != Some("thread/queue/list")
+                || request.pointer("/params/threadId") != queued.pointer("/params/threadId")
+            {
+                return Err(
+                    "reconciliation mutated native state or inspected another target".into(),
+                );
+            }
+            let mut item = json!({"id":"recovered-queue-id","input":queued.pointer("/params/input"),"clientUserMessageId":queued.pointer("/params/clientUserMessageId")});
+            if matches!(outcome, NativeOutcome::ReconcileMismatch) {
+                *item
+                    .pointer_mut("/input/0/text")
+                    .ok_or("fixture input text missing")? = json!("different message");
+            }
+            let data = if matches!(outcome, NativeOutcome::ReconcileAbsent) {
+                json!([])
+            } else {
+                json!([item])
+            };
+            socket
+                .send(Message::Text(
+                    json!({"id":request.get("id"),"result":{"data":data,"nextCursor":null}})
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            if let Some(Ok(message)) =
+                tokio::time::timeout(Duration::from_secs(2), socket.next()).await?
+                && !message.is_close()
+            {
+                return Err("reconciliation sent another native request after inspection".into());
+            }
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
     let mut connection = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new().filename(&database),
@@ -177,7 +259,7 @@ async fn exercise_delivery(
             if let Some(record)=record{return Ok::<_,sqlx::Error>(record);}
         }
     }).await??;
-    let request = tokio::time::timeout(Duration::from_secs(2), backend).await???;
+    let request = tokio::time::timeout(Duration::from_secs(2), queue_receiver).await??;
     match outcome {
         NativeOutcome::Accepted => {
             let receipt: Value = serde_json::from_str(&receipt.ok_or("missing accepted receipt")?)?;
@@ -192,7 +274,10 @@ async fn exercise_delivery(
                 return Err("actual receipt or correlation lost".into());
             }
         }
-        NativeOutcome::ResponseLost => {
+        NativeOutcome::ResponseLost
+        | NativeOutcome::ReconcileFound
+        | NativeOutcome::ReconcileAbsent
+        | NativeOutcome::ReconcileMismatch => {
             if status != "uncertain" || receipt.is_some() {
                 return Err("lost response fabricated acceptance".into());
             }
@@ -207,6 +292,52 @@ async fn exercise_delivery(
             }
         }
     }
+    if matches!(
+        outcome,
+        NativeOutcome::ReconcileFound
+            | NativeOutcome::ReconcileAbsent
+            | NativeOutcome::ReconcileMismatch
+    ) {
+        let (socket, server) = tokio::net::UnixStream::pair()?;
+        let service = tokio::spawn(communication_service::serve_control_connection(
+            server, identity,
+        ));
+        let mut client =
+            communication_client::ControlClient::initialize(socket, "reconcile-fixture", "1")
+                .await?;
+        let delivery_id = request
+            .pointer("/params/clientUserMessageId")
+            .and_then(Value::as_str)
+            .ok_or("correlation missing")?
+            .to_owned()
+            .try_into()?;
+        let result = client
+            .reconcile_delivery(communication_protocol::DeliveryShowRequest { delivery_id })
+            .await?;
+        if matches!(outcome, NativeOutcome::ReconcileFound) {
+            let communication_protocol::DeliveryEvidence::Accepted { receipt, .. } =
+                result.evidence
+            else {
+                return Err("matching queue evidence did not reconcile acceptance".into());
+            };
+            let communication_protocol::NativeSendAcceptance::QueueAccepted { submission_id } =
+                receipt.acceptance
+            else {
+                return Err("reconciliation changed queue semantics".into());
+            };
+            if String::from(submission_id) != "recovered-queue-id" {
+                return Err("reconciliation fabricated a queue identity".into());
+            }
+        } else if !matches!(
+            result.evidence,
+            communication_protocol::DeliveryEvidence::OutcomeUnknown { .. }
+        ) {
+            return Err("absence or content mismatch was treated as a definite outcome".into());
+        }
+        client.close().await?;
+        service.await??;
+    }
+    tokio::time::timeout(Duration::from_secs(2), backend).await???;
     shutdown.cancel();
     worker.await?;
     connection.close().await?;

@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 pub(crate) struct OperationRequest<'a> {
+    pub reconcile: bool,
+    pub configuration_backend: Option<&'a Arc<dyn crate::AutomationConfigurationBackend>>,
     pub id: Value,
     pub params: Value,
     pub service_id: &'a UuidIdentity,
@@ -27,7 +29,7 @@ pub(crate) async fn dispatch(request: OperationRequest<'_>) -> Value {
             );
         }
     };
-    let record = match store
+    let mut record = match store
         .lock()
         .await
         .read_operation(&params.operation_id)
@@ -40,10 +42,42 @@ pub(crate) async fn dispatch(request: OperationRequest<'_>) -> Value {
             return failure::response(request.id, error);
         }
     };
-    let snapshot = match crate::operation_receipt_projection::snapshot(record, request.service_id) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return failure::response(request.id, failure::storage(error)),
-    };
+    let mut explanation = None;
+    if request.reconcile
+        && record.method == "automation/configure"
+        && !matches!(
+            record.state,
+            automation_storage::StoredOperationState::Succeeded { .. }
+                | automation_storage::StoredOperationState::Failed { .. }
+        )
+    {
+        if let Some(backend) = request.configuration_backend {
+            if let Err(error) = backend.reconcile(params.operation_id.clone()).await {
+                explanation = Some(error.message);
+            }
+            record = match store
+                .lock()
+                .await
+                .read_operation(&params.operation_id)
+                .await
+            {
+                Ok(record) => record,
+                Err(error) => return failure::response(request.id, failure::storage(error)),
+            };
+        } else {
+            explanation = Some("The Host configuration backend is unavailable. Reconnect to the owning Host and reconcile this operation ID; no native work was resubmitted.".into());
+        }
+    }
+    let mut snapshot =
+        match crate::operation_receipt_projection::snapshot(record, request.service_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return failure::response(request.id, failure::storage(error)),
+        };
+    if let (Some(message), communication_protocol::OperationState::Uncertain { explanation, .. }) =
+        (explanation, &mut snapshot.state)
+    {
+        *explanation = message;
+    }
     let response = json!({"jsonrpc":"2.0","id":request.id,"result":snapshot});
     match serde_json::to_vec(&response) {
         Ok(bytes) if bytes.len() <= communication_protocol::MAX_CONTROL_FRAME_BYTES => response,

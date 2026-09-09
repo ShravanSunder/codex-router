@@ -263,12 +263,47 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
-                Ok(request) if request.method == "operation/show" => {
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "delivery/reconcile" | "run/reconcile"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = if request.method == "delivery/reconcile" {
+                            crate::automation_reconciliation_dispatch::delivery(
+                                json!(id),
+                                request.params,
+                                &identity,
+                            )
+                            .await
+                        } else {
+                            crate::automation_reconciliation_dispatch::run(
+                                json!(id),
+                                request.params,
+                                &identity,
+                            )
+                            .await
+                        };
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "operation/show" | "operation/reconcile"
+                    ) =>
+                {
                     let identity = identity.clone();
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::operation_inspection_dispatch::dispatch(
                             crate::operation_inspection_dispatch::OperationRequest {
+                                reconcile: request.method == "operation/reconcile",
+                                configuration_backend: identity.configuration_backend.as_ref(),
                                 id: json!(id),
                                 params: request.params,
                                 service_id: &identity.service_id,

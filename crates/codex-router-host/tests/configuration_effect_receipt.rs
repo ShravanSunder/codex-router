@@ -44,7 +44,7 @@ async fn settings_write_failure_retains_uncertainty_and_recovers_same_request()
     }
     std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
     backend
-        .recover()
+        .reconcile(request.operation_id.clone())
         .await
         .map_err(|error| format!("configuration fixture recovery failed: {:?}", error.kind))?;
     let record = store
@@ -56,6 +56,25 @@ async fn settings_write_failure_retains_uncertainty_and_recovers_same_request()
         || handle.current().await != Some(request.configuration())
     {
         return Err("configuration recovery lost the original operation or intended values".into());
+    }
+    let newer = AutomationConfigureRequest {
+        operation_id: OperationId::generate(),
+        execution_timeout_seconds: 240.try_into()?,
+        summary_timeout_seconds: 180.try_into()?,
+    };
+    backend
+        .configure(newer.clone())
+        .await
+        .map_err(|error| format!("newer configuration failed: {:?}", error.kind))?;
+    let installed = std::fs::read(directory.join("automation-settings.json"))?;
+    backend
+        .reconcile(request.operation_id.clone())
+        .await
+        .map_err(|error| format!("completed reconciliation failed: {:?}", error.kind))?;
+    if handle.current().await != Some(newer.configuration())
+        || std::fs::read(directory.join("automation-settings.json"))? != installed
+    {
+        return Err("reconciling old operation rolled back newer configuration".into());
     }
     drop(backend);
     drop(store);

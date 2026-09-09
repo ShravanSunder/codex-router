@@ -88,6 +88,29 @@ async fn cli_configures_and_inspects_future_attempt_budgets()
     {
         return Err("operation CLI omitted the original configuration receipt".into());
     }
+    let reconciled = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "operation",
+            "reconcile",
+            "--operation-id",
+            operation_id,
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !reconciled.status.success() {
+        return Err(format!(
+            "operation reconcile failed: {}",
+            String::from_utf8_lossy(&reconciled.stderr)
+        )
+        .into());
+    }
+    let reconciled: Value = serde_json::from_slice(&reconciled.stdout)?;
+    if reconciled != receipt {
+        return Err("completed-operation reconciliation changed the original receipt".into());
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         std::fs::remove_file(entry?.path())?;

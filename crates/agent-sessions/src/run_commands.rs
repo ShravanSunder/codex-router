@@ -23,6 +23,11 @@ struct RunArguments {
 }
 #[derive(Subcommand)]
 enum RunCommand {
+    /// Observe exact worker/summary evidence without starting or interrupting work; uncertainty keeps ownership.
+    Reconcile {
+        #[arg(long)]
+        run_id: String,
+    },
     /// Inspect latest and retained prior summary attempts with explicit history coverage.
     Summaries(crate::automation_collection_commands::RunSummaryOptions),
     /// List current records using a service-scoped pagination cursor.
@@ -67,6 +72,15 @@ pub fn run_workflow_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let command = match args.command {
+        RunCommand::Reconcile { run_id } => {
+            return crate::automation_collection_commands::run_collection_command(
+                crate::automation_collection_commands::CollectionCommand::RunReconcile(run_id),
+                crate::automation_collection_commands::CollectionContext {
+                    service_directory: args.service_directory,
+                    json: args.json,
+                },
+            );
+        }
         RunCommand::Summaries(options) => {
             return crate::automation_collection_commands::run_collection_command(
                 crate::automation_collection_commands::CollectionCommand::RunSummaries(options),

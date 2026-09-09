@@ -17,6 +17,19 @@ pub struct DeliveryRecord<TTarget, TGeneration, TReceipt> {
     pub receipt: Option<TReceipt>,
 }
 impl AutomationStore {
+    /// Read the delivery's frozen content, never a subsequently changed wake definition.
+    pub async fn read_delivery_content<TContent: DeserializeOwned>(
+        &mut self,
+        id: &DeliveryId,
+    ) -> Result<TContent, StorageError> {
+        let text: String =
+            sqlx::query_scalar("SELECT message_json FROM mailbox_deliveries WHERE delivery_id=?")
+                .bind(id.as_str())
+                .fetch_optional(&mut self.connection)
+                .await?
+                .ok_or(StorageError::InvalidRecord)?;
+        serde_json::from_str(&text).map_err(|_| StorageError::InvalidRecord)
+    }
     pub async fn read_delivery<
         TTarget: DeserializeOwned,
         TGeneration: DeserializeOwned,

@@ -203,7 +203,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         .pointer("/result/records/0/deliveryId")
         .and_then(serde_json::Value::as_str)
         .ok_or("missing fired delivery")?;
-    for action in ["show", "attempts"] {
+    for action in ["show", "attempts", "reconcile"] {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
             .args([
                 "delivery",

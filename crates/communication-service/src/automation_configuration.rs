@@ -50,6 +50,11 @@ impl AutomationConfigurationHandle {
     }
 }
 pub trait AutomationConfigurationBackend: Send + Sync {
+    /// Recover only this configuration receipt; completed older operations never restore old settings.
+    fn reconcile(
+        &self,
+        operation_id: communication_protocol::OperationId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ConfigurationFailure>> + Send + '_>>;
     fn configure(
         &self,
         request: AutomationConfigureRequest,

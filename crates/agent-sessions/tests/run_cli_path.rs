@@ -164,6 +164,25 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
     {
         return Err("empty summary history omitted coverage or invented an attempt".into());
     }
+    let reconciled = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "run",
+            "reconcile",
+            "--run-id",
+            run.as_str(),
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    if !reconciled.status.success() {
+        return Err("run reconcile CLI failed".into());
+    }
+    let reconciled: Value = serde_json::from_slice(&reconciled.stdout)?;
+    if reconciled.get("result") != value.get("result") {
+        return Err("reconciling finished Run changed its original outcome".into());
+    }
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

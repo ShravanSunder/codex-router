@@ -14,13 +14,27 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 pub(crate) struct SummaryStep<'a> {
+    pub work: SummaryWork,
     pub store: &'a Arc<Mutex<AutomationStore>>,
     pub admission: &'a NativeAdmission,
     pub record: RunRecord<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>,
     pub timeout_seconds: u32,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SummaryWork {
+    Advance,
+    ObserveOnly,
+}
 pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
     let id = input.record.run_id.clone();
+    if input.work == SummaryWork::ObserveOnly
+        && !matches!(
+            input.record.phase,
+            RunPhase::SummaryRunning | RunPhase::SummaryBlocked
+        )
+    {
+        return Ok(());
+    }
     if input.record.phase == RunPhase::SummaryRequired {
         input
             .store
@@ -55,11 +69,18 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
         let (Some(target), Some(turn_id)) = (&attempt.target, &attempt.native_turn_id) else {
             return Ok(());
         };
-        let observed =
-            crate::scheduled_native_observation::read_turn(input.admission, target, turn_id).await;
-        let Ok(Some(turn)) = observed else {
+        let retired = input.admission.retirement();
+        let observed = tokio::select! {
+            biased;
+            _ = retired.cancelled() => return Ok(()),
+            observed = tokio::time::timeout(std::time::Duration::from_secs(20), crate::scheduled_native_observation::read_turn(input.admission, target, turn_id)) => observed,
+        };
+        let Ok(Ok(Some(turn))) = observed else {
             return Ok(());
         };
+        if retired.is_cancelled() {
+            return Ok(());
+        }
         let status = turn.get("status").and_then(Value::as_str);
         if status == Some("completed") && attempt.phase != SummaryPhase::Stopping {
             let text = turn
@@ -103,6 +124,9 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
             attempt.effects.cessation = CessationEvidence::Confirmed;
             return block(input.store,id,attempt,false,"Summary failed or exceeded its time budget; worker outcome is preserved. Retry or explicitly skip after inspection.").await;
         }
+        if input.work == SummaryWork::ObserveOnly {
+            return Ok(());
+        }
         if attempt.deadline_at_ms <= chrono::Utc::now().timestamp_millis()
             && attempt.phase != SummaryPhase::Stopping
         {
@@ -123,6 +147,9 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
                 .await;
             }
         }
+        return Ok(());
+    }
+    if input.work == SummaryWork::ObserveOnly {
         return Ok(());
     }
     if attempt.deadline_at_ms <= chrono::Utc::now().timestamp_millis() {

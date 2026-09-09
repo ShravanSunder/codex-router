@@ -14,14 +14,57 @@ pub enum AutomationInspectionClientError {
     Connection(#[from] ClientError),
 }
 impl ControlClient {
+    /// Observe the exact recorded worker/summary turn without starting or interrupting native work.
+    pub async fn reconcile_run(
+        &mut self,
+        request: communication_protocol::RunShowRequest,
+    ) -> Result<RunSnapshot, AutomationInspectionClientError> {
+        let expected = request.run_id.clone();
+        let result: RunSnapshot = self
+            .automation_inspection_call("run/reconcile", request)
+            .await?;
+        if result.run_id != expected {
+            self.connection.retire();
+            return Err(ClientError::Protocol("Run reconciliation identity mismatch").into());
+        }
+        Ok(result)
+    }
+    /// Observe an uncertain delivery without resending input. Absence remains uncertain.
+    pub async fn reconcile_delivery(
+        &mut self,
+        request: communication_protocol::DeliveryShowRequest,
+    ) -> Result<DeliveryInspection, AutomationInspectionClientError> {
+        let expected = request.delivery_id.clone();
+        let result: DeliveryInspection = self
+            .automation_inspection_call("delivery/reconcile", request)
+            .await?;
+        if result.delivery_id != expected {
+            self.connection.retire();
+            return Err(ClientError::Protocol("delivery reconciliation identity mismatch").into());
+        }
+        Ok(result)
+    }
     pub async fn read_operation(
         &mut self,
         request: communication_protocol::OperationShowRequest,
     ) -> Result<communication_protocol::OperationSnapshot, AutomationInspectionClientError> {
+        self.inspect_operation("operation/show", request).await
+    }
+    /// Reconcile original evidence without replaying native input or allocating a thread.
+    pub async fn reconcile_operation(
+        &mut self,
+        request: communication_protocol::OperationShowRequest,
+    ) -> Result<communication_protocol::OperationSnapshot, AutomationInspectionClientError> {
+        self.inspect_operation("operation/reconcile", request).await
+    }
+    async fn inspect_operation(
+        &mut self,
+        method: &str,
+        request: communication_protocol::OperationShowRequest,
+    ) -> Result<communication_protocol::OperationSnapshot, AutomationInspectionClientError> {
         let expected = request.operation_id.clone();
-        let result: communication_protocol::OperationSnapshot = self
-            .automation_inspection_call("operation/show", request)
-            .await?;
+        let result: communication_protocol::OperationSnapshot =
+            self.automation_inspection_call(method, request).await?;
         if result.operation_id != expected || !result.has_consistent_outcome() {
             self.connection.retire();
             return Err(

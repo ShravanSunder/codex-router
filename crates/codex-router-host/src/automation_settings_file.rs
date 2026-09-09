@@ -27,6 +27,38 @@ pub struct AutomationSettingsFile {
     serial: Mutex<()>,
 }
 impl AutomationSettingsFile {
+    async fn reconcile_operation(&self, id: OperationId) -> Result<(), ConfigurationFailure> {
+        let _serial = self.serial.lock().await;
+        let record = self
+            .store
+            .lock()
+            .await
+            .read_operation(&id)
+            .await
+            .map_err(|_| unavailable(Some(id.clone())))?;
+        if record.method != "automation/configure" {
+            return Err(unavailable(Some(id)));
+        }
+        if matches!(
+            record.state,
+            automation_storage::StoredOperationState::Succeeded { .. }
+                | automation_storage::StoredOperationState::Failed { .. }
+        ) {
+            return Ok(());
+        }
+        let pending = self
+            .store
+            .lock()
+            .await
+            .pending_configuration::<AutomationConfiguration>()
+            .await
+            .map_err(|_| unavailable(Some(id.clone())))?;
+        if pending.is_none_or(|pending| pending.operation_id != id) {
+            return Err(unavailable(Some(id)));
+        }
+        self.handle.suspend().await;
+        self.recover_locked().await
+    }
     pub fn new(
         directory: &Path,
         store: Arc<Mutex<AutomationStore>>,
@@ -227,6 +259,12 @@ impl AutomationSettingsFile {
     }
 }
 impl AutomationConfigurationBackend for AutomationSettingsFile {
+    fn reconcile(
+        &self,
+        operation_id: OperationId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ConfigurationFailure>> + Send + '_>> {
+        Box::pin(self.reconcile_operation(operation_id))
+    }
     fn configure(
         &self,
         request: AutomationConfigureRequest,

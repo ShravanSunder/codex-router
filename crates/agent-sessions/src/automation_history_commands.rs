@@ -18,6 +18,11 @@ struct DeliveryArguments {
 }
 #[derive(Subcommand)]
 enum DeliveryCommand {
+    /// Recover positive native acceptance evidence without resending input; absence stays uncertain.
+    Reconcile {
+        #[arg(long)]
+        delivery_id: String,
+    },
     /// Inspect attempts without replaying input; older evidence may have expired.
     Attempts(crate::automation_collection_commands::DeliveryAttemptOptions),
     /// List durable obligations, optionally restricted to an exact wake-up.
@@ -38,6 +43,9 @@ pub fn run_delivery_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let command = match args.command {
+        DeliveryCommand::Reconcile { delivery_id } => {
+            CollectionCommand::DeliveryReconcile(delivery_id)
+        }
         DeliveryCommand::Attempts(options) => CollectionCommand::DeliveryAttempts(options),
         DeliveryCommand::List(options) => CollectionCommand::Deliveries(options),
         DeliveryCommand::Show { delivery_id } => CollectionCommand::DeliveryShow(delivery_id),
@@ -99,6 +107,11 @@ struct OperationArguments {
 }
 #[derive(Subcommand)]
 enum OperationCommand {
+    /// Recover the original command receipt without resending native work. Unresolved effects remain uncertain.
+    Reconcile {
+        #[arg(long)]
+        operation_id: String,
+    },
     /// Inspect an original durable command receipt; success does not imply its worker task completed.
     Show {
         #[arg(long)]
@@ -114,9 +127,14 @@ pub fn run_operation_command(arguments: Vec<OsString>) -> i32 {
             return code;
         }
     };
-    let OperationCommand::Show { operation_id } = args.command;
+    let command = match args.command {
+        OperationCommand::Show { operation_id } => CollectionCommand::OperationShow(operation_id),
+        OperationCommand::Reconcile { operation_id } => {
+            CollectionCommand::OperationReconcile(operation_id)
+        }
+    };
     run_collection_command(
-        CollectionCommand::OperationShow(operation_id),
+        command,
         CollectionContext {
             service_directory: args.service_directory,
             json: args.json,

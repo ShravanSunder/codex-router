@@ -15,10 +15,16 @@ pub enum NativeOperation {
     SteerTurn,
     InterruptTurn,
     QueueAdd,
+    QueueList,
 }
 impl NativeOperation {
     pub(crate) fn contract(self) -> (&'static str, &'static str, &'static str) {
         match self {
+            Self::QueueList => (
+                "thread/queue/list",
+                "ThreadQueueListParams",
+                "ThreadQueueListResponse",
+            ),
             Self::QueueAdd => (
                 "thread/queue/add",
                 "ThreadQueueAddParams",
@@ -59,7 +65,11 @@ impl NativeOperation {
     pub(crate) fn has_effects(self) -> bool {
         !matches!(
             self,
-            Self::ReadThread | Self::ListLoadedThreads | Self::ListTurns | Self::ListItems
+            Self::ReadThread
+                | Self::ListLoadedThreads
+                | Self::ListTurns
+                | Self::ListItems
+                | Self::QueueList
         )
     }
 }
@@ -93,6 +103,7 @@ impl NativePayloadSchemas {
         }
         for operation in [
             NativeOperation::QueueAdd,
+            NativeOperation::QueueList,
             NativeOperation::ForkThread,
             NativeOperation::ListTurns,
             NativeOperation::ListItems,

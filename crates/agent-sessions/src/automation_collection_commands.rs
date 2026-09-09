@@ -75,6 +75,9 @@ pub(crate) struct DeliveryListOptions {
     pub page: PageOptions,
 }
 pub(crate) enum CollectionCommand {
+    RunReconcile(String),
+    DeliveryReconcile(String),
+    OperationReconcile(String),
     OperationShow(String),
     RunSummaries(RunSummaryOptions),
     DeliveryAttempts(DeliveryAttemptOptions),
@@ -91,6 +94,9 @@ pub(crate) struct CollectionContext {
     pub json: bool,
 }
 enum PreparedCollection {
+    RunReconcile(communication_protocol::RunShowRequest),
+    DeliveryReconcile(DeliveryShowRequest),
+    OperationReconcile(communication_protocol::OperationShowRequest),
     OperationShow(communication_protocol::OperationShowRequest),
     RunSummaries(communication_protocol::RunSummariesRequest),
     DeliveryAttempts(communication_protocol::DeliveryAttemptsRequest),
@@ -177,6 +183,15 @@ pub(crate) fn run_collection_command(
         )
         .await?;
         let result = match request {
+            PreparedCollection::RunReconcile(request) => {
+                read_value(client.reconcile_run(request)).await
+            }
+            PreparedCollection::DeliveryReconcile(request) => {
+                read_value(client.reconcile_delivery(request)).await
+            }
+            PreparedCollection::OperationReconcile(request) => {
+                read_value(client.reconcile_operation(request)).await
+            }
             PreparedCollection::OperationShow(request) => {
                 read_value(client.read_operation(request)).await
             }
@@ -245,6 +260,23 @@ async fn read_value<TResult: serde::Serialize, TError: Into<ReadCommandError>>(
 }
 fn prepare(command: CollectionCommand) -> Result<PreparedCollection, String> {
     match command {
+        CollectionCommand::RunReconcile(id) => Ok(PreparedCollection::RunReconcile(
+            communication_protocol::RunShowRequest {
+                run_id: id.try_into().map_err(|_| "--run-id requires UUIDv7")?,
+            },
+        )),
+        CollectionCommand::DeliveryReconcile(id) => {
+            Ok(PreparedCollection::DeliveryReconcile(DeliveryShowRequest {
+                delivery_id: id.try_into().map_err(|_| "--delivery-id requires UUIDv7")?,
+            }))
+        }
+        CollectionCommand::OperationReconcile(id) => Ok(PreparedCollection::OperationReconcile(
+            communication_protocol::OperationShowRequest {
+                operation_id: id
+                    .try_into()
+                    .map_err(|_| "--operation-id requires UUIDv7")?,
+            },
+        )),
         CollectionCommand::OperationShow(id) => Ok(PreparedCollection::OperationShow(
             communication_protocol::OperationShowRequest {
                 operation_id: id
