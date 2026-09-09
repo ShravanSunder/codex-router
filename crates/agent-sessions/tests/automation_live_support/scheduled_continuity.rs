@@ -127,7 +127,7 @@ pub async fn exercise() -> ProofResult<()> {
     Ok(())
 }
 
-async fn wait_for_finished_run(
+pub(super) async fn wait_for_finished_run(
     proof: &mut ProofContext,
     schedule_id: &ScheduleId,
     expected_count: usize,

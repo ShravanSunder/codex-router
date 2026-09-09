@@ -5,6 +5,8 @@ mod busy_thread_delivery;
 mod debug_backend_restart;
 #[path = "automation_live_support/durable_delivery_recovery.rs"]
 mod durable_delivery_recovery;
+#[path = "automation_live_support/native_fork_continuation.rs"]
+mod native_fork_continuation;
 #[path = "automation_live_support/proof_context.rs"]
 mod proof_context;
 #[path = "automation_live_support/scheduled_continuity.rs"]
@@ -19,6 +21,12 @@ use communication_protocol::{
 };
 use proof_context::{ProofContext, ProofResult, shell_quote};
 use serde_json::{Value, json};
+
+#[tokio::test]
+#[ignore = "requires an isolated debug Host and fresh Luna source/fork threads"]
+async fn scheduled_fork_preserves_source_context_without_reusing_source() -> ProofResult<()> {
+    native_fork_continuation::exercise().await
+}
 
 #[tokio::test]
 #[ignore = "requires an isolated debug Host; interrupts only its own Luna summary and opens a controlled delivery gate"]
