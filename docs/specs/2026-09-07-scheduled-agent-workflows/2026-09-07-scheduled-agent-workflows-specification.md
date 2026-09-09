@@ -41,6 +41,8 @@ A failed required summary MUST preserve the worker outcome and block fresh-threa
 
 Execution timeout MUST default to 3600 seconds, with configurable service default and optional schedule override. Waiting for admission MUST NOT consume the budget. Active work retains its effective timeout despite later edits. Expiry MUST request interruption without asserting cessation before confirmation. Luna summarization MUST use a separate configurable timeout defaulting to 900 seconds (15 minutes). The effective summary timeout is captured when a summary attempt begins; later configuration edits do not change that active attempt. Basis: S9, S15, S19, S38. Proof: V4.
 
+Timeout interruption is best-effort: send the recorded native thread/turn identity, then observe that execution for cessation. Native acknowledgment alone MUST NOT release occupancy. Native Codex may start a later turn between validating the requested identity and applying interruption; this system MUST NOT promise atomic exact-turn cancellation. An interrupt with an uncertain submission outcome MUST NOT be automatically resent. Recovery preserves stopping/unknown effects and observes the recorded execution; it does not grant a fresh execution budget or admit successor work before confirmed cessation. A known connection failure before submission may be retried, using the same recorded identity and original deadline.
+
 ## R5. Import and export
 
 Each schedule MUST support JSONL export/import preserving its UUID. Existing UUIDs MUST reject import unless --overwrite is supplied, even for identical contents. Overwrite MUST create a new local UUIDv7 change identity, preserving active executions and history within its specified retention window. Source revision is provenance.

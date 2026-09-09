@@ -138,12 +138,15 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
         {
             let target = target.clone();
             let turn_id = turn_id.clone();
+            // Connection failure precedes interrupt submission and remains retryable.
+            let Ok(mut connection) =
+                NativeProtocolConnection::connect(input.admission.backend_path()).await
+            else {
+                return Ok(());
+            };
             attempt.phase = SummaryPhase::Stopping;
             attempt.effects.cessation = CessationEvidence::Unconfirmed;
-            if persist(input.store, &id, &attempt).await?
-                && let Ok(mut connection) =
-                    NativeProtocolConnection::connect(input.admission.backend_path()).await
-            {
+            if persist(input.store, &id, &attempt).await? {
                 let _stop = validated_call(
                     input.admission,
                     &mut connection,

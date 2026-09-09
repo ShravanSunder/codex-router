@@ -8,6 +8,16 @@ type TestResult<TValue> = Result<TValue, Box<dyn std::error::Error + Send + Sync
 
 #[tokio::test]
 async fn expired_summary_requests_interrupt_when_history_is_rejected() -> TestResult<()> {
+    exercise_timeout_connection(false).await
+}
+
+#[tokio::test]
+async fn summary_connection_failure_preserves_timeout_retry_without_stopping_intent()
+-> TestResult<()> {
+    exercise_timeout_connection(true).await
+}
+
+async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
     let directory = std::path::PathBuf::from("/tmp").join(format!(
         "summary-deadline-{}",
         agent_automation::OperationId::generate().as_str()
@@ -124,7 +134,12 @@ async fn expired_summary_requests_interrupt_when_history_is_rejected() -> TestRe
     gate.activate(generation, socket_path, Some(schemas))?;
     let admission = gate.acquire()?;
     let server = tokio::spawn(async move {
-        for method in ["thread/read", "turn/interrupt"] {
+        let methods: &[&str] = if fail_connection {
+            &["thread/read"]
+        } else {
+            &["thread/read", "turn/interrupt"]
+        };
+        for &method in methods {
             let (socket, _) = listener.accept().await?;
             let mut socket = tokio_tungstenite::accept_async(socket).await?;
             let init: Value = serde_json::from_str(
@@ -155,6 +170,15 @@ async fn expired_summary_requests_interrupt_when_history_is_rejected() -> TestRe
                 }
                 json!({"id":request["id"],"result":{}})
             };
+            if fail_connection {
+                // Reject history and make the subsequent interrupt connection impossible.
+                std::fs::remove_file(
+                    listener
+                        .local_addr()?
+                        .as_pathname()
+                        .ok_or("socket path missing")?,
+                )?;
+            }
             socket
                 .send(Message::Text(response.to_string().into()))
                 .await?;
@@ -171,5 +195,27 @@ async fn expired_summary_requests_interrupt_when_history_is_rejected() -> TestRe
     })
     .await?;
     tokio::time::timeout(Duration::from_secs(2), server).await???;
+    let mut inspection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&path),
+    )
+    .await?;
+    let text: String =
+        sqlx::query_scalar("SELECT summary_attempt_json FROM workflow_runs WHERE run_id=?")
+            .bind(run_id.as_str())
+            .fetch_one(&mut inspection)
+            .await?;
+    let persisted: SummaryAttempt<SessionRef, CodexGeneration> = serde_json::from_str(&text)?;
+    let expected = if fail_connection {
+        SummaryPhase::Running
+    } else {
+        SummaryPhase::Stopping
+    };
+    if persisted.phase != expected || persisted.effects.cessation != CessationEvidence::Unconfirmed
+    {
+        return Err(
+            "timeout connection result changed stopping intent or invented cessation".into(),
+        );
+    }
+    inspection.close().await?;
     Ok(())
 }

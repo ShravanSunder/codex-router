@@ -79,7 +79,7 @@ pub(crate) async fn observe_worker(
     let outcome = match turn.get("status").and_then(serde_json::Value::as_str) {
         Some("completed") => WorkerOutcome::Completed { explanation: None },
         Some("failed") => WorkerOutcome::Failed { explanation: Some("Native turn failed; inspect its recorded output.".into()) },
-        Some("interrupted") => WorkerOutcome::Interrupted { explanation: Some(if record.phase == RunPhase::Stopping { "Native turn stopped after its execution deadline triggered an interruption request." } else { "Native turn was interrupted." }.into()) },
+        Some("interrupted") => WorkerOutcome::Interrupted { explanation: Some(if record.phase == RunPhase::Stopping { "Native history confirms the recorded turn is interrupted; timeout stopping intent was recorded, but attribution to that request is not confirmed." } else { "Native turn was interrupted." }.into()) },
         _ => return Ok(false),
     };
     store

@@ -82,6 +82,19 @@ impl ScheduledRunWorker {
                     time.deadline_at_ms <= chrono::Utc::now().timestamp_millis()
                 })
             {
+                // A failed connection cannot have submitted an interrupt. Keep the
+                // expired execution retryable until a native client is initialized.
+                let Some(schemas) = admission.schemas() else {
+                    return Ok(());
+                };
+                let Ok(mut connection) =
+                    codex_native_integration::NativeProtocolConnection::connect(
+                        admission.backend_path(),
+                    )
+                    .await
+                else {
+                    return Ok(());
+                };
                 if self
                     .store
                     .lock()
@@ -90,12 +103,6 @@ impl ScheduledRunWorker {
                         &id, turn_id,
                     )
                     .await?
-                    && let Some(schemas) = admission.schemas()
-                    && let Ok(mut connection) =
-                        codex_native_integration::NativeProtocolConnection::connect(
-                            admission.backend_path(),
-                        )
-                        .await
                 {
                     let _response=connection.request_validated(&schemas,codex_native_integration::NativeOperation::InterruptTurn,serde_json::json!({"threadId":String::from(target.session_id.clone()),"turnId":turn_id})).await;
                 }
