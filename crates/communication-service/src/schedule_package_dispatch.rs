@@ -58,6 +58,15 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                 );
             }
         };
+        // Request IDs allow 128 UTF-8 bytes; a control character needs six JSON bytes.
+        // Reserve a maximally escaped ID and the larger import envelope before exporting.
+        let import = json!({
+            "jsonrpc":"2.0", "id":"\u{0001}".repeat(128), "method":"schedule/import",
+            "params":{"operationId":"00000000-0000-7000-8000-000000000000","packageUtf8":encoded,"overwrite":false}
+        });
+        let import_bytes = serde_json::to_vec(&import)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
         let response = json!({"jsonrpc":"2.0","id":request.id,"result":ScheduleExportResult { package_utf8: encoded }});
         let bytes = match serde_json::to_vec(&response) {
             Ok(bytes) => bytes,
@@ -71,8 +80,9 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                 );
             }
         };
-        if bytes.len() > MAX_CONTROL_FRAME_BYTES {
-            return json!({"jsonrpc":"2.0","id":request.id,"error":{"code":-32050,"message":"Schedule package too large","data":communication_protocol::ScheduleFailure::package_frame_limit(None, bytes.len())}});
+        let required_bytes = bytes.len().max(import_bytes);
+        if required_bytes > MAX_CONTROL_FRAME_BYTES {
+            return json!({"jsonrpc":"2.0","id":request.id,"error":{"code":-32050,"message":"Schedule package too large","data":communication_protocol::ScheduleFailure::package_frame_limit(None, required_bytes)}});
         }
         return response;
     }
