@@ -28,10 +28,11 @@ pub(crate) async fn dispatch(request: InstructionRequest<'_>) -> Value {
         .get("instructionId")
         .cloned()
         .and_then(|v| serde_json::from_value::<InstructionId>(v).ok());
-    let context = FailureContext {
+    let mut context = FailureContext {
         operation_id,
         instruction_id,
         mutation: request.method != "instruction/show",
+        current_revision_id: None,
     };
     let Some(store) = request.store else {
         return failure(
@@ -130,12 +131,18 @@ pub(crate) async fn dispatch(request: InstructionRequest<'_>) -> Value {
             }
         },
         Err(error) => {
+            if let StorageError::RevisionConflict {
+                current_revision_id,
+            } = &error
+            {
+                context.current_revision_id = Some(current_revision_id.clone());
+            }
             let (kind, message) = match &error {
                 StorageError::OperationConflict => (
                     InstructionFailureKind::OperationConflict,
                     "Operation identity belongs to a different request; inspect that operation or choose a new identity for new work.",
                 ),
-                StorageError::RevisionConflict => (
+                StorageError::RevisionConflict { .. } => (
                     InstructionFailureKind::RevisionConflict,
                     "Instruction changed; read its current revision before editing.",
                 ),
@@ -174,6 +181,7 @@ struct FailureContext {
     operation_id: Option<OperationId>,
     instruction_id: Option<InstructionId>,
     mutation: bool,
+    current_revision_id: Option<communication_protocol::RevisionId>,
 }
 fn invalid(id: Value, context: FailureContext, message: &str) -> Value {
     failure(
@@ -215,6 +223,7 @@ fn failure(id: Value, context: FailureContext, reason: FailureReason<'_>) -> Val
         message: message.into(),
         operation_id: context.operation_id,
         instruction_id: context.instruction_id,
+        current_revision_id: context.current_revision_id,
         effects: LocalMutationEvidence::Local { mutation },
         next_action,
     };
@@ -227,6 +236,7 @@ pub(crate) fn overloaded(id: Value) -> Value {
             operation_id: None,
             instruction_id: None,
             mutation: false,
+            current_revision_id: None,
         },
         FailureReason {
             kind: InstructionFailureKind::Overloaded,

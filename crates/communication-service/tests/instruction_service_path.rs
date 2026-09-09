@@ -42,6 +42,31 @@ async fn real_control_client_creates_and_reads_durable_instruction()
     {
         return Err("instruction service path did not preserve content/identity".into());
     }
+    let update = communication_protocol::InstructionUpdateParams {
+        operation_id: OperationId::generate(),
+        instruction_id: first.instruction_id.clone(),
+        expected_revision_id: first.revision_id.clone(),
+        text: InstructionText::try_from("Updated instructions".to_owned())?,
+    };
+    let updated = client.update_instruction(update.clone()).await?;
+    let stale = communication_protocol::InstructionUpdateParams {
+        operation_id: OperationId::generate(),
+        ..update
+    };
+    let error = client
+        .update_instruction(stale)
+        .await
+        .err()
+        .ok_or("stale update accepted")?;
+    let communication_client::InstructionClientError::Rejected(failure) = error else {
+        return Err("stale update lacked typed conflict".into());
+    };
+    let encoded = serde_json::to_value(failure)?;
+    if encoded.get("currentRevisionId") != Some(&serde_json::to_value(updated.revision_id)?) {
+        return Err(
+            "revision conflict omitted the revision observed by the rejecting transaction".into(),
+        );
+    }
     client.close().await?;
     task.await??;
     drop(store);

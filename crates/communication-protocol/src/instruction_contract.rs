@@ -80,6 +80,8 @@ pub struct InstructionFailure {
     pub message: String,
     pub operation_id: Option<OperationId>,
     pub instruction_id: Option<InstructionId>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub current_revision_id: Option<RevisionId>,
     pub effects: LocalMutationEvidence,
     pub next_action: InstructionNextAction,
 }

@@ -34,7 +34,9 @@ pub enum StorageError {
     #[error("instruction was not found in this automation database")]
     InstructionNotFound,
     #[error("instruction changed; inspect the current revision before editing")]
-    RevisionConflict,
+    RevisionConflict {
+        current_revision_id: agent_automation::RevisionId,
+    },
     #[error("schedule was not found in this automation database")]
     ScheduleNotFound,
     #[error("schedule UUID already exists; pass --overwrite for an intentional replacement")]

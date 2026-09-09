@@ -41,7 +41,9 @@ impl AutomationStore {
         }
         let current = read_current(&mut transaction, &request.instruction_id).await?;
         if current.revision_id != request.expected_revision_id {
-            return Err(StorageError::RevisionConflict);
+            return Err(StorageError::RevisionConflict {
+                current_revision_id: current.revision_id,
+            });
         }
         let updated = InstructionDocument {
             instruction_id: current.instruction_id,
