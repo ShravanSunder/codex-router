@@ -93,9 +93,12 @@ pub async fn exercise() -> ProofResult<()> {
             definition: prepared.definition,
         })
         .await?;
-    let run =
-        super::scheduled_continuity::wait_for_finished_run(&mut proof, &schedule.schedule_id, 1)
-            .await?;
+    let run = super::scheduled_continuity::wait_for_finished_run(
+        &mut proof,
+        &schedule.schedule_id,
+        super::scheduled_continuity::CompletionExpectation::OwnedThread,
+    )
+    .await?;
     let RunState::Finished {
         execution,
         outcome: WorkerOutcome::Completed { .. },

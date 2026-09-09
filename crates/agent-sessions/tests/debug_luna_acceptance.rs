@@ -1,4 +1,6 @@
 //! Opt-in live proof. Run only against automation-debug-host, never production or an existing thread.
+#[path = "automation_live_support/automatic_summary_timeout.rs"]
+mod automatic_summary_timeout;
 #[path = "automation_live_support/busy_thread_delivery.rs"]
 mod busy_thread_delivery;
 #[path = "automation_live_support/debug_backend_restart.rs"]
@@ -21,6 +23,13 @@ use communication_protocol::{
 };
 use proof_context::{ProofContext, ProofResult, shell_quote};
 use serde_json::{Value, json};
+
+#[tokio::test]
+#[ignore = "requires isolated debug Host; only the service timer interrupts its fresh Luna summary"]
+async fn summary_timeout_is_requested_by_service_and_confirms_native_cessation() -> ProofResult<()>
+{
+    automatic_summary_timeout::exercise().await
+}
 
 #[tokio::test]
 #[ignore = "requires an isolated debug Host and fresh Luna source/fork threads"]

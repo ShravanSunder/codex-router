@@ -34,7 +34,12 @@ pub async fn exercise() -> ProofResult<()> {
         })
         .await?;
     proof.record("freshScheduleCreated", json!(schedule))?;
-    let first = wait_for_finished_run(&mut proof, &schedule.schedule_id, 1).await?;
+    let first = wait_for_finished_run(
+        &mut proof,
+        &schedule.schedule_id,
+        CompletionExpectation::WithSummary { run_count: 1 },
+    )
+    .await?;
     let summary = first
         .summary
         .as_ref()
@@ -80,7 +85,12 @@ pub async fn exercise() -> ProofResult<()> {
             definition: current.definition,
         })
         .await?;
-    let second = wait_for_finished_run(&mut proof, &schedule.schedule_id, 2).await?;
+    let second = wait_for_finished_run(
+        &mut proof,
+        &schedule.schedule_id,
+        CompletionExpectation::WithSummary { run_count: 2 },
+    )
+    .await?;
     let RunState::Finished {
         inputs,
         execution,
@@ -127,11 +137,21 @@ pub async fn exercise() -> ProofResult<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum CompletionExpectation {
+    WithSummary { run_count: usize },
+    OwnedThread,
+}
+
 pub(super) async fn wait_for_finished_run(
     proof: &mut ProofContext,
     schedule_id: &ScheduleId,
-    expected_count: usize,
+    expectation: CompletionExpectation,
 ) -> ProofResult<RunSnapshot> {
+    let expected_count = match expectation {
+        CompletionExpectation::WithSummary { run_count } => run_count,
+        CompletionExpectation::OwnedThread => 1,
+    };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let mut last_state = None;
@@ -163,6 +183,11 @@ pub(super) async fn wait_for_finished_run(
             }
             match &run.state {
                 RunState::SummaryRequired { .. } | RunState::SummaryRunning { .. } => {
+                    if matches!(expectation, CompletionExpectation::OwnedThread) {
+                        return Err(
+                            "Owned-thread continuation unexpectedly requested a summary".into()
+                        );
+                    }
                     let current = proof
                         .client
                         .read_schedule(ScheduleShowRequest {
@@ -188,10 +213,19 @@ pub(super) async fn wait_for_finished_run(
                     }
                 }
                 RunState::Finished { .. } => {
-                    if !saw_summary {
+                    if matches!(expectation, CompletionExpectation::WithSummary { .. })
+                        && !saw_summary
+                    {
                         return Err(
                             "Live proof never observed required summary retaining Run occupancy"
                                 .into(),
+                        );
+                    }
+                    if matches!(expectation, CompletionExpectation::OwnedThread)
+                        && run.summary.is_some()
+                    {
+                        return Err(
+                            "Owned-thread continuation unexpectedly produced a summary".into()
                         );
                     }
                     return Ok(run.clone());

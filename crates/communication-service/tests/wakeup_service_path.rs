@@ -142,15 +142,15 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
     let receipt: communication_protocol::NativeSendReceipt = serde_json::from_value(json!({
         "target":target,"generation":generation,"inputKind":"agent",
         "representation":"declaredAgentText","clientUserMessageId":claimed.attempt_id,
-        "resumeEffect":"notRequested","acceptance":{"kind":"nativeInputAccepted",
-        "operation":"turnStart","disposition":"startedOrSteered","turnId":"accepted-fixture-turn"}
+        "resumeEffect":"notRequested","acceptance":{"kind":"queueAccepted",
+        "submissionId":"accepted-fixture-submission"}
     }))?;
     let effects: agent_automation::NativeEffectEvidence<
         communication_protocol::SessionRef,
         communication_protocol::CodexGeneration,
     > = serde_json::from_value(json!({
         "target":target,"generation":generation,"clientUserMessageId":claimed.attempt_id,
-        "nativeTurnId":"accepted-fixture-turn","nativeSubmissionId":null,
+        "nativeTurnId":null,"nativeSubmissionId":"accepted-fixture-submission",
         "allocation":"notRequested","resume":"notRequested","submission":"accepted",
         "cessation":"notApplicable"
     }))?;
