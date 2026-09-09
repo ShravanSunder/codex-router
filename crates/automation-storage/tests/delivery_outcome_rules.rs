@@ -41,6 +41,101 @@ fn effects(submission: SubmissionEffect) -> NativeEffectEvidence<String, String>
         cessation: CessationEvidence::NotApplicable,
     }
 }
+
+#[tokio::test]
+async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "wake-cancellation-history-{}.sqlite",
+        OperationId::generate().as_str()
+    ));
+    let mut store = AutomationStore::open(&path).await?;
+    let wake = store
+        .create_wakeup(&WakeCreate {
+            operation_id: OperationId::generate(),
+            message: Message {
+                target: "B".into(),
+                text: "Check".into(),
+            },
+            timing: TimingRule::Interval { seconds: 60 },
+            expiry: ExpiryRule::None,
+            now_ms: 0,
+        })
+        .await?;
+    let mut deliveries = Vec::new();
+    // Two accepted occurrences followed by an unresolved third occurrence.
+    for occurrence in 1..=3 {
+        let now_ms = occurrence * 60000;
+        let id = match store
+            .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, now_ms)
+            .await?
+        {
+            WakeEvaluation::Fired { delivery_id, .. } => delivery_id,
+            _ => return Err("expected a new reminder occurrence".into()),
+        };
+        let claim = store
+            .claim_delivery::<String, String, String>(&id, now_ms)
+            .await?
+            .ok_or("expected dispatch claim")?;
+        let (submission, result) = if occurrence < 3 {
+            (
+                SubmissionEffect::Accepted,
+                DeliveryResult::Accepted {
+                    receipt: format!("receipt-{occurrence}"),
+                },
+            )
+        } else {
+            (
+                SubmissionEffect::Unknown,
+                DeliveryResult::Unknown {
+                    reason: "reply lost".into(),
+                },
+            )
+        };
+        store
+            .complete_delivery(DeliveryCompletion {
+                delivery_id: id.clone(),
+                attempt_id: claim.attempt_id,
+                effects: effects(submission),
+                result,
+                now_ms,
+            })
+            .await?;
+        deliveries.push(id);
+    }
+    store.close().await?;
+    let mut store = AutomationStore::open(&path).await?;
+    let request = automation_storage::WakeMutation {
+        operation_id: OperationId::generate(),
+        wakeup_id: wake.definition.wakeup_id,
+        action: automation_storage::WakeAction::Cancel,
+        now_ms: 181000,
+    };
+    let cancelled = store.mutate_wakeup::<Message>(&request).await?;
+    let retained: Vec<_> = cancelled
+        .retained
+        .iter()
+        .map(|record| record.delivery_id.clone())
+        .collect();
+    if retained != deliveries[1..] || !cancelled.discarded.is_empty() {
+        return Err(
+            "cancellation must retain latest accepted and unresolved deliveries only".into(),
+        );
+    }
+    let older = store
+        .read_delivery::<String, String, String>(&deliveries[0])
+        .await?;
+    if older.receipt.as_deref() != Some("receipt-1") {
+        return Err("bounded cancellation response deleted older acceptance evidence".into());
+    }
+    let replayed = store.mutate_wakeup::<Message>(&request).await?;
+    if serde_json::to_value(&cancelled)? != serde_json::to_value(replayed)? {
+        return Err("cancellation replay changed the transaction snapshot".into());
+    }
+    store.close().await?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
 #[tokio::test]
 async fn known_nonsubmission_retries_but_uncertainty_never_does()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -369,6 +464,23 @@ async fn pause_preserves_late_acceptance_and_unknown_effects()
             .await?;
         if accepted != record.pending_delivery_id.is_none() {
             return Err("pending identity does not reflect actual native evidence".into());
+        }
+        let cancellation = store
+            .mutate_wakeup::<Message>(&WakeMutation {
+                operation_id: OperationId::generate(),
+                wakeup_id: wake.definition.wakeup_id.clone(),
+                action: WakeAction::Cancel,
+                now_ms: 1000000,
+            })
+            .await?;
+        if cancellation.retained.len() != 1 {
+            return Err("cancellation omitted accepted or unresolved native delivery".into());
+        }
+        if cancellation.retained[0].delivery_id != id
+            || cancellation.retained[0].receipt
+                != accepted.then(|| serde_json::json!("native receipt"))
+        {
+            return Err("cancellation changed the retained delivery identity or receipt".into());
         }
         store.close().await?;
         std::fs::remove_file(path)?;

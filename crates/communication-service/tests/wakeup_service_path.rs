@@ -120,7 +120,7 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
     let claimed = store.lock().await.claim_delivery::<communication_protocol::SessionRef,communication_protocol::MessageContent,communication_protocol::CodexGeneration>(&delivery, chrono::Utc::now().timestamp_millis()).await?.ok_or("fixture claim missing")?;
     let attempts = client
         .read_delivery_attempts(communication_protocol::DeliveryAttemptsRequest {
-            delivery_id: delivery,
+            delivery_id: delivery.clone(),
             cursor: None,
             limit: 50.try_into()?,
         })
@@ -136,6 +136,55 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
         )
     {
         return Err("attempt inspection lost admitted submission evidence".into());
+    }
+    // A scripted native acceptance exercises receipt projection through the real SDK.
+    let generation = json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1});
+    let receipt: communication_protocol::NativeSendReceipt = serde_json::from_value(json!({
+        "target":target,"generation":generation,"inputKind":"agent",
+        "representation":"declaredAgentText","clientUserMessageId":claimed.attempt_id,
+        "resumeEffect":"notRequested","acceptance":{"kind":"nativeInputAccepted",
+        "operation":"turnStart","disposition":"startedOrSteered","turnId":"accepted-fixture-turn"}
+    }))?;
+    let effects: agent_automation::NativeEffectEvidence<
+        communication_protocol::SessionRef,
+        communication_protocol::CodexGeneration,
+    > = serde_json::from_value(json!({
+        "target":target,"generation":generation,"clientUserMessageId":claimed.attempt_id,
+        "nativeTurnId":"accepted-fixture-turn","nativeSubmissionId":null,
+        "allocation":"notRequested","resume":"notRequested","submission":"accepted",
+        "cessation":"notApplicable"
+    }))?;
+    store
+        .lock()
+        .await
+        .complete_delivery(automation_storage::DeliveryCompletion {
+            delivery_id: delivery.clone(),
+            attempt_id: claimed.attempt_id,
+            effects,
+            result: automation_storage::DeliveryResult::Accepted {
+                receipt: receipt.clone(),
+            },
+            now_ms: chrono::Utc::now().timestamp_millis(),
+        })
+        .await?;
+    let cancellation_request = communication_protocol::WakeMutationRequest {
+        operation_id: OperationId::generate(),
+        wakeup_id: immediate.definition.wakeup_id,
+    };
+    let cancelled = client.cancel_wakeup(cancellation_request.clone()).await?;
+    let [retained] = cancelled.dispatched_deliveries.as_slice() else {
+        return Err("SDK cancellation omitted previously accepted delivery".into());
+    };
+    if retained.delivery_id != delivery || cancelled.wakeup.pending_delivery_id.is_some() {
+        return Err("SDK cancellation lost cleared-pointer delivery identity".into());
+    }
+    let evidence = serde_json::to_value(&retained.evidence)?;
+    if evidence.get("receipt") != Some(&serde_json::to_value(receipt)?) {
+        return Err("SDK cancellation changed native acceptance receipt".into());
+    }
+    let replayed = client.cancel_wakeup(cancellation_request).await?;
+    if serde_json::to_value(&cancelled)? != serde_json::to_value(replayed)? {
+        return Err("SDK cancellation replay changed evidence".into());
     }
     let changed: WakeSendRequest = serde_json::from_value(
         json!({"operationId":OperationId::generate(),"message":current.definition.message,"timing":{"kind":"cron","expression":"* * * * *","timezone":"invalid-zone"},"expiry":{"kind":"none"}}),

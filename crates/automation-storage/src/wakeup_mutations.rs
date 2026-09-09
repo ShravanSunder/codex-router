@@ -2,9 +2,9 @@
 use crate::local_operation_receipts::{self, CompletedLocalOperation, LocalOperation};
 use crate::wakeup_evaluation::{WakeEvent, append_event, discard_undispatched};
 use crate::{AutomationStore, StorageError};
-use agent_automation::{DeliveryId, DeliveryStatus, OperationId, WakeRecord, WakeState, WakeupId};
+use agent_automation::{DeliveryId, OperationId, WakeRecord, WakeState, WakeupId};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sqlx::{Connection, Row};
+use sqlx::Connection;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,15 +132,25 @@ impl AutomationStore {
             discard_undispatched(&mut transaction, &request.wakeup_id).await?;
         }
         let mut retained = Vec::new();
-        if let Some(id) = &current.pending_delivery_id {
-            let row=sqlx::query("SELECT delivery_status,latest_attempt_json,accepted_receipt_json FROM mailbox_deliveries WHERE delivery_id=? AND wakeup_id=?").bind(id.as_str()).bind(request.wakeup_id.as_str()).fetch_one(&mut *transaction).await?;
-            let status: DeliveryStatus =
-                serde_json::from_value(serde_json::Value::String(row.try_get("delivery_status")?))
-                    .map_err(|_| StorageError::InvalidRecord)?;
-            if status.may_have_native_effect() {
-                retained
-                    .push(crate::delivery_inspection::read_current(&mut transaction, id).await?);
-            }
+        // Acceptance clears the pending pointer. Inspect delivery evidence itself,
+        // retaining unresolved effects and only the newest accepted occurrence.
+        let retained_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT delivery_id FROM mailbox_deliveries
+             WHERE wakeup_id=? AND (
+                 delivery_status IN ('dispatching','uncertain') OR delivery_id=(
+                     SELECT delivery_id FROM mailbox_deliveries
+                     WHERE wakeup_id=? AND delivery_status='accepted'
+                     ORDER BY fired_at_ms DESC, delivery_id DESC LIMIT 1
+                 )
+             ) ORDER BY fired_at_ms, delivery_id",
+        )
+        .bind(request.wakeup_id.as_str())
+        .bind(request.wakeup_id.as_str())
+        .fetch_all(&mut *transaction)
+        .await?;
+        for id in retained_ids {
+            let id = id.try_into().map_err(|_| StorageError::InvalidRecord)?;
+            retained.push(crate::delivery_inspection::read_current(&mut transaction, &id).await?);
         }
         if let Some(kind) = kind {
             let status = match state {

@@ -275,6 +275,8 @@ Thread bindings are immutable in schedule association and native address. Addres
 
 Wake firing commits first_fire_json when absent, the delivery row, pending pointer and timing watermark together. Later missed ticks coalesce while the pending delivery is unresolved. Pause/cancel/expiry commits removal of undispatched eligibility; an already admitted native submission remains inspectable. A single dispatch coordinator orders cancellation against beginning native calls without holding SQLite transactions over I/O. The persisted dispatch claim marks possible external effects conservatively on crash.
 
+Wake mutation receipts read delivery evidence by wake-up identity within that same transaction, independently of pending_delivery_id: acceptance clears the pointer but must remain visible. Select all dispatching/uncertain deliveries and the newest accepted occurrence ordered by fired_at_ms then delivery_id. Persist the resulting snapshot with the operation receipt so replay does not substitute later evidence. Older accepted delivery records remain unchanged and available through ordinary inspection. No additional table or history copy is needed.
+
 Latest delivery and summary attempt evidence is persisted on the owning row before the native effect. On replacement by another permitted attempt, the old evidence is appended to events in the same transaction. Only known temporary non-submission is retryable. Unknown effects are never silently resent or overwritten by a retry. Successful summary text/provenance remains on its run, independent of old attempt events.
 
 ## Command receipts and preparation recovery
