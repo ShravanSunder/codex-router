@@ -51,6 +51,7 @@ pub struct CapturedRunInputs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeExecution {
     pub target: SessionRef,
+    #[serde(rename = "nativeTurnId")]
     pub turn_id: String,
     pub started_at: ObservationTimestamp,
     pub deadline_at: ObservationTimestamp,
