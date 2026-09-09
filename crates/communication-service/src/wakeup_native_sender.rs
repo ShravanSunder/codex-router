@@ -14,6 +14,9 @@ use communication_protocol::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+#[cfg(test)]
+#[path = "native_delivery_crash_tests.rs"]
+mod crash_tests;
 
 #[derive(Clone)]
 pub(crate) struct WakeNativeSender {
@@ -71,6 +74,8 @@ impl WakeNativeSender {
             if !prepared {
                 return Ok(());
             }
+            #[cfg(test)]
+            crash_tests::checkpoint("intent-persisted");
             let endpoints = self
                 .endpoints
                 .subscribe()
@@ -112,6 +117,10 @@ impl WakeNativeSender {
         } else {
             DeliveryResult::KnownNotSubmitted{reason:"Native backend unavailable; no native call was dispatched. The same delivery will retry when eligible.".into(),retryable:true}
         };
+        #[cfg(test)]
+        if matches!(&result, DeliveryResult::Accepted { .. }) {
+            crash_tests::checkpoint("receipt-before-commit");
+        }
         store
             .lock()
             .await
