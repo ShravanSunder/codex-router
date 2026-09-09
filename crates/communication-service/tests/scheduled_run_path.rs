@@ -15,12 +15,17 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::test]
 async fn scheduled_fresh_thread_finishes_after_separate_luna_summary()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false, PreparationOutcome::Accepted).await
+    exercise_scheduled_run(false, PreparationOutcome::Accepted, false).await
 }
 #[tokio::test]
 async fn busy_target_waits_without_dispatch_budget_or_steer()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(true, PreparationOutcome::Accepted).await
+    exercise_scheduled_run(true, PreparationOutcome::Accepted, false).await
+}
+#[tokio::test]
+async fn explicit_sdk_summary_skip_preserves_worker_result_and_releases_occupancy()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_scheduled_run(false, PreparationOutcome::Accepted, true).await
 }
 #[derive(Clone, Copy)]
 enum PreparationOutcome {
@@ -31,16 +36,17 @@ enum PreparationOutcome {
 #[tokio::test]
 async fn known_native_preparation_rejection_finishes_without_execution()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false, PreparationOutcome::Rejected).await
+    exercise_scheduled_run(false, PreparationOutcome::Rejected, false).await
 }
 #[tokio::test]
 async fn lost_native_preparation_response_preserves_occupancy()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_scheduled_run(false, PreparationOutcome::ResponseLost).await
+    exercise_scheduled_run(false, PreparationOutcome::ResponseLost, false).await
 }
 async fn exercise_scheduled_run(
     busy_first: bool,
     preparation: PreparationOutcome,
+    skip_failed_summary: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "scheduled-run-fixture-{}",
@@ -179,6 +185,9 @@ async fn exercise_scheduled_run(
                     json!({"thread":{"id":"summary-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-luna","sandbox":{"type":"readOnly"}})
                 }
                 5 => json!({"turn":{"id":"summary-turn"}}),
+                6 if skip_failed_summary => {
+                    json!({"thread":{"id":"summary-new-thread","turns":[{"id":"summary-turn","status":"failed","items":[]}]}})
+                }
                 6 => {
                     json!({"thread":{"id":"summary-new-thread","turns":[{"id":"summary-turn","status":"completed","items":[{"type":"agentMessage","id":"summary-output","text":"Build checks passed. Monitor the next scheduled run."}]}]}})
                 }
@@ -249,6 +258,12 @@ async fn exercise_scheduled_run(
             }
             if let Some(run_id)=&known_run{
                 let run=store.lock().await.read_run::<SessionRef,communication_protocol::EndpointRef,CodexGeneration,communication_protocol::NativeSendReceipt>(run_id).await?;
+                if skip_failed_summary && run.phase == agent_automation::RunPhase::SummaryBlocked {
+                    client.skip_summary(communication_protocol::RunRecoveryRequest {
+                        operation_id: OperationId::generate(), run_id: run_id.clone(),
+                    }).await.map_err(|_|automation_storage::StorageError::InvalidRecord)?;
+                    continue;
+                }
                 if matches!(run.phase,agent_automation::RunPhase::Finished | agent_automation::RunPhase::PreparationFailed | agent_automation::RunPhase::Uncertain){return Ok::<_,automation_storage::StorageError>(run);}
             }
         }
@@ -292,9 +307,26 @@ async fn exercise_scheduled_run(
         || record.worker_outcome.is_none()
         || record.completed_at_ms.is_none()
         || record.summary_text.as_deref()
-            != Some("Build checks passed. Monitor the next scheduled run.")
+            != if skip_failed_summary {
+                None
+            } else {
+                Some("Build checks passed. Monitor the next scheduled run.")
+            }
     {
         return Err("worker and summary completion did not preserve result/provenance".into());
+    }
+    if skip_failed_summary
+        && store
+            .lock()
+            .await
+            .inspect_schedule::<SessionRef, communication_protocol::EndpointRef>(
+                &schedule.schedule_id,
+            )
+            .await?
+            .active_run_id
+            .is_some()
+    {
+        return Err("explicit summary skip did not release confirmed stopped Run occupancy".into());
     }
     let public = client
         .read_run(communication_protocol::RunShowRequest {
@@ -304,7 +336,7 @@ async fn exercise_scheduled_run(
     if !matches!(
         public.state,
         communication_protocol::RunState::Finished { .. }
-    ) || public.summary.is_none()
+    ) || public.summary.is_none() != skip_failed_summary
     {
         return Err("public Run snapshot lost finished worker or summary".into());
     }
@@ -318,11 +350,19 @@ async fn exercise_scheduled_run(
     let [summary] = summaries.records.as_slice() else {
         return Err("expected one retained summary attempt".into());
     };
-    if summary.retry_eligible
-        || !matches!(
+    let expected_summary_state = if skip_failed_summary {
+        matches!(
+            summary.state,
+            communication_protocol::SummaryInspectionState::Skipped
+        )
+    } else {
+        matches!(
             summary.state,
             communication_protocol::SummaryInspectionState::Completed
         )
+    };
+    if summary.retry_eligible
+        || !expected_summary_state
         || !summaries.coverage.latest_attempt_included
     {
         return Err("summary history lost completed attempt or advertised an unsafe retry".into());
