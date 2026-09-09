@@ -79,7 +79,6 @@ pub(crate) async fn validate(
     use codex_native_integration::NativeOperation;
     let required = [
         NativeOperation::ReadThread,
-        NativeOperation::ListTurns,
         NativeOperation::StartTurn,
         NativeOperation::InterruptTurn,
         if matches!(

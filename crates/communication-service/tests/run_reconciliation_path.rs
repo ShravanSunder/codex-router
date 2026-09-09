@@ -17,23 +17,38 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::test]
 async fn completed_exact_turn_reconciles_after_deadline_and_generation_replacement()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise("completed", "recorded-turn", true).await
+    exercise(HistoryEvidence::ExactCompleted).await
 }
 #[tokio::test]
 async fn active_turn_stays_occupied_without_interrupting_past_deadline()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise("inProgress", "recorded-turn", false).await
+    exercise(HistoryEvidence::ExactActive).await
 }
 #[tokio::test]
 async fn another_completed_turn_cannot_release_execution()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise("completed", "unrelated-turn", false).await
+    exercise(HistoryEvidence::OtherTurn).await
+}
+#[tokio::test]
+async fn another_thread_cannot_release_matching_turn_identity()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise(HistoryEvidence::OtherThread).await
+}
+enum HistoryEvidence {
+    ExactCompleted,
+    ExactActive,
+    OtherTurn,
+    OtherThread,
 }
 async fn exercise(
-    status: &str,
-    observed_id: &str,
-    completed: bool,
+    evidence: HistoryEvidence,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (status, observed_thread, observed_id, completed) = match evidence {
+        HistoryEvidence::ExactCompleted => ("completed", "recorded-thread", "recorded-turn", true),
+        HistoryEvidence::ExactActive => ("inProgress", "recorded-thread", "recorded-turn", false),
+        HistoryEvidence::OtherTurn => ("completed", "recorded-thread", "unrelated-turn", false),
+        HistoryEvidence::OtherThread => ("completed", "another-thread", "recorded-turn", false),
+    };
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "run-reconcile-fixture-{}",
         OperationId::generate().as_str()
@@ -123,7 +138,6 @@ async fn exercise(
         "TurnStart",
         "TurnSteer",
         "TurnInterrupt",
-        "ThreadTurnsList",
     ] {
         definitions.insert(format!("{name}Params"), json!({"type":"object"}));
         definitions.insert(format!("{name}Response"), json!({"type":"object"}));
@@ -175,13 +189,17 @@ async fn exercise(
                 .ok_or("observation missing")??
                 .to_text()?,
         )?;
-        if request.get("method").and_then(Value::as_str) != Some("thread/turns/list")
+        if request.get("method").and_then(Value::as_str) != Some("thread/read")
+            || request
+                .pointer("/params/includeTurns")
+                .and_then(Value::as_bool)
+                != Some(true)
             || request.pointer("/params/threadId").and_then(Value::as_str)
                 != Some("recorded-thread")
         {
             return Err("reconcile mutated native state or selected another target".into());
         }
-        socket.send(Message::Text(json!({"id":request.get("id"),"result":{"data":[{"id":observed_id,"status":status,"items":[]}],"nextCursor":null}}).to_string().into())).await?;
+        socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":observed_thread,"turns":[{"id":observed_id,"status":status,"items":[]}]}}}).to_string().into())).await?;
         if let Some(Ok(message)) =
             tokio::time::timeout(Duration::from_secs(2), socket.next()).await?
             && !message.is_close()

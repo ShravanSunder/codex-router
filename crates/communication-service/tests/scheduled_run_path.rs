@@ -69,7 +69,6 @@ async fn exercise_scheduled_run(
         "TurnSteer",
         "TurnInterrupt",
         "ThreadQueueAdd",
-        "ThreadTurnsList",
     ] {
         definitions.insert(format!("{name}Params"), json!({"type":"object"}));
         definitions.insert(format!("{name}Response"), json!({"type":"object"}));
@@ -138,10 +137,18 @@ async fn exercise_scheduled_run(
                 0 | 3 => "thread/start",
                 1 => "thread/read",
                 5 => "turn/start",
-                _ => "thread/turns/list",
+                _ => "thread/read",
             };
             if request.get("method").and_then(Value::as_str) != Some(expected) {
                 return Err(format!("expected {expected}").into());
+            }
+            if matches!(logical_stage, 2 | 4 | 6)
+                && request
+                    .pointer("/params/includeTurns")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+            {
+                return Err("history observation did not request native turn contents".into());
             }
             if logical_stage == 0 && !matches!(preparation, PreparationOutcome::Accepted) {
                 if matches!(preparation, PreparationOutcome::Rejected) {
@@ -173,10 +180,10 @@ async fn exercise_scheduled_run(
                 }
                 5 => json!({"turn":{"id":"summary-turn"}}),
                 6 => {
-                    json!({"data":[{"id":"summary-turn","status":"completed","items":[{"type":"agentMessage","id":"summary-output","text":"Build checks passed. Monitor the next scheduled run."}]}],"nextCursor":null})
+                    json!({"thread":{"id":"summary-new-thread","turns":[{"id":"summary-turn","status":"completed","items":[{"type":"agentMessage","id":"summary-output","text":"Build checks passed. Monitor the next scheduled run."}]}]}})
                 }
                 _ => {
-                    json!({"data":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}],"nextCursor":null})
+                    json!({"thread":{"id":"scheduled-new-thread","turns":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}]}})
                 }
             };
             let result = if busy_first && stage == 1 {
