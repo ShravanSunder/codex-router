@@ -1489,7 +1489,7 @@ impl LoopbackProtocolConnectionHandler {
                     provider_error_observer,
                     account_id,
                     route_band,
-                    current_unix_seconds().map_or(0, |seconds| seconds),
+                    current_unix_seconds().unwrap_or(0),
                 )?;
                 Err(PrecommitHttpQuotaResponse::AccountQuotaExhausted)
             }
@@ -2125,7 +2125,7 @@ fn spawn_async_affinity_owner_record(
             credential_generation,
             RouteBand::Responses,
             AffinitySourceTransport::HttpSse,
-            current_unix_seconds().map_or(0, |seconds| seconds),
+            current_unix_seconds().unwrap_or(0),
         );
         let _record_result = recorder.record_affinity_owner(owner).await;
     });
@@ -2138,7 +2138,7 @@ fn spawn_async_provider_error_observation(
     classification: ProviderErrorClassification,
     affinity_record_tasks: TaskTracker,
 ) {
-    let observed_unix_seconds = current_unix_seconds().map_or(0, |seconds| seconds);
+    let observed_unix_seconds = current_unix_seconds().unwrap_or(0);
     if classification == ProviderErrorClassification::AccountQuotaExhausted {
         let _runtime_mark_result = observer.mark_runtime_account_quota_exhausted(
             account_id.clone(),

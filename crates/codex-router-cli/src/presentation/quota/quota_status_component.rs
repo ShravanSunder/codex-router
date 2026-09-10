@@ -605,7 +605,7 @@ pub(super) fn QuotaStatusComponent(
             Text(content: quota_title_line(&view_model, content_width, spinner_tick.get()), color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             Text(content: fit_line(&view_model.route_line, content_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             #(body)
-            View(width: 100pct, flex_grow: 1.0) {}
+            View(width: 100pct, flex_grow: 1.0_f32) {}
             View(width: 100pct, padding_left: if reset_detail_active || current_weekly_floor_editor.is_some() { 2 } else { 0 }) {
                 Text(
                     content: fit_line(

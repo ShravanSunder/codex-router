@@ -509,7 +509,6 @@ where
                 WebSocketFirstFrameDecision::OpenUpstream {
                     headers,
                     first_frame,
-                    affinity_owner_context: _,
                     ..
                 } => WebSocketFirstFrameDecision::OpenUpstream {
                     token_generation,
@@ -721,7 +720,6 @@ where
                 WebSocketFirstFrameDecision::OpenUpstream {
                     headers,
                     first_frame,
-                    affinity_owner_context: _,
                     ..
                 } => WebSocketFirstFrameDecision::OpenUpstream {
                     token_generation,
