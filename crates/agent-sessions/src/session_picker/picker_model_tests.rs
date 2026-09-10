@@ -17,7 +17,12 @@ fn default_picker_excludes_helper_threads_even_with_interactive_origin() {
         "codex-router",
         "cli",
     )];
-    for kind in ["subagent", "guardian_review", "memory_consolidation"] {
+    for kind in [
+        "subagent",
+        "guardian_review",
+        "memory_consolidation",
+        "system",
+    ] {
         let mut child = picker_record(
             kind,
             "Hidden helper",
@@ -490,4 +495,31 @@ fn sessions_picker_pointer_focus_preserves_the_rendered_scrolled_window() {
         window_start,
         "pointer focus must not move a row that was already visible"
     );
+}
+
+#[test]
+fn refreshed_system_threads_stay_hidden_without_hiding_unnamed_users() {
+    let mut human = picker_record(
+        "unnamed-user",
+        "unnamed-user",
+        "/repo/project-a",
+        "codex-router",
+        "vscode",
+    );
+    human.thread_source = Some("user".into());
+    human.runtime_status = PickerRuntimeStatus::Idle;
+    let mut system = picker_record(
+        "internal-system",
+        "internal-system",
+        "/repo/project-a",
+        "codex-router",
+        "vscode",
+    );
+    system.thread_source = Some("system".into());
+    system.runtime_status = PickerRuntimeStatus::Idle;
+    let mut model = SessionsPickerModel::new(picker_request(), 120);
+    model.replace_records(observed_records(vec![human, system]));
+    let snapshot = model.render_snapshot();
+    assert!(snapshot.contains("unnamed-user"), "{snapshot}");
+    assert!(!snapshot.contains("internal-system"), "{snapshot}");
 }
