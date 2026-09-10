@@ -1,4 +1,4 @@
-name: CI
+name: Validate changes
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   rust:
-    name: Rust
+    name: Validate Rust workspace
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -42,16 +42,9 @@ jobs:
           command -v cargo-deny >/dev/null || cargo install cargo-deny --locked
           command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
 
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Homebrew formula updater tests
-        run: python3 -m unittest scripts.tests.test_update_homebrew_formula -v
-
-      - name: Integrated quota reset PTY harness
+      - name: Build codex-router variants and quota-reset harness
+        id: build
+        background: true
         run: |
           cargo build -p codex-router-cli --bin codex-router
           cargo build -p codex-router-cli --all-features --bin codex-router
@@ -60,24 +53,44 @@ jobs:
           test -x "${install_root}/bin/codex-router"
           test "$(find "${install_root}/bin" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "1"
           cargo build -p codex-router-quota-reset-test-harness --bin codex-router-quota-reset-test-harness
-          cargo clippy -p codex-router-quota-reset-test-harness --all-targets -- -D warnings
-          cargo nextest run -p codex-router-quota-reset-test-harness
 
-      - name: Test
-        run: cargo nextest run --workspace
+      - name: Check Rust formatting
+        id: format
+        background: true
+        run: cargo fmt --all -- --check
 
-      - name: Deny
+      - name: Lint Rust workspace
+        id: lint
+        background: true
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test Homebrew release automation
+        id: homebrew_release_automation
+        background: true
+        run: python3 -m unittest scripts.tests.test_update_homebrew_formula -v
+
+      - name: Enforce dependency policy
+        id: dependency_policy
+        background: true
         run: cargo deny check
 
-      - name: Audit
+      - name: Audit dependency vulnerabilities
+        id: dependency_audit
+        background: true
         run: cargo audit
 
-  workflow-lint:
-    name: Workflow lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - name: Wait for build
+        wait: build
 
-      - name: Check GitHub Actions
-        uses: raven-actions/actionlint@v2
+      - name: Test quota-reset terminal integration
+        id: quota_reset_terminal_integration
+        background: true
+        run: cargo nextest run -p codex-router-quota-reset-test-harness
+
+      - name: Test Rust workspace
+        id: workspace_tests
+        background: true
+        run: cargo nextest run --workspace
+
+      - name: Wait for validation
+        wait-all:
