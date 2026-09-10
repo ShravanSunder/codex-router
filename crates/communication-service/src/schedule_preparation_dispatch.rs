@@ -299,6 +299,11 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
             "The thread belongs to another schedule. Select a different thread; no binding was committed for this schedule.",
             effects, false,
         ).await,
+        Err(automation_storage::StorageError::ScheduleChangeConflict) => finish_failure(
+            store, request.id, &params, ScheduleFailureKind::ChangeConflict,
+            "The schedule changed during preparation; no binding was committed. Inspect the current schedule and retained native effects before preparing again.",
+            effects, false,
+        ).await,
         Err(_)=>finish_failure(store,request.id,&params,ScheduleFailureKind::OutcomeUnknown,"Native preparation completed but binding commit was not established; inspect retained target and operation before retrying.",effects,true).await,
     }
 }
@@ -321,6 +326,7 @@ fn error(
         effects: ScheduleEffects::Native { evidence: effects },
         next_action: match kind {
             ScheduleFailureKind::OwnershipConflict => ScheduleNextAction::SelectDifferentThread,
+            ScheduleFailureKind::ChangeConflict => ScheduleNextAction::InspectSchedule,
             ScheduleFailureKind::InvalidField => ScheduleNextAction::CorrectRequest,
             _ => ScheduleNextAction::InspectOperation,
         },

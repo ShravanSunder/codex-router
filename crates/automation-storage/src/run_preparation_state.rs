@@ -19,7 +19,8 @@ pub struct RunPreparationFailure<TTarget, TGeneration> {
     pub now_ms: i64,
 }
 impl AutomationStore {
-    /// A known allocation/preparation failure never consumed an execution budget.
+    /// A known preparation failure never consumed an execution budget.
+    /// Preserve an already prepared target when local input validation fails afterward.
     pub async fn fail_run_preparation<
         TTarget: Serialize + DeserializeOwned,
         TEndpoint: DeserializeOwned,
@@ -51,7 +52,6 @@ impl AutomationStore {
         if record.phase != RunPhase::Preparing
             || record.evidence.timing.is_some()
             || record.native_turn_id.is_some()
-            || record.evidence.native.target.is_some()
         {
             transaction.commit().await?;
             return Ok(false);

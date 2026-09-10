@@ -10,6 +10,9 @@ use communication_protocol::{
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
+#[cfg(test)]
+#[path = "scheduled_input_validation_tests.rs"]
+mod input_validation_tests;
 #[derive(Clone)]
 pub(crate) struct ScheduledRunWorker {
     pub store: Arc<Mutex<AutomationStore>>,
@@ -134,6 +137,25 @@ impl ScheduledRunWorker {
             return Ok(());
         }
         let target = record.evidence.native.target.clone();
+        let text = match render_instructions(
+            &inputs,
+            record.schedule_id.as_str(),
+            id.as_str(),
+            target.as_ref(),
+        ) {
+            Ok(text) => text,
+            Err(_) => {
+                self.store.lock().await.fail_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+                automation_storage::RunPreparationFailure {
+                    run_id: id,
+                    effects: record.evidence.native,
+                    explanation: "Combined instructions and continuity exceed the supported request size; no native input was submitted; any earlier preparation effects remain recorded. Shorten instructions or continuity for future runs.".into(),
+                    now_ms: chrono::Utc::now().timestamp_millis(),
+                },
+            ).await?;
+                return Ok(());
+            }
+        };
         let Some(target) = target else {
             let destination = match &inputs.execution_configuration.destination {
                 ExecutionDestination::Unprepared => return Err(StorageError::InvalidRecord),
@@ -177,8 +199,6 @@ impl ScheduledRunWorker {
                 return Ok(());
             }
             drop(configuration_lease);
-            let text =
-                render_instructions(&inputs, record.schedule_id.as_str(), id.as_str(), None)?;
             let prepared = crate::native_thread_preparation::prepare(
                 crate::native_thread_preparation::NativePreparationInput {
                     admission: &admission,
@@ -240,12 +260,6 @@ impl ScheduledRunWorker {
         if target.endpoint != backend.endpoint {
             return Err(StorageError::ActivationUnavailable);
         }
-        let text = render_instructions(
-            &inputs,
-            record.schedule_id.as_str(),
-            id.as_str(),
-            Some(&target),
-        )?;
         crate::scheduled_native_dispatch::dispatch(
             crate::scheduled_native_dispatch::ScheduledDispatch {
                 admission: &admission,

@@ -15,21 +15,27 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::test]
 async fn preparation_replay_uses_recorded_native_thread_without_forking_again()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_preparation(false, false).await
+    exercise_preparation(false, false, false).await
 }
 #[tokio::test]
 async fn lost_preparation_response_is_retained_without_reallocation()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_preparation(true, false).await
+    exercise_preparation(true, false, false).await
 }
 #[tokio::test]
 async fn ownership_rejection_allows_preparing_a_different_thread()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_preparation(false, true).await
+    exercise_preparation(false, true, false).await
+}
+#[tokio::test]
+async fn ordinary_edit_during_preparation_allows_a_new_preparation()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_preparation(false, false, true).await
 }
 async fn exercise_preparation(
     lose_response: bool,
     ownership_conflict: bool,
+    change_conflict: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "schedule-native-fixture-{}",
@@ -110,8 +116,11 @@ async fn exercise_preparation(
             })
             .await?;
     }
+    let existing_conflict = ownership_conflict || change_conflict;
+    let backend_store = store.clone();
+    let backend_schedule = schedule.schedule_id.clone();
     let backend = tokio::spawn(async move {
-        for _ in 0..if ownership_conflict { 2 } else { 1 } {
+        for attempt in 0..if existing_conflict { 2 } else { 1 } {
             let (stream, _) = listener.accept().await?;
             let mut socket = tokio_tungstenite::accept_async(stream).await?;
             let init: Value =
@@ -129,7 +138,31 @@ async fn exercise_preparation(
                     .ok_or("missing thread start")??
                     .to_text()?,
             )?;
-            if ownership_conflict {
+            if change_conflict && attempt == 0 {
+                let current = backend_store
+                    .lock()
+                    .await
+                    .inspect_schedule::<SessionRef, communication_protocol::EndpointRef>(
+                        &backend_schedule,
+                    )
+                    .await?;
+                let mut definition = current.record.definition;
+                definition.execution_timeout_seconds = Some(120);
+                backend_store
+                    .lock()
+                    .await
+                    .mutate_schedule(&automation_storage::ScheduleMutation {
+                        operation_id: OperationId::generate(),
+                        schedule_id: backend_schedule.clone(),
+                        edit: automation_storage::ScheduleEdit::Replace {
+                            expected_change_id: current.record.change_id,
+                            definition,
+                        },
+                        now_ms: chrono::Utc::now().timestamp_millis(),
+                    })
+                    .await?;
+            }
+            if existing_conflict {
                 if request.get("method").and_then(Value::as_str) != Some("thread/read") {
                     return Err("existing preparation must only read native thread".into());
                 }
@@ -148,7 +181,7 @@ async fn exercise_preparation(
         }
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
-    let destination = if ownership_conflict {
+    let destination = if existing_conflict {
         json!({"kind":"existing","target":{"endpoint":target.endpoint,"sessionId":"owned-thread"},"cwd":"/fresh-fixture"})
     } else {
         json!({"kind":"fresh","endpoint":target.endpoint,"cwd":"/fresh-fixture"})
@@ -161,19 +194,30 @@ async fn exercise_preparation(
         client.prepare_schedule(request.clone()),
     )
     .await?;
-    if ownership_conflict {
+    if existing_conflict {
         let error = match first {
             Err(communication_client::ScheduleClientError::Rejected(error)) => error,
             _ => return Err("ownership conflict did not return a typed rejection".into()),
         };
-        if !matches!(
-            error.kind,
-            communication_protocol::ScheduleFailureKind::OwnershipConflict
-        ) || !matches!(
-            error.next_action,
-            communication_protocol::ScheduleNextAction::SelectDifferentThread
-        ) {
-            return Err("known ownership conflict became unrecoverable uncertainty".into());
+        let correct_error = if change_conflict {
+            matches!(
+                error.kind,
+                communication_protocol::ScheduleFailureKind::ChangeConflict
+            ) && matches!(
+                error.next_action,
+                communication_protocol::ScheduleNextAction::InspectSchedule
+            )
+        } else {
+            matches!(
+                error.kind,
+                communication_protocol::ScheduleFailureKind::OwnershipConflict
+            ) && matches!(
+                error.next_action,
+                communication_protocol::ScheduleNextAction::SelectDifferentThread
+            )
+        };
+        if !correct_error {
+            return Err("known preparation rejection became unrecoverable uncertainty".into());
         }
         let (retry_socket, retry_server) = tokio::net::UnixStream::pair()?;
         let retry_service = tokio::spawn(serve_control_connection(retry_server, identity.clone()));
