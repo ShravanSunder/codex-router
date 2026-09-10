@@ -9,10 +9,10 @@ Router provides communication and automation around harness-owned conversations.
 
 ## Choose the action
 
-- Discover a recipient or send information now: read [session messaging](command-guides/session-messaging.md).
-- Send information later or periodically: read [timed wake-ups](command-guides/timed-wakeups.md).
-- Execute reusable instructions on a schedule: read [scheduled workflows](command-guides/scheduled-workflows.md).
-- Inspect a failed, delayed, or uncertain operation: read [receipt recovery](command-guides/receipt-recovery.md).
+- Discover a recipient or send information now: read [session messaging](references/session-messaging.md).
+- Send information later or periodically: read [timed wake-ups](references/timed-wakeups.md).
+- Execute reusable instructions on a schedule: read [scheduled workflows](references/scheduled-workflows.md).
+- Inspect a failed, delayed, or uncertain operation: read [receipt recovery](references/receipt-recovery.md).
 
 Check `agent-sessions --help` and the relevant subcommand help against these examples. They describe the 0.1.18 CLI surface. If a command or capability is missing, report the mismatch rather than invent flags or install/upgrade software without authorization.
 
