@@ -7,6 +7,7 @@ use communication_protocol::{
 };
 use serde_json::{Value, json};
 use std::time::Duration;
+const SUMMARY_TIMEOUT_SECONDS: u32 = 5;
 
 pub async fn exercise() -> ProofResult<()> {
     let mut proof = ProofContext::connect().await?;
@@ -15,7 +16,7 @@ pub async fn exercise() -> ProofResult<()> {
         .configure_automation(AutomationConfigureRequest {
             operation_id: OperationId::generate(),
             execution_timeout_seconds: 120.try_into()?,
-            summary_timeout_seconds: 1.try_into()?,
+            summary_timeout_seconds: SUMMARY_TIMEOUT_SECONDS.try_into()?,
         })
         .await?;
     let instruction = proof
@@ -110,7 +111,8 @@ pub async fn exercise() -> ProofResult<()> {
     let [summary] = attempts.records.as_slice() else {
         return Err("Expected exactly one summary attempt".into());
     };
-    if u32::from(summary.effective_timeout_seconds) != 1
+    proof.record("automaticSummaryTimeoutAttemptInspected", json!(summary))?;
+    if u32::from(summary.effective_timeout_seconds) != SUMMARY_TIMEOUT_SECONDS
         || !matches!(summary.state, SummaryInspectionState::Failed)
         || !matches!(summary.cessation, CessationEvidence::Confirmed)
         || !summary.retry_eligible
@@ -137,8 +139,10 @@ pub async fn exercise() -> ProofResult<()> {
             .clone()
             .ok_or("Summary deadline missing")?,
     ))?;
-    if (expires - started).num_milliseconds() != 1000 || chrono::Utc::now() < expires {
-        return Err("Summary failed outside the captured one-second timeout boundary".into());
+    if (expires - started).num_milliseconds() != i64::from(SUMMARY_TIMEOUT_SECONDS) * 1000
+        || chrono::Utc::now() < expires
+    {
+        return Err("Summary failed outside its captured timeout boundary".into());
     }
     let turns = proof.turns(target).await?;
     if !turns.iter().any(|turn| {
