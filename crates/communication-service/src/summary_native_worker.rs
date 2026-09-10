@@ -147,6 +147,8 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
             attempt.phase = SummaryPhase::Stopping;
             attempt.effects.cessation = CessationEvidence::Unconfirmed;
             if persist(input.store, &id, &attempt).await? {
+                #[cfg(test)]
+                summary_deadline_tests::crash_checkpoint("stop-intent");
                 let _stop = validated_call(
                     input.admission,
                     &mut connection,
@@ -154,6 +156,8 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
                     json!({"threadId":String::from(target.session_id),"turnId":turn_id}),
                 )
                 .await;
+                #[cfg(test)]
+                summary_deadline_tests::crash_checkpoint("interrupt-response");
             }
         }
         return Ok(());

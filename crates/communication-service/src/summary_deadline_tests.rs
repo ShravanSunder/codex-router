@@ -5,6 +5,11 @@ use sqlx::Connection;
 use std::{collections::BTreeMap, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
 type TestResult<TValue> = Result<TValue, Box<dyn std::error::Error + Send + Sync>>;
+#[path = "summary_timeout_crash_tests.rs"]
+mod crash_tests;
+pub(super) fn crash_checkpoint(stage: &str) {
+    crash_tests::checkpoint(stage);
+}
 
 #[tokio::test]
 async fn expired_summary_requests_interrupt_when_history_is_rejected() -> TestResult<()> {
@@ -18,10 +23,12 @@ async fn summary_connection_failure_preserves_timeout_retry_without_stopping_int
 }
 
 async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
-    let directory = std::path::PathBuf::from("/tmp").join(format!(
-        "summary-deadline-{}",
-        agent_automation::OperationId::generate().as_str()
-    ));
+    let directory = crash_tests::child_root()?.unwrap_or_else(|| {
+        std::path::PathBuf::from("/tmp").join(format!(
+            "summary-deadline-{}",
+            agent_automation::OperationId::generate().as_str()
+        ))
+    });
     std::fs::create_dir(&directory)?;
     let path = directory.join("automation.sqlite");
     let store = AutomationStore::open(&path).await?;
@@ -108,6 +115,20 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
         summary_source: None,
         completed_at_ms: None,
     };
+    let mut state = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&path),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE workflow_runs SET execution_evidence_json=?,native_turn_id=? WHERE run_id=?",
+    )
+    .bind(serde_json::to_string(&record.evidence)?)
+    .bind("worker-turn")
+    .bind(run_id.as_str())
+    .execute(&mut state)
+    .await?;
+    state.close().await?;
+    std::fs::write(directory.join("run-id.json"), serde_json::to_vec(&run_id)?)?;
     let mut definitions = serde_json::Map::new();
     for name in [
         "ThreadRead",
@@ -128,11 +149,16 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
     let schemas = Arc::new(codex_native_integration::NativePayloadSchemas::from_bundle(
         &bundle,
     )?);
+    std::fs::write(
+        directory.join("schema.json"),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))?,
+    )?;
     let socket_path = directory.join("native.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let gate = crate::NativeGenerationGate::default();
     gate.activate(generation, socket_path, Some(schemas))?;
     let admission = gate.acquire()?;
+    let witness = directory.join("interrupt-request.json");
     let server = tokio::spawn(async move {
         let methods: &[&str] = if fail_connection {
             &["thread/read"]
@@ -168,6 +194,7 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
                 {
                     return Err("interrupted wrong summary turn".into());
                 }
+                std::fs::write(&witness, serde_json::to_vec(&request)?)?;
                 json!({"id":request["id"],"result":{}})
             };
             if fail_connection {
