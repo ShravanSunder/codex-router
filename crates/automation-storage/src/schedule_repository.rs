@@ -17,9 +17,7 @@ pub(crate) fn validate_unchanged_execution_mode<TTarget, TEndpoint>(
     before: &ExecutionDestination<TTarget, TEndpoint>,
     after: &ExecutionDestination<TTarget, TEndpoint>,
 ) -> Result<(), StorageError> {
-    if matches!(before, ExecutionDestination::FreshEachRun { .. })
-        != matches!(after, ExecutionDestination::FreshEachRun { .. })
-    {
+    if before.execution_mode() != after.execution_mode() {
         return Err(StorageError::InvalidSchedule {
             field: "destination",
             reason: "Execution mode is fixed at creation. Create a new schedule to use another mode.",
@@ -105,7 +103,9 @@ pub(crate) fn validate_definition<TTarget, TEndpoint>(
     definition: &ScheduleDefinition<TTarget, TEndpoint>,
 ) -> Result<(), StorageError> {
     match &definition.destination {
-        ExecutionDestination::Unprepared if definition.enabled => {
+        ExecutionDestination::Unprepared | ExecutionDestination::FreshEachRunUnprepared
+            if definition.enabled =>
+        {
             return Err(StorageError::InvalidSchedule {
                 field: "enabled",
                 reason: "unprepared schedules must be disabled",

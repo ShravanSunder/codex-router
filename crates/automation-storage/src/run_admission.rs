@@ -49,7 +49,7 @@ impl AutomationStore {
         let definition: ScheduleDefinition<TTarget, TEndpoint> =
             serde_json::from_str(&schedule.try_get::<String, _>("definition_json")?)
                 .map_err(|_| StorageError::InvalidRecord)?;
-        if matches!(definition.destination, ExecutionDestination::Unprepared) {
+        if !definition.destination.is_prepared() {
             transaction.commit().await?;
             return Ok(RunAdmission::DestinationUnprepared { run_id });
         }

@@ -25,7 +25,7 @@ SDK consumer journey: discover local service → submit typed request → distin
 
 Schedules refer to reusable instruction identities. Future execution MUST use current instructions when preparing work. A run MUST retain the actual inputs, schedule change/instruction revision references, native destination and effective timeout used for that execution. Revision references are historical evidence, not user-selected execution pins. Definition edits MUST NOT redirect an existing run's cancellation, observation or timeout to a new thread. Basis: S2, S3, S19, S20, S23. Proof: V1.
 
-Execution mode is fixed at schedule creation: reuse one prepared thread, or create a fresh thread for each run. Unprepared and owned-thread destinations are states within reuse mode. Updates, preparation and overwrite MUST NOT switch between these modes, even before the first run. Reject the request with a destination validation error and guidance to create a new schedule; retain the existing definition and change identity. Instructions, timing, enabled state, timeout and destinations within the same mode remain editable. Preparing a reuse-mode schedule establishes its owned thread without changing mode. This restriction does not add a historical summary-generation workflow.
+Execution mode is fixed at schedule creation: reuse one prepared thread, or create a fresh thread for each run. Unprepared and owned-thread destinations are states within reuse mode; freshEachRunUnprepared and freshEachRun are states within fresh-per-run mode. Destination readiness is independent of fixed mode. Updates, preparation and overwrite MUST NOT switch between these modes, even before the first run. Reject the request with a destination validation error and guidance to create a new schedule; retain the existing definition and change identity. Instructions, timing, enabled state, timeout and destinations within the same mode remain editable. Preparing a reuse-mode schedule establishes its owned thread without changing mode. This restriction does not add a historical summary-generation workflow.
 
 ## R2. Triggers and concurrency
 
@@ -350,6 +350,7 @@ type InstructionSnapshot = {
 };
 type ExecutionDestination =
   | { kind: "unprepared" }
+  | { kind: "freshEachRunUnprepared" }
   | { kind: "ownedThread"; target: SessionRef; cwd: string }
   | { kind: "freshEachRun"; endpoint: EndpointRef; cwd: string };
 type ScheduleDefinition = {
@@ -639,7 +640,7 @@ type PortableRecord =
   | { kind: "packageEnd"; recordCount: number; sha256: string };
 ```
 
-The exported schedule destination is unprepared; live machine bindings are not serialized as reusable destinations. Its enabled value is false. A missing continuity summary omits that record. recordCount includes all records preceding packageEnd. SHA-256 is lowercase hex over exact preceding UTF-8 lines including their LF terminators. Each record is one JSON object followed by LF. Unknown/duplicate/misordered records and unresolved instruction identity reject the package before mutation. This hash detects damage, not authentic authorship.
+The exported schedule destination retains its fixed execution mode without local bindings: unprepared for reuse mode, freshEachRunUnprepared for fresh-per-run mode. Live machine bindings are not serialized as reusable destinations. A fresh-mode import remains disabled until schedule/update supplies its local freshEachRun endpoint and workspace; this prepares bindings within the same mode. Same-ID overwrite preserves that mode. Its enabled value is false. A missing continuity summary omits that record. recordCount includes all records preceding packageEnd. SHA-256 is lowercase hex over exact preceding UTF-8 lines including their LF terminators. Each record is one JSON object followed by LF. Unknown/duplicate/misordered records and unresolved instruction identity reject the package before mutation. This hash detects damage, not authentic authorship.
 
 Collection cursors are base64url-encoded UTF-8 JSON with closed fields `{version:1,serviceId,collection,upperKey,lastKey,filterDigest}`. Keys are serialized creation-time/identity pairs; request filters are normalized and hashed. Limit remains 1..100 and cursor length is bounded by the existing frame. Validate version, selected service, collection, key ordering and filter digest. Invalid cursor returns invalidField. Event cursors encode sequence and observation time; they expire after the specified two-month window, independent of physical cleanup timing. These are navigation tokens, not authorization credentials.
 

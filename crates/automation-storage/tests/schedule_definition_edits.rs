@@ -162,6 +162,7 @@ async fn execution_mode_cannot_change_even_before_the_first_run()
         {
             return Err("rejected mode edit mutated schedule".into());
         }
+        let mut expected_change_id = schedule.change_id.clone();
         if fresh {
             let package = store
                 .export_schedule::<String, String>(&schedule.schedule_id)
@@ -174,15 +175,54 @@ async fn execution_mode_cannot_change_even_before_the_first_run()
                     overwrite: true,
                     now_ms: 2,
                 })
-                .await;
+                .await?;
+            if overwritten.record.definition.destination.execution_mode()
+                != agent_automation::ExecutionMode::FreshEachRun
+                || overwritten.record.definition.destination.is_prepared()
+                || overwritten.record.definition.enabled
+            {
+                return Err("overwrite lost mode or retained local bindings".into());
+            }
+            expected_change_id = overwritten.record.change_id;
+            let other_path = path.with_extension("destination.sqlite");
+            let mut other = AutomationStore::open(&other_path).await?;
+            let imported = other
+                .import_schedule::<String, String>(&automation_storage::ScheduleImport {
+                    operation_id: OperationId::generate(),
+                    package_utf8: &encoded,
+                    overwrite: false,
+                    now_ms: 3,
+                })
+                .await?;
+            if imported.record.schedule_id != schedule.schedule_id
+                || imported.record.definition.destination.execution_mode()
+                    != agent_automation::ExecutionMode::FreshEachRun
+                || imported.record.definition.destination.is_prepared()
+            {
+                return Err(
+                    "cross-database import did not preserve fresh mode without bindings".into(),
+                );
+            }
+            other.close().await?;
+            std::fs::remove_file(other_path)?;
+            let mut wrong_mode = package;
+            wrong_mode.definition.destination = ExecutionDestination::Unprepared;
+            let encoded = agent_automation::encode_schedule_package(&wrong_mode, 1_048_576)?;
             if !matches!(
-                overwritten,
+                store
+                    .import_schedule::<String, String>(&automation_storage::ScheduleImport {
+                        operation_id: OperationId::generate(),
+                        package_utf8: &encoded,
+                        overwrite: true,
+                        now_ms: 4,
+                    })
+                    .await,
                 Err(automation_storage::StorageError::InvalidSchedule {
                     field: "destination",
                     ..
                 })
             ) {
-                return Err("overwrite bypassed immutable execution mode".into());
+                return Err("overwrite changed fixed mode".into());
             }
         }
         let mut allowed = schedule.definition;
@@ -193,7 +233,7 @@ async fn execution_mode_cannot_change_even_before_the_first_run()
                 operation_id: OperationId::generate(),
                 schedule_id: schedule.schedule_id,
                 edit: ScheduleEdit::Replace {
-                    expected_change_id: schedule.change_id,
+                    expected_change_id,
                     definition: allowed,
                 },
                 now_ms: 2,

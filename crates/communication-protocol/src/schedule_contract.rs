@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ExecutionDestination {
     Unprepared,
+    FreshEachRunUnprepared,
     OwnedThread { target: SessionRef, cwd: String },
     FreshEachRun { endpoint: EndpointRef, cwd: String },
 }

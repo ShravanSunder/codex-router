@@ -26,6 +26,12 @@ pub(crate) async fn validate(
         return Ok(());
     }
     let endpoint = match &request.definition.destination {
+        ExecutionDestination::FreshEachRunUnprepared => {
+            return Err(StorageError::InvalidSchedule {
+                field: "destination",
+                reason: "use schedule update to set a freshEachRun endpoint and absolute workspace before enabling; execution mode remains fresh-per-run",
+            });
+        }
         ExecutionDestination::Unprepared => {
             return Err(StorageError::InvalidSchedule {
                 field: "enabled",

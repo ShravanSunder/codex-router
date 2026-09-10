@@ -56,7 +56,7 @@ enum ScheduleAction {
         #[arg(long)]
         operation_id: Option<String>,
     },
-    /// Replace future configuration using the current edit token; admitted runs retain their inputs.
+    /// Update future configuration within the fixed execution mode; admitted runs retain their inputs.
     Update {
         #[arg(long)]
         schedule_id: String,

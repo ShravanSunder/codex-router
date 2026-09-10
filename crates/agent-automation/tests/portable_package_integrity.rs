@@ -6,6 +6,14 @@ use agent_automation::{
 #[test]
 fn package_round_trip_preserves_identity_but_strips_live_destination()
 -> Result<(), Box<dyn std::error::Error>> {
+    exercise_round_trip(false)
+}
+#[test]
+fn fresh_mode_round_trip_preserves_mode_without_local_bindings()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_round_trip(true)
+}
+fn exercise_round_trip(fresh: bool) -> Result<(), Box<dyn std::error::Error>> {
     let instruction_id = InstructionId::generate();
     let package = PortableSchedulePackage::<String, String> {
         schedule_id: ScheduleId::generate(),
@@ -19,9 +27,16 @@ fn package_round_trip_preserves_identity_but_strips_live_destination()
             instruction_id,
             timing: TimingRule::Interval { seconds: 600 },
             enabled: true,
-            destination: ExecutionDestination::OwnedThread {
-                target: "live-native-thread".into(),
-                cwd: "/private/source-workspace".into(),
+            destination: if fresh {
+                ExecutionDestination::FreshEachRun {
+                    endpoint: "live-native-thread".into(),
+                    cwd: "/private/source-workspace".into(),
+                }
+            } else {
+                ExecutionDestination::OwnedThread {
+                    target: "live-native-thread".into(),
+                    cwd: "/private/source-workspace".into(),
+                }
             },
             execution_timeout_seconds: Some(120),
         },
@@ -35,10 +50,14 @@ fn package_round_trip_preserves_identity_but_strips_live_destination()
         decode_schedule_package(&text, 1_048_576)?;
     if decoded.schedule_id != package.schedule_id
         || decoded.definition.enabled
-        || !matches!(
-            decoded.definition.destination,
-            ExecutionDestination::Unprepared
-        )
+        || serde_json::to_value(&decoded.definition.destination)?
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            != Some(if fresh {
+                "freshEachRunUnprepared"
+            } else {
+                "unprepared"
+            })
     {
         return Err("portable identity/disabled boundary changed".into());
     }

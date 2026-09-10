@@ -66,15 +66,14 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
             );
         }
     };
-    if matches!(
-        inspected.record.definition.destination,
-        agent_automation::ExecutionDestination::FreshEachRun { .. }
-    ) {
+    if inspected.record.definition.destination.execution_mode()
+        == agent_automation::ExecutionMode::FreshEachRun
+    {
         return reject(
             request.id,
             &params,
             ScheduleFailureKind::InvalidField,
-            "Execution mode is fixed at creation. A fresh-per-run schedule cannot own one prepared thread; create a new reuse-mode schedule. No native operation was dispatched.",
+            "Execution mode is fixed at creation. Use schedule update to configure a freshEachRun endpoint and workspace; schedule prepare creates a reuse-thread binding and cannot change mode. No native operation was dispatched.",
             effects,
         );
     }

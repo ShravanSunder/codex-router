@@ -40,7 +40,7 @@ pub fn encode_schedule_package<TTarget: Clone + Serialize, TEndpoint: Clone + Se
 ) -> Result<String, PackageError> {
     let mut definition = package.definition.clone();
     definition.enabled = false;
-    definition.destination = crate::ExecutionDestination::Unprepared;
+    definition.destination = definition.destination.without_bindings();
     let mut records: Vec<PortableRecord<TTarget, TEndpoint>> = vec![
         PortableRecord::PackageHeader {
             format: "agentSchedule".into(),
@@ -150,10 +150,7 @@ pub fn decode_schedule_package<TTarget: DeserializeOwned, TEndpoint: Deserialize
         _ => return Err(PackageError::InvalidRecord),
     };
     if definition.instruction_id != instruction.instruction_id
-        || !matches!(
-            definition.destination,
-            crate::ExecutionDestination::Unprepared
-        )
+        || definition.destination.is_prepared()
     {
         return Err(PackageError::InvalidDefinition);
     }

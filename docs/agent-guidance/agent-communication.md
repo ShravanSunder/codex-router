@@ -147,6 +147,15 @@ leaves it disabled until its destination is prepared. The package does not move
 native session files. Event history expires after two calendar months; current
 Runs, summaries and latest effect evidence remain.
 
+Execution mode is fixed at creation and survives export/import. An imported
+reuse-mode schedule has `{"kind":"unprepared"}` and uses `schedule prepare`.
+An imported fresh-per-run schedule has `{"kind":"freshEachRunUnprepared"}`.
+For that mode, use `schedule update --schedule-id ... --expected-change-id ...
+--definition-file ...` to supply a `freshEachRun` destination containing the
+local `endpoint` and absolute `cwd`, then enable it. This configures local
+bindings without allocating a thread or changing mode. Same-ID overwrite
+preserves mode; choosing another mode requires a new schedule.
+
 Completion wake-ups, shared message boards and remote federation are later work.
 B still sends its own reply explicitly.
 

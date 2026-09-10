@@ -158,7 +158,9 @@ impl ScheduledRunWorker {
         };
         let Some(target) = target else {
             let destination = match &inputs.execution_configuration.destination {
-                ExecutionDestination::Unprepared => return Err(StorageError::InvalidRecord),
+                ExecutionDestination::Unprepared | ExecutionDestination::FreshEachRunUnprepared => {
+                    return Err(StorageError::InvalidRecord);
+                }
                 ExecutionDestination::OwnedThread { target, cwd } => {
                     DestinationPreparation::Existing {
                         target: target.clone(),

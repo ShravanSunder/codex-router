@@ -12,8 +12,8 @@ mod timing_calculation;
 pub use timing_calculation::{TimingError, TimingRule};
 mod schedule_definition;
 pub use schedule_definition::{
-    CapturedRunInputs, ContinuityInput, ExecutionDestination, FrozenExecutionConfiguration,
-    ScheduleDefinition, ScheduleRecord, SummarySource,
+    CapturedRunInputs, ContinuityInput, ExecutionDestination, ExecutionMode,
+    FrozenExecutionConfiguration, ScheduleDefinition, ScheduleRecord, SummarySource,
 };
 mod wakeup_definition;
 pub use wakeup_definition::{

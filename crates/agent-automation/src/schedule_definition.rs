@@ -6,8 +6,31 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ExecutionDestination<TTarget, TEndpoint> {
     Unprepared,
+    FreshEachRunUnprepared,
     OwnedThread { target: TTarget, cwd: String },
     FreshEachRun { endpoint: TEndpoint, cwd: String },
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionMode {
+    ReuseThread,
+    FreshEachRun,
+}
+impl<TTarget, TEndpoint> ExecutionDestination<TTarget, TEndpoint> {
+    pub fn execution_mode(&self) -> ExecutionMode {
+        match self {
+            Self::Unprepared | Self::OwnedThread { .. } => ExecutionMode::ReuseThread,
+            Self::FreshEachRunUnprepared | Self::FreshEachRun { .. } => ExecutionMode::FreshEachRun,
+        }
+    }
+    pub fn without_bindings(&self) -> Self {
+        match self.execution_mode() {
+            ExecutionMode::ReuseThread => Self::Unprepared,
+            ExecutionMode::FreshEachRun => Self::FreshEachRunUnprepared,
+        }
+    }
+    pub fn is_prepared(&self) -> bool {
+        matches!(self, Self::OwnedThread { .. } | Self::FreshEachRun { .. })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

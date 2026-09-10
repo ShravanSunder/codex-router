@@ -352,7 +352,15 @@ Resume serializes with timing evaluation. If the one-shot's due instant was skip
 
 ## Immutable schedule execution mode
 
-Schedule mode validation belongs to the existing schedule repository transactions. Compare whether the current and proposed destinations are FreshEachRun; Unprepared and OwnedThread both mean reuse mode. Reject differing modes before definition, timer, receipt or event writes. Apply the same guard on overwrite and preparation completion, and reject preparation of a fresh-per-run schedule in the service before native allocation. No mode column, migration or summary backfill is needed. Frozen Run inputs still protect active work from permitted same-mode destination and instruction edits.
+Schedule mode validation belongs to the existing schedule repository transactions. Derive ExecutionMode independently of binding readiness from the tagged destination states:
+
+```text
+Execution mode       No local binding             Local binding ready
+reuse thread         Unprepared                   OwnedThread
+fresh per run        FreshEachRunUnprepared       FreshEachRun
+```
+
+Use the mode comparison in update, overwrite and preparation completion guards; reject a mode change before writes. Export calls the binding-removal operation, preserving mode while clearing endpoint/thread/workspace. Both unprepared states reject enable/admission. An imported fresh-mode schedule uses the existing update path to attach a local endpoint/workspace without native allocation. Reuse mode keeps explicit thread preparation. Frozen inputs retain both mode and preparation state. No additional SQLite column, migration or summary backfill is needed.
 
 ## Host-composed configuration adapter
 
