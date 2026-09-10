@@ -103,6 +103,33 @@ fn sessions_interactive_picker_launches_selected_session_with_injected_dependenc
                 3000,
             ),
             CodexStateThreadFixture::new(
+                "thread-guardian",
+                &project,
+                "codex-router",
+                "cli",
+                "guardian_review",
+                "main",
+                6000,
+            ),
+            CodexStateThreadFixture::new(
+                "thread-exec",
+                &project,
+                "codex-router",
+                "cli",
+                "exec",
+                "main",
+                7000,
+            ),
+            CodexStateThreadFixture::new(
+                "thread-memory",
+                &project,
+                "codex-router",
+                "cli",
+                "memory_consolidation",
+                "main",
+                8000,
+            ),
+            CodexStateThreadFixture::new(
                 "thread-subagent",
                 &project,
                 "codex-router",
@@ -113,6 +140,29 @@ fn sessions_interactive_picker_launches_selected_session_with_injected_dependenc
             ),
         ],
     );
+    // A running conversation updates now even if its recency marker has not advanced.
+    let runtime = must_ok(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+    );
+    runtime.block_on(async {
+        let pool = must_ok(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    sqlx::sqlite::SqliteConnectOptions::new()
+                        .filename(codex_home.join("state_5.sqlite")),
+                )
+                .await,
+        );
+        must_ok(
+            sqlx::query("UPDATE threads SET updated_at_ms=5000 WHERE id='thread-old'")
+                .execute(&pool)
+                .await,
+        );
+        pool.close().await;
+    });
     let command = match parse_session_arguments([]) {
         Ok(command) => command,
         Err(error) => panic!("sessions command should parse: {error}"),
@@ -135,11 +185,8 @@ fn sessions_interactive_picker_launches_selected_session_with_injected_dependenc
     ));
 
     assert!(stdout.is_empty());
-    assert_eq!(
-        picker.offered_session_ids,
-        ["thread-subagent", "thread-new", "thread-old"]
-    );
-    assert_eq!(picker.offered_labels.len(), 3);
+    assert_eq!(picker.offered_session_ids, ["thread-old", "thread-new"]);
+    assert_eq!(picker.offered_labels.len(), 2);
     assert_eq!(picker.offered_labels[0], "PICKER_CANARY_SHOULD_NOT_LEAK");
     assert_eq!(runner.resumed_session_ids, ["thread-old"]);
 }

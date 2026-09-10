@@ -404,8 +404,8 @@ pub(super) fn create_codex_state_db_with_thread_rows(
         );
         must_ok(
             sqlx::query(
-                "CREATE INDEX idx_threads_recency_at_ms \
-                 ON threads(recency_at_ms DESC, id DESC)",
+                "CREATE INDEX idx_threads_updated_at_ms \
+                 ON threads(updated_at_ms DESC, id DESC)",
             )
             .execute(&pool)
             .await,

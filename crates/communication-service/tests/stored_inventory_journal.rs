@@ -32,11 +32,11 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_recency_at_ms ON threads(recency_at_ms DESC, id DESC);")
+        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
             .execute(&pool).await.unwrap();
         let title = "PRIVATE_TITLE".repeat(60_000);
         for (id, time) in [("stored-b", 2000_i64), ("stored-a", 1000_i64)] {
-            sqlx::query("INSERT INTO threads (id,cwd,name,title,preview,first_user_message,recency_at_ms,archived) VALUES (?, '/private-fixture-workspace', ?, 'PRIVATE_TITLE', 'PRIVATE_BODY', 'PRIVATE_BODY', ?, 0)")
+            sqlx::query("INSERT INTO threads (id,cwd,name,title,preview,first_user_message,updated_at_ms,archived) VALUES (?, '/private-fixture-workspace', ?, 'PRIVATE_TITLE', 'PRIVATE_BODY', 'PRIVATE_BODY', ?, 0)")
                 .bind(id).bind(&title).bind(time).execute(&pool).await.unwrap();
         }
         pool.close().await;
