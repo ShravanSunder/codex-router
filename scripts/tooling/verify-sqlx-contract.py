@@ -164,8 +164,11 @@ def main() -> int:
             text=True,
             check=False,
         )
-        _ = (evidence / "stale-metadata.log").write_text(result.stdout + result.stderr)
-        if result.returncode == 0 or "one or more query files differ" not in result.stderr:
+        freshness_output = result.stdout + result.stderr
+        _ = (evidence / "stale-metadata.log").write_text(
+            f"exit_code: {result.returncode}\n{freshness_output}"
+        )
+        if result.returncode == 0 or "one or more query files differ" not in freshness_output:
             raise RuntimeError("stale metadata did not fail at the freshness comparison")
     print(
         f"SQLx contract proof: valid offline build, three expected compiler failures, "
