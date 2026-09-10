@@ -29,9 +29,7 @@ use picker_frame_view::render_picker_view;
 
 #[path = "picker_layout_budget.rs"]
 mod picker_layout_budget;
-use picker_layout_budget::{
-    detail_height, picker_body_budget, session_list_height, session_visible_row_budget,
-};
+use picker_layout_budget::{picker_body_budget, session_visible_row_budget, stacked_panel_heights};
 
 #[path = "picker_list_view.rs"]
 mod picker_list_view;

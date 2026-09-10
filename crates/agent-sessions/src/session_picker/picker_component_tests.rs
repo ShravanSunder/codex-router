@@ -212,6 +212,9 @@ mod picker_interaction_tests;
 #[path = "picker_layout_tests.rs"]
 mod picker_layout_tests;
 
+#[path = "picker_pane_stability_tests.rs"]
+mod picker_pane_stability_tests;
+
 #[path = "picker_background_tests.rs"]
 mod picker_background_tests;
 

@@ -199,6 +199,8 @@ async fn sessions_picker_view_shortcut_filters_the_latest_loaded_records() {
             request,
             record_loader: Some(record_loader),
             width: 100usize,
+            // This test observes reload behavior, so keep both Start New and the loaded row visible.
+            height: 40usize,
         )
     };
     let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));

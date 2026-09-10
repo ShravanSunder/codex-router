@@ -1,6 +1,7 @@
 //! Picker layout budget.
-use super::{SessionConversationPreview, SessionsPickerModel};
-use unicode_width::UnicodeWidthStr;
+use super::{MIN_STACKED_DETAILS_HEIGHT, SessionsPickerModel};
+
+const MIN_STACKED_LIST_HEIGHT: usize = 8;
 
 pub(super) fn picker_body_budget(
     height: usize,
@@ -65,39 +66,14 @@ pub(super) fn session_list_height(
         + more_below_height
 }
 
-pub(super) fn detail_height(
-    conversation: Option<&SessionConversationPreview>,
-    width: usize,
-) -> usize {
-    let text_width = width.saturating_sub(4).max(1);
-    let conversation_row_count = conversation.map_or(1, |conversation| {
-        if conversation.snippets.is_empty() {
-            return conversation
-                .unavailable_reason
-                .as_deref()
-                .map_or(1, |reason| {
-                    UnicodeWidthStr::width(reason).max(1).div_ceil(text_width)
-                });
-        }
-        conversation
-            .snippets
-            .iter()
-            .map(|snippet| {
-                UnicodeWidthStr::width(snippet.as_str())
-                    .saturating_add(2)
-                    .max(1)
-                    .div_ceil(text_width)
-            })
-            .sum::<usize>()
-    });
-    let detail_border_height = 2;
-    let session_identity_height = 2;
-    let conversation_heading_height = 1;
+pub(super) fn stacked_panel_heights(available_height: usize) -> Option<(usize, usize)> {
+    let details_height = available_height.div_ceil(2);
+    let list_height = available_height.saturating_sub(details_height);
+    if details_height < MIN_STACKED_DETAILS_HEIGHT || list_height < MIN_STACKED_LIST_HEIGHT {
+        return None;
+    }
 
-    detail_border_height
-        + session_identity_height
-        + conversation_heading_height
-        + conversation_row_count
+    Some((list_height, details_height))
 }
 
 const fn session_choice_row_height(visible_index: usize) -> usize {
