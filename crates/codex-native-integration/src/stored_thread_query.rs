@@ -51,14 +51,14 @@ pub fn stored_thread_page_query(query: &StoredThreadQuery) -> QueryBuilder<Sqlit
     let page_size = *page_size;
     let (sort_column, sort_index) = match sort {
         StoredThreadSort::Created => ("created_at_ms", "idx_threads_created_at_ms"),
-        StoredThreadSort::Updated => ("recency_at_ms", "idx_threads_recency_at_ms"),
+        StoredThreadSort::Updated => ("updated_at_ms", "idx_threads_updated_at_ms"),
     };
     let mut builder = QueryBuilder::<Sqlite>::new(
         r#"
             SELECT
                 id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
                 git_origin_url, name, title, preview, first_user_message,
-                created_at_ms, updated_at_ms, recency_at_ms
+                created_at_ms, updated_at_ms, updated_at_ms AS recency_at_ms
             FROM threads INDEXED BY "#,
     );
     builder.push(sort_index).push(" WHERE archived = 0");

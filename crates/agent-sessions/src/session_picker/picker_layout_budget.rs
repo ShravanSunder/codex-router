@@ -67,7 +67,7 @@ pub(super) fn session_list_height(
 }
 
 pub(super) fn stacked_panel_heights(available_height: usize) -> Option<(usize, usize)> {
-    let details_height = available_height.div_ceil(2);
+    let details_height = available_height.saturating_mul(2).div_ceil(5);
     let list_height = available_height.saturating_sub(details_height);
     if details_height < MIN_STACKED_DETAILS_HEIGHT || list_height < MIN_STACKED_LIST_HEIGHT {
         return None;

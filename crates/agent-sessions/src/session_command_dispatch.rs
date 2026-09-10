@@ -193,15 +193,13 @@ fn write_sessions_table<W: Write>(
 }
 
 fn run_interactive_session(
-    mut command: SessionsCommand,
+    command: SessionsCommand,
     context: &CliContext,
     launch_target: &SessionsLaunchTarget,
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
     picker.ensure_available()?;
-    // The interactive runtime view replaces source cycling; origin is not activity.
-    command.source = SessionsSource::All;
     let picker_root = SessionsPickerRoot::try_from(command.root)?;
     let picker_provider = command.provider.clone();
     let picker_source = command.source;

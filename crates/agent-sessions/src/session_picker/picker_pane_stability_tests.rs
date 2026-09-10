@@ -127,8 +127,8 @@ async fn sessions_picker_stacked_panel_boundaries_ignore_conversation_height() {
     let body_height = details_bottom - list_top + 1;
     let details_height = details_bottom - details_top + 1;
     assert!(
-        details_height * 2 >= body_height,
-        "stacked details should receive at least half the usable pane area; body={body_height}, details={details_height}:\n{short_text}"
+        details_height == body_height.saturating_mul(2).div_ceil(5),
+        "stacked details should receive 40% of the usable pane area; body={body_height}, details={details_height}:\n{short_text}"
     );
     let footer_index = short_text
         .lines()

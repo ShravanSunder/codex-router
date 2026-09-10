@@ -25,10 +25,10 @@ fn session_record_pages_use_keyset_order_index_without_offset() {
     );
     let later_page_sql = later_page_builder.build().sql().as_str().to_owned();
 
-    assert!(first_page_sql.contains("INDEXED BY idx_threads_recency_at_ms"));
+    assert!(first_page_sql.contains("INDEXED BY idx_threads_updated_at_ms"));
     assert!(!first_page_sql.contains("OFFSET"));
-    assert!(later_page_sql.contains("recency_at_ms <"));
-    assert!(later_page_sql.contains("recency_at_ms ="));
+    assert!(later_page_sql.contains("updated_at_ms <"));
+    assert!(later_page_sql.contains("updated_at_ms ="));
     assert!(later_page_sql.contains("id <"));
     assert!(!later_page_sql.contains("OFFSET"));
 
