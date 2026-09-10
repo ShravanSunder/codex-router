@@ -51,6 +51,15 @@ impl AutomationStore {
         if existing.is_some() && !request.overwrite {
             return Err(StorageError::ScheduleImportExists);
         }
+        if let Some(existing) = &existing {
+            let definition: agent_automation::ScheduleDefinition<TTarget, TEndpoint> =
+                serde_json::from_str(&existing.try_get::<String, _>("definition_json")?)
+                    .map_err(|_| StorageError::InvalidRecord)?;
+            crate::schedule_repository::validate_unchanged_execution_mode(
+                &definition.destination,
+                &package.definition.destination,
+            )?;
+        }
         let current = sqlx::query(
             "SELECT instruction_text FROM instruction_documents WHERE instruction_id=?",
         )

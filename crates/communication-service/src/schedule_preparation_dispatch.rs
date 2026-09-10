@@ -66,6 +66,18 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
             );
         }
     };
+    if matches!(
+        inspected.record.definition.destination,
+        agent_automation::ExecutionDestination::FreshEachRun { .. }
+    ) {
+        return reject(
+            request.id,
+            &params,
+            ScheduleFailureKind::InvalidField,
+            "Execution mode is fixed at creation. A fresh-per-run schedule cannot own one prepared thread; create a new reuse-mode schedule. No native operation was dispatched.",
+            effects,
+        );
+    }
     let canonical = match serde_json::to_vec(&(&params.schedule_id, &params.destination)) {
         Ok(value) => value,
         Err(_) => {
@@ -303,12 +315,13 @@ fn error(
         operation_id: Some(params.operation_id.clone()),
         schedule_id: Some(params.schedule_id.clone()),
         current_change_id: None,
-        field: None,
-        constraint: None,
+        field: matches!(kind, ScheduleFailureKind::InvalidField).then(|| "destination".into()),
+        constraint: matches!(kind, ScheduleFailureKind::InvalidField).then(|| message.into()),
         details: communication_protocol::ScheduleFailureDetails::None,
         effects: ScheduleEffects::Native { evidence: effects },
         next_action: match kind {
             ScheduleFailureKind::OwnershipConflict => ScheduleNextAction::SelectDifferentThread,
+            ScheduleFailureKind::InvalidField => ScheduleNextAction::CorrectRequest,
             _ => ScheduleNextAction::InspectOperation,
         },
     }

@@ -26,8 +26,8 @@ async fn overwrite_preserves_admitted_inputs_and_waiting_identity_after_restart(
                 instruction_id: instruction.instruction_id,
                 timing: TimingRule::Interval { seconds: 60 },
                 enabled: true,
-                destination: ExecutionDestination::FreshEachRun {
-                    endpoint: "original-endpoint".into(),
+                destination: ExecutionDestination::OwnedThread {
+                    target: "original-thread".into(),
                     cwd: "/original-workspace".into(),
                 },
                 execution_timeout_seconds: Some(120),

@@ -350,6 +350,10 @@ Connect and initialize the native client before committing stopping intent. If c
 
 Resume serializes with timing evaluation. If the one-shot's due instant was skipped during pause, and no firing exists, store finished with next_due_at_ms null. Append the finishedWithoutFiring event in the same transaction and notify subscribers only after commit; it is a lifecycle event, not a firing. The SDK derives wakeFinishedWithoutFiring from either the subscription transition or current snapshot. A historical first_fire_json still satisfies a new first-fire wait. This needs no extra table or timer mode.
 
+## Immutable schedule execution mode
+
+Schedule mode validation belongs to the existing schedule repository transactions. Compare whether the current and proposed destinations are FreshEachRun; Unprepared and OwnedThread both mean reuse mode. Reject differing modes before definition, timer, receipt or event writes. Apply the same guard on overwrite and preparation completion, and reject preparation of a fresh-per-run schedule in the service before native allocation. No mode column, migration or summary backfill is needed. Frozen Run inputs still protect active work from permitted same-mode destination and instruction edits.
+
 ## Host-composed configuration adapter
 
 Current `host_configuration.rs` provides immutable Host launch inputs; it is not a mutable automation settings store. Add a small AutomationConfigurationStore adapter, composed by Host from its selected communication directory. It owns `automation-settings.json` beside automation.sqlite, with closed fields formatVersion=1, operationId, executionTimeoutSeconds and summaryTimeoutSeconds. Defaults without a file are 3600/900. Invalid existing content reports configurationUnavailable and blocks new automation admission; it does not silently reset settings or stop ordinary communication. Owner-only file permissions follow the existing private runtime directory.

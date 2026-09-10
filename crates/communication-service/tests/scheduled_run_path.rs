@@ -33,7 +33,7 @@ async fn explicit_sdk_summary_skip_preserves_worker_result_and_releases_occupanc
     .await
 }
 #[tokio::test]
-async fn resumed_worker_uses_frozen_inputs_after_schedule_mode_edit()
+async fn resumed_worker_uses_frozen_inputs_after_schedule_workspace_edit()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     exercise_scheduled_run(
         false,
@@ -344,8 +344,8 @@ async fn exercise_scheduled_run(
         future.enabled = false;
         future.instruction_id = future_instruction.instruction_id;
         future.execution_timeout_seconds = Some(1.try_into()?);
-        future.destination = communication_protocol::ExecutionDestination::OwnedThread {
-            target: target.clone(),
+        future.destination = communication_protocol::ExecutionDestination::FreshEachRun {
+            endpoint: target.endpoint.clone(),
             cwd: "/future-fixture".into(),
         };
         client

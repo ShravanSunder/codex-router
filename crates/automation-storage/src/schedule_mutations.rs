@@ -65,6 +65,10 @@ impl AutomationStore {
                 if *expected_change_id != current.change_id {
                     return Err(StorageError::ScheduleChangeConflict);
                 }
+                crate::schedule_repository::validate_unchanged_execution_mode(
+                    &current.definition.destination,
+                    &definition.destination,
+                )?;
                 current.definition = definition.clone();
             }
             ScheduleEdit::SetEnabled { enabled } => current.definition.enabled = *enabled,

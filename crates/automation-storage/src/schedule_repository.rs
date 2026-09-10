@@ -13,6 +13,20 @@ pub struct ScheduleCreate<TTarget, TEndpoint> {
     pub imported_continuity: ContinuityInput<TTarget>,
     pub now_ms: i64,
 }
+pub(crate) fn validate_unchanged_execution_mode<TTarget, TEndpoint>(
+    before: &ExecutionDestination<TTarget, TEndpoint>,
+    after: &ExecutionDestination<TTarget, TEndpoint>,
+) -> Result<(), StorageError> {
+    if matches!(before, ExecutionDestination::FreshEachRun { .. })
+        != matches!(after, ExecutionDestination::FreshEachRun { .. })
+    {
+        return Err(StorageError::InvalidSchedule {
+            field: "destination",
+            reason: "Execution mode is fixed at creation. Create a new schedule to use another mode.",
+        });
+    }
+    Ok(())
+}
 impl AutomationStore {
     pub async fn create_schedule<TTarget, TEndpoint>(
         &mut self,

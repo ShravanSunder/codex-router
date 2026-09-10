@@ -55,6 +55,10 @@ impl AutomationStore {
         if record.change_id != request.expected_change_id {
             return Err(StorageError::ScheduleChangeConflict);
         }
+        crate::schedule_repository::validate_unchanged_execution_mode(
+            &record.definition.destination,
+            &ExecutionDestination::Unprepared,
+        )?;
         crate::thread_binding_repository::claim_in_transaction(
             &mut transaction,
             &ThreadBindingClaim {
