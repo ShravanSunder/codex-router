@@ -252,3 +252,18 @@ async fn remembered_runtime_rows_refresh_age_labels_from_their_timestamps() {
     assert_eq!(rows[0].created_at_ms, Some(0));
     assert_eq!(rows[0].recency_at_ms, Some(0));
 }
+
+#[test]
+fn ephemeral_system_runtime_record_preserves_system_classification() {
+    let row = runtime_record(
+        "system-record",
+        "",
+        "/repo/project-a",
+        &json!({
+            "source":"vscode", "threadSource":"system", "ephemeral":true,
+            "parentThreadId":null, "name":null, "path":null
+        }),
+    );
+    assert_eq!(row.thread_source.as_deref(), Some("system"));
+    assert_eq!(row.source.as_deref(), Some("vscode"));
+}

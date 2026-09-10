@@ -51,7 +51,8 @@ pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecor
                 && !matches!(
                     record.thread_source.as_deref(),
                     Some(
-                        "exec"
+                        "system"
+                            | "exec"
                             | "app_server"
                             | "subagent"
                             | "guardian_review"

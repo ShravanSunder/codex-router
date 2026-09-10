@@ -103,6 +103,15 @@ fn sessions_interactive_picker_launches_selected_session_with_injected_dependenc
                 3000,
             ),
             CodexStateThreadFixture::new(
+                "thread-system",
+                &project,
+                "codex-router",
+                "vscode",
+                "system",
+                "main",
+                9000,
+            ),
+            CodexStateThreadFixture::new(
                 "thread-guardian",
                 &project,
                 "codex-router",

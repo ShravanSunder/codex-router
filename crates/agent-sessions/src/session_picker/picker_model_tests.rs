@@ -17,7 +17,12 @@ fn default_picker_excludes_helper_threads_even_with_interactive_origin() {
         "codex-router",
         "cli",
     )];
-    for kind in ["subagent", "guardian_review", "memory_consolidation"] {
+    for kind in [
+        "subagent",
+        "guardian_review",
+        "memory_consolidation",
+        "system",
+    ] {
         let mut child = picker_record(
             kind,
             "Hidden helper",
