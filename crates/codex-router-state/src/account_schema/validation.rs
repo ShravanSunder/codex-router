@@ -92,7 +92,8 @@ pub(super) async fn validate_table(
     if !table_matches(connection, table_name, expected).await? {
         return incompatible_schema();
     }
-    validate_table_constraints(connection, table_name).await
+    validate_table_constraints(connection, table_name).await?;
+    validate_no_owned_table_triggers(connection, table_name).await
 }
 
 pub(super) async fn table_matches(
@@ -123,13 +124,14 @@ pub(super) struct ActualColumn {
     not_null: bool,
     default_value: Option<String>,
     primary_key_position: i64,
+    hidden: i64,
 }
 
 pub(super) async fn load_columns(
     connection: &mut SqliteConnection,
     table_name: &'static str,
 ) -> Result<BTreeMap<String, ActualColumn>, StateStoreError> {
-    let query = format!("PRAGMA table_info(\"{table_name}\")");
+    let query = format!("PRAGMA table_xinfo(\"{table_name}\")");
     let rows = sqlx::query(sqlx::AssertSqlSafe(query))
         .fetch_all(connection)
         .await
@@ -144,6 +146,7 @@ pub(super) async fn load_columns(
                     not_null: row.get::<i64, _>("notnull") != 0,
                     default_value: row.get::<Option<String>, _>("dflt_value"),
                     primary_key_position: row.get::<i64, _>("pk"),
+                    hidden: row.get::<i64, _>("hidden"),
                 },
             )
         })
@@ -164,6 +167,7 @@ pub(super) fn validate_column(
         .eq_ignore_ascii_case(expected.declared_type)
         && actual.not_null == expected.not_null
         && actual.primary_key_position == expected.primary_key_position
+        && actual.hidden == 0
         && default_matches
     {
         Ok(())
@@ -305,6 +309,24 @@ pub(super) async fn validate_table_constraints(
         return incompatible_schema();
     }
     Ok(())
+}
+
+pub(super) async fn validate_no_owned_table_triggers(
+    connection: &mut SqliteConnection,
+    table_name: &'static str,
+) -> Result<(), StateStoreError> {
+    let trigger_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1)",
+    )
+    .bind(table_name)
+    .fetch_one(connection)
+    .await
+    .map_err(crate::sqlite::sqlx_error)?;
+    if trigger_exists {
+        incompatible_schema()
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn schema_tokens(sql: &str) -> Vec<String> {

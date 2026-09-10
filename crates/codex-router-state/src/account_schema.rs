@@ -255,6 +255,7 @@ async fn validate_lease_shape(
     if !table_exists(connection, "active_client_leases").await? {
         return Ok(LeaseShape::Missing);
     }
+    validate_no_owned_table_triggers(connection, "active_client_leases").await?;
     if table_matches(connection, "active_client_leases", ACTIVE_CLIENT_LEASES).await? {
         return Ok(LeaseShape::Current);
     }
@@ -281,6 +282,7 @@ async fn validate_history_table(
     if !table_exists(connection, table_name).await? {
         return Ok(Vec::new());
     }
+    validate_no_owned_table_triggers(connection, table_name).await?;
     let actual = load_columns(connection, table_name).await?;
     let mut missing = Vec::new();
     for expected in final_columns {

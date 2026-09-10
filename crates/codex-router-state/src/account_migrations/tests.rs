@@ -15,6 +15,7 @@ mod history_contracts;
 mod legacy_shapes;
 mod presence_fixtures;
 mod schema_contracts;
+mod schema_integrity;
 mod transaction_recovery;
 
 use presence_fixtures::*;
