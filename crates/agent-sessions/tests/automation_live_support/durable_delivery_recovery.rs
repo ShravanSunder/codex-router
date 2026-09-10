@@ -83,11 +83,11 @@ pub async fn exercise(proof: &mut ProofContext, portable: PortableRunProof) -> P
         || imported.definition.enabled
         || !matches!(
             imported.definition.destination,
-            ExecutionDestination::Unprepared
+            ExecutionDestination::FreshEachRunUnprepared
         )
         || !matches!(&imported.imported_continuity, ImportedContinuity::ImportedSummary { text, .. } if text == &portable.summary_text)
     {
-        return Err("Portable import did not preserve identity/summary with a new edit token and disabled unprepared destination".into());
+        return Err("Portable import did not preserve identity, summary and fresh execution mode with a new edit token and disabled unprepared bindings".into());
     }
     let runs = client
         .list_runs(RunListRequest {

@@ -13,6 +13,9 @@ use tokio::sync::Mutex;
 #[cfg(test)]
 #[path = "scheduled_input_validation_tests.rs"]
 mod input_validation_tests;
+#[cfg(test)]
+#[path = "worker_timeout_crash_tests.rs"]
+mod timeout_crash_tests;
 #[derive(Clone)]
 pub(crate) struct ScheduledRunWorker {
     pub store: Arc<Mutex<AutomationStore>>,
@@ -107,7 +110,11 @@ impl ScheduledRunWorker {
                     )
                     .await?
                 {
+                    #[cfg(test)]
+                    timeout_crash_tests::checkpoint("stop-intent");
                     let _response=connection.request_validated(&schemas,codex_native_integration::NativeOperation::InterruptTurn,serde_json::json!({"threadId":String::from(target.session_id.clone()),"turnId":turn_id})).await;
+                    #[cfg(test)]
+                    timeout_crash_tests::checkpoint("interrupt-response");
                 }
                 return Ok(());
             }
