@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prove checked account SQL using isolated copies of the actual workspace source."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -140,8 +141,35 @@ def main() -> int:
                     f"{label} did not fail for its expected compiler diagnostic"
                 )
         _ = source_path.write_text(original)
+        # Freshness is a separate gate from offline compilation: corrupt only
+        # the scratch metadata and require comparison with the migrated schema.
+        for query_file in sorted(metadata.glob("query-*.json")):
+            query_data = json.loads(query_file.read_text())
+            nullable = query_data["describe"]["nullable"]
+            if nullable:
+                nullable[0] = not nullable[0]
+                _ = query_file.write_text(json.dumps(query_data))
+                break
+        else:
+            raise RuntimeError("no checked result metadata available for freshness proof")
+        environment["PATH"] = f"{sqlx.parent}:{environment['PATH']}"
+        result = subprocess.run(
+            [
+                "cargo", "sqlx", "prepare", "--workspace", "--check",
+                "--", "--locked", "--package", "codex-router-state", "--all-targets",
+            ],
+            cwd=workspace,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _ = (evidence / "stale-metadata.log").write_text(result.stdout + result.stderr)
+        if result.returncode == 0 or "one or more query files differ" not in result.stderr:
+            raise RuntimeError("stale metadata did not fail at the freshness comparison")
     print(
-        f"SQLx contract proof: valid offline build and three expected compiler failures; logs: {evidence}"
+        f"SQLx contract proof: valid offline build, three expected compiler failures, "
+        f"and stale metadata rejection; logs: {evidence}"
     )
     return 0
 

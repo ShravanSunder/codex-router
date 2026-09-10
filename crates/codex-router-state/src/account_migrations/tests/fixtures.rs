@@ -6,17 +6,41 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use sqlx::Connection;
+use sqlx::SqliteConnection;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 
 use super::super::BASELINE_SQL;
 
-pub(super) fn create_conflicting_v13_database(database_path: &Path) {
-    let connection = Connection::open(database_path).expect("fixture should open");
+pub(super) async fn open_test_connection(
+    database_path: &Path,
+    create_if_missing: bool,
+) -> SqliteConnection {
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .create_if_missing(create_if_missing);
+    SqliteConnection::connect_with(&options)
+        .await
+        .expect("test database connection should open")
+}
+
+pub(super) async fn execute_fixture_sql(database_path: &Path, sql: &'static str) {
+    let mut connection = open_test_connection(database_path, true).await;
+    sqlx::raw_sql(sql)
+        .execute(&mut connection)
+        .await
+        .expect("fixture SQL should execute");
     connection
-        .execute_batch(
-            "CREATE TABLE accounts (
+        .close()
+        .await
+        .expect("fixture connection should close");
+}
+
+pub(super) async fn create_conflicting_v13_database(database_path: &Path) {
+    execute_fixture_sql(
+        database_path,
+        "CREATE TABLE accounts (
                 account_id TEXT PRIMARY KEY NOT NULL,
                 label BLOB NOT NULL,
                 status TEXT NOT NULL,
@@ -24,8 +48,8 @@ pub(super) fn create_conflicting_v13_database(database_path: &Path) {
              );
              INSERT INTO accounts VALUES ('preserved', 'before-failure', 'enabled', 7);
              PRAGMA user_version = 13;",
-        )
-        .expect("fixture should initialize");
+    )
+    .await;
 }
 
 pub(super) async fn open_test_pool(database_path: &Path) -> sqlx::SqlitePool {
@@ -39,53 +63,52 @@ pub(super) async fn open_test_pool(database_path: &Path) -> sqlx::SqlitePool {
         .expect("test pool should open")
 }
 
-pub(super) fn create_legacy_v13_database(database_path: &Path, account_label: &str) {
-    let connection = Connection::open(database_path).expect("legacy fixture should open");
-    connection
-        .execute_batch(BASELINE_SQL)
+pub(super) async fn create_legacy_v13_database(database_path: &Path, account_label: &str) {
+    let mut connection = open_test_connection(database_path, true).await;
+    sqlx::raw_sql(BASELINE_SQL)
+        .execute(&mut connection)
+        .await
         .expect("legacy v13 schema should initialize");
-    connection
-        .execute(
-            "INSERT INTO accounts VALUES ('preserved-account', ?1, 'disabled', 41)",
-            [account_label],
-        )
+    sqlx::query("INSERT INTO accounts VALUES ('preserved-account', ?1, 'disabled', 41)")
+        .bind(account_label)
+        .execute(&mut connection)
+        .await
         .expect("legacy account should seed");
-    connection
-        .execute(
-            "INSERT INTO affinity_pins VALUES ('preserved-pin', 'preserved-account')",
-            [],
-        )
+    sqlx::query("INSERT INTO affinity_pins VALUES ('preserved-pin', 'preserved-account')")
+        .execute(&mut connection)
+        .await
         .expect("legacy pin should seed");
-    connection
-        .execute(
-            "INSERT INTO previous_response_affinity_owners VALUES (
+    sqlx::query(
+        "INSERT INTO previous_response_affinity_owners VALUES (
                 'preserved-hash', 'responses', 'preserved-account', 41, 'websocket', 1234
              )",
-            [],
-        )
-        .expect("legacy owner should seed");
-    connection
-        .execute(
-            "INSERT INTO account_routing_policies VALUES ('preserved-account', 900)",
-            [],
-        )
+    )
+    .execute(&mut connection)
+    .await
+    .expect("legacy owner should seed");
+    sqlx::query("INSERT INTO account_routing_policies VALUES ('preserved-account', 900)")
+        .execute(&mut connection)
+        .await
         .expect("legacy policy should seed");
-    connection
-        .execute(
-            "INSERT INTO session_account_affinities VALUES (
+    sqlx::query(
+        "INSERT INTO session_account_affinities VALUES (
                 'preserved-session', 'preserved-account', 5678
              )",
-            [],
-        )
-        .expect("legacy session affinity should seed");
+    )
+    .execute(&mut connection)
+    .await
+    .expect("legacy session affinity should seed");
+    connection
+        .close()
+        .await
+        .expect("legacy fixture connection should close");
 }
 
-pub(super) fn create_legacy_v11_database(database_path: &Path) {
-    create_legacy_v13_database(database_path, "v11-policy");
-    let connection = Connection::open(database_path).expect("v11 fixture should reopen");
-    connection
-        .execute_batch(
-            "DROP TABLE session_account_affinities;
+pub(super) async fn create_legacy_v11_database(database_path: &Path) {
+    create_legacy_v13_database(database_path, "v11-policy").await;
+    execute_fixture_sql(
+        database_path,
+        "DROP TABLE session_account_affinities;
              ALTER TABLE account_routing_policies RENAME TO account_routing_policies_current;
              CREATE TABLE account_routing_policies (
                 account_id TEXT PRIMARY KEY NOT NULL,
@@ -99,16 +122,15 @@ pub(super) fn create_legacy_v11_database(database_path: &Path) {
                 SELECT * FROM account_routing_policies_current;
              DROP TABLE account_routing_policies_current;
              PRAGMA user_version = 11;",
-        )
-        .expect("v11 fixture should initialize");
+    )
+    .await;
 }
 
-pub(super) fn create_legacy_v7_database(database_path: &Path) {
-    create_legacy_v13_database(database_path, "v7-lease");
-    let connection = Connection::open(database_path).expect("v7 fixture should reopen");
-    connection
-        .execute_batch(
-            "DROP TABLE session_account_affinities;
+pub(super) async fn create_legacy_v7_database(database_path: &Path) {
+    create_legacy_v13_database(database_path, "v7-lease").await;
+    execute_fixture_sql(
+        database_path,
+        "DROP TABLE session_account_affinities;
              DROP TABLE account_routing_policies;
              DROP TABLE active_client_leases;
              CREATE TABLE active_client_leases (
@@ -122,42 +144,39 @@ pub(super) fn create_legacy_v7_database(database_path: &Path) {
                 'responses', 'legacy-reservation', 'preserved-account', 123
              );
              PRAGMA user_version = 7;",
-        )
-        .expect("v7 fixture should initialize");
+    )
+    .await;
 }
 
-pub(super) fn create_legacy_v7_current_lease_database(database_path: &Path) {
-    create_legacy_v13_database(database_path, "v7-current-lease");
-    let connection = Connection::open(database_path).expect("v7 fixture should reopen");
-    connection
-        .execute_batch(
-            "DROP TABLE session_account_affinities;
+pub(super) async fn create_legacy_v7_current_lease_database(database_path: &Path) {
+    create_legacy_v13_database(database_path, "v7-current-lease").await;
+    execute_fixture_sql(
+        database_path,
+        "DROP TABLE session_account_affinities;
              DROP TABLE account_routing_policies;
              INSERT INTO active_client_leases VALUES (
                 'responses', 'current-process', 'current-reservation',
                 'preserved-account', 123, 5
              );
              PRAGMA user_version = 7;",
-        )
-        .expect("v7 current lease fixture should initialize");
+    )
+    .await;
 }
 
-pub(super) fn create_legacy_v7_without_lease_table(database_path: &Path) {
-    create_legacy_v13_database(database_path, "v7-absent-lease");
-    let connection = Connection::open(database_path).expect("v7 fixture should reopen");
-    connection
-        .execute_batch(
-            "DROP TABLE session_account_affinities;
+pub(super) async fn create_legacy_v7_without_lease_table(database_path: &Path) {
+    create_legacy_v13_database(database_path, "v7-absent-lease").await;
+    execute_fixture_sql(
+        database_path,
+        "DROP TABLE session_account_affinities;
              DROP TABLE account_routing_policies;
              DROP TABLE active_client_leases;
              PRAGMA user_version = 7;",
-        )
-        .expect("v7 absent lease fixture should initialize");
+    )
+    .await;
 }
 
-pub(super) fn create_legacy_v9_history_shape(database_path: &Path, optional_field_mask: u8) {
-    create_legacy_v13_database(database_path, "v9-history");
-    let connection = Connection::open(database_path).expect("v9 fixture should reopen");
+pub(super) async fn create_legacy_v9_history_shape(database_path: &Path, optional_field_mask: u8) {
+    create_legacy_v13_database(database_path, "v9-history").await;
     let mut event_columns = Vec::new();
     let mut event_column_names = Vec::new();
     let mut event_values = Vec::new();
@@ -240,9 +259,8 @@ pub(super) fn create_legacy_v9_history_shape(database_path: &Path, optional_fiel
         .iter()
         .map(|value| format!(", {value}"))
         .collect::<String>();
-    connection
-        .execute_batch(&format!(
-            "DROP TABLE session_account_affinities;
+    let fixture_sql = format!(
+        "DROP TABLE session_account_affinities;
              DROP TABLE account_routing_policies;
              DROP TABLE active_session_events;
              CREATE TABLE active_session_events (
@@ -288,8 +306,16 @@ pub(super) fn create_legacy_v9_history_shape(database_path: &Path, optional_fiel
                 {rollup_optional_values}
              );
              PRAGMA user_version = 9;"
-        ))
+    );
+    let mut connection = open_test_connection(database_path, false).await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(fixture_sql))
+        .execute(&mut connection)
+        .await
         .expect("v9 history fixture should initialize");
+    connection
+        .close()
+        .await
+        .expect("v9 fixture connection should close");
 }
 
 pub(super) const LEGACY_V0_TABLE_STATEMENTS: &[&str] = &[
@@ -345,54 +371,62 @@ pub(super) const LEGACY_V0_TABLE_STATEMENTS: &[&str] = &[
     );",
 ];
 
-pub(super) fn assert_legacy_database_unchanged(database_path: &Path, account_label: &str) {
-    let connection = Connection::open(database_path).expect("legacy database should inspect");
-    let history_exists: bool = connection
-        .query_row(
+pub(super) async fn assert_legacy_database_unchanged(database_path: &Path, account_label: &str) {
+    let mut connection = open_test_connection(database_path, false).await;
+    let history_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
-            [],
-            |row| row.get(0),
         )
+        .fetch_one(&mut connection)
+        .await
         .expect("history presence should query");
     assert!(!history_exists);
-    let account: (String, String, i64) = connection
-        .query_row(
-            "SELECT label, status, active_credential_generation
+    let account: (String, String, i64) = sqlx::query_as(
+        "SELECT label, status, active_credential_generation
                FROM accounts WHERE account_id = 'preserved-account'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("preserved account should query");
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("preserved account should query");
     assert_eq!(
         account,
         (account_label.to_owned(), "disabled".to_owned(), 41)
     );
+    connection
+        .close()
+        .await
+        .expect("legacy inspection connection should close");
 }
 
-pub(super) fn assert_native_history_present(database_path: &Path) {
-    let connection = Connection::open(database_path).expect("native database should inspect");
-    let history_rows: i64 = connection
-        .query_row("SELECT COUNT(*) FROM _sqlx_migrations", [], |row| {
-            row.get(0)
-        })
+pub(super) async fn assert_native_history_present(database_path: &Path) {
+    let mut connection = open_test_connection(database_path, false).await;
+    let history_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&mut connection)
+        .await
         .expect("native history should query");
     assert_eq!(history_rows, 1);
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
         .expect("legacy marker should query");
     assert_eq!(version, 13);
+    connection
+        .close()
+        .await
+        .expect("native inspection connection should close");
 }
 
-pub(super) fn migration_history_bytes(database_path: &Path) -> Vec<(i64, bool, Vec<u8>)> {
-    let connection = Connection::open(database_path).expect("history should inspect");
-    let mut statement = connection
-        .prepare("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
-        .expect("history query should prepare");
-    statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .expect("history should query")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("history should collect")
+pub(super) async fn migration_history_bytes(database_path: &Path) -> Vec<(i64, bool, Vec<u8>)> {
+    let mut connection = open_test_connection(database_path, false).await;
+    let rows =
+        sqlx::query_as("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&mut connection)
+            .await
+            .expect("history should collect");
+    connection
+        .close()
+        .await
+        .expect("history inspection connection should close");
+    rows
 }
 
 pub(super) fn run_migration_child_to_checkpoint(
