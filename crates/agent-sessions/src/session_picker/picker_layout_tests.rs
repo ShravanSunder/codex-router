@@ -522,10 +522,10 @@ async fn sessions_picker_stacked_layout_removes_top_padding_and_keeps_panels_adj
 }
 
 #[tokio::test]
-async fn sessions_picker_uses_sidecar_only_at_160_columns() {
+async fn sessions_picker_uses_sidecar_only_at_140_columns() {
     let stacked_text = render_picker_capture(
         capture_picker_request(),
-        159,
+        139,
         vec![TerminalEvent::Key(KeyEvent::new(
             KeyEventKind::Press,
             KeyCode::Esc,
@@ -534,12 +534,12 @@ async fn sessions_picker_uses_sidecar_only_at_160_columns() {
     .await;
     assert!(
         !has_sidecar_details(&stacked_text),
-        "session picker should stack details below 160 columns:\n{stacked_text}"
+        "session picker should stack details below 140 columns:\n{stacked_text}"
     );
 
     let sidecar_text = render_picker_capture(
         capture_picker_request(),
-        160,
+        140,
         vec![TerminalEvent::Key(KeyEvent::new(
             KeyEventKind::Press,
             KeyCode::Esc,
@@ -548,7 +548,7 @@ async fn sessions_picker_uses_sidecar_only_at_160_columns() {
     .await;
     assert!(
         has_sidecar_details(&sidecar_text),
-        "session picker should place details on the right at 160 columns:\n{sidecar_text}"
+        "session picker should place details on the right at 140 columns:\n{sidecar_text}"
     );
 }
 
@@ -562,8 +562,8 @@ async fn sessions_picker_reflows_when_terminal_width_changes() {
     }
     .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
         vec![
-            TerminalEvent::Resize(159, 40),
-            TerminalEvent::Resize(160, 40),
+            TerminalEvent::Resize(139, 40),
+            TerminalEvent::Resize(140, 40),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
         ],
     )))
@@ -573,10 +573,10 @@ async fn sessions_picker_reflows_when_terminal_width_changes() {
 
     assert!(
         frames.iter().any(|frame| !has_sidecar_details(frame)),
-        "session picker should render a stacked frame after shrinking below 160 columns: {frames:?}"
+        "session picker should render a stacked frame after shrinking below 140 columns: {frames:?}"
     );
     assert!(
         frames.iter().any(|frame| has_sidecar_details(frame)),
-        "session picker should render a sidecar frame after growing to 160 columns: {frames:?}"
+        "session picker should render a sidecar frame after growing to 140 columns: {frames:?}"
     );
 }

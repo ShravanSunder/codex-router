@@ -46,7 +46,7 @@ use picker_display_text::{
 };
 
 const MIN_RENDER_HEIGHT: usize = 24;
-const SIDECAR_PICKER_WIDTH: usize = 160;
+const SIDECAR_PICKER_WIDTH: usize = 140;
 const NARROW_PICKER_WIDTH: usize = 72;
 const COMPACT_PICKER_WIDTH: usize = 56;
 const MIN_STACKED_DETAILS_HEIGHT: usize = 6;
