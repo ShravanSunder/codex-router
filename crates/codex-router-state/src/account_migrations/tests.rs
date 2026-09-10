@@ -13,8 +13,11 @@ use fixtures::*;
 
 mod history_contracts;
 mod legacy_shapes;
+mod presence_fixtures;
 mod schema_contracts;
 mod transaction_recovery;
+
+use presence_fixtures::*;
 
 #[tokio::test]
 async fn migration_process_helper() {
