@@ -82,8 +82,9 @@ the foreground host stops its children and re-execs itself; otherwise the
 running app-server and connected clients are left untouched. This MVP is not a
 background service, launchd agent, or cross-machine control plane.
 
-For discovery, agent-declared messages, queue/steer, and event listening, see the
-[agent CLI guide](docs/agent-guidance/agent-communication.md). The
-[isolated debug testing guide](docs/wip/2026-09-06-agent-communication-guide.md)
-shows the real two-agent acceptance workflow. V1 ships the Rust SDK and CLI;
-other language SDKs, remote transport, scheduling, and mailboxes follow separately.
+For discovery, agent-declared messages, queue/steer, timed wake-ups and scheduled
+work, see the [agent CLI guide](docs/agent-guidance/agent-communication.md).
+Automation uses a separate `automation.sqlite` database and the same Rust SDK
+and CLI. [Debug testing instructions](docs/testing/automation-debug-testing.md)
+cover the opt-in Luna acceptance runner and its isolated Host. Other language
+SDK implementations, shared message boards and remote transport follow separately.

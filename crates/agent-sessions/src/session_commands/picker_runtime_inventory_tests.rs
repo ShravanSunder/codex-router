@@ -1,5 +1,18 @@
 //! Real public-client boundary: inventory reads never resume or submit work.
 use super::*;
+
+#[test]
+fn runtime_picker_preserves_native_subagent_classification() {
+    let row = runtime_record(
+        "child",
+        "Helper",
+        "/repo",
+        &json!({
+            "source":"vscode", "threadSource":"subagent", "parentThreadId":"parent"
+        }),
+    );
+    assert_eq!(row.thread_source.as_deref(), Some("subagent"));
+}
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 const SERVICE: &str = "00000000-0000-4000-8000-000000000001";
@@ -204,7 +217,12 @@ async fn unavailable_service_retains_remembered_rows_without_stale_active_claims
     // Act
     let missing =
         std::env::temp_dir().join(format!("missing-picker-service-{}", std::process::id()));
-    let rows = inventory.refresh(Some(&missing), vec![]).await;
+    let snapshot = inventory.refresh(Some(&missing), vec![]).await;
+    assert_eq!(
+        snapshot.runtime_coverage,
+        crate::picker_runtime_status::PickerRuntimeCoverage::Unavailable
+    );
+    let rows = snapshot.records;
     // Assert: remembered identity remains visible in All, but cannot match Active or Idle.
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].session_id, "remembered");
@@ -222,7 +240,12 @@ async fn remembered_runtime_rows_refresh_age_labels_from_their_timestamps() {
         remembered: vec![row],
     };
 
-    let rows = inventory.refresh(None, vec![]).await;
+    let snapshot = inventory.refresh(None, vec![]).await;
+    assert_eq!(
+        snapshot.runtime_coverage,
+        crate::picker_runtime_status::PickerRuntimeCoverage::LocalOnly
+    );
+    let rows = snapshot.records;
 
     assert!(rows[0].created.ends_with(" ago"));
     assert!(rows[0].recency.ends_with(" ago"));

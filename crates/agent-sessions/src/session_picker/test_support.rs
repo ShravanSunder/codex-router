@@ -8,6 +8,16 @@ use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
+#[cfg(test)]
+pub(crate) fn observed_records(
+    records: Vec<SessionPickerRecord>,
+) -> crate::picker_runtime_status::PickerRecordsSnapshot {
+    crate::picker_runtime_status::PickerRecordsSnapshot {
+        records,
+        runtime_coverage: crate::picker_runtime_status::PickerRuntimeCoverage::Available,
+    }
+}
+
 pub(crate) fn picker_request() -> SessionsPickerRequest {
     SessionsPickerRequest {
         root: SessionsPickerRoot::Cwd,

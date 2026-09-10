@@ -34,6 +34,9 @@ pub struct CommunicationRuntime {
     tasks: JoinSet<io::Result<()>>,
     journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     maintenance: Option<tokio::task::JoinHandle<Result<(), lifecycle_observation::JournalError>>>,
+    automation_task: Option<tokio::task::JoinHandle<()>>,
+    schedule_task: Option<tokio::task::JoinHandle<()>>,
+    automation_maintenance: Option<tokio::task::JoinHandle<()>>,
     current_generation: Option<CodexGeneration>,
     observer_task: Option<tokio::task::JoinHandle<()>>,
     manifest: Option<communication_service::ManifestPublication>,
@@ -95,6 +98,28 @@ impl CommunicationRuntime {
         if let Some(journal) = &journal {
             identity = identity.with_journal(std::sync::Arc::clone(journal));
         }
+        let mut settings_backend = None;
+        match automation_storage::AutomationStore::open(&inputs.directory.join("automation.sqlite"))
+            .await
+        {
+            Ok(store) => {
+                let store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+                let handle = communication_service::AutomationConfigurationHandle::default();
+                handle.suspend().await;
+                let backend = std::sync::Arc::new(crate::AutomationSettingsFile::new(
+                    &inputs.directory,
+                    std::sync::Arc::clone(&store),
+                    handle.clone(),
+                ));
+                identity = identity
+                    .with_automation_store(store)
+                    .with_automation_configuration(handle, backend.clone());
+                settings_backend = Some(backend);
+            }
+            Err(_) => {
+                tracing::warn!("automation storage unavailable; communication remains independent")
+            }
+        }
         let endpoint = EndpointRef {
             service_id: service_id.clone(),
             endpoint_id: EndpointId::try_from("codex-local".to_owned())
@@ -113,6 +138,9 @@ impl CommunicationRuntime {
                 gate: publication.admission_gate(),
             })
             .map_err(io::Error::other)?;
+        let wake_worker = identity.wake_timing_worker();
+        let schedule_worker = identity.schedule_timing_worker();
+        let retention_worker = identity.automation_retention_worker();
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
         let control = LocalControlService::bind(&inputs.directory.join("control.sock"), identity)?
             .with_connection_budget(std::sync::Arc::clone(&permits));
@@ -132,6 +160,13 @@ impl CommunicationRuntime {
         )?
         .with_connection_budget(permits);
         let publication = publication.with_acp_listener()?;
+        if let Some(settings) = settings_backend
+            && settings.recover().await.is_err()
+        {
+            tracing::warn!(
+                "automation configuration recovery unavailable; new automation admission is paused"
+            );
+        }
         let manifest = communication_service::ManifestPublication::publish(
             &inputs.directory,
             &communication_protocol::ServiceManifest {
@@ -146,6 +181,12 @@ impl CommunicationRuntime {
             },
         )?;
         let shutdown = CancellationToken::new();
+        // Binding above establishes this runtime owns the listeners before recovery can mutate state.
+        let automation_task = wake_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
+        let schedule_task =
+            schedule_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
+        let automation_maintenance =
+            retention_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
         let mut tasks = JoinSet::new();
         tasks.spawn(control.run(shutdown.clone()));
         tasks.spawn(native.run(shutdown.clone()));
@@ -167,6 +208,9 @@ impl CommunicationRuntime {
             manifest: Some(manifest),
             journal,
             maintenance,
+            automation_task,
+            schedule_task,
+            automation_maintenance,
             current_generation: None,
             observer_task: None,
         })
@@ -412,6 +456,21 @@ impl CommunicationRuntime {
                     failure.get_or_insert(io::Error::other("lifecycle maintenance failed"));
                 }
             }
+        }
+        if let Some(task) = self.automation_task.take()
+            && task.await.is_err()
+        {
+            failure.get_or_insert(io::Error::other("automation worker shutdown failed"));
+        }
+        if let Some(task) = self.schedule_task.take()
+            && task.await.is_err()
+        {
+            failure.get_or_insert(io::Error::other("schedule worker shutdown failed"));
+        }
+        if let Some(task) = self.automation_maintenance.take()
+            && task.await.is_err()
+        {
+            failure.get_or_insert(io::Error::other("automation maintenance shutdown failed"));
         }
         match failure {
             Some(error) => Err(error),

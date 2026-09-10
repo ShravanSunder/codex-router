@@ -83,3 +83,105 @@ mod acp_schema_catalog;
 pub use acp_schema_catalog::{
     ACP_SCHEMA_BYTES, ACP_SCHEMA_DIGEST, AcpSchemaCatalog, AcpSchemaError,
 };
+
+mod instruction_contract;
+pub use agent_automation::{AttemptId, DeliveryId, EventId};
+pub use agent_automation::{InstructionId, InstructionText, OperationId, RevisionId, WakeupId};
+pub use instruction_contract::{
+    InstructionCreateParams, InstructionShowParams, InstructionSnapshot, InstructionUpdateParams,
+};
+pub use instruction_contract::{
+    InstructionFailure, InstructionFailureKind, InstructionNextAction, InstructionStage,
+    LocalMutationEvidence, LocalMutationState,
+};
+mod automation_timing_contract;
+pub use automation_timing_contract::{
+    ExpiryRequest, InvalidSeconds, PositiveSeconds, TimingRequest,
+};
+mod wakeup_contract;
+pub use wakeup_contract::{
+    FireKind, FireReceipt, SavedMessage, WakeDefinition, WakeMutationRequest, WakeSendRequest,
+    WakeShowRequest, WakeSnapshot, WakeState,
+};
+mod wakeup_failure;
+pub use wakeup_failure::{WakeFailure, WakeFailureReason, WakeFailureStage, WakeNextAction};
+mod delivery_inspection_contract;
+pub use delivery_inspection_contract::{
+    CessationEvidence, DeliveryDisposition, DeliveryEvidence, DeliveryInspection,
+    DeliveryShowRequest, DeliverySource, NativeEffectEvidence, PreparationEffect, SubmissionEffect,
+    WakeMutationResult,
+};
+
+mod wakeup_subscription_contract;
+pub use wakeup_subscription_contract::{
+    NoMutation, UnknownFire, WaitNextAction, WaitStage, WaitUnavailable, WaitUnavailableEffects,
+    WaitUnavailableKind, WakeChange, WakeChanged, WakeSubscription,
+};
+
+pub use wakeup_subscription_contract::{
+    UnknownFirstFire, VerifyWakeupAddress, WakeNotFound, WakeNotFoundKind,
+};
+mod automation_page_contract;
+pub use automation_page_contract::{
+    AutomationPage, AutomationPageRequest, InvalidPageLimit, PageLimit,
+};
+
+mod attempt_history_contract;
+mod automation_inspection_contract;
+pub use attempt_history_contract::{
+    AttemptHistoryCoverage, AttemptHistoryPage, AttemptInspection, DeliveryAttemptsRequest,
+    EarlierAttempts, RunSummariesRequest, SummaryInspection, SummaryInspectionState,
+};
+mod automation_event_contract;
+mod operation_outcome_contract;
+pub use operation_outcome_contract::{
+    AutomationOperationMethod, ConfigurationOperation, InstructionOperation, OperationSuccess,
+    RunRecoveryOperation, ScheduleOperation, WakeCreationOperation, WakeMutationOperation,
+};
+mod operation_inspection_contract;
+pub use automation_event_contract::{
+    AutomationEvent, AutomationEventDetails, AutomationEventSubject, AutomationEventSubjectKind,
+    AutomationEventsPage, AutomationEventsRequest,
+};
+pub use operation_inspection_contract::{
+    OperationEffects, OperationFailure, OperationLocalMutation, OperationShowRequest,
+    OperationSnapshot, OperationState,
+};
+mod schedule_contract;
+mod schedule_package_contract;
+pub use automation_inspection_contract::{
+    AutomationInspectionFailure, AutomationInspectionFailureKind, AutomationInspectionNextAction,
+    AutomationInspectionStage, DeliveryListRequest, RevisionListRequest, RevisionRecord,
+    RunListRequest,
+};
+pub use schedule_contract::{
+    ExecutionDestination, ImportedContinuity, ScheduleCreateRequest, ScheduleDefinition,
+    ScheduleEnableRequest, ScheduleShowRequest, ScheduleSnapshot, ScheduleUpdateRequest,
+};
+pub use schedule_failure::ScheduleFailureDetails;
+pub use schedule_package_contract::{ScheduleExportResult, ScheduleImportRequest};
+mod schedule_failure;
+pub use agent_automation::{ChangeId, RunId, ScheduleId};
+pub use schedule_failure::{
+    ScheduleFailure, ScheduleFailureKind, ScheduleFailureStage, ScheduleNextAction,
+};
+
+mod schedule_preparation_contract;
+pub use schedule_failure::ScheduleEffects;
+pub use schedule_preparation_contract::{DestinationPreparation, SchedulePrepareRequest};
+
+mod run_evidence_validation;
+mod run_execution_contract;
+pub use run_execution_contract::{
+    CapturedRunInputs, ContinuityInput, ExecutionTiming, FrozenExecutionConfiguration,
+    NativeExecution, RetainedSummary, RunExecutionEvidence, RunRecoveryRequest, RunShowRequest,
+    RunSnapshot, RunState, WorkerOutcome,
+};
+mod run_failure_contract;
+pub use run_failure_contract::{RunFailure, RunFailureKind, RunFailureStage, RunNextAction};
+
+mod automation_configuration_contract;
+pub use automation_configuration_contract::{
+    AutomationConfiguration, AutomationConfigureRequest, AutomationStatus, ConfigurationFailure,
+    ConfigurationFailureKind, ConfigurationFileState, ConfigurationNextAction,
+};

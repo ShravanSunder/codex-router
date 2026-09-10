@@ -98,4 +98,6 @@ pub use communication_runtime::{
 
 mod native_schema_cache;
 
+mod automation_settings_file;
 mod debug_readiness_timing;
+pub use automation_settings_file::AutomationSettingsFile;

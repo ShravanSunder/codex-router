@@ -461,7 +461,7 @@ async fn sessions_picker_budgets_wrapped_controls_from_actual_search_text() {
 }
 
 #[tokio::test]
-async fn sessions_picker_stacked_layout_removes_top_padding_and_dead_list_tail() {
+async fn sessions_picker_stacked_layout_removes_top_padding_and_keeps_panels_adjacent() {
     let text = render_picker_capture_at(
         capture_picker_request(),
         120,
@@ -501,25 +501,23 @@ async fn sessions_picker_stacked_layout_removes_top_padding_and_dead_list_tail()
         "list header should sit directly below the list border:\n{text}"
     );
 
-    let more_below_index = lines
+    let panel_border_column = lines[list_top_border_index]
+        .chars()
+        .position(|character| character == '┌')
+        .unwrap_or_else(|| panic!("sessions list top border should render:\n{text}"));
+    let list_bottom_border_index = lines
         .iter()
-        .position(|line| line.contains("more below"))
-        .unwrap_or_else(|| panic!("sessions list should render a more-below row:\n{text}"));
-    let list_bottom_border_index = more_below_index + 1;
+        .enumerate()
+        .skip(list_top_border_index + 1)
+        .find_map(|(index, line)| {
+            (line.chars().nth(panel_border_column) == Some('└')).then_some(index)
+        })
+        .unwrap_or_else(|| panic!("sessions list bottom border should render:\n{text}"));
     assert!(
         lines
-            .get(list_bottom_border_index)
-            .is_some_and(|line| line.contains('└')),
-        "sessions list bottom border should sit directly below the more-below row:\n{text}"
-    );
-    let row_before_bottom = lines
-        .get(list_bottom_border_index.saturating_sub(1))
-        .unwrap_or_else(|| panic!("sessions list should have content above bottom:\n{text}"));
-    assert!(
-        row_before_bottom.contains("Follow-up implementation lane")
-            || row_before_bottom.contains("more below")
-            || row_before_bottom.contains("more above"),
-        "sessions list should not leave an empty tail above its bottom border:\n{text}"
+            .get(list_bottom_border_index + 1)
+            .is_some_and(|line| { line.chars().nth(panel_border_column) == Some('┌') }),
+        "stacked detail panel should begin directly below the fixed list panel:\n{text}"
     );
 }
 

@@ -311,9 +311,6 @@ impl ClapSessionsCommand {
             (true, false, false) => Ok(SessionsRoot::Checkout),
             (false, true, false) => Ok(SessionsRoot::Repo),
             (false, false, true) => Ok(SessionsRoot::Any),
-            (false, false, false) if !self.list && !self.last && self.id.is_none() && !self.new => {
-                Ok(SessionsRoot::Repo)
-            }
             (false, false, false) => Ok(SessionsRoot::Cwd),
             _ => Err("--checkout, --repo, and --any cannot be used together".to_owned()),
         }

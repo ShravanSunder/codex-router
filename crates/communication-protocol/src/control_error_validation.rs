@@ -2,8 +2,17 @@
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::OnceLock};
 
-static ERROR_VALIDATORS: OnceLock<Option<BTreeMap<String, jsonschema::Validator>>> =
-    OnceLock::new();
+static ERROR_VALIDATORS: OnceLock<Option<ErrorValidatorCatalog>> = OnceLock::new();
+
+struct ErrorValidatorCatalog {
+    document: Value,
+    methods: BTreeMap<String, MethodErrorValidator>,
+}
+
+struct MethodErrorValidator {
+    schema_reference: String,
+    compiled: OnceLock<Option<jsonschema::Validator>>,
+}
 
 /// Error shapes are independent of native payload profiles. Unknown methods fail closed.
 #[must_use]
@@ -29,9 +38,9 @@ pub fn control_error_is_valid(method: &str, frame: &Value) -> bool {
         return false;
     }
     ERROR_VALIDATORS
-        .get_or_init(compile_error_validators)
+        .get_or_init(ErrorValidatorCatalog::load)
         .as_ref()
-        .and_then(|validators| validators.get(method))
+        .and_then(|catalog| catalog.validator(method))
         .is_some_and(|validator| validator.is_valid(frame))
 }
 
@@ -41,15 +50,39 @@ fn bounded_text(value: Option<&Value>, maximum: usize) -> bool {
         .is_some_and(|text| !text.is_empty() && text.len() <= maximum)
 }
 
-fn compile_error_validators() -> Option<BTreeMap<String, jsonschema::Validator>> {
-    let document = crate::control_schema_document(None).ok()?;
-    let methods = document.get("x-methods")?.as_object()?;
-    let mut validators = BTreeMap::new();
-    for (method, contract) in methods {
-        let reference = contract.get("error")?.get("$ref")?.as_str()?;
-        let schema = json!({"$schema":document.get("$schema")?,"$id":document.get("$id")?,"$defs":document.get("$defs")?,"$ref":reference});
-        // jsonschema is built without network retrieval; all error references are local.
-        validators.insert(method.clone(), jsonschema::validator_for(&schema).ok()?);
+impl ErrorValidatorCatalog {
+    fn load() -> Option<Self> {
+        let document = crate::control_schema_document(None).ok()?;
+        let contracts = document.get("x-methods")?.as_object()?;
+        let mut methods = BTreeMap::new();
+        for (method, contract) in contracts {
+            methods.insert(
+                method.clone(),
+                MethodErrorValidator {
+                    schema_reference: contract.get("error")?.get("$ref")?.as_str()?.to_owned(),
+                    compiled: OnceLock::new(),
+                },
+            );
+        }
+        Some(Self { document, methods })
     }
-    Some(validators)
+
+    fn validator(&self, method: &str) -> Option<&jsonschema::Validator> {
+        let entry = self.methods.get(method)?;
+        // A native failure must not wait for unrelated automation error schemas.
+        // Each method still validates against the same complete published document.
+        entry
+            .compiled
+            .get_or_init(|| {
+                let schema = json!({
+                    "$schema": self.document.get("$schema")?,
+                    "$id": self.document.get("$id")?,
+                    "$defs": self.document.get("$defs")?,
+                    "$ref": entry.schema_reference,
+                });
+                // Network retrieval is disabled; all error references are local.
+                jsonschema::validator_for(&schema).ok()
+            })
+            .as_ref()
+    }
 }

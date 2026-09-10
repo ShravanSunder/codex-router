@@ -7,15 +7,24 @@ pub enum NativeOperation {
     ReadThread,
     ResumeThread,
     StartThread,
+    ForkThread,
+    ListTurns,
+    ListItems,
     ListLoadedThreads,
     StartTurn,
     SteerTurn,
     InterruptTurn,
     QueueAdd,
+    QueueList,
 }
 impl NativeOperation {
     pub(crate) fn contract(self) -> (&'static str, &'static str, &'static str) {
         match self {
+            Self::QueueList => (
+                "thread/queue/list",
+                "ThreadQueueListParams",
+                "ThreadQueueListResponse",
+            ),
             Self::QueueAdd => (
                 "thread/queue/add",
                 "ThreadQueueAddParams",
@@ -27,6 +36,17 @@ impl NativeOperation {
                 "ThreadResumeParams",
                 "ThreadResumeResponse",
             ),
+            Self::ListTurns => (
+                "thread/turns/list",
+                "ThreadTurnsListParams",
+                "ThreadTurnsListResponse",
+            ),
+            Self::ListItems => (
+                "thread/items/list",
+                "ThreadItemsListParams",
+                "ThreadItemsListResponse",
+            ),
+            Self::ForkThread => ("thread/fork", "ThreadForkParams", "ThreadForkResponse"),
             Self::StartThread => ("thread/start", "ThreadStartParams", "ThreadStartResponse"),
             Self::ListLoadedThreads => (
                 "thread/loaded/list",
@@ -43,7 +63,14 @@ impl NativeOperation {
         }
     }
     pub(crate) fn has_effects(self) -> bool {
-        !matches!(self, Self::ReadThread | Self::ListLoadedThreads)
+        !matches!(
+            self,
+            Self::ReadThread
+                | Self::ListLoadedThreads
+                | Self::ListTurns
+                | Self::ListItems
+                | Self::QueueList
+        )
     }
 }
 
@@ -74,11 +101,20 @@ impl NativePayloadSchemas {
                 ),
             );
         }
-        if let (Ok(params), Ok(result)) = (
-            bundle.validator_for_v2("ThreadQueueAddParams"),
-            bundle.validator_for_v2("ThreadQueueAddResponse"),
-        ) {
-            operations.insert(NativeOperation::QueueAdd, (params, result));
+        for operation in [
+            NativeOperation::QueueAdd,
+            NativeOperation::QueueList,
+            NativeOperation::ForkThread,
+            NativeOperation::ListTurns,
+            NativeOperation::ListItems,
+        ] {
+            let (_, params_name, result_name) = operation.contract();
+            if let (Ok(params), Ok(result)) = (
+                bundle.validator_for_v2(params_name),
+                bundle.validator_for_v2(result_name),
+            ) {
+                operations.insert(operation, (params, result));
+            }
         }
         let schema_digest = format!(
             "sha256:{}",

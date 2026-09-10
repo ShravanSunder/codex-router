@@ -1,89 +1,15 @@
 //! Control connection admission and discovery bootstrap. Native dispatch is separate.
-use crate::{EndpointDirectory, EndpointSubscription};
-use communication_protocol::{
-    AdmissionError, ControlAdmission, ControlFrameDecoder, EndpointDescription, UuidIdentity,
-};
+use crate::{EndpointSubscription, ServiceIdentity};
+use communication_protocol::{AdmissionError, ControlAdmission, ControlFrameDecoder};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+#[cfg(test)]
+#[path = "wake_creation_crash_tests.rs"]
+mod wake_creation_crash_tests;
 
-#[derive(Clone)]
-pub struct ServiceIdentity {
-    service_id: UuidIdentity,
-    service_epoch: UuidIdentity,
-    schema_digest: communication_protocol::SchemaDigest,
-    directory: EndpointDirectory,
-    journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
-    native_backend: Option<crate::NativeControlBackend>,
-}
-impl ServiceIdentity {
-    pub fn with_native_backend(
-        mut self,
-        backend: crate::NativeControlBackend,
-    ) -> Result<Self, String> {
-        if backend.endpoint.service_id != self.service_id {
-            return Err("native backend belongs to another service".into());
-        }
-        self.native_backend = Some(backend);
-        Ok(self)
-    }
-    /// Registers a bounded inventory without inferring endpoint liveness.
-    pub fn with_endpoints(self, endpoints: Vec<EndpointDescription>) -> Result<Self, String> {
-        let mut identities = std::collections::HashSet::new();
-        if endpoints.len() > 64 {
-            return Err("too many endpoints".into());
-        }
-        for endpoint in &endpoints {
-            if endpoint.endpoint.service_id != self.service_id {
-                return Err("endpoint belongs to another service".into());
-            }
-            if !identities.insert(endpoint.endpoint.clone()) {
-                return Err("duplicate endpoint identity".into());
-            }
-            if !(1..=2).contains(&endpoint.channels.len()) {
-                return Err("invalid channel count".into());
-            }
-        }
-        for endpoint in endpoints {
-            self.directory
-                .publish(endpoint)
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(self)
-    }
-
-    #[must_use]
-    pub fn endpoint_directory(&self) -> EndpointDirectory {
-        self.directory.clone()
-    }
-
-    pub fn with_journal(
-        mut self,
-        journal: std::sync::Arc<lifecycle_observation::LifecycleStore>,
-    ) -> Self {
-        self.journal = Some(journal);
-        self
-    }
-
-    pub fn new(service_id: &str, service_epoch: &str, schema_digest: &str) -> Result<Self, String> {
-        let digest = communication_protocol::SchemaDigest::try_from(schema_digest.to_owned())
-            .map_err(str::to_owned)?;
-        Ok(Self {
-            service_id: UuidIdentity::try_from(service_id.to_owned())
-                .map_err(|error| error.to_string())?,
-            service_epoch: UuidIdentity::try_from(service_epoch.to_owned())
-                .map_err(|error| error.to_string())?,
-            schema_digest: digest,
-            journal: None,
-            native_backend: None,
-            directory: EndpointDirectory::new(
-                UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?,
-            ),
-        })
-    }
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -98,6 +24,9 @@ pub async fn serve_control_connection(
     identity: ServiceIdentity,
 ) -> io::Result<()> {
     let mut subscription = identity.directory.subscribe()?;
+    let mut wake_subscription: Option<crate::wakeup_subscription::WakeSubscriptionState> = None;
+    let mut wake_poll = tokio::time::interval(std::time::Duration::from_millis(50));
+    wake_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut decoder = ControlFrameDecoder::default();
     let mut admission = ControlAdmission::default();
     let mut buffer = [0_u8; 8192];
@@ -105,6 +34,15 @@ pub async fn serve_control_connection(
     loop {
         let count = tokio::select! {
             result = stream.read(&mut buffer) => result?,
+            _=wake_poll.tick(), if wake_subscription.is_some()=>{
+                if let Some(wake)=&mut wake_subscription {
+                    for change in wake.next_changes().await? {
+                        let mut output=serde_json::to_vec(&json!({"jsonrpc":"2.0","method":"wake/changed","params":change})).map_err(io::Error::other)?;
+                        output.push(b'\n');stream.write_all(&output).await?;
+                    }
+                }
+                continue;
+            },
             completion = pending.join_next(), if !pending.is_empty() => {
                 let (id,response)=completion.ok_or_else(||io::Error::other("pending task missing"))?.map_err(|_|io::Error::other("Control task failed"))?;
                 admission.complete(&id);
@@ -132,6 +70,329 @@ pub async fn serve_control_connection(
             }
             let response = match admit_request(frame, &mut admission) {
                 Err(response) => response,
+                Ok(request) if request.method == "wake/subscribe" => {
+                    admission.complete(&request.id);
+                    match serde_json::from_value::<communication_protocol::WakeShowRequest>(
+                        request.params,
+                    ) {
+                        Err(_) => error(
+                            json!(request.id),
+                            -32602,
+                            "Provide exact wakeupId for first-fire subscription",
+                        ),
+                        Ok(params) => {
+                            let wakeup_id = params.wakeup_id.clone();
+                            let permit = std::sync::Arc::clone(&identity.wake_wait_permits)
+                                .try_acquire_owned();
+                            if wake_subscription.is_some() {
+                                crate::wakeup_subscription::unavailable(
+                                    json!(request.id),
+                                    wakeup_id,
+                                )
+                            } else if let (Some(store), Ok(permit)) =
+                                (identity.automation.as_ref(), permit)
+                            {
+                                match crate::wakeup_subscription::start(
+                                    std::sync::Arc::clone(store),
+                                    identity.service_id.clone(),
+                                    params,
+                                    permit,
+                                )
+                                .await
+                                {
+                                    Ok((state, result)) => {
+                                        wake_subscription = Some(state);
+                                        json!({"jsonrpc":"2.0","id":request.id,"result":result})
+                                    }
+                                    Err(automation_storage::StorageError::WakeNotFound) => {
+                                        crate::wakeup_subscription::not_found(
+                                            json!(request.id),
+                                            wakeup_id,
+                                        )
+                                    }
+                                    Err(_) => crate::wakeup_subscription::unavailable(
+                                        json!(request.id),
+                                        wakeup_id,
+                                    ),
+                                }
+                            } else {
+                                crate::wakeup_subscription::unavailable(
+                                    json!(request.id),
+                                    wakeup_id,
+                                )
+                            }
+                        }
+                    }
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "wake/send"
+                            | "wake/list"
+                            | "wake/show"
+                            | "wake/pause"
+                            | "wake/resume"
+                            | "wake/cancel"
+                            | "delivery/show"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        #[cfg(test)]
+                        wake_creation_crash_tests::checkpoint("before-dispatch", &request.method);
+                        let response =
+                            crate::wakeup_dispatch::dispatch(crate::wakeup_dispatch::WakeRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            })
+                            .await;
+                        #[cfg(test)]
+                        wake_creation_crash_tests::checkpoint("after-dispatch", &request.method);
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "automation/configure" | "automation/status"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::automation_configuration_dispatch::dispatch(
+                            crate::automation_configuration_dispatch::ConfigurationRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                handle: &identity.configuration,
+                                backend: identity.configuration_backend.as_ref(),
+                                store: identity.automation.as_ref(),
+                                service_id: &identity.service_id,
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "run/show" | "run/summaryRetry" | "run/summarySkip"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response =
+                            crate::run_dispatch::dispatch(crate::run_dispatch::RunRequest {
+                                configuration: &identity.configuration,
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                store: identity.automation.as_ref(),
+                            })
+                            .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "instruction/list"
+                            | "schedule/list"
+                            | "run/list"
+                            | "revision/list"
+                            | "delivery/list"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::automation_collection_dispatch::dispatch(
+                            crate::automation_collection_dispatch::CollectionRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "delivery/attempts" | "run/summaries"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::attempt_history_dispatch::dispatch(
+                            crate::attempt_history_dispatch::AttemptRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request) if request.method == "automation/events" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::automation_event_dispatch::dispatch(
+                            crate::automation_event_dispatch::EventRequest {
+                                id: json!(id),
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "delivery/reconcile" | "run/reconcile"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = if request.method == "delivery/reconcile" {
+                            crate::automation_reconciliation_dispatch::delivery(
+                                json!(id),
+                                request.params,
+                                &identity,
+                            )
+                            .await
+                        } else {
+                            crate::automation_reconciliation_dispatch::run(
+                                json!(id),
+                                request.params,
+                                &identity,
+                            )
+                            .await
+                        };
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "operation/show" | "operation/reconcile"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::operation_inspection_dispatch::dispatch(
+                            crate::operation_inspection_dispatch::OperationRequest {
+                                reconcile: request.method == "operation/reconcile",
+                                configuration_backend: identity.configuration_backend.as_ref(),
+                                id: json!(id),
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request) if request.method == "schedule/prepare" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::schedule_preparation_dispatch::dispatch(
+                            crate::schedule_preparation_dispatch::PreparationRequest {
+                                configuration: &identity.configuration,
+                                id: json!(id),
+                                params: request.params,
+                                service_id: &identity.service_id,
+                                backend: identity.native_backend.as_ref(),
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "schedule/create"
+                            | "schedule/show"
+                            | "schedule/update"
+                            | "schedule/enable"
+                            | "schedule/disable"
+                            | "schedule/export"
+                            | "schedule/import"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::schedule_dispatch::dispatch(
+                            crate::schedule_dispatch::ScheduleRequest {
+                                service_id: &identity.service_id,
+                                backend: identity.native_backend.as_ref(),
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "instruction/create" | "instruction/update" | "instruction/show"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::instruction_dispatch::dispatch(
+                            crate::instruction_dispatch::InstructionRequest {
+                                id: json!(id),
+                                method: &request.method,
+                                params: request.params,
+                                store: identity.automation.as_ref(),
+                            },
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request)
                     if matches!(
                         request.method.as_str(),
@@ -214,17 +475,11 @@ fn admit_request(frame: Value, admission: &mut ControlAdmission) -> Result<Reque
     }
     if let Err(failure) = admission.admit(&request.id, &request.method) {
         if failure == AdmissionError::Overloaded {
-            if request.method == "control/initialize" {
-                return Err(error(id, -32603, "Request capacity exceeded"));
-            }
-            let data = if request.method == "codex/messageSend" {
-                json!({"kind":"overloaded","stage":"discovery","message":"Request capacity exceeded","effects":{"resume":"notRequested","submission":"notDispatched"}})
-            } else {
-                json!({"kind":"overloaded","stage":"discovery","message":"Request capacity exceeded"})
-            };
-            return Err(
-                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Request capacity exceeded","data":data}}),
-            );
+            return Err(crate::control_overload_response::response(
+                id,
+                &request.method,
+                &request.params,
+            ));
         }
         return Err(error(id, -32600, &failure.to_string()));
     }
@@ -282,6 +537,34 @@ fn initialize(
 #[cfg(test)]
 mod admission_error_tests {
     use super::*;
+
+    #[test]
+    fn saturated_methods_preserve_their_published_error_contracts() {
+        let mut admission = ControlAdmission::default();
+        admission.admit("init", "control/initialize").unwrap();
+        admission.initialized();
+        admission.complete("init");
+        for number in 0..64 {
+            admission
+                .admit(&format!("pending-{number}"), "codex/sessionInspect")
+                .unwrap();
+        }
+        let schema = communication_protocol::control_schema_document(None).unwrap();
+        let methods = schema.get("x-methods").and_then(Value::as_object).unwrap();
+        for method in methods.keys() {
+            let response = admit_request(
+                json!({"jsonrpc":"2.0","id":format!("overloaded-{method}"),"method":method,"params":{"wakeupId":communication_protocol::WakeupId::generate()}}),
+                &mut admission,
+            );
+            let Err(response) = response else {
+                panic!("overloaded request admitted");
+            };
+            assert!(
+                communication_protocol::control_error_is_valid(method, &response),
+                "invalid overload response for {method}: {response}"
+            );
+        }
+    }
 
     #[test]
     fn saturated_message_admission_reports_that_no_native_effect_was_dispatched() {

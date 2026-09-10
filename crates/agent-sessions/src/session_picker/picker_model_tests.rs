@@ -3,8 +3,35 @@ use crate::presentation::session_picker::picker_actions::SessionsPickerKey;
 use crate::presentation::session_picker::picker_actions::SessionsPickerOutcome;
 use crate::presentation::session_picker::picker_model::SessionsPickerModel;
 use crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView;
+use crate::presentation::session_picker::test_support::observed_records;
 use crate::presentation::session_picker::test_support::picker_record;
 use crate::presentation::session_picker::test_support::picker_request;
+
+#[test]
+fn default_picker_excludes_helper_threads_even_with_interactive_origin() {
+    let mut request = picker_request();
+    request.records = vec![picker_record(
+        "human",
+        "Human conversation",
+        "/repo/project-a",
+        "codex-router",
+        "cli",
+    )];
+    for kind in ["subagent", "guardian_review", "memory_consolidation"] {
+        let mut child = picker_record(
+            kind,
+            "Hidden helper",
+            "/repo/project-a",
+            "codex-router",
+            "vscode",
+        );
+        child.thread_source = Some(kind.to_owned());
+        request.records.push(child);
+    }
+    let snapshot = SessionsPickerModel::new(request, 120).render_snapshot();
+    assert!(snapshot.contains("Human conversation"), "{snapshot}");
+    assert!(!snapshot.contains("Hidden helper"), "{snapshot}");
+}
 
 #[test]
 fn sessions_picker_model_shows_and_switches_scope_view_and_sort() {
@@ -255,7 +282,7 @@ fn sessions_picker_runtime_views_match_only_their_named_status() {
 }
 
 #[test]
-fn sessions_picker_status_column_precedes_existing_age_columns() {
+fn sessions_picker_status_column_uses_only_icons_before_age_columns() {
     let mut request = picker_request();
     request.records[0].runtime_status = PickerRuntimeStatus::Blocked;
     let snapshot = SessionsPickerModel::new(request, 120).render_snapshot();
@@ -266,7 +293,17 @@ fn sessions_picker_status_column_precedes_existing_age_columns() {
 
     assert!(header.find("Status") < header.find("Upd"));
     assert!(header.find("Upd") < header.find("New"));
-    assert!(snapshot.contains("◆ Blocked"), "{snapshot}");
+    assert!(snapshot.contains('◆'), "{snapshot}");
+    assert!(!snapshot.contains("◆ Blocked"), "{snapshot}");
+}
+
+#[test]
+fn unavailable_runtime_is_explained_even_when_every_row_was_already_unknown() {
+    let mut model = SessionsPickerModel::new(picker_request(), 120);
+    model.invalidate_runtime_statuses();
+    let snapshot = model.render_snapshot();
+    assert!(snapshot.contains("Live status unavailable"), "{snapshot}");
+    assert!(!snapshot.contains("? Unknown"), "{snapshot}");
 }
 
 #[test]
@@ -397,7 +434,7 @@ fn sessions_picker_pointer_focus_resolves_stable_visible_session_identity() {
 
     let mut replacement_records = model.request.records.clone();
     replacement_records.reverse();
-    model.replace_records(replacement_records);
+    model.replace_records(observed_records(replacement_records));
 
     assert_eq!(
         model.focused_session_id(),

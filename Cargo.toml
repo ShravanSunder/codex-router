@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/agent-automation",
+    "crates/automation-storage",
     "crates/codex-acp-adapter",
     "crates/lifecycle-observation",
     "crates/communication-client",
@@ -23,12 +25,15 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+croner = "=4.0.0"
+chrono-tz = "0.10.4"
+uuid = { version = "1.26.0", features = ["v7"] }
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
 codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
 codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
@@ -93,6 +98,15 @@ uninlined_format_args = "deny"
 unimplemented = "deny"
 unreachable = "deny"
 unwrap_used = "deny"
+
+# Keep useful backtrace locations without full debugger metadata in local builds.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
 
 # Debug Host restarts hash the managed executable before launch and publication.
 # Keep full content verification fast enough for native TUI reconnect deadlines.

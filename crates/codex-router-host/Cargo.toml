@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+automation-storage = { path = "../automation-storage", version = "0.1.16" }
 chrono.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 communication-protocol = { path = "../communication-protocol", version = "0.1.14" }
@@ -26,6 +27,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+toml = "1.1.2"
+sqlx.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 futures-util.workspace = true
 tokio-tungstenite.workspace = true

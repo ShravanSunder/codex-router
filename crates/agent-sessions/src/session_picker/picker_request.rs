@@ -30,8 +30,13 @@ pub(crate) struct SessionsPickerDataQuery {
     pub(crate) search: String,
 }
 
-pub(crate) type SessionsPickerRecordLoader =
-    Arc<dyn Fn(SessionsPickerDataQuery) -> Result<Vec<SessionPickerRecord>, String> + Send + Sync>;
+pub(crate) type SessionsPickerRecordLoader = Arc<
+    dyn Fn(
+            SessionsPickerDataQuery,
+        ) -> Result<crate::picker_runtime_status::PickerRecordsSnapshot, String>
+        + Send
+        + Sync,
+>;
 
 impl Default for SessionsPickerRequest {
     fn default() -> Self {

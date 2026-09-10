@@ -1,10 +1,9 @@
 //! Picker frame view.
 use super::{
-    COMPACT_PICKER_WIDTH, MIN_PICKER_WIDTH, MIN_STACKED_DETAILS_HEIGHT, NARROW_PICKER_WIDTH,
-    SIDECAR_PICKER_WIDTH, SessionConversationPreview, SessionsPickerModel, SessionsPickerOutcome,
-    detail_height, fit_line, footer_lines, picker_body_budget, render_details, render_session_list,
-    render_start_new_details, root_label, runtime_view_label, session_list_height,
-    session_visible_row_budget, sort_label,
+    COMPACT_PICKER_WIDTH, MIN_PICKER_WIDTH, NARROW_PICKER_WIDTH, SIDECAR_PICKER_WIDTH,
+    SessionConversationPreview, SessionsPickerModel, SessionsPickerOutcome, fit_line, footer_lines,
+    picker_body_budget, render_details, render_session_list, render_start_new_details, root_label,
+    runtime_view_label, session_visible_row_budget, sort_label, stacked_panel_heights,
 };
 use iocraft::prelude::*;
 use unicode_width::UnicodeWidthStr;
@@ -18,7 +17,12 @@ pub(super) fn render_picker_view(
     minimum_render_height: usize,
 ) -> Element<'static, View> {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
-    let filter_controls = render_filter_controls(model, content_width);
+    let mut filter_controls = render_filter_controls(model, content_width);
+    if let Some(notice) = model.runtime_coverage.notice() {
+        filter_controls.push(element! {
+            Text(content: fit_line(notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap)
+        }.into_any());
+    }
     let control_height = filter_controls.len();
     let footer_lines = footer_lines(content_width, model.show_help);
     let body_budget = picker_body_budget(
@@ -39,7 +43,6 @@ pub(super) fn render_picker_view(
     ];
     children.extend(filter_controls);
 
-    let visible_len = model.visible_len();
     let focused_record = model.focused_record();
     if model.width >= SIDECAR_PICKER_WIDTH {
         let list_width = (content_width.saturating_sub(2) / 2).max(42);
@@ -58,47 +61,29 @@ pub(super) fn render_picker_view(
             .into_any(),
         );
     } else {
-        let details_height = focused_record
-            .filter(|_| model.width >= NARROW_PICKER_WIDTH)
-            .map(|record| {
-                detail_height(
-                    selected_conversation.or(Some(&record.conversation)),
-                    content_width,
-                )
-            });
-        let minimum_list_height = if visible_len == 0 {
-            0
-        } else {
-            session_list_height(visible_len, model.focused_window_start(1), 1)
-        };
-        let visible_details_height = details_height
-            .map(|preferred_height| {
-                preferred_height
-                    .min(body_budget.saturating_sub(minimum_list_height))
-                    .min(body_budget / 2)
-            })
-            .filter(|height| *height >= MIN_STACKED_DETAILS_HEIGHT);
-        let list_budget = body_budget.saturating_sub(visible_details_height.unwrap_or(0));
-        let visible_row_budget = session_visible_row_budget(model, list_budget);
+        let stacked_heights = (model.width >= NARROW_PICKER_WIDTH)
+            .then(|| stacked_panel_heights(body_budget))
+            .flatten();
+        let list_height = stacked_heights.map_or(body_budget, |(list_height, _)| list_height);
+        let visible_row_budget = session_visible_row_budget(model, list_height);
         children.push(render_session_list(
             model,
             model_state,
             selected_outcome,
             content_width,
             visible_row_budget,
-            session_list_height(
-                visible_len,
-                model.focused_window_start(visible_row_budget),
-                visible_row_budget,
-            ),
+            list_height,
         ));
-        if let (Some(record), Some(details_height)) = (focused_record, visible_details_height) {
-            children.push(render_details(
-                record,
-                content_width,
-                selected_conversation,
-                details_height,
-            ));
+        if let Some((_, details_height)) = stacked_heights {
+            children.push(
+                focused_record
+                    .map(|record| {
+                        render_details(record, content_width, selected_conversation, details_height)
+                    })
+                    .unwrap_or_else(|| {
+                        render_start_new_details(model, content_width, details_height)
+                    }),
+            );
         }
     }
 
@@ -193,7 +178,7 @@ pub(super) fn render_footer(width: usize, lines: Vec<String>) -> AnyElement<'sta
     element! {
         View(
             width: 100pct,
-            flex_grow: 1.0,
+            flex_grow: 1.0_f32,
             flex_direction: FlexDirection::Column,
             justify_content: JustifyContent::FlexEnd,
         ) {

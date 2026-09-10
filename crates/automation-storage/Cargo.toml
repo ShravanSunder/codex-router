@@ -1,0 +1,22 @@
+[package]
+name = "automation-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+uuid.workspace = true
+chrono.workspace = true
+agent-automation = { path = "../agent-automation", version = "0.1.16" }
+sqlx.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+uuid.workspace = true

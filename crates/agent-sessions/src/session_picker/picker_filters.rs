@@ -50,12 +50,28 @@ pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecor
             matches!(record.source.as_deref(), Some("cli" | "vscode"))
                 && !matches!(
                     record.thread_source.as_deref(),
-                    Some("exec" | "app_server" | "subagent")
+                    Some(
+                        "exec"
+                            | "app_server"
+                            | "subagent"
+                            | "guardian_review"
+                            | "memory_consolidation"
+                    )
                 )
         }
         SessionsSource::Subagents => {
             matches!(record.source.as_deref(), Some("subagent"))
-                || matches!(record.thread_source.as_deref(), Some("subagent"))
+                || matches!(
+                    record.thread_source.as_deref(),
+                    Some("subagent" | "guardian_review" | "memory_consolidation")
+                )
+                || record
+                    .source
+                    .as_deref()
+                    .and_then(|source| serde_json::from_str::<serde_json::Value>(source).ok())
+                    .is_some_and(|source| {
+                        source.get("subagent").is_some() || source.get("subAgent").is_some()
+                    })
         }
     }
 }

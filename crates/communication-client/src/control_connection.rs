@@ -26,11 +26,11 @@ pub enum ClientError {
     Rejected { code: i64, data: Option<Value> },
 }
 pub struct ControlClient {
-    connection: ClientConnection,
+    pub(crate) connection: ClientConnection,
     identity: ControlInitializationResult,
     notification_state: EndpointNotificationState,
 }
-struct ClientConnection {
+pub(crate) struct ClientConnection {
     stream: UnixStream,
     decoder: ControlFrameDecoder,
     incoming: VecDeque<Value>,
@@ -391,13 +391,43 @@ impl ControlClient {
             }
         }
     }
+    pub(crate) async fn next_wake_notification(&mut self) -> Result<Value, ClientError> {
+        if self.connection.failed {
+            return Err(ClientError::Protocol("connection is retired"));
+        }
+        loop {
+            let frame = if let Some(frame) = self.connection.notifications.pop_front() {
+                frame
+            } else if let Some(frame) = self.connection.incoming.pop_front() {
+                frame
+            } else {
+                self.connection.read_frames().await?;
+                continue;
+            };
+            if frame.get("method").and_then(Value::as_str) == Some("endpoint/changed") {
+                self.notification_state.consume(frame)?;
+                continue;
+            }
+            if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+                || frame.get("method").and_then(Value::as_str) != Some("wake/changed")
+                || frame.get("id").is_some()
+                || frame.as_object().is_none_or(|object| object.len() != 3)
+            {
+                return Err(ClientError::Protocol("invalid wake notification envelope"));
+            }
+            return Ok(frame);
+        }
+    }
     pub async fn close(mut self) -> Result<(), ClientError> {
         self.connection.stream.shutdown().await?;
         Ok(())
     }
 }
 impl ClientConnection {
-    async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+    pub(crate) fn retire(&mut self) {
+        self.failed = true;
+    }
+    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         if self.failed || self.next_id >= 65_536 {
             return Err(ClientError::Protocol("connection is retired"));
         }
@@ -419,6 +449,16 @@ impl ClientConnection {
                 Err(ClientError::Timeout)
             }
         }
+    }
+    pub(crate) fn encoded_request_len(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Result<usize, ClientError> {
+        let id = format!("client-{}", self.next_id);
+        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .map(|bytes| bytes.len())
+            .map_err(|_| ClientError::Protocol("request encoding"))
     }
     async fn exchange(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         let id = format!("client-{}", self.next_id);

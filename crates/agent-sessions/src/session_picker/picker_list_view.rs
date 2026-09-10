@@ -5,12 +5,12 @@ use super::{
 };
 use iocraft::prelude::*;
 
-const STATUS_COLUMN_WIDTH: usize = 12;
+const STATUS_COLUMN_WIDTH: usize = 6;
 const AGE_COLUMN_WIDTH: usize = 6;
 
 fn session_column_widths(width: usize) -> (usize, usize, usize) {
     let inner_width = width.saturating_sub(2);
-    let status_width = if width < 43 { 9 } else { STATUS_COLUMN_WIDTH };
+    let status_width = STATUS_COLUMN_WIDTH;
     let age_width = if width < 43 { 3 } else { AGE_COLUMN_WIDTH };
     let fixed_width = 2 + status_width + (age_width * 2) + 3;
     let title_width = inner_width.saturating_sub(fixed_width).max(2);
@@ -246,11 +246,7 @@ pub(super) fn render_record_row(
     let title_prefix = if selected { "❯ " } else { "  " };
     let (title_width, status_width, age_width) = session_column_widths(width);
     let title = truncate_end(&record.title, title_width);
-    let status = format!(
-        "{} {}",
-        record.runtime_status.icon(),
-        record.runtime_status.label()
-    );
+    let status = record.runtime_status.icon();
     let cwd = record.cwd.as_deref().unwrap_or("-");
     let metadata_line = if width < 43 {
         format!("    ⎇ {:<10}  {cwd}", record.branch)

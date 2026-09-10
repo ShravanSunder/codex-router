@@ -17,7 +17,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.95.0
+          toolchain: 1.98.1
           components: clippy,rustfmt,rust-src
 
       - name: Cache cargo crates, tools, and target
@@ -31,10 +31,9 @@ jobs:
             ~/.cargo/bin/cargo-deny
             ~/.cargo/bin/cargo-audit
             target
-          key: ${{ runner.os }}-cargo-1.95.0-${{ hashFiles('Cargo.lock', '.github/workflows/ci.yml') }}
+          key: ${{ runner.os }}-cargo-1.98.1-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', '.github/workflows/ci.yml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-1.95.0-
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-1.98.1-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', '.github/workflows/ci.yml') }}-
 
       - name: Install cargo tools
         run: |

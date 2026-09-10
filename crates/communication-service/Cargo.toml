@@ -7,7 +7,10 @@ publish.workspace = true
 [lints]
 workspace = true
 [dependencies]
+automation-storage = { path = "../automation-storage", version = "0.1.16" }
+agent-automation = { path = "../agent-automation", version = "0.1.16" }
 base64.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 codex-acp-adapter = { path = "../codex-acp-adapter", version = "0.1.14" }
 codex-native-integration.workspace = true
@@ -21,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 communication-client = { path = "../communication-client", version = "0.1.14" }

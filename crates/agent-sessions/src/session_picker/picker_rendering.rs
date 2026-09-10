@@ -27,12 +27,15 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
     let visible_len = model.visible_len();
     let mut lines = vec![fit_line("Resume a previous session", model.width)];
     lines.extend(render_controls_lines(model));
+    if let Some(notice) = model.runtime_coverage.notice() {
+        lines.push(fit_line(notice, model.width));
+    }
 
     if visible_len > 0 {
-        let title_width = model.width.saturating_sub(31).max(14);
+        let title_width = model.width.saturating_sub(25).max(14);
         lines.push(fit_line(
             &format!(
-                "  {:<title_width$} {:<12} {:>6} {:>6}",
+                "  {:<title_width$} {:<6} {:>6} {:>6}",
                 "Session", "Status", "Upd", "New"
             ),
             model.width,
@@ -81,13 +84,9 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
             };
             lines.push(fit_line(
                 &format!(
-                    "{marker} {:<title_width$} {:<12} {:>6} {:>6}",
+                    "{marker} {:<title_width$} {:<6} {:>6} {:>6}",
                     truncate_end(&record.title, title_width),
-                    format!(
-                        "{} {}",
-                        record.runtime_status.icon(),
-                        record.runtime_status.label()
-                    ),
+                    record.runtime_status.icon(),
                     compact_age(&record.recency),
                     compact_age(&record.created)
                 ),
@@ -172,6 +171,28 @@ fn render_controls_lines(model: &SessionsPickerModel) -> Vec<String> {
 }
 
 pub(super) fn footer_lines(width: usize, show_help: bool) -> Vec<String> {
+    let mut lines = control_footer_lines(width, show_help);
+    if show_help {
+        use crate::picker_runtime_status::PickerRuntimeStatus;
+        let meanings = [
+            PickerRuntimeStatus::Active,
+            PickerRuntimeStatus::Idle,
+            PickerRuntimeStatus::Blocked,
+            PickerRuntimeStatus::NotLoaded,
+            PickerRuntimeStatus::Unknown,
+            PickerRuntimeStatus::SystemError,
+        ]
+        .map(|status| format!("{} {}", status.icon(), status.label()));
+        if width >= 104 {
+            lines.push(format!("Status: {}", meanings.join(" | ")));
+        } else {
+            lines.extend(meanings);
+        }
+    }
+    lines
+}
+
+fn control_footer_lines(width: usize, show_help: bool) -> Vec<String> {
     if !show_help {
         return vec![COMPACT_HELP.to_owned()];
     }

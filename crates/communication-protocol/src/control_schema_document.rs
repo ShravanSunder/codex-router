@@ -26,6 +26,81 @@ pub fn control_schema_document(
         frames: Vec::new(),
         native_uri,
     };
+    assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
+    assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
+    assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/show", &[])?;
+    assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/reconcile", &[])?;
+    assembly.add_method::<DeliveryShowRequest, DeliveryInspection>("delivery/reconcile", &[])?;
+    assembly.add_method::<RunShowRequest, RunSnapshot>("run/reconcile", &[])?;
+    assembly
+        .add_method::<AutomationEventsRequest, AutomationEventsPage>("automation/events", &[])?;
+    assembly.add_method::<DeliveryAttemptsRequest, AttemptHistoryPage<AttemptInspection>>(
+        "delivery/attempts",
+        &[],
+    )?;
+    assembly.add_method::<RunSummariesRequest, AttemptHistoryPage<SummaryInspection>>(
+        "run/summaries",
+        &[],
+    )?;
+    assembly.add_method::<AutomationPageRequest, AutomationPage<InstructionSnapshot>>(
+        "instruction/list",
+        &[],
+    )?;
+    assembly.add_method::<AutomationPageRequest, AutomationPage<ScheduleSnapshot>>(
+        "schedule/list",
+        &[],
+    )?;
+    assembly.add_method::<RunListRequest, AutomationPage<RunSnapshot>>("run/list", &[])?;
+    assembly
+        .add_method::<RevisionListRequest, AutomationPage<RevisionRecord>>("revision/list", &[])?;
+    assembly.add_method::<DeliveryListRequest, AutomationPage<DeliveryInspection>>(
+        "delivery/list",
+        &[],
+    )?;
+    assembly.add_method::<AutomationConfigureRequest, AutomationConfiguration>(
+        "automation/configure",
+        &[],
+    )?;
+    assembly.add_method::<EmptyParams, AutomationStatus>("automation/status", &[])?;
+    assembly.add_type::<RunFailure>("run-failure")?;
+    assembly.add_method::<RunShowRequest, RunSnapshot>("run/show", &[])?;
+    for method in ["run/summaryRetry", "run/summarySkip"] {
+        assembly.add_method::<RunRecoveryRequest, RunSnapshot>(method, &[])?;
+    }
+    assembly.add_type::<ScheduleFailure>("schedule-failure")?;
+    assembly.add_method::<SchedulePrepareRequest, ScheduleSnapshot>("schedule/prepare", &[])?;
+    assembly.add_method::<ScheduleCreateRequest, ScheduleSnapshot>("schedule/create", &[])?;
+    assembly.add_method::<ScheduleShowRequest, ScheduleSnapshot>("schedule/show", &[])?;
+    assembly.add_method::<ScheduleShowRequest, ScheduleExportResult>("schedule/export", &[])?;
+    assembly.add_method::<ScheduleImportRequest, ScheduleSnapshot>("schedule/import", &[])?;
+    assembly.add_method::<ScheduleUpdateRequest, ScheduleSnapshot>("schedule/update", &[])?;
+    for method in ["schedule/enable", "schedule/disable"] {
+        assembly.add_method::<ScheduleEnableRequest, ScheduleSnapshot>(method, &[])?;
+    }
+    assembly.add_type::<InstructionFailure>("instruction-failure")?;
+    assembly.add_type::<WakeFailure>("wake-failure")?;
+    assembly.add_method::<AutomationPageRequest, AutomationPage<WakeSnapshot>>("wake/list", &[])?;
+    assembly.add_type::<WaitUnavailable>("wait-unavailable")?;
+    assembly.add_type::<WakeNotFound>("wake-not-found")?;
+    assembly.add_type::<WakeChanged>("wake-changed")?;
+    assembly.add_method::<WakeShowRequest, WakeSubscription>("wake/subscribe", &[])?;
+    for method in ["wake/pause", "wake/resume", "wake/cancel"] {
+        assembly.add_method::<WakeMutationRequest, WakeMutationResult>(method, &[])?;
+    }
+    assembly.add_method::<DeliveryShowRequest, DeliveryInspection>("delivery/show", &[])?;
+    assembly.add_method::<WakeSendRequest, WakeSnapshot>(
+        "wake/send",
+        &["invalidField", "automationUnavailable", "operationConflict"],
+    )?;
+    assembly.add_method::<WakeShowRequest, WakeSnapshot>(
+        "wake/show",
+        &["resourceNotFound", "automationUnavailable"],
+    )?;
+    assembly
+        .add_method::<InstructionCreateParams, InstructionSnapshot>("instruction/create", &[])?;
+    assembly
+        .add_method::<InstructionUpdateParams, InstructionSnapshot>("instruction/update", &[])?;
+    assembly.add_method::<InstructionShowParams, InstructionSnapshot>("instruction/show", &[])?;
     assembly.add_type::<JournalBounds>("journal-bounds")?;
     assembly.add_method::<ControlInitializationParams, ControlInitializationResult>(
         "control/initialize",
@@ -113,6 +188,8 @@ pub fn control_schema_document(
     assembly
         .frames
         .push(reference("endpoint-change-notification"));
+    assembly.definitions.insert("wake-change-notification".into(),json!({"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"wake/changed"},"params":reference("wake-changed")}}));
+    assembly.frames.push(reference("wake-change-notification"));
     Ok(json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
         "$id":"urn:agent-communication:control:1",
@@ -123,7 +200,7 @@ pub fn control_schema_document(
         "x-protocolVersion":{"major":1,"minor":0},
         "x-nativeSchemaDigest":native_digest,
         "x-methods":assembly.methods,
-        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification")},
+        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification"),"wake/changed":reference("wake-change-notification")},
         "x-maxFrameUtf8Bytes":1048576,
         "x-maxPendingRequests":64,
         "x-maxRequestsPerConnection":65536
@@ -232,6 +309,41 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     let mut data = vec![json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties})];
+    if method.starts_with("wake/") || method.starts_with("delivery/") {
+        data = vec![reference("wake-failure")];
+    }
+    if method == "wake/subscribe" {
+        data = vec![reference("wait-unavailable"), reference("wake-not-found")];
+    }
+    if matches!(method, "automation/configure" | "automation/status") {
+        data = vec![reference("configuration-failure")];
+    }
+    if method.starts_with("run/") {
+        data = vec![reference("run-failure")];
+    }
+    if method.starts_with("schedule/") {
+        data = vec![reference("schedule-failure")];
+    }
+    if method.starts_with("instruction/") {
+        data = vec![reference("instruction-failure")];
+    }
+    if matches!(
+        method,
+        "instruction/list"
+            | "schedule/list"
+            | "run/list"
+            | "revision/list"
+            | "delivery/list"
+            | "automation/events"
+            | "delivery/attempts"
+            | "run/summaries"
+            | "operation/show"
+            | "operation/reconcile"
+            | "delivery/reconcile"
+            | "run/reconcile"
+    ) {
+        data = vec![reference("automation-inspection-failure")];
+    }
     if method == "lifecycleJournal/read" {
         data.push(json!({"type":"object","required":["kind","current"],"additionalProperties":false,
             "properties":{"kind":{"enum":["journalChanged","historyExpired"]},"current":reference("journal-bounds")}}));
