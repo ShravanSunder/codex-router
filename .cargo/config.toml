@@ -1,0 +1,3 @@
+[env]
+# Ordinary builds use committed query descriptions, never a live account database.
+SQLX_OFFLINE = "true"

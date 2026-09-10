@@ -55,8 +55,11 @@ use crate::repositories::SelectorQuotaRepository;
 use crate::session_account_affinity::SessionAccountAffinity;
 
 const CURRENT_SCHEMA_VERSION: i64 = 13;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const PREVIOUS_SCHEMA_VERSION: i64 = 12;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const SCHEMA_VERSION_V11: i64 = 11;
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const SCHEMA_VERSION_V10: i64 = 10;
 const WEEKLY_FLOOR_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -80,59 +83,7 @@ const SELECTOR_INVALIDATED_ROUTE_BANDS: [&str; 4] = [
     "memories_trace_summarize",
     "responses_compact",
 ];
-const ASYNC_V1_SCHEMA_STATEMENTS: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS accounts (
-        account_id TEXT PRIMARY KEY NOT NULL,
-        label TEXT NOT NULL,
-        status TEXT NOT NULL,
-        active_credential_generation INTEGER
-    )",
-    "CREATE TABLE IF NOT EXISTS quota_snapshots (
-        account_id TEXT NOT NULL,
-        source TEXT NOT NULL,
-        observed_unix_seconds INTEGER NOT NULL,
-        route_band TEXT NOT NULL,
-        remaining_headroom INTEGER NOT NULL,
-        reset_unix_seconds INTEGER,
-        reset_credits_available INTEGER,
-        stale_penalty INTEGER NOT NULL,
-        PRIMARY KEY (account_id, route_band)
-    )",
-    "CREATE TABLE IF NOT EXISTS affinity_pins (
-        affinity_key TEXT PRIMARY KEY NOT NULL,
-        account_id TEXT NOT NULL
-    )",
-    "CREATE TABLE IF NOT EXISTS selector_quota_windows (
-        account_id TEXT NOT NULL,
-        route_band TEXT NOT NULL,
-        limit_window_seconds INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        remaining_headroom INTEGER NOT NULL,
-        reset_unix_seconds INTEGER,
-        effective INTEGER NOT NULL,
-        observed_unix_seconds INTEGER NOT NULL,
-        PRIMARY KEY (account_id, route_band, limit_window_seconds)
-    )",
-    "CREATE TABLE IF NOT EXISTS quota_refresh_status (
-        account_id TEXT NOT NULL,
-        route_band TEXT NOT NULL,
-        last_success_unix_seconds INTEGER,
-        last_attempt_unix_seconds INTEGER,
-        last_error_class TEXT,
-        stale_after_unix_seconds INTEGER,
-        PRIMARY KEY (account_id, route_band)
-    )",
-    "CREATE TABLE IF NOT EXISTS previous_response_affinity_owners (
-        affinity_key_hash TEXT NOT NULL,
-        route_band TEXT NOT NULL,
-        account_id TEXT NOT NULL,
-        credential_generation INTEGER NOT NULL,
-        source_transport TEXT NOT NULL,
-        created_unix_seconds INTEGER NOT NULL,
-        PRIMARY KEY (affinity_key_hash, route_band, account_id)
-    )",
-    "PRAGMA user_version = 10",
-];
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const V11_ACCOUNT_ROUTING_POLICY_TABLE_SQL: &str = "CREATE TABLE account_routing_policies (
     account_id TEXT PRIMARY KEY NOT NULL,
     weekly_quota_floor_basis_points INTEGER NOT NULL
@@ -141,6 +92,7 @@ const V11_ACCOUNT_ROUTING_POLICY_TABLE_SQL: &str = "CREATE TABLE account_routing
             AND weekly_quota_floor_basis_points % 100 = 0
         )
 )";
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const V12_ACCOUNT_ROUTING_POLICY_REPLACEMENT_TABLE_SQL: &str =
     "CREATE TABLE account_routing_policies_v12 (
         account_id TEXT PRIMARY KEY NOT NULL,
@@ -150,47 +102,12 @@ const V12_ACCOUNT_ROUTING_POLICY_REPLACEMENT_TABLE_SQL: &str =
                 AND weekly_quota_floor_basis_points % 100 = 0
             )
     )";
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const V13_SESSION_ACCOUNT_AFFINITY_TABLE_SQL: &str = "CREATE TABLE session_account_affinities (
         session_id TEXT PRIMARY KEY NOT NULL,
         account_id TEXT NOT NULL,
         last_seen_unix_seconds INTEGER NOT NULL
     )";
-const SESSION_ACCOUNT_AFFINITY_LAST_SEEN_INDEX_SQL: &str =
-    "CREATE INDEX IF NOT EXISTS session_account_affinities_last_seen_lookup
-        ON session_account_affinities (last_seen_unix_seconds)";
-
-async fn rebuild_account_routing_policy_table_v12_async(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-) -> Result<(), StateStoreError> {
-    sqlx::query(V12_ACCOUNT_ROUTING_POLICY_REPLACEMENT_TABLE_SQL)
-        .execute(&mut **transaction)
-        .await
-        .map_err(sqlx_error)?;
-    sqlx::query(
-        "INSERT INTO account_routing_policies_v12 (
-            account_id, weekly_quota_floor_basis_points
-         )
-         SELECT account_id, weekly_quota_floor_basis_points
-           FROM account_routing_policies",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(sqlx_error)?;
-    sqlx::query("DROP TABLE account_routing_policies")
-        .execute(&mut **transaction)
-        .await
-        .map_err(sqlx_error)?;
-    sqlx::query("ALTER TABLE account_routing_policies_v12 RENAME TO account_routing_policies")
-        .execute(&mut **transaction)
-        .await
-        .map_err(sqlx_error)?;
-    sqlx::query("PRAGMA user_version = 12")
-        .execute(&mut **transaction)
-        .await
-        .map_err(sqlx_error)?;
-
-    Ok(())
-}
 
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 fn rebuild_account_routing_policy_table_v12_sync(
@@ -224,6 +141,7 @@ fn rebuild_account_routing_policy_table_v12_sync(
 
     Ok(())
 }
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS quota_history_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,6 +164,7 @@ const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
             account_id, route_band, limit_window_seconds, observed_unix_seconds
         )",
 ];
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS active_client_leases (
         route_band TEXT NOT NULL,
@@ -261,6 +180,7 @@ const ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS: &[&str] = &[
             route_band, account_id, acquired_unix_seconds
         )",
 ];
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS: &[&str] =
     &["CREATE TABLE IF NOT EXISTS route_band_account_states (
         account_id TEXT NOT NULL,
@@ -271,6 +191,7 @@ const ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS: &[&str] =
         expires_unix_seconds INTEGER,
         PRIMARY KEY (account_id, route_band)
     )"];
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const ASYNC_ACTIVE_SESSION_HISTORY_TABLE_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS active_session_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,6 +218,7 @@ const ASYNC_ACTIVE_SESSION_HISTORY_TABLE_STATEMENTS: &[&str] = &[
         PRIMARY KEY (account_id, route_band, bucket_start_unix_seconds, bucket_end_unix_seconds)
     )",
 ];
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const ASYNC_ACTIVE_SESSION_HISTORY_INDEX_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS active_session_events_route_lookup
         ON active_session_events (
@@ -732,16 +654,7 @@ impl AsyncSqliteStateStore {
             pool,
             read_only: false,
         };
-        store.migrate().await?;
-        store.ensure_quota_history_schema().await?;
-        store.ensure_active_client_schema().await?;
-        store.ensure_route_band_account_state_schema().await?;
-        store.ensure_active_session_history_schema().await?;
-        store.apply_v11_if_needed().await?;
-        store.apply_v12_if_needed().await?;
-        store.apply_v13_if_needed().await?;
-        store.ensure_session_account_affinity_indexes().await?;
-        if let Err(error) = store.verify_account_routing_policy_schema().await {
+        if let Err(error) = crate::account_migrations::migrate(&store.pool).await {
             store.pool.close().await;
             return Err(error);
         }
@@ -770,15 +683,36 @@ impl AsyncSqliteStateStore {
             pool,
             read_only: true,
         };
-        match store.schema_version().await? {
-            CURRENT_SCHEMA_VERSION => {
-                if let Err(error) = store.verify_read_only_schema().await {
-                    store.pool.close().await;
-                    return Err(error);
+        let authority = {
+            let mut connection = store.pool.acquire().await.map_err(sqlx_error)?;
+            crate::account_migrations::migration_authority(&mut connection).await?
+        };
+        let validation = match authority {
+            crate::account_migrations::MigrationAuthority::Legacy => {
+                let version = store.schema_version().await?;
+                if version != CURRENT_SCHEMA_VERSION {
+                    Err(StateStoreError::UnsupportedSchemaVersion { version })
+                } else {
+                    let mut connection = store.pool.acquire().await.map_err(sqlx_error)?;
+                    crate::account_schema::validate_required_read_only_objects(&mut connection)
+                        .await
                 }
-                Ok(store)
             }
-            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
+            crate::account_migrations::MigrationAuthority::NativeCurrent => {
+                let mut connection = store.pool.acquire().await.map_err(sqlx_error)?;
+                crate::account_schema::validate_required_read_only_objects(&mut connection).await?;
+                crate::account_migrations::validate_native_read_only_schema(&mut connection).await
+            }
+            crate::account_migrations::MigrationAuthority::NativeUpgradeRequired => {
+                let mut connection = store.pool.acquire().await.map_err(sqlx_error)?;
+                crate::account_migrations::validate_native_read_only_schema(&mut connection).await
+            }
+        };
+        if let Err(error) = validation {
+            store.pool.close().await;
+            Err(error)
+        } else {
+            Ok(store)
         }
     }
 
@@ -946,22 +880,24 @@ impl AsyncSqliteStateStore {
 
     /// Inserts or updates account metadata through the async state pool.
     pub async fn upsert_account(&self, account: &AccountRecord) -> Result<(), StateStoreError> {
-        sqlx::query(
+        let account_id = account.account_id().as_str();
+        let account_label = account.label();
+        let account_status = account.status().as_str();
+        let active_credential_generation = account
+            .active_credential_generation()
+            .map(u64_to_i64)
+            .transpose()?;
+        sqlx::query!(
             "INSERT INTO accounts (account_id, label, status, active_credential_generation)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(account_id) DO UPDATE SET
                label = excluded.label,
                status = excluded.status,
                active_credential_generation = excluded.active_credential_generation",
-        )
-        .bind(account.account_id().as_str())
-        .bind(account.label())
-        .bind(account.status().as_str())
-        .bind(
-            account
-                .active_credential_generation()
-                .map(u64_to_i64)
-                .transpose()?,
+            account_id,
+            account_label,
+            account_status,
+            active_credential_generation,
         )
         .execute(&self.pool)
         .await
@@ -972,7 +908,7 @@ impl AsyncSqliteStateStore {
 
     /// Lists account metadata in deterministic selector order through the async state pool.
     pub async fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT account_id, label, status, active_credential_generation
                FROM accounts
               ORDER BY account_id",
@@ -984,10 +920,10 @@ impl AsyncSqliteStateStore {
         let mut accounts = Vec::new();
         for row in rows {
             accounts.push(parse_account_row(
-                row.get::<String, _>(0),
-                row.get::<String, _>(1),
-                row.get::<String, _>(2),
-                row.get::<Option<i64>, _>(3),
+                row.account_id,
+                row.label,
+                row.status,
+                row.active_credential_generation,
             )?);
         }
 
@@ -1104,12 +1040,13 @@ impl AsyncSqliteStateStore {
         &self,
         account_id: &AccountId,
     ) -> Result<Option<AccountRecord>, StateStoreError> {
-        let row = sqlx::query(
+        let account_id_value = account_id.as_str();
+        let row = sqlx::query!(
             "SELECT account_id, label, status, active_credential_generation
                FROM accounts
               WHERE account_id = ?1",
+            account_id_value,
         )
-        .bind(account_id.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -1119,10 +1056,10 @@ impl AsyncSqliteStateStore {
         };
 
         parse_account_row(
-            row.get::<String, _>(0),
-            row.get::<String, _>(1),
-            row.get::<String, _>(2),
-            row.get::<Option<i64>, _>(3),
+            row.account_id,
+            row.label,
+            row.status,
+            row.active_credential_generation,
         )
         .map(Some)
     }
@@ -2352,471 +2289,6 @@ impl AsyncSqliteStateStore {
 
         Ok(counts)
     }
-
-    async fn migrate(&self) -> Result<(), StateStoreError> {
-        match self.schema_version().await? {
-            0 => self.apply_v1().await,
-            7 => {
-                self.apply_v8().await?;
-                self.apply_v9().await?;
-                self.apply_v10().await
-            }
-            8 => {
-                self.apply_v9().await?;
-                self.apply_v10().await
-            }
-            9 => self.apply_v10().await,
-            SCHEMA_VERSION_V10
-            | SCHEMA_VERSION_V11
-            | PREVIOUS_SCHEMA_VERSION
-            | CURRENT_SCHEMA_VERSION => Ok(()),
-            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
-        }
-    }
-
-    async fn apply_v11_if_needed(&self) -> Result<(), StateStoreError> {
-        match self.schema_version().await? {
-            SCHEMA_VERSION_V10 => {
-                let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-                sqlx::query(V11_ACCOUNT_ROUTING_POLICY_TABLE_SQL)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(sqlx_error)?;
-                sqlx::query("PRAGMA user_version = 11")
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(sqlx_error)?;
-                transaction.commit().await.map_err(sqlx_error)
-            }
-            SCHEMA_VERSION_V11 | PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
-            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
-        }
-    }
-
-    /// Exercises rollback immediately before the v11 commit.
-    #[cfg(test)]
-    pub async fn inject_v11_migration_rollback_for_test(
-        database_path: &Path,
-    ) -> Result<(), StateStoreError> {
-        let options = SqliteConnectOptions::new()
-            .filename(database_path)
-            .create_if_missing(false)
-            .busy_timeout(Duration::from_millis(0));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .map_err(sqlx_error)?;
-        let mut transaction = pool.begin().await.map_err(sqlx_error)?;
-        sqlx::query(V11_ACCOUNT_ROUTING_POLICY_TABLE_SQL)
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
-        sqlx::query("PRAGMA user_version = 11")
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
-        transaction.rollback().await.map_err(sqlx_error)?;
-        pool.close().await;
-        Err(redacted_weekly_floor_sqlite_error(
-            "injected migration failure",
-        ))
-    }
-
-    async fn apply_v12_if_needed(&self) -> Result<(), StateStoreError> {
-        match self.schema_version().await? {
-            SCHEMA_VERSION_V11 => {
-                let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-                rebuild_account_routing_policy_table_v12_async(&mut transaction).await?;
-                transaction.commit().await.map_err(sqlx_error)
-            }
-            PREVIOUS_SCHEMA_VERSION | CURRENT_SCHEMA_VERSION => Ok(()),
-            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
-        }
-    }
-
-    async fn apply_v13_if_needed(&self) -> Result<(), StateStoreError> {
-        match self.schema_version().await? {
-            PREVIOUS_SCHEMA_VERSION => {
-                let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-                sqlx::query(V13_SESSION_ACCOUNT_AFFINITY_TABLE_SQL)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(sqlx_error)?;
-                sqlx::query("PRAGMA user_version = 13")
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(sqlx_error)?;
-                transaction.commit().await.map_err(sqlx_error)
-            }
-            CURRENT_SCHEMA_VERSION => Ok(()),
-            version => Err(StateStoreError::UnsupportedSchemaVersion { version }),
-        }
-    }
-
-    async fn ensure_session_account_affinity_indexes(&self) -> Result<(), StateStoreError> {
-        sqlx::query(SESSION_ACCOUNT_AFFINITY_LAST_SEEN_INDEX_SQL)
-            .execute(&self.pool)
-            .await
-            .map_err(sqlx_error)?;
-        Ok(())
-    }
-
-    /// Exercises rollback immediately before the v12 commit.
-    #[cfg(test)]
-    pub async fn inject_v12_migration_rollback_for_test(
-        database_path: &Path,
-    ) -> Result<(), StateStoreError> {
-        let options = SqliteConnectOptions::new()
-            .filename(database_path)
-            .create_if_missing(false)
-            .busy_timeout(Duration::from_millis(0));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .map_err(sqlx_error)?;
-        let mut transaction = pool.begin().await.map_err(sqlx_error)?;
-        rebuild_account_routing_policy_table_v12_async(&mut transaction).await?;
-        transaction.rollback().await.map_err(sqlx_error)?;
-        pool.close().await;
-        Err(redacted_weekly_floor_sqlite_error(
-            "injected migration failure",
-        ))
-    }
-
-    async fn apply_v1(&self) -> Result<(), StateStoreError> {
-        for statement in ASYNC_V1_SCHEMA_STATEMENTS {
-            sqlx::query(*statement)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn ensure_quota_history_schema(&self) -> Result<(), StateStoreError> {
-        for statement in ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS {
-            sqlx::query(*statement)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn ensure_active_client_schema(&self) -> Result<(), StateStoreError> {
-        for statement in ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS {
-            sqlx::query(*statement)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn ensure_route_band_account_state_schema(&self) -> Result<(), StateStoreError> {
-        for statement in ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS {
-            sqlx::query(*statement)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn ensure_active_session_history_schema(&self) -> Result<(), StateStoreError> {
-        for statement in ASYNC_ACTIVE_SESSION_HISTORY_TABLE_STATEMENTS {
-            sqlx::query(*statement)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-        }
-
-        for (table_name, column_name, alter_statement) in [
-            (
-                "active_session_events",
-                "logical_session_id",
-                "ALTER TABLE active_session_events ADD COLUMN logical_session_id TEXT NOT NULL DEFAULT ''",
-            ),
-            (
-                "active_session_events",
-                "session_started_unix_seconds",
-                "ALTER TABLE active_session_events ADD COLUMN session_started_unix_seconds INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "active_session_events",
-                "session_ended_unix_seconds",
-                "ALTER TABLE active_session_events ADD COLUMN session_ended_unix_seconds INTEGER",
-            ),
-            (
-                "active_session_events",
-                "transport_kind",
-                "ALTER TABLE active_session_events ADD COLUMN transport_kind TEXT NOT NULL DEFAULT 'unknown'",
-            ),
-            (
-                "active_session_rollups",
-                "completed_sessions",
-                "ALTER TABLE active_session_rollups ADD COLUMN completed_sessions INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "active_session_rollups",
-                "stale_purged_sessions",
-                "ALTER TABLE active_session_rollups ADD COLUMN stale_purged_sessions INTEGER NOT NULL DEFAULT 0",
-            ),
-        ] {
-            if !self.table_has_column(table_name, column_name).await? {
-                sqlx::query(alter_statement)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(sqlx_error)?;
-            }
-        }
-
-        for statement in ASYNC_ACTIVE_SESSION_HISTORY_INDEX_STATEMENTS {
-            sqlx::query(*statement)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn verify_read_only_schema(&self) -> Result<(), StateStoreError> {
-        for table_name in [
-            "accounts",
-            "quota_snapshots",
-            "selector_quota_windows",
-            "quota_refresh_status",
-            "quota_history_observations",
-            "active_client_leases",
-            "route_band_account_states",
-            "active_session_events",
-            "active_session_rollups",
-            "account_routing_policies",
-            "session_account_affinities",
-        ] {
-            if !self.schema_object_exists("table", table_name).await? {
-                return Err(StateStoreError::MissingReadOnlySchemaObject {
-                    object_kind: "table",
-                    object_name: table_name,
-                });
-            }
-        }
-
-        for (table_name, column_name) in [
-            ("active_client_leases", "process_run_id"),
-            ("active_client_leases", "active_pressure"),
-            ("active_session_events", "logical_session_id"),
-            ("active_session_events", "session_started_unix_seconds"),
-            ("active_session_events", "session_ended_unix_seconds"),
-            ("active_session_events", "transport_kind"),
-            ("active_session_rollups", "completed_sessions"),
-            ("active_session_rollups", "stale_purged_sessions"),
-            ("account_routing_policies", "account_id"),
-            (
-                "account_routing_policies",
-                "weekly_quota_floor_basis_points",
-            ),
-            ("session_account_affinities", "session_id"),
-            ("session_account_affinities", "account_id"),
-            ("session_account_affinities", "last_seen_unix_seconds"),
-        ] {
-            if !self.table_has_column(table_name, column_name).await? {
-                return Err(StateStoreError::MissingReadOnlySchemaObject {
-                    object_kind: "column",
-                    object_name: column_name,
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn verify_account_routing_policy_schema(&self) -> Result<(), StateStoreError> {
-        if !self
-            .schema_object_exists("table", "account_routing_policies")
-            .await?
-        {
-            return Err(StateStoreError::MissingReadOnlySchemaObject {
-                object_kind: "table",
-                object_name: "account_routing_policies",
-            });
-        }
-        for column_name in ["account_id", "weekly_quota_floor_basis_points"] {
-            if !self
-                .table_has_column("account_routing_policies", column_name)
-                .await?
-            {
-                return Err(StateStoreError::MissingReadOnlySchemaObject {
-                    object_kind: "column",
-                    object_name: column_name,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    async fn apply_v8(&self) -> Result<(), StateStoreError> {
-        if !self.table_exists("active_client_leases").await? {
-            self.ensure_active_client_schema().await?;
-            sqlx::query("PRAGMA user_version = 8")
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-            return Ok(());
-        }
-
-        if self
-            .table_has_column("active_client_leases", "process_run_id")
-            .await?
-        {
-            sqlx::query("PRAGMA user_version = 8")
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_error)?;
-            return Ok(());
-        }
-
-        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-        sqlx::query("DROP INDEX IF EXISTS active_client_leases_account_lookup")
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
-        sqlx::query(
-            "CREATE TABLE active_client_leases_v8 (
-                route_band TEXT NOT NULL,
-                process_run_id TEXT NOT NULL,
-                reservation_id TEXT NOT NULL,
-                account_id TEXT NOT NULL,
-                acquired_unix_seconds INTEGER NOT NULL,
-                active_pressure INTEGER NOT NULL,
-                PRIMARY KEY (route_band, process_run_id, reservation_id)
-            )",
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
-        sqlx::query(
-            "INSERT OR IGNORE INTO active_client_leases_v8 (
-                route_band, process_run_id, reservation_id, account_id,
-                acquired_unix_seconds, active_pressure
-             )
-             SELECT
-                route_band, 'legacy', reservation_id, account_id,
-                acquired_unix_seconds, 8
-             FROM active_client_leases",
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
-        sqlx::query("DROP TABLE active_client_leases")
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
-        sqlx::query("ALTER TABLE active_client_leases_v8 RENAME TO active_client_leases")
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS active_client_leases_account_lookup
-                ON active_client_leases (
-                    route_band, account_id, acquired_unix_seconds
-                )",
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
-        sqlx::query("PRAGMA user_version = 8")
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
-        transaction.commit().await.map_err(sqlx_error)?;
-
-        Ok(())
-    }
-
-    async fn apply_v9(&self) -> Result<(), StateStoreError> {
-        self.ensure_active_session_history_schema().await?;
-        sqlx::query("PRAGMA user_version = 9")
-            .execute(&self.pool)
-            .await
-            .map_err(sqlx_error)?;
-
-        Ok(())
-    }
-
-    async fn apply_v10(&self) -> Result<(), StateStoreError> {
-        self.ensure_active_session_history_schema().await?;
-        sqlx::query("PRAGMA user_version = 10")
-            .execute(&self.pool)
-            .await
-            .map_err(sqlx_error)?;
-
-        Ok(())
-    }
-
-    async fn table_exists(&self, table_name: &str) -> Result<bool, StateStoreError> {
-        self.schema_object_exists("table", table_name).await
-    }
-
-    async fn schema_object_exists(
-        &self,
-        object_kind: &'static str,
-        object_name: &str,
-    ) -> Result<bool, StateStoreError> {
-        sqlx::query("SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2")
-            .bind(object_kind)
-            .bind(object_name)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|row| row.is_some())
-            .map_err(sqlx_error)
-    }
-
-    async fn table_has_column(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> Result<bool, StateStoreError> {
-        let rows = match table_name {
-            "active_client_leases" => sqlx::query("PRAGMA table_info(\"active_client_leases\")")
-                .fetch_all(&self.pool)
-                .await
-                .map_err(sqlx_error)?,
-            "active_session_events" => sqlx::query("PRAGMA table_info(\"active_session_events\")")
-                .fetch_all(&self.pool)
-                .await
-                .map_err(sqlx_error)?,
-            "active_session_rollups" => {
-                sqlx::query("PRAGMA table_info(\"active_session_rollups\")")
-                    .fetch_all(&self.pool)
-                    .await
-                    .map_err(sqlx_error)?
-            }
-            "account_routing_policies" => {
-                sqlx::query("PRAGMA table_info(\"account_routing_policies\")")
-                    .fetch_all(&self.pool)
-                    .await
-                    .map_err(sqlx_error)?
-            }
-            "session_account_affinities" => {
-                sqlx::query("PRAGMA table_info(\"session_account_affinities\")")
-                    .fetch_all(&self.pool)
-                    .await
-                    .map_err(sqlx_error)?
-            }
-            _ => Vec::new(),
-        };
-        Ok(rows
-            .iter()
-            .any(|row| row.get::<String, _>("name") == column_name))
-    }
 }
 
 impl AsyncWeeklyQuotaFloorMutationStore {
@@ -2831,6 +2303,34 @@ impl AsyncWeeklyQuotaFloorMutationStore {
             .connect_with(options)
             .await
             .map_err(|_| redacted_weekly_floor_sqlite_error("unable to open database"))?;
+        let authority = {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| redacted_weekly_floor_sqlite_error("unable to verify schema"))?;
+            crate::account_migrations::migration_authority(&mut connection).await
+        };
+        match authority {
+            Ok(crate::account_migrations::MigrationAuthority::Legacy) => {}
+            Ok(crate::account_migrations::MigrationAuthority::NativeCurrent) => {
+                let native_schema_valid = {
+                    let mut connection = pool.acquire().await.map_err(|_| {
+                        redacted_weekly_floor_sqlite_error("unable to verify schema")
+                    })?;
+                    crate::account_migrations::validate_native_read_only_schema(&mut connection)
+                        .await
+                        .is_ok()
+                };
+                if !native_schema_valid {
+                    pool.close().await;
+                    return Err(StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired);
+                }
+            }
+            Ok(crate::account_migrations::MigrationAuthority::NativeUpgradeRequired) | Err(_) => {
+                pool.close().await;
+                return Err(StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired);
+            }
+        }
         let version = sqlx::query("PRAGMA user_version")
             .fetch_one(&pool)
             .await
@@ -5020,7 +4520,7 @@ fn sqlite_error(error: rusqlite::Error) -> StateStoreError {
     }
 }
 
-fn sqlx_error(error: sqlx::Error) -> StateStoreError {
+pub(crate) fn sqlx_error(error: sqlx::Error) -> StateStoreError {
     StateStoreError::Sqlite {
         message: error.to_string(),
     }

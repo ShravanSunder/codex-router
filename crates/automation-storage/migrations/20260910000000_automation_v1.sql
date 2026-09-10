@@ -128,3 +128,4 @@ CREATE INDEX run_admission_lookup ON workflow_runs(schedule_id, run_status);
 CREATE INDEX run_history ON workflow_runs(schedule_id, due_at_ms, run_id);
 CREATE INDEX event_history ON automation_events(subject_kind, subject_id, event_sequence);
 CREATE INDEX event_cleanup ON automation_events(recorded_at_ms, event_sequence);
+PRAGMA user_version=1;

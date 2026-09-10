@@ -1,0 +1,10 @@
+[profile.default]
+retries = 0
+
+[profile.ci]
+fail-fast = false
+retries = 0
+status-level = "fail"
+final-status-level = "fail"
+# Reporting only: process/PTY deadlines are owned by their permanent tests.
+slow-timeout = "60s"
