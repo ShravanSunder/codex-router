@@ -2081,24 +2081,44 @@ mod tests {
             "weekly-healthy",
             AccountStatus::Enabled,
         );
-        persist_account_with_selector_window_specs(
-            &state,
-            &short_rich_weekly_poor,
-            "responses",
-            &[(18_000, 90, true), (604_800, 5, false)],
-        );
-        persist_account_with_selector_window_specs(
-            &state,
-            &weekly_healthy,
-            "responses",
-            &[(18_000, 50, true), (604_800, 50, false)],
-        );
+        // Equal reset times keep this test about weekly health rather than reset ordering.
+        let now = test_unix_seconds();
+        for (account, windows) in [
+            (
+                &short_rich_weekly_poor,
+                [(18_000, 90, true), (604_800, 5, false)],
+            ),
+            (&weekly_healthy, [(18_000, 50, true), (604_800, 50, false)]),
+        ] {
+            let account_with_generation = account.clone().with_active_credential_generation(1);
+            if let Err(error) =
+                AccountStateRepository::upsert_account(&state, &account_with_generation)
+            {
+                panic!("account should persist: {error}");
+            }
+            for (limit_window_seconds, remaining_headroom, effective) in windows {
+                let selector_window = PersistedSelectorQuotaWindow::new(
+                    account.account_id().clone(),
+                    "responses",
+                    limit_window_seconds,
+                    SelectorQuotaWindowStatus::Eligible,
+                )
+                .with_remaining_headroom(remaining_headroom)
+                .with_effective(effective)
+                .with_observed_unix_seconds(now)
+                .with_reset_unix_seconds(now.saturating_add(limit_window_seconds));
+                if let Err(error) =
+                    SelectorQuotaRepository::upsert_selector_window(&state, &selector_window)
+                {
+                    panic!("selector quota window should persist: {error}");
+                }
+            }
+        }
         let async_state = match AsyncSqliteStateStore::open(&database_path).await {
             Ok(state) => state,
             Err(error) => panic!("async state store should open: {error}"),
         };
-        let now = test_unix_seconds();
-        let weekly_reset = selector_reset_seconds(604_800);
+        let weekly_reset = now.saturating_add(604_800);
         append_history_series_with_reset(
             &async_state,
             short_rich_weekly_poor.account_id(),
