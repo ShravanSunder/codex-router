@@ -99,6 +99,15 @@ unimplemented = "deny"
 unreachable = "deny"
 unwrap_used = "deny"
 
+# Keep useful backtrace locations without full debugger metadata in local builds.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+
 # Debug Host restarts hash the managed executable before launch and publication.
 # Keep full content verification fast enough for native TUI reconnect deadlines.
 [profile.dev.package.sha2]
