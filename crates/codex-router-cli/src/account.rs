@@ -819,7 +819,8 @@ fn redacted_account_status_state_error(error: StateStoreError) -> AccountCommand
         StateStoreError::AccountStatusDatabaseBusy => {
             AccountCommandError::AccountStatusDatabaseBusy
         }
-        StateStoreError::AccountStatusSchemaUpgradeRequired => {
+        StateStoreError::AccountStatusSchemaUpgradeRequired
+        | StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired => {
             AccountCommandError::AccountStatusSchemaUpgradeRequired
         }
         StateStoreError::AccountStatusAccountNotFound => {
@@ -829,6 +830,26 @@ fn redacted_account_status_state_error(error: StateStoreError) -> AccountCommand
             AccountCommandError::AccountStatusAccountAmbiguous
         }
         _ => AccountCommandError::AccountStatusStateOperationFailed,
+    }
+}
+
+#[cfg(test)]
+mod account_status_error_tests {
+    use super::*;
+
+    #[test]
+    fn schema_upgrade_error_is_actionable_and_redacted() {
+        let rendered = redacted_account_status_state_error(
+            StateStoreError::WeeklyQuotaFloorSchemaUpgradeRequired,
+        )
+        .to_string();
+        assert_eq!(
+            rendered,
+            "account status requires a compatible upgraded router database"
+        );
+        for canary in ["sensitive-label", "acct_internal", "/private/state.sqlite"] {
+            assert!(!rendered.contains(canary));
+        }
     }
 }
 
