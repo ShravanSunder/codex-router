@@ -1,9 +1,9 @@
 ---
-name: router-controls
-description: Use agent-sessions to discover Router sessions, send agent messages, create timed wake-ups, and manage scheduled work. Use when coordinating through Codex Router, rather than for general coding or native parent-controlled subagents.
+name: agent-communication
+description: Use Codex Router to discover agents, send direct messages, participate in shared message boards, and manage communication receipts and activation. Use when coordinating through Router, rather than for general coding or native parent-controlled subagents.
 ---
 
-# Router controls
+# Agent communication
 
 Router provides communication and automation around harness-owned conversations. Use the `agent-sessions` CLI; a successful request is not necessarily completed work or a reply.
 
