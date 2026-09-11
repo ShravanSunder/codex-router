@@ -197,7 +197,7 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
             .last()
             .ok_or("recovered app-server PID is missing")?,
     )?;
-    let exhausted_snapshot = wait_for_unavailable_status(
+    let exhausted_snapshot = wait_for_child_exit_status(
         coordination_paths.operator_socket(),
         Duration::from_secs(20),
     )
@@ -395,7 +395,7 @@ fn write_managed_codex_version_fixture(
     Ok(())
 }
 
-async fn wait_for_unavailable_status(
+async fn wait_for_child_exit_status(
     operator_socket: &Path,
     deadline: Duration,
 ) -> Result<HostSnapshot, Box<dyn std::error::Error>> {
@@ -408,10 +408,9 @@ async fn wait_for_unavailable_status(
             )
             .await
                 && let Ok(snapshot) = terminal_snapshot(&frames)
-                && matches!(
-                    snapshot.app_server(),
-                    AppServerCondition::Absent | AppServerCondition::Failed
-                )
+                // A failed reachability probe can precede owner-observed child exit.
+                // Absence means the owner has consumed the exit and synchronized publication.
+                && matches!(snapshot.app_server(), AppServerCondition::Absent)
             {
                 return snapshot.clone();
             }

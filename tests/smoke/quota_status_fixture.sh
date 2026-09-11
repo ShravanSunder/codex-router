@@ -32,10 +32,13 @@ smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/codex-router-quota-status.XXXXXX")"
 router_root="${smoke_root}/router"
 mkdir -p "${router_root}"
 
-"${cargo_command[@]}" run -q -p codex-router-cli -- \
-  account list \
-  --router-root "${router_root}" \
-  >/dev/null
+# Account listing is read-only. Prepare this fixture through the same native
+# migration set used by writable startup rather than changing that contract.
+"${repo_root}/scripts/tooling/bootstrap-tools.sh" sqlx --check >/dev/null
+sqlx_binary="${repo_root}/tmp/rust-tools/bin/sqlx"
+DATABASE_URL="sqlite://${router_root}/state.sqlite" "${sqlx_binary}" database create
+DATABASE_URL="sqlite://${router_root}/state.sqlite" "${sqlx_binary}" migrate run \
+  --source "${repo_root}/crates/codex-router-state/migrations"
 
 seed_sql_statement="
 INSERT INTO accounts (account_id, label, status, active_credential_generation)

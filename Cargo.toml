@@ -25,7 +25,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.18"
+version = "0.1.19"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -59,6 +59,7 @@ opentelemetry = { version = "0.31.0", features = ["logs", "metrics", "trace"] }
 opentelemetry-appender-tracing = "0.31.1"
 opentelemetry-otlp = { version = "0.31.0", features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["logs", "metrics", "rt-tokio", "trace"] }
+proptest = "1.11.0"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "stdio"] }
 rusqlite = { version = "0.37.0", default-features = false, features = ["bundled"] }

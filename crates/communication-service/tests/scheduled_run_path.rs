@@ -152,6 +152,8 @@ async fn exercise_scheduled_run(
         })
         .await?;
     let backend_store = Arc::clone(&store);
+    let resume_uncertainty_observed = Arc::new(tokio::sync::Notify::new());
+    let backend_resume_uncertainty_observed = Arc::clone(&resume_uncertainty_observed);
     let backend = tokio::spawn(async move {
         for stage in 0..if busy_first || resume_rejected { 8 } else { 7 } {
             let logical_stage = if (busy_first || resume_rejected) && stage >= 2 {
@@ -263,6 +265,12 @@ async fn exercise_scheduled_run(
                 if resume.get("method").and_then(Value::as_str) != Some("thread/resume") {
                     return Err("unloaded worker did not request resume".into());
                 }
+                // Make the durable in-flight state observable before returning the known rejection.
+                tokio::time::timeout(
+                    Duration::from_secs(6),
+                    backend_resume_uncertainty_observed.notified(),
+                )
+                .await?;
                 socket.send(Message::Text(json!({"id":resume.get("id"),"error":{"code":-32602,"message":"known resume rejection"}}).to_string().into())).await?;
                 continue;
             }
@@ -376,13 +384,20 @@ async fn exercise_scheduled_run(
             }
             if let Some(run_id)=&known_run{
                 let run=store.lock().await.read_run::<SessionRef,communication_protocol::EndpointRef,CodexGeneration,communication_protocol::NativeSendReceipt>(run_id).await?;
+                if resume_rejected && run.phase == agent_automation::RunPhase::Uncertain {
+                    resume_uncertainty_observed.notify_one();
+                }
                 if skip_failed_summary && run.phase == agent_automation::RunPhase::SummaryBlocked {
                     client.skip_summary(communication_protocol::RunRecoveryRequest {
                         operation_id: OperationId::generate(), run_id: run_id.clone(),
                     }).await.map_err(|_|automation_storage::StorageError::InvalidRecord)?;
                     continue;
                 }
-                if matches!(run.phase,agent_automation::RunPhase::Finished | agent_automation::RunPhase::PreparationFailed | agent_automation::RunPhase::Uncertain){return Ok::<_,automation_storage::StorageError>(run);}
+                // Resume uncertainty is in-flight until the scripted native response resolves it.
+                // Only the deliberately lost-response scenario expects uncertainty as its outcome.
+                if matches!(run.phase,agent_automation::RunPhase::Finished | agent_automation::RunPhase::PreparationFailed)
+                    || (matches!(preparation,PreparationOutcome::ResponseLost) && run.phase == agent_automation::RunPhase::Uncertain)
+                {return Ok::<_,automation_storage::StorageError>(run);}
             }
         }
     }).await??;
