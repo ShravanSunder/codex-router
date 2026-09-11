@@ -15,7 +15,10 @@ checked-query coverage. Their existing runtime validation remains necessary.
 
 Native SQLx migration files replace the handwritten Rust migration system, as
 explicitly directed by the owner on 2026-09-10. Existing data must survive the
-transition. No separate schema package is required.
+transition. No separate schema package is required. Migration ownership covers every
+router-owned production SQLite store: account state, automation storage and the
+lifecycle observation journal. The initial checked-query group does not narrow
+this migration scope.
 
 The build workflow and migration machinery may change, but this work does not authorize changing stored
 data formats, changing routing behavior or

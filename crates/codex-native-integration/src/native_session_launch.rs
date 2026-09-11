@@ -56,7 +56,11 @@ impl SessionLaunch {
         user_arguments: &[OsString],
         session_id: &str,
     ) -> Self {
-        let mut arguments = root_arguments(socket_path, invoking_cwd, user_arguments);
+        let mut arguments = root_arguments(
+            socket_path,
+            invoking_cwd,
+            &hosted_resume_arguments(user_arguments),
+        );
         arguments.extend([
             OsString::from("resume"),
             OsString::from("--"),
@@ -95,7 +99,11 @@ impl SessionLaunch {
         user_arguments: &[OsString],
         session_id: &str,
     ) -> Self {
-        let mut arguments = root_arguments(socket_path, invoking_cwd, user_arguments);
+        let mut arguments = root_arguments(
+            socket_path,
+            invoking_cwd,
+            &hosted_resume_arguments(user_arguments),
+        );
         arguments.extend([
             OsString::from("fork"),
             OsString::from("--"),
@@ -161,6 +169,39 @@ fn local_root_arguments(invoking_cwd: &Path, user_arguments: &[OsString]) -> Vec
     append_default_working_directory(&mut arguments, invoking_cwd, user_arguments);
     arguments.extend_from_slice(user_arguments);
     arguments
+}
+
+fn hosted_resume_arguments(user_arguments: &[OsString]) -> Vec<OsString> {
+    let mut result = Vec::with_capacity(user_arguments.len());
+    let mut skip_value = false;
+    for argument in user_arguments {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        let Some(value) = argument.to_str() else {
+            result.push(argument.clone());
+            continue;
+        };
+        if matches!(value, "--sandbox" | "-s" | "--ask-for-approval" | "-a") {
+            skip_value = true;
+            continue;
+        }
+        if matches!(
+            value,
+            "--yolo" | "--dangerously-bypass-approvals-and-sandbox" | "--approve-for-me"
+        ) || value.starts_with("--sandbox=")
+            || value.starts_with("--ask-for-approval=")
+            || value.starts_with("-c")
+                && (value.contains("approval_policy")
+                    || value.contains("sandbox_mode")
+                    || value.contains("sandbox_permissions"))
+        {
+            continue;
+        }
+        result.push(argument.clone());
+    }
+    result
 }
 
 fn append_default_working_directory(

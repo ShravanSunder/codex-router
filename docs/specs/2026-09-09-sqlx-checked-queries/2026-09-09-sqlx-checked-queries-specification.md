@@ -107,3 +107,21 @@ thread bindings, runs and summaries, wakes/deliveries, operation receipts and
 event sequence identities remain authoritative. The scheduled-workflow
 [Requirements](../2026-09-07-scheduled-agent-workflows/2026-09-07-scheduled-agent-workflows-requirements.md)
 retain ownership of their behavior; this work changes schema management only.
+
+## Lifecycle journal boundary under R6
+
+R6 includes `lifecycle-observation` and its `session-registry.sqlite` database.
+Fresh initialization and future schema upgrades use native SQLx migrations.
+Adoption of the existing five-table journal preserves journal identity, metadata,
+record sequences and payloads, retention accounting, address rows and checkpoint
+state. It must not reset replay cursors, emit new observations or rebuild domain
+rows as a side effect. Known legacy schema and version are validated before
+registering SQLx history; incompatible schema, version or native history fails
+without committing changes. Concurrent startup must not create competing journal
+identities or duplicate baseline history.
+
+Migration completeness requires an inventory of every production SQLite schema
+owner. The current owners are account state, automation and lifecycle journal.
+External Codex databases remain read-only; synchronous account fixture helpers
+are test infrastructure, not another production migration owner. One-time legacy
+adoption ends when native history exists; future upgrades belong only to SQLx.

@@ -43,28 +43,8 @@ impl ObservationJournal {
             .synchronous(SqliteSynchronous::Full)
             .busy_timeout(Duration::from_secs(1));
         let mut connection = SqliteConnection::connect_with(&options).await?;
-        let mut transaction = connection.begin().await?;
-        sqlx::query("CREATE TABLE IF NOT EXISTS journal_metadata (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, journal_id TEXT NOT NULL, last_sequence INTEGER NOT NULL, retention_clock INTEGER NOT NULL, payload_bytes INTEGER NOT NULL)").execute(&mut *transaction).await?;
-        sqlx::query("CREATE TABLE IF NOT EXISTS lifecycle_records (sequence INTEGER PRIMARY KEY, retention_at INTEGER NOT NULL, observation_json TEXT NOT NULL)").execute(&mut *transaction).await?;
-        sqlx::query("CREATE TABLE IF NOT EXISTS thread_addresses (address_key TEXT PRIMARY KEY, entry_json TEXT NOT NULL, payload_bytes INTEGER NOT NULL)").execute(&mut *transaction).await?;
-        sqlx::query("CREATE TABLE IF NOT EXISTS journal_checkpoint (singleton INTEGER PRIMARY KEY CHECK(singleton=1), sequence INTEGER NOT NULL)").execute(&mut *transaction).await?;
-        sqlx::query("INSERT OR IGNORE INTO journal_checkpoint VALUES (1,0)")
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("CREATE TABLE IF NOT EXISTS checkpoint_addresses (address_key TEXT PRIMARY KEY, entry_json TEXT NOT NULL)").execute(&mut *transaction).await?;
-        sqlx::query("INSERT OR IGNORE INTO journal_metadata VALUES (1,1,?,0,0,0)")
-            .bind(String::from(new_identity))
-            .execute(&mut *transaction)
-            .await?;
-        let row = sqlx::query("SELECT version,journal_id FROM journal_metadata WHERE singleton=1")
-            .fetch_one(&mut *transaction)
-            .await?;
-        if row.try_get::<i64, _>("version")? != 1 {
-            return Err(JournalError::InvalidStorage);
-        }
-        let journal_id = UuidIdentity::try_from(row.try_get::<String, _>("journal_id")?)
-            .map_err(|_| JournalError::InvalidStorage)?;
-        transaction.commit().await?;
+        let journal_id =
+            crate::journal_migrations::initialize(&mut connection, new_identity).await?;
         Ok(Self {
             connection,
             journal_id,
