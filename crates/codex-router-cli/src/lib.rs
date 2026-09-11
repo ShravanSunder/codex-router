@@ -545,6 +545,8 @@ codex-router
 
 commands:
   serve                         Run the local Codex account router
+  account disable --account <name>  Stop routing to an account
+  account enable --account <name>   Resume routing to an account
   account login --label <name>  Add an OAuth account
   account list                  Show configured router accounts
   account set-weekly-floor      Set or disable an account weekly quota floor

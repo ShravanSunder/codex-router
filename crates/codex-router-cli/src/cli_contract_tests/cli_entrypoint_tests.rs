@@ -199,6 +199,8 @@ fn process_binary_path_is_skipped_before_command_parse() {
 
     for expected_line in [
         "serve                         Run the local Codex account router",
+        "account disable --account <name>  Stop routing to an account",
+        "account enable --account <name>   Resume routing to an account",
         "account login --label <name>  Add an OAuth account",
         "account list                  Show configured router accounts",
         "account set-weekly-floor      Set or disable an account weekly quota floor",
@@ -241,6 +243,8 @@ fn nested_user_facing_help_does_not_leak_internal_commands() {
             &["codex-router", "account", "--help"][..],
             &[
                 "codex-router account",
+                "disable --account <name>",
+                "enable --account <name>",
                 "login --label <name>  Add an OAuth account",
                 "list                  Show configured router accounts",
             ][..],

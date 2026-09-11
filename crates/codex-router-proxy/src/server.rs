@@ -134,6 +134,7 @@ use crate::websocket::router_websocket_config;
 
 #[cfg(test)]
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const ACTIVE_SESSION_EVENT_RETENTION_SECONDS: u64 = 7 * 86_400;
 
 /// Address validated for the v1 loopback-only proxy server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -788,7 +789,6 @@ impl LoopbackRouterRuntime {
         const ROLLUP_BUCKET_SECONDS: u64 = 300;
         const ACTIVE_CLIENT_STALE_AFTER_SECONDS: u64 = 600;
         const ACTIVE_SESSION_RETENTION_SECONDS: u64 = 86_400;
-        const ACTIVE_SESSION_COMPACTION_SECONDS: u64 = 86_400;
         const SESSION_ACCOUNT_AFFINITY_RETENTION_SECONDS: u64 = 7 * 86_400;
 
         if claim_session_affinity_cleanup_day(
@@ -838,11 +838,16 @@ impl LoopbackRouterRuntime {
                 self.maintenance_actor
                     .try_enqueue(MaintenanceHint::CompactActiveSessionHistory {
                         route_band,
-                        compact_before_unix_seconds: now_unix_seconds
-                            .saturating_sub(ACTIVE_SESSION_COMPACTION_SECONDS),
+                        compact_before_unix_seconds: active_session_event_compaction_before(
+                            now_unix_seconds,
+                        ),
                     });
         }
     }
+}
+
+fn active_session_event_compaction_before(now_unix_seconds: u64) -> u64 {
+    now_unix_seconds.saturating_sub(ACTIVE_SESSION_EVENT_RETENTION_SECONDS)
 }
 
 fn claim_session_affinity_cleanup_day(
@@ -2424,6 +2429,16 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn active_session_event_compaction_keeps_completed_events_for_seven_days() {
+        assert_eq!(
+            active_session_event_compaction_before(7 * 86_400 + 123),
+            123
+        );
+        assert_eq!(active_session_event_compaction_before(7 * 86_400), 0);
+        assert_eq!(active_session_event_compaction_before(123), 0);
+    }
 
     #[test]
     fn daily_session_affinity_cleanup_guard_allows_only_advancing_utc_days() {

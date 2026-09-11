@@ -1967,6 +1967,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlx_active_session_event_compaction_purges_only_completed_old_sessions() {
+        let temp_dir = TestTempDir::new("async_active_session_event_compaction");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => panic!("async state store should open and migrate: {error}"),
+        };
+        let account = account_id("acct_event_compaction");
+        let old_completed = ReservationId::new("reservation-old-completed");
+        let old_open = ReservationId::new("reservation-old-open");
+        let recent_completed = ReservationId::new("reservation-recent-completed");
+        let other_route = ReservationId::new("reservation-other-route");
+
+        for (
+            route_band,
+            process_run_id,
+            reservation_id,
+            acquired_unix_seconds,
+            released_unix_seconds,
+        ) in [
+            ("responses", "process-old", &old_completed, 100, Some(200)),
+            ("responses", "process-open", &old_open, 100, None),
+            (
+                "responses",
+                "process-recent",
+                &recent_completed,
+                900,
+                Some(1_000),
+            ),
+            (
+                "models",
+                "process-other-route",
+                &other_route,
+                100,
+                Some(200),
+            ),
+        ] {
+            store
+                .record_active_client_acquired(
+                    route_band,
+                    process_run_id,
+                    reservation_id,
+                    &account,
+                    acquired_unix_seconds,
+                    1,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("session acquire should persist: {error}"));
+            if let Some(released_unix_seconds) = released_unix_seconds {
+                store
+                    .record_active_client_released(
+                        route_band,
+                        process_run_id,
+                        reservation_id,
+                        released_unix_seconds,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("session release should persist: {error}"));
+            }
+        }
+
+        store
+            .compact_completed_active_session_events_before("responses", 500)
+            .await
+            .unwrap_or_else(|error| panic!("completed old events should compact: {error}"));
+
+        let response_events = store
+            .active_session_events_for_route_band("responses")
+            .await
+            .unwrap_or_else(|error| panic!("response events should load: {error}"));
+        assert_eq!(
+            response_events,
+            vec![
+                crate::sqlite::ActiveSessionEvent::new(
+                    account.clone(),
+                    "responses",
+                    "process-open",
+                    old_open,
+                    crate::sqlite::ActiveSessionEventKind::Acquired,
+                    100,
+                ),
+                crate::sqlite::ActiveSessionEvent::new(
+                    account.clone(),
+                    "responses",
+                    "process-recent",
+                    recent_completed.clone(),
+                    crate::sqlite::ActiveSessionEventKind::Acquired,
+                    900,
+                ),
+                crate::sqlite::ActiveSessionEvent::new(
+                    account,
+                    "responses",
+                    "process-recent",
+                    recent_completed,
+                    crate::sqlite::ActiveSessionEventKind::Released,
+                    1_000,
+                )
+                .with_session_interval(900, Some(1_000), "unknown"),
+            ]
+        );
+
+        assert_eq!(
+            store
+                .active_session_events_for_route_band("models")
+                .await
+                .unwrap_or_else(|error| panic!("other-route events should load: {error}"))
+                .len(),
+            2,
+            "compaction must stay within its route band"
+        );
+    }
+
+    #[tokio::test]
     async fn sqlx_active_session_release_timestamp_bounds_rollup_interval() {
         let temp_dir = TestTempDir::new("async_active_session_release_timestamp");
         let database_path = temp_dir.path().join("state.sqlite");

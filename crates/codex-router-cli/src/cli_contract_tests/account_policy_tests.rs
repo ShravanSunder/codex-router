@@ -57,6 +57,98 @@ fn account_set_weekly_floor_parses_exact_contract() {
 }
 
 #[test]
+fn account_status_commands_parse_and_preserve_credential_generation() {
+    let test_root = TestRoot::new("account-status");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir(&router_root));
+    let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
+    must_ok(AccountStateRepository::upsert_account(
+        &state,
+        &AccountRecord::new(
+            account_id("acct_primary"),
+            "primary".to_owned(),
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(7),
+    ));
+    drop(state);
+
+    for (command, expected_status) in [
+        ("disable", AccountStatus::Disabled),
+        ("enable", AccountStatus::Enabled),
+    ] {
+        let output = run_cli(
+            [
+                "account",
+                command,
+                "--account",
+                "primary",
+                "--router-root",
+                path_to_str(&router_root),
+            ],
+            CliContext::new(Vec::new()),
+        );
+        assert_eq!(
+            output.stdout,
+            format!(
+                "updated account status: primary = {}\n",
+                expected_status.as_str()
+            )
+        );
+        assert!(output.stderr.is_empty());
+
+        let runtime = test_async_runtime();
+        let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open_read_only(
+            &router_root.join("state.sqlite"),
+        )));
+        let account = must_ok(runtime.block_on(state.load_account(&account_id("acct_primary"))))
+            .unwrap_or_else(|| panic!("status command must retain account metadata"));
+        assert_eq!(account.status(), expected_status);
+        assert_eq!(account.active_credential_generation(), Some(7));
+    }
+}
+
+#[test]
+fn account_status_commands_require_one_account_option() {
+    for arguments in [
+        vec!["account", "disable"],
+        vec![
+            "account",
+            "enable",
+            "--account",
+            "primary",
+            "--account",
+            "secondary",
+        ],
+    ] {
+        let result = CliCommand::parse(arguments.into_iter().map(OsString::from));
+        assert!(
+            result.is_err(),
+            "status commands require one account option"
+        );
+    }
+}
+
+#[test]
+fn account_status_command_help_is_specific() {
+    for (command, expected_line) in [
+        ("disable", "codex-router account disable --account <label>"),
+        ("enable", "codex-router account enable --account <label>"),
+    ] {
+        let parsed = CliCommand::parse([
+            OsString::from("account"),
+            OsString::from(command),
+            OsString::from("--help"),
+        ]);
+        let Ok(CliCommand::Account(AccountCommand::Help(help))) = parsed else {
+            panic!("{command} help should parse");
+        };
+        assert!(help.contains(expected_line));
+    }
+}
+
+#[test]
 fn account_set_weekly_floor_rejects_invalid_and_duplicate_options() {
     for invalid_percent in ["-1", "2.5", "16", "65536"] {
         let result = CliCommand::parse([
