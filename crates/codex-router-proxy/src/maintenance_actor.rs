@@ -94,15 +94,6 @@ pub trait MaintenanceRepository: Send + Sync + 'static {
         &'a self,
         hint: MaintenanceHint,
     ) -> BoxFuture<'a, Result<(), MaintenanceRepositoryError>>;
-
-    /// Runs active-session history compaction for one route band.
-    fn compact_active_session_history<'a>(
-        &'a self,
-        _route_band: RouteBand,
-        _compact_before_unix_seconds: u64,
-    ) -> BoxFuture<'a, Result<(), MaintenanceRepositoryError>> {
-        Box::pin(async { Ok(()) })
-    }
 }
 
 impl<T> MaintenanceRepository for Arc<T>
@@ -114,15 +105,6 @@ where
         hint: MaintenanceHint,
     ) -> BoxFuture<'a, Result<(), MaintenanceRepositoryError>> {
         self.as_ref().run_maintenance_hint(hint)
-    }
-
-    fn compact_active_session_history<'a>(
-        &'a self,
-        route_band: RouteBand,
-        compact_before_unix_seconds: u64,
-    ) -> BoxFuture<'a, Result<(), MaintenanceRepositoryError>> {
-        self.as_ref()
-            .compact_active_session_history(route_band, compact_before_unix_seconds)
     }
 }
 
@@ -183,8 +165,11 @@ impl MaintenanceRepository for AsyncSqliteStateStore {
                     route_band,
                     compact_before_unix_seconds,
                 } => {
-                    self.compact_active_session_history(route_band, compact_before_unix_seconds)
-                        .await?;
+                    self.compact_completed_active_session_events_before(
+                        route_band.as_str(),
+                        compact_before_unix_seconds,
+                    )
+                    .await?;
                 }
             }
             Ok(())
@@ -499,6 +484,7 @@ mod tests {
     use std::time::Duration;
 
     use codex_router_core::ids::AccountId;
+    use codex_router_core::ids::ReservationId;
     use codex_router_core::routes::RouteBand;
     use codex_router_state::session_account_affinity::SessionAccountAffinity;
     use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
@@ -692,6 +678,54 @@ mod tests {
             .await,
             Ok(Some(cutoff_affinity))
         );
+        actor.shutdown().await;
+        store
+            .close()
+            .await
+            .unwrap_or_else(|error| panic!("test state store should close: {error}"));
+    }
+
+    #[tokio::test]
+    async fn active_session_history_compaction_hint_deletes_completed_old_sqlite_events() {
+        let database_path = test_database_path("active_session_history_compaction_hint");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("test state store should open: {error}"));
+        let account = AccountId::new("acct_compaction")
+            .unwrap_or_else(|error| panic!("test account should validate: {error}"));
+        let reservation = ReservationId::new("reservation-compaction");
+        store
+            .record_active_client_acquired("responses", "process", &reservation, &account, 100, 1)
+            .await
+            .unwrap_or_else(|error| panic!("test session acquire should persist: {error}"));
+        store
+            .record_active_client_released("responses", "process", &reservation, 200)
+            .await
+            .unwrap_or_else(|error| panic!("test session release should persist: {error}"));
+        let actor = MaintenanceActor::start(store.clone(), 8);
+
+        assert_eq!(
+            actor.try_enqueue(MaintenanceHint::CompactActiveSessionHistory {
+                route_band: RouteBand::Responses,
+                compact_before_unix_seconds: 500,
+            }),
+            MaintenanceEnqueueResult::Enqueued
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let events = store
+                    .active_session_events_for_route_band("responses")
+                    .await
+                    .unwrap_or_else(|error| panic!("active event lookup should succeed: {error}"));
+                if events.is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| panic!("maintenance actor should compact completed events"));
+
         actor.shutdown().await;
         store
             .close()

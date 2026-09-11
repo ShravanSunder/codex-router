@@ -788,7 +788,7 @@ impl LoopbackRouterRuntime {
         const ROLLUP_BUCKET_SECONDS: u64 = 300;
         const ACTIVE_CLIENT_STALE_AFTER_SECONDS: u64 = 600;
         const ACTIVE_SESSION_RETENTION_SECONDS: u64 = 86_400;
-        const ACTIVE_SESSION_COMPACTION_SECONDS: u64 = 86_400;
+        const ACTIVE_SESSION_COMPACTION_SECONDS: u64 = 7 * 86_400;
         const SESSION_ACCOUNT_AFFINITY_RETENTION_SECONDS: u64 = 7 * 86_400;
 
         if claim_session_affinity_cleanup_day(

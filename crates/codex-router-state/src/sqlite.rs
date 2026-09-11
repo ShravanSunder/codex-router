@@ -1899,6 +1899,46 @@ impl AsyncSqliteStateStore {
         rows.into_iter().map(parse_active_session_event).collect()
     }
 
+    /// Compacts completed active-session events whose terminal event predates the cutoff.
+    ///
+    /// An acquired event is retained until its matching released, retired, or stale-purged
+    /// event is also eligible. This keeps a long-lived or not-yet-reconciled session available
+    /// to interval reconstruction.
+    pub async fn compact_completed_active_session_events_before(
+        &self,
+        route_band: &str,
+        completed_before_unix_seconds: u64,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "DELETE FROM active_session_events AS event
+              WHERE event.route_band = ?1
+                AND (
+                    (event.event_kind IN ('released', 'retired', 'stale_purged')
+                     AND event.event_unix_seconds < ?2)
+                    OR (
+                        event.event_kind = 'acquired'
+                        AND EXISTS (
+                            SELECT 1
+                              FROM active_session_events AS terminal
+                             WHERE terminal.route_band = event.route_band
+                               AND terminal.process_run_id = event.process_run_id
+                               AND terminal.reservation_id = event.reservation_id
+                               AND terminal.event_kind IN ('released', 'retired', 'stale_purged')
+                               AND terminal.event_unix_seconds >= event.event_unix_seconds
+                               AND terminal.event_unix_seconds < ?2
+                        )
+                    )
+                )",
+        )
+        .bind(route_band)
+        .bind(u64_to_i64(completed_before_unix_seconds)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(())
+    }
+
     async fn active_session_intervals_for_route_band(
         &self,
         route_band: &str,
