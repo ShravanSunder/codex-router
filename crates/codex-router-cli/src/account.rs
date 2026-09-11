@@ -77,6 +77,15 @@ pub enum AccountCommand {
         /// Router-owned root.
         router_root: PathBuf,
     },
+    /// Changes one account's lifecycle status while retaining its credentials.
+    SetStatus {
+        /// Router-owned root.
+        router_root: PathBuf,
+        /// Exact display label used to resolve one account.
+        account_label: String,
+        /// Lifecycle status to persist.
+        status: AccountStatus,
+    },
     /// Sets or disables one account's weekly quota floor.
     SetWeeklyFloor {
         /// Router-owned root.
@@ -139,6 +148,26 @@ impl AccountCommand {
                 let options = AccountRootOptions::parse(parser)?;
                 Ok(Self::List {
                     router_root: options.router_root()?,
+                })
+            }
+            "enable" | "disable" => {
+                if parser.next_if_help()? {
+                    parser.reject_remaining()?;
+                    return Ok(Self::Help(if command == "enable" {
+                        ACCOUNT_ENABLE_HELP_TEXT
+                    } else {
+                        ACCOUNT_DISABLE_HELP_TEXT
+                    }));
+                }
+                let options = AccountStatusOptions::parse(parser)?;
+                Ok(Self::SetStatus {
+                    router_root: options.router_root()?,
+                    account_label: options.account_label()?,
+                    status: if command == "enable" {
+                        AccountStatus::Enabled
+                    } else {
+                        AccountStatus::Disabled
+                    },
                 })
             }
             "set-weekly-floor" => {
@@ -241,6 +270,12 @@ pub enum AccountCommandError {
     /// The configured percentage was not an integer in the supported range.
     #[error("weekly floor percent must be an integer from 0 through 15")]
     InvalidWeeklyFloorPercent,
+    /// A lifecycle status option was supplied more than once.
+    #[error("account status option supplied more than once: {option}")]
+    DuplicateAccountStatusOption {
+        /// Duplicated option name.
+        option: &'static str,
+    },
     /// No configured account has the supplied exact label.
     #[error("weekly floor account label did not match a configured account")]
     WeeklyFloorAccountNotFound,
@@ -256,6 +291,21 @@ pub enum AccountCommandError {
     /// A weekly-floor state operation failed without exposing storage details.
     #[error("weekly floor state operation failed")]
     WeeklyFloorStateOperationFailed,
+    /// Account status could not acquire the SQLite writer lock in time.
+    #[error("failed to update account status: database is busy; retry the command")]
+    AccountStatusDatabaseBusy,
+    /// The router must migrate the database before the status command can write state.
+    #[error("account status requires a compatible upgraded router database")]
+    AccountStatusSchemaUpgradeRequired,
+    /// No configured account has the supplied exact label.
+    #[error("account status target did not match a configured account")]
+    AccountStatusAccountNotFound,
+    /// More than one configured account has the supplied exact label.
+    #[error("account status target label matched more than one configured account")]
+    AccountStatusAccountAmbiguous,
+    /// An account status operation failed without exposing storage details.
+    #[error("account status update failed")]
+    AccountStatusStateOperationFailed,
     /// Secret-store operation failed.
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
@@ -318,6 +368,11 @@ pub fn run_account_command(
             AccountImportOutputMode::Import,
         ),
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
+        AccountCommand::SetStatus {
+            router_root,
+            account_label,
+            status,
+        } => set_account_status(stdout, router_root, account_label, status),
         AccountCommand::SetWeeklyFloor {
             router_root,
             account_label,
@@ -330,6 +385,8 @@ const ACCOUNT_HELP_TEXT: &str = "\
 codex-router account
 
 commands:
+  disable --account <name>  Stop routing to an account while retaining its credentials
+  enable --account <name>   Resume routing to an account
   login --label <name>  Add an OAuth account with device-code login
   list                  Show configured router accounts
   set-weekly-floor      Set or disable one account's weekly quota floor
@@ -349,6 +406,18 @@ const ACCOUNT_LIST_HELP_TEXT: &str = "\
 codex-router account list
 
 Shows configured router accounts.
+";
+
+const ACCOUNT_ENABLE_HELP_TEXT: &str = "\
+codex-router account enable --account <label>
+
+Resumes routing to one account without changing its credentials, quota, or history.
+";
+
+const ACCOUNT_DISABLE_HELP_TEXT: &str = "\
+codex-router account disable --account <label>
+
+Changes one account's routing status without removing its credentials, quota, or history.
 ";
 
 const ACCOUNT_SET_WEEKLY_FLOOR_HELP_TEXT: &str = "\
@@ -703,6 +772,30 @@ fn set_weekly_floor(
     }
 }
 
+fn set_account_status(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    account_label: String,
+    status: AccountStatus,
+) -> Result<(), AccountCommandError> {
+    let runtime = account_command_runtime()?;
+    let mutation = runtime
+        .block_on(AsyncWeeklyQuotaFloorMutationStore::open(
+            &router_root.join("state.sqlite"),
+        ))
+        .map_err(redacted_account_status_state_error)?;
+    let mutation_result =
+        runtime.block_on(mutation.set_account_status_by_label(&account_label, status));
+    runtime.block_on(mutation.close());
+    mutation_result.map_err(redacted_account_status_state_error)?;
+    writeln!(
+        stdout,
+        "updated account status: {account_label} = {}",
+        status.as_str()
+    )
+    .map_err(AccountCommandError::Stdout)
+}
+
 fn redacted_weekly_floor_state_error(error: StateStoreError) -> AccountCommandError {
     match error {
         StateStoreError::WeeklyQuotaFloorDatabaseBusy => {
@@ -718,6 +811,24 @@ fn redacted_weekly_floor_state_error(error: StateStoreError) -> AccountCommandEr
             AccountCommandError::WeeklyFloorAccountAmbiguous
         }
         _ => AccountCommandError::WeeklyFloorStateOperationFailed,
+    }
+}
+
+fn redacted_account_status_state_error(error: StateStoreError) -> AccountCommandError {
+    match error {
+        StateStoreError::AccountStatusDatabaseBusy => {
+            AccountCommandError::AccountStatusDatabaseBusy
+        }
+        StateStoreError::AccountStatusSchemaUpgradeRequired => {
+            AccountCommandError::AccountStatusSchemaUpgradeRequired
+        }
+        StateStoreError::AccountStatusAccountNotFound => {
+            AccountCommandError::AccountStatusAccountNotFound
+        }
+        StateStoreError::AccountStatusAccountLabelAmbiguous => {
+            AccountCommandError::AccountStatusAccountAmbiguous
+        }
+        _ => AccountCommandError::AccountStatusStateOperationFailed,
     }
 }
 
@@ -986,6 +1097,57 @@ struct AccountSetWeeklyFloorOptions {
     router_root: Option<PathBuf>,
     account_label: Option<String>,
     percent: Option<u16>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct AccountStatusOptions {
+    router_root: Option<PathBuf>,
+    account_label: Option<String>,
+}
+
+impl AccountStatusOptions {
+    fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
+        let mut options = Self::default();
+        while let Some(argument) = parser.next_string()? {
+            match argument.as_str() {
+                "--router-root" if options.router_root.is_none() => {
+                    options.router_root =
+                        Some(PathBuf::from(parser.next_required_value("--router-root")?));
+                }
+                "--account" if options.account_label.is_none() => {
+                    options.account_label = Some(parser.next_required_value("--account")?);
+                }
+                "--router-root" => {
+                    return Err(AccountCommandError::DuplicateAccountStatusOption {
+                        option: "--router-root",
+                    }
+                    .into());
+                }
+                "--account" => {
+                    return Err(AccountCommandError::DuplicateAccountStatusOption {
+                        option: "--account",
+                    }
+                    .into());
+                }
+                unknown => {
+                    return Err(CliError::UnknownOption {
+                        option: unknown.to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(options)
+    }
+
+    fn router_root(&self) -> Result<PathBuf, CliError> {
+        router_root_or_default(self.router_root.clone())
+    }
+
+    fn account_label(&self) -> Result<String, CliError> {
+        self.account_label.clone().ok_or(CliError::MissingOption {
+            option: "--account",
+        })
+    }
 }
 
 impl AccountSetWeeklyFloorOptions {

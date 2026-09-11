@@ -540,6 +540,18 @@ pub enum StateStoreError {
     /// Weekly-floor mutation matched more than one configured display label.
     #[error("weekly quota floor account label is ambiguous")]
     WeeklyQuotaFloorAccountLabelAmbiguous,
+    /// Account-status mutation requires a router-migrated current database.
+    #[error("account status requires a compatible upgraded router database")]
+    AccountStatusSchemaUpgradeRequired,
+    /// Account-status mutation could not acquire the SQLite writer lock in time.
+    #[error("account status update is busy; retry the command")]
+    AccountStatusDatabaseBusy,
+    /// Account-status mutation named an account that is not configured.
+    #[error("account status target was not found")]
+    AccountStatusAccountNotFound,
+    /// Account-status mutation matched more than one configured display label.
+    #[error("account status target label is ambiguous")]
+    AccountStatusAccountLabelAmbiguous,
     /// Persisted weekly-floor policy is outside the supported integer-percent range.
     #[error("stored weekly quota floor policy is invalid")]
     CorruptAccountRoutingPolicy,
@@ -2437,6 +2449,56 @@ impl AsyncWeeklyQuotaFloorMutationStore {
         .await
     }
 
+    /// Sets one account's lifecycle status by its exact display label.
+    pub async fn set_account_status_by_label(
+        &self,
+        account_label: &str,
+        status: AccountStatus,
+    ) -> Result<(), StateStoreError> {
+        let deadline = Instant::now() + WEEKLY_FLOOR_MUTATION_DEADLINE;
+        let mut next_delay_index = 0;
+        loop {
+            if deadline.checked_duration_since(Instant::now()).is_none() {
+                return Err(StateStoreError::AccountStatusDatabaseBusy);
+            }
+            match self
+                .try_set_account_status_by_label(account_label, status)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(WeeklyQuotaFloorMutationAttemptError::Sqlite(error))
+                    if is_busy_or_locked_sqlx_error(&error) =>
+                {
+                    let Some(delay) = WEEKLY_FLOOR_RETRY_DELAYS.get(next_delay_index).copied()
+                    else {
+                        return Err(StateStoreError::AccountStatusDatabaseBusy);
+                    };
+                    next_delay_index += 1;
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(StateStoreError::AccountStatusDatabaseBusy);
+                    };
+                    if delay >= remaining {
+                        return Err(StateStoreError::AccountStatusDatabaseBusy);
+                    }
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        Instant::now() + delay,
+                    ))
+                    .await;
+                }
+                Err(WeeklyQuotaFloorMutationAttemptError::AccountNotFound) => {
+                    return Err(StateStoreError::AccountStatusAccountNotFound);
+                }
+                Err(WeeklyQuotaFloorMutationAttemptError::AccountLabelAmbiguous) => {
+                    return Err(StateStoreError::AccountStatusAccountLabelAmbiguous);
+                }
+                Err(WeeklyQuotaFloorMutationAttemptError::InvalidAccountMetadata)
+                | Err(WeeklyQuotaFloorMutationAttemptError::Sqlite(_)) => {
+                    return Err(StateStoreError::AccountStatusSchemaUpgradeRequired);
+                }
+            }
+        }
+    }
+
     async fn set_weekly_quota_floor(
         &self,
         account_selector: WeeklyQuotaFloorAccountSelector<'_>,
@@ -2559,6 +2621,39 @@ impl AsyncWeeklyQuotaFloorMutationStore {
         };
         transaction.commit().await?;
         Ok(result)
+    }
+
+    async fn try_set_account_status_by_label(
+        &self,
+        account_label: &str,
+        status: AccountStatus,
+    ) -> Result<(), WeeklyQuotaFloorMutationAttemptError> {
+        let mut transaction = self.pool.begin().await?;
+        let matching_account_ids = sqlx::query_scalar::<_, String>(
+            "SELECT account_id FROM accounts WHERE label = ?1 ORDER BY account_id LIMIT 2",
+        )
+        .bind(account_label)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let account_id = match matching_account_ids.as_slice() {
+            [] => {
+                transaction.rollback().await?;
+                return Err(WeeklyQuotaFloorMutationAttemptError::AccountNotFound);
+            }
+            [account_id] => account_id,
+            [_, _, ..] => {
+                transaction.rollback().await?;
+                return Err(WeeklyQuotaFloorMutationAttemptError::AccountLabelAmbiguous);
+            }
+        };
+        sqlx::query("UPDATE accounts SET status = ?2 WHERE account_id = ?1")
+            .bind(account_id)
+            .bind(status.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+
+        Ok(())
     }
 
     /// Closes the mutation pool without issuing a WAL checkpoint.
