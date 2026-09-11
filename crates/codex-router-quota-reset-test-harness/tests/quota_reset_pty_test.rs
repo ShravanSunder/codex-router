@@ -20,7 +20,7 @@ mod quota_reset_pty_test {
     use loopback_provider_test::HeldLoopbackProvider;
     use terminal_interaction_test::TerminalDriver;
 
-    const SEMANTIC_WAIT: Duration = Duration::from_secs(20);
+    const SEMANTIC_WAIT: Duration = Duration::from_secs(8);
 
     #[tokio::test(flavor = "current_thread")]
     async fn compiled_quota_tui_inspects_loopback_and_cancels_with_zero_posts() -> TestResult<()> {
