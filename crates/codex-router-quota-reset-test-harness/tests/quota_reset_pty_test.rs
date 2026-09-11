@@ -46,10 +46,19 @@ mod quota_reset_pty_test {
         )?;
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
-        terminal.wait_for_text("Weekly usage", SEMANTIC_WAIT)?;
-        terminal.wait_for_text("Reset credits", SEMANTIC_WAIT)?;
+        stage(
+            terminal.wait_for_text("Weekly usage", SEMANTIC_WAIT),
+            "inspection weekly usage",
+        )?;
+        stage(
+            terminal.wait_for_text("Reset credits", SEMANTIC_WAIT),
+            "inspection reset credits",
+        )?;
 
-        let requests = provider.wait_for_request_count(2, SEMANTIC_WAIT)?;
+        let requests = stage(
+            provider.wait_for_request_count(2, SEMANTIC_WAIT),
+            "inspection request ledger",
+        )?;
         ensure(
             requests
                 .iter()
@@ -76,14 +85,20 @@ mod quota_reset_pty_test {
         )?;
 
         let resize_start = terminal.transcript_len();
-        terminal.resize(48, 170)?;
-        terminal.wait_for_text_after("Reset credit", resize_start, SEMANTIC_WAIT)?;
+        stage(terminal.resize(48, 170), "resize request")?;
+        stage(
+            terminal.wait_for_text_after("Reset credit", resize_start, SEMANTIC_WAIT),
+            "inspection after resize",
+        )?;
         let cancel_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
-        terminal.wait_for_text_after("ctrl-r reset credits", cancel_start, SEMANTIC_WAIT)?;
+        stage(
+            terminal.wait_for_text_after("ctrl-r reset credits", cancel_start, SEMANTIC_WAIT),
+            "cancelled inspection browse restoration",
+        )?;
         terminal.send(b"q")?;
-        let transcript = terminal.finish(SEMANTIC_WAIT)?;
-        let request_records = provider.finish()?;
+        let transcript = stage(terminal.finish(SEMANTIC_WAIT), "cancelled path child exit")?;
+        let request_records = stage(provider.finish(), "provider shutdown")?;
 
         ensure(
             request_records.len() == 2,

@@ -1,7 +1,9 @@
 //! SQLite-backed metadata boundary for codex-router.
 
 pub mod account;
+mod account_migrations;
 pub mod account_routing_policy;
+mod account_schema;
 pub mod affinity_owner;
 pub mod quota_snapshot;
 pub mod repositories;
@@ -84,7 +86,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("fixture should reopen for v10 conversion: {error}"));
         connection
             .execute_batch(
-                "DROP TABLE account_routing_policies;
+                "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE account_routing_policies;
                  DROP TABLE session_account_affinities;
                  PRAGMA user_version = 10;",
             )
@@ -96,7 +99,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("fixture should reopen for v11 conversion: {error}"));
         connection
             .execute_batch(
-                "ALTER TABLE account_routing_policies RENAME TO account_routing_policies_current;
+                "DROP TABLE IF EXISTS _sqlx_migrations;
+                 ALTER TABLE account_routing_policies RENAME TO account_routing_policies_current;
                  CREATE TABLE account_routing_policies (
                     account_id TEXT PRIMARY KEY NOT NULL,
                     weekly_quota_floor_basis_points INTEGER NOT NULL
@@ -119,7 +123,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("fixture should reopen for v12 conversion: {error}"));
         connection
             .execute_batch(
-                "DROP TABLE session_account_affinities;
+                "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE session_account_affinities;
                  PRAGMA user_version = 12;",
             )
             .unwrap_or_else(|error| panic!("fixture should convert to v12: {error}"));
@@ -297,7 +302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_v13_database_adds_session_affinity_index_without_version_change() {
+    async fn native_v13_database_rejects_missing_session_affinity_index() {
         let temp_dir = TestTempDir::new("session_account_affinity_v13_index_upgrade");
         let database_path = temp_dir.path().join("state.sqlite");
         let initial_store = AsyncSqliteStateStore::open(&database_path)
@@ -319,12 +324,15 @@ mod tests {
         );
         drop(existing_v13);
 
-        let reopened = AsyncSqliteStateStore::open(&database_path)
+        let error = AsyncSqliteStateStore::open(&database_path)
             .await
-            .expect("existing v13 database should reopen");
-
-        assert_eq!(reopened.schema_version().await, Ok(13));
-        reopened.close().await.expect("reopened store should close");
+            .expect_err("native current database must reject a missing required index");
+        assert_eq!(
+            error,
+            StateStoreError::Sqlite {
+                message: "incompatible account database schema".to_owned()
+            }
+        );
         let inspected = Connection::open(&database_path).expect("reopened database should inspect");
         let index_count: i64 = inspected
             .query_row(
@@ -335,7 +343,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("session affinity indexes should query");
-        assert_eq!(index_count, 1);
+        assert_eq!(index_count, 0, "rejection must not repair native schema");
     }
 
     #[test]
@@ -529,46 +537,6 @@ mod tests {
             .expect("integrity check should run");
         assert_eq!(integrity, "ok");
     }
-
-    #[tokio::test]
-    async fn v10_to_v11_migration_rolls_back_atomically_and_retries_to_v12() {
-        let temp_dir = TestTempDir::new("v11_async_rollback_retry");
-        let database_path = temp_dir.path().join("state.sqlite");
-        let account = AccountRecord::new(
-            account_id("acct_v11_async_rollback"),
-            "rollback",
-            AccountStatus::Enabled,
-        );
-        let store = SqliteStateStore::open(&database_path).expect("fixture should open");
-        store
-            .upsert_account(&account)
-            .expect("account should persist");
-        drop(store);
-        convert_current_fixture_to_v10(&database_path);
-
-        let error = AsyncSqliteStateStore::inject_v11_migration_rollback_for_test(&database_path)
-            .await
-            .expect_err("migration failure should be injected");
-        assert!(!error.to_string().contains(account.account_id().as_str()));
-        let connection = Connection::open(&database_path).expect("fixture should reopen");
-        let version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("version should read");
-        assert_eq!(version, 10);
-        assert!(
-            connection
-                .prepare("SELECT 1 FROM account_routing_policies")
-                .is_err()
-        );
-        drop(connection);
-
-        let migrated = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .expect("migration retry should succeed");
-        assert_eq!(migrated.schema_version().await, Ok(13));
-        assert_eq!(migrated.list_accounts().await, Ok(vec![account]));
-    }
-
     #[test]
     fn v10_to_v11_sync_migration_rolls_back_atomically_and_retries_to_v12() {
         let temp_dir = TestTempDir::new("v11_sync_rollback_retry");
@@ -595,50 +563,6 @@ mod tests {
             SqliteStateStore::open(&database_path).expect("sync migration retry should succeed");
         assert_eq!(migrated.schema_version(), 13);
     }
-
-    #[tokio::test]
-    async fn v12_async_migration_rolls_back_to_intact_v11_and_retries() {
-        let temp_dir = TestTempDir::new("v12_async_rollback_retry");
-        let database_path = temp_dir.path().join("state.sqlite");
-        let store = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .expect("current fixture should open");
-        let account_id = account_id("acct_v12_async_rollback");
-        store
-            .upsert_account(&AccountRecord::new(
-                account_id.clone(),
-                "v12-async-rollback",
-                AccountStatus::Enabled,
-            ))
-            .await
-            .expect("account should persist");
-        store.close().await.expect("fixture should close");
-        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
-            .await
-            .expect("current mutation store should open");
-        let floor = WeeklyQuotaFloorBasisPoints::new(900).expect("valid v11 floor");
-        mutation
-            .set_weekly_quota_floor_by_label("v12-async-rollback", Some(floor))
-            .await
-            .expect("policy should persist");
-        mutation.close().await;
-        convert_current_fixture_to_v11(&database_path);
-
-        AsyncSqliteStateStore::inject_v12_migration_rollback_for_test(&database_path)
-            .await
-            .expect_err("v12 migration failure should be injected");
-        assert_intact_v11_policy_database(&database_path, account_id.as_str(), 900);
-
-        let migrated = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .expect("v12 migration retry should succeed");
-        assert_eq!(migrated.schema_version().await, Ok(13));
-        assert_eq!(
-            migrated.list_account_routing_policies().await,
-            Ok(vec![AccountRoutingPolicy::new(account_id, floor)])
-        );
-    }
-
     #[test]
     fn v12_sync_migration_rolls_back_to_intact_v11_and_retries() {
         let temp_dir = TestTempDir::new("v12_sync_rollback_retry");
@@ -857,22 +781,23 @@ mod tests {
         .expect("malformed policy table should install");
         drop(raw);
 
-        for error in [
+        assert_eq!(
             AsyncSqliteStateStore::open(&database_path)
                 .await
                 .expect_err("async writable open must reject malformed policy schema"),
+            StateStoreError::Sqlite {
+                message: "incompatible account database schema".to_owned()
+            }
+        );
+        assert_eq!(
             AsyncSqliteStateStore::open_read_only(&database_path)
                 .await
                 .expect_err("read-only open must reject malformed policy schema"),
-        ] {
-            assert_eq!(
-                error,
-                StateStoreError::MissingReadOnlySchemaObject {
-                    object_kind: "column",
-                    object_name: "weekly_quota_floor_basis_points",
-                }
-            );
-        }
+            StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "column",
+                object_name: "weekly_quota_floor_basis_points",
+            }
+        );
         assert_eq!(
             AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
                 .await
@@ -892,22 +817,23 @@ mod tests {
         raw.execute_batch("DROP TABLE account_routing_policies;")
             .expect("policy table should drop");
         drop(raw);
-        for error in [
+        assert_eq!(
             AsyncSqliteStateStore::open(&database_path)
                 .await
                 .expect_err("async writable open must reject missing policy table"),
+            StateStoreError::Sqlite {
+                message: "incompatible account database schema".to_owned()
+            }
+        );
+        assert_eq!(
             AsyncSqliteStateStore::open_read_only(&database_path)
                 .await
                 .expect_err("read-only open must reject missing policy table"),
-        ] {
-            assert_eq!(
-                error,
-                StateStoreError::MissingReadOnlySchemaObject {
-                    object_kind: "table",
-                    object_name: "account_routing_policies",
-                }
-            );
-        }
+            StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "table",
+                object_name: "account_routing_policies",
+            }
+        );
         assert_eq!(
             AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
                 .await
@@ -4821,3 +4747,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod future_send_contract;

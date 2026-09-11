@@ -27,19 +27,29 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/advisory-db
-            ~/.cargo/bin/cargo-nextest
-            ~/.cargo/bin/cargo-deny
-            ~/.cargo/bin/cargo-audit
             target
           key: ${{ runner.os }}-cargo-1.98.1-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', '.github/workflows/ci.yml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-1.98.1-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', '.github/workflows/ci.yml') }}-
 
-      - name: Install cargo tools
+      - name: Cache pinned Rust tools
+        uses: actions/cache@v4
+        with:
+          path: tmp/rust-tools
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-tools-${{ hashFiles('scripts/tooling/tool-versions.tsv', 'scripts/tooling/bootstrap-tools.sh', 'rust-toolchain.toml') }}
+
+      - name: Verify and install pinned Rust tools
         run: |
-          command -v cargo-nextest >/dev/null || cargo install cargo-nextest --locked
-          command -v cargo-deny >/dev/null || cargo install cargo-deny --locked
-          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          scripts/tooling/bootstrap-tools.sh ci
+          echo "$GITHUB_WORKSPACE/tmp/rust-tools/bin" >> "$GITHUB_PATH"
+
+      - name: Test tool bootstrap
+        run: python3 -m unittest scripts.tests.test_bootstrap_tools -v
+
+      - name: Check SQLx query metadata against native migrations
+        run: |
+          scripts/tooling/bootstrap-tools.sh sqlx
+          python3 scripts/tooling/prepare-sqlx.py --check
 
       - name: Build codex-router variants and quota-reset harness
         id: build
@@ -84,12 +94,12 @@ jobs:
       - name: Test quota-reset terminal integration
         id: quota_reset_terminal_integration
         background: true
-        run: cargo nextest run -p codex-router-quota-reset-test-harness
+        run: cargo nextest run --profile ci -p codex-router-quota-reset-test-harness
 
       - name: Test Rust workspace
         id: workspace_tests
         background: true
-        run: cargo nextest run --workspace
+        run: cargo nextest run --profile ci --workspace
 
       - name: Wait for validation
         wait-all:

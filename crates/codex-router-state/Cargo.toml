@@ -16,7 +16,7 @@ codex-router-core.workspace = true
 codex-router-selection = { path = "../codex-router-selection", version = "0.1.4" }
 futures-util.workspace = true
 rusqlite = { workspace = true, optional = true }
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["macros", "migrate"] }
 thiserror.workspace = true
 tokio.workspace = true
 

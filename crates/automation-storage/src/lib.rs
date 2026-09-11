@@ -6,6 +6,7 @@ mod instruction_revision_read;
 mod instruction_updates;
 pub use instruction_revision_read::InstructionRevisionRecord;
 mod schema_initialization;
+mod schema_validation;
 pub use instruction_updates::InstructionUpdate;
 mod run_admission;
 pub use run_admission::RunAdmission;

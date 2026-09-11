@@ -36,6 +36,20 @@
   parent private. It isolates the endpoint, not Codex home: upstream still
   serializes app-server startup per `CODEX_HOME`.
 
+## Cargo Build Storage
+
+- Periodically check `target/debug` size with `du -sh target/debug`, especially
+  after dependency/toolchain changes or extensive build and test runs.
+- When retained artifacts have grown substantially, run
+  `cargo clean --workspace --profile dev` from the repository root. First
+  confirm no active builds, tests, or running debug processes depend on those
+  artifacts; defer cleanup if they do. Use `--dry-run` to preview removal.
+- This removes rebuildable workspace debug artifacts, not account data or
+  credentials. Subsequent builds may take longer. Do not clean after every
+  build or stop production processes to make cleanup possible.
+- Prefer focused `cargo check -p <package>` and tests during development;
+  preserve all required full-workspace validation gates.
+
 ## Terminal UI Layout
 
 - Build every terminal UI with iocraft layout primitives. Use nested
