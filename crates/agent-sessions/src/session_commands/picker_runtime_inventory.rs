@@ -136,16 +136,18 @@ fn runtime_record(
             .and_then(|value| value.checked_mul(1000))
     };
     let name = text("name");
-    let title = name
-        .clone()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| {
-            if fallback_title.is_empty() {
-                id.to_owned()
-            } else {
-                fallback_title.to_owned()
-            }
-        });
+    let thread_title = text("title");
+    let preview = text("preview");
+    let first_user_message = text("firstUserMessage");
+    let title = super::display_title_from_session_fields(
+        name.as_deref(),
+        thread_title
+            .as_deref()
+            .or_else(|| (!fallback_title.is_empty()).then_some(fallback_title)),
+        preview.as_deref(),
+        first_user_message.as_deref(),
+    )
+    .unwrap_or_else(|| "Untitled session".to_owned());
     SessionPickerRecord::from_record(&SessionRecord {
         session_id: id.to_owned(),
         rollout_path: None,
@@ -165,6 +167,8 @@ fn runtime_record(
             .is_some_and(|id| !id.is_empty())
         {
             Some("subagent".to_owned())
+        } else if thread.get("ephemeral").and_then(serde_json::Value::as_bool) == Some(true) {
+            Some("ephemeral".to_owned())
         } else {
             text("threadSource")
         },
@@ -178,8 +182,8 @@ fn runtime_record(
             .map(str::to_owned),
         name,
         title: Some(title),
-        preview: None,
-        first_user_message: None,
+        preview,
+        first_user_message,
         created_at_ms: time("createdAt"),
         updated_at_ms: time("updatedAt"),
         recency_at_ms: time("updatedAt"),

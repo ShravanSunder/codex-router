@@ -57,6 +57,7 @@ pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecor
                             | "subagent"
                             | "guardian_review"
                             | "memory_consolidation"
+                            | "ephemeral"
                     )
                 )
         }
