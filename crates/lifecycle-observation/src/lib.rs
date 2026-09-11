@@ -1,4 +1,5 @@
 //! Durable lifecycle metadata, separate from native history and message delivery.
+mod journal_migrations;
 mod observation_journal;
 pub use observation_journal::{JournalError, JournalRow, ObservationJournal};
 

@@ -699,3 +699,51 @@ so automatic coverage cleanup cannot remove ordinary build artifacts. For extern
 child tests, generate instrumentation environment once, build/run through normal
 Cargo/Nextest with that environment, then collect using the coverage report path;
 do not recursively invoke instrumenting wrappers in an already-instrumented shell.
+
+## Complete production schema ownership
+
+| Database owner | Startup migration entrypoint | Native migration set | Legacy entry boundary |
+| --- | --- | --- | --- |
+| Account state | `codex-router-state/src/account_migrations.rs::migrate` | `codex-router-state/migrations/` | Validated v0/v7–v13 conversion only while native history is absent. |
+| Automation | `automation-storage/src/schema_initialization.rs::initialize` | `automation-storage/migrations/` | Validate existing v1, then register its baseline. |
+| Lifecycle journal | `lifecycle-observation/src/journal_migrations.rs::initialize` | `lifecycle-observation/migrations/` | Validate the five-table legacy schema, metadata version and identity, then register its baseline. |
+
+```mermaid
+flowchart LR
+  Host[Host communication runtime] --> Open[ObservationJournal open]
+  Open --> Tx[BEGIN IMMEDIATE]
+  Tx --> Inspect{Native history exists?}
+  Inspect -->|Yes| Native[SQLx migrator]
+  Inspect -->|No, existing journal| Validate[Validate legacy schema and identity]
+  Validate --> Adopt[SQLx register baseline]
+  Adopt --> Native
+  Inspect -->|No, empty| Native
+  Native --> Target[Validate target; seed identity only for empty store]
+  Target --> Commit[Commit schema and identity together]
+```
+
+The journal retains DELETE journaling, FULL synchronous mode and its existing
+busy timeout. The write transaction serializes startup before deciding whether
+to adopt or initialize. The baseline contains the existing table definitions;
+identity and zero checkpoint insertion remain domain initialization within that
+same transaction. Existing stores are never reseeded. SQLx owns checksums and
+future history; error mapping preserves `JournalError::Storage` for SQL execution
+failures and `InvalidStorage` for incompatible history.
+
+The exact legacy definitions come from the previous initializer and are checked
+before adopting its baseline. Tests keep an independent legacy SQL fixture,
+compare every domain table across adoption, reject schema/history corruption,
+and exercise concurrent opens plus existing append/reopen/retention behavior.
+The mutable `lifecycle-observation/src/journal_schema.sql` target must be updated
+alongside any future schema change. Legacy validation continues to use the
+immutable baseline; applied migration files remain immutable. A two-version
+regression verifies later migration and reopen without changing the baseline
+checksum. Build scripts in all three owners track their migrations directories
+so stable Cargo builds notice newly added numbered migrations.
+
+The account store retains bounded one-time conversion SQL, including finite
+conditional additions, to preserve supported old data. This does not own future
+upgrades. Its synchronous Rusqlite migration implementation is compiled only
+for tests or the optional fixture feature. External Codex SQLite readers do not
+create or migrate its schema. No other production schema initializer is excluded
+from the SQLx ownership requirement.
