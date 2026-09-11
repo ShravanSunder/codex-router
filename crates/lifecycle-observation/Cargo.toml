@@ -13,7 +13,7 @@ base64.workspace = true
 communication-protocol = { path = "../communication-protocol", version = "0.1.14" }
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["macros", "migrate"] }
 tokio.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
