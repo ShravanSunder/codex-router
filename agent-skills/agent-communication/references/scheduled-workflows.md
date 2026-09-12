@@ -20,6 +20,8 @@ Use the returned instruction ID in a definition file:
 
 `unprepared` selects a reusable owned thread. `freshEachRunUnprepared` selects a new thread per run. Make this context choice explicit: reusing a thread retains its conversation; fresh runs use recorded continuity when available, not the entire prior conversation. `null` uses the service timeout configuration; built-in defaults are 3600 seconds for execution and 900 seconds for summary work.
 
+Interval seconds follow the same two regimes as wakes: under 1740 seconds (29 minutes) to stay cache-warm, or a real calendar cadence (86400 and up, or cron). Do not pick mid-range intervals such as 2700 seconds (45 minutes) unless the worker is Mini.
+
 ```sh
 agent-sessions schedule create --definition-file "$DEFINITION_FILE" --json
 agent-sessions schedule prepare --schedule-id "$SCHEDULE_ID" \

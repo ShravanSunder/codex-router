@@ -14,6 +14,8 @@ Router provides communication and automation around harness-owned conversations.
 - Execute reusable instructions on a schedule: read [scheduled workflows](references/scheduled-workflows.md).
 - Inspect a failed, delayed, or uncertain operation: read [receipt recovery](references/receipt-recovery.md).
 
+Wait and repeat intervals are either under the 29-minute prompt-cache ceiling or a real calendar schedule (day-scale or cron). Mid-range waits such as 45 minutes are not a third option unless the recipient is Mini.
+
 Check `agent-sessions --help` and the relevant subcommand help against these examples. They describe the 0.1.18 CLI surface. If a command or capability is missing, report the mismatch rather than invent flags or install/upgrade software without authorization.
 
 Use `--json` for control operations. Discover exact addresses instead of guessing from titles. Preserve returned IDs for subsequent inspection. Prefer `--text-file` for multiline content; quote shell arguments and never interpolate message content as shell code.
