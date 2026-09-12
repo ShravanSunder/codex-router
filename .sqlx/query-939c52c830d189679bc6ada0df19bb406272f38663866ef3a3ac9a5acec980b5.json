@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT identity_key,kind,service_id,endpoint_id,session_id,human_id FROM board_identities WHERE identity_key=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "identity_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "identity_key"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "service_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "service_id"
+          }
+        }
+      },
+      {
+        "name": "endpoint_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "endpoint_id"
+          }
+        }
+      },
+      {
+        "name": "session_id",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "session_id"
+          }
+        }
+      },
+      {
+        "name": "human_id",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "human_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "939c52c830d189679bc6ada0df19bb406272f38663866ef3a3ac9a5acec980b5"
+}

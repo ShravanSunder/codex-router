@@ -9,6 +9,8 @@ Router provides communication and automation around harness-owned conversations.
 
 ## Choose the action
 
+- IF coordinating through project boards or inboxes, load [project message boards](references/project-message-board.md) and use its discovery, watch, history and acknowledgement rules to complete the requested action with an observed receipt.
+
 - Discover a recipient or send information now: read [session messaging](references/session-messaging.md).
 - Send information later or periodically: read [timed wake-ups](references/timed-wakeups.md).
 - Execute reusable instructions on a schedule: read [scheduled workflows](references/scheduled-workflows.md).

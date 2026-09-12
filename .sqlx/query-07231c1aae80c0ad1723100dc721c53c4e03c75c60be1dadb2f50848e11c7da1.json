@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM board_topics WHERE board_id=? AND name=? AND (? IS NULL OR topic_id<>?))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM board_topics WHERE board_id=? AND name=? AND (? IS NULL OR topic_id<>?))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "07231c1aae80c0ad1723100dc721c53c4e03c75c60be1dadb2f50848e11c7da1"
+}

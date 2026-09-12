@@ -105,41 +105,7 @@ fn git_stdout(current_dir: &Path, arguments: &[&str]) -> Option<String> {
 }
 
 pub(super) fn normalize_git_origin_url(origin: &str) -> Option<String> {
-    let origin = origin
-        .trim()
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('/');
-    if origin.is_empty() {
-        return None;
-    }
-    let (host, repository_path) = if let Some((_scheme, remainder)) = origin.split_once("://") {
-        let remainder = remainder
-            .rsplit_once('@')
-            .map_or(remainder, |(_, value)| value);
-        remainder.split_once('/')?
-    } else if let Some((host_with_user, repository_path)) = origin.split_once(':') {
-        let host = host_with_user
-            .rsplit_once('@')
-            .map_or(host_with_user, |(_, value)| value);
-        (host, repository_path)
-    } else {
-        let (host, repository_path) = origin.split_once('/')?;
-        if !host.contains('.') {
-            return None;
-        }
-        (host, repository_path)
-    };
-    let host = host.trim().to_lowercase();
-    let repository_path = repository_path
-        .trim_matches('/')
-        .strip_suffix(".git")
-        .unwrap_or(repository_path.trim_matches('/'));
-    if host.is_empty() || repository_path.is_empty() {
-        return None;
-    }
-    Some(format!("{host}/{repository_path}"))
+    project_board::normalize_git_origin_url(origin)
 }
 
 pub(super) fn repository_basename_from_evidence(

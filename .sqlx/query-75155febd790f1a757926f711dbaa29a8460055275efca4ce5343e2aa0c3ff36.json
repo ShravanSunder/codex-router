@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.activity_sequence,m.message_id FROM board_activity a JOIN board_messages m ON m.message_id=a.message_id WHERE a.message_id IS NOT NULL AND a.activity_sequence<=? AND ((?=1 AND a.activity_sequence<?) OR (?=0 AND a.activity_sequence>?)) AND ((?='topic' AND a.topic_id=? AND a.root_id IS NULL) OR (?='thread' AND a.root_id=?) OR (?='board' AND a.board_id=?) OR (?='project' AND a.project_id=? AND a.root_id IS NULL) OR (?='all' AND a.root_id IS NULL)) ORDER BY CASE WHEN ?=1 THEN a.activity_sequence END DESC, CASE WHEN ?=0 THEN a.activity_sequence END ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "activity_sequence",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "activity_sequence"
+          }
+        }
+      },
+      {
+        "name": "message_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "message_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 17
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "75155febd790f1a757926f711dbaa29a8460055275efca4ce5343e2aa0c3ff36"
+}

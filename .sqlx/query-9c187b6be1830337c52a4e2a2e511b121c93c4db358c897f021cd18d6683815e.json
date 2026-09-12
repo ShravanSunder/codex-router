@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.project_id,m.board_id,m.topic_id,m.message_id,t.state,m.root_id FROM board_threads t JOIN board_messages m ON m.message_id=t.root_id JOIN project_boards b ON b.board_id=m.board_id WHERE t.root_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "project_boards",
+            "name": "project_id"
+          }
+        }
+      },
+      {
+        "name": "board_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "board_id"
+          }
+        }
+      },
+      {
+        "name": "topic_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "topic_id"
+          }
+        }
+      },
+      {
+        "name": "message_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "message_id"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_threads",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "root_id",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "root_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "9c187b6be1830337c52a4e2a2e511b121c93c4db358c897f021cd18d6683815e"
+}

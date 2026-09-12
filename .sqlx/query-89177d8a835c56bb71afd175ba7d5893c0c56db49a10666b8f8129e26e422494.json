@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT active,starts_after_activity FROM thread_watches WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "active",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "active"
+          }
+        }
+      },
+      {
+        "name": "starts_after_activity",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "starts_after_activity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "89177d8a835c56bb71afd175ba7d5893c0c56db49a10666b8f8129e26e422494"
+}

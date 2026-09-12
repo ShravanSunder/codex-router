@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.message_id,m.board_id,m.topic_id,m.root_id,m.actor_key,m.acting_for_key,m.text, a.activity_sequence,a.actor_key AS activity_actor_key,a.kind AS activity_kind, a.root_id AS activity_root_id FROM board_messages m JOIN board_activity a ON a.message_id=m.message_id WHERE m.message_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "message_id"
+          }
+        }
+      },
+      {
+        "name": "board_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "board_id"
+          }
+        }
+      },
+      {
+        "name": "topic_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "topic_id"
+          }
+        }
+      },
+      {
+        "name": "root_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "actor_key",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "actor_key"
+          }
+        }
+      },
+      {
+        "name": "acting_for_key",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "acting_for_key"
+          }
+        }
+      },
+      {
+        "name": "text",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "activity_sequence",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "activity_sequence"
+          }
+        }
+      },
+      {
+        "name": "activity_actor_key",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "actor_key"
+          }
+        }
+      },
+      {
+        "name": "activity_kind",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "activity_root_id",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "root_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "3c6d9a1d14091b809c812ce85d729b22cf7d1ad0f7ff3a2256616730451c256e"
+}

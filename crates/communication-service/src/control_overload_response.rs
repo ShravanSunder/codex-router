@@ -4,6 +4,9 @@ use serde_json::{Value, json};
 
 pub(crate) fn response(id: Value, method: &str, params: &Value) -> Value {
     const MESSAGE: &str = "Request capacity exceeded; this request was not dispatched. Reconnect and retry the same operation identity when capacity is available.";
+    if method.starts_with("board/") {
+        return crate::board_request_dispatch::overloaded(id);
+    }
     if matches!(method, "control/initialize") {
         return standard(id, MESSAGE);
     }

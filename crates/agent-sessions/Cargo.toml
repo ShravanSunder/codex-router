@@ -12,6 +12,7 @@ workspace = true
 quota-reset-test-harness = []
 
 [dependencies]
+project-board = { path = "../project-board", version = "0.1.20" }
 tokio-util.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true

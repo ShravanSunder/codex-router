@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.project_id FROM board_threads th JOIN board_messages m ON m.message_id=th.root_id JOIN project_boards b ON b.board_id=m.board_id WHERE th.root_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "project_boards",
+            "name": "project_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bf1ed158f340215eab38f60f55468114b37914e6ec9e614f0a9934aa61cf35c3"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,acting_for_key,text) VALUES(?,?,?,?,?,?,?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "3f3a926b970a6edd15c01a138c3904def8e10b8e59eb55e2616a1bc52a8db245"
+}

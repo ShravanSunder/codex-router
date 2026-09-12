@@ -4,6 +4,7 @@ use communication_protocol::{EndpointDescription, UuidIdentity};
 
 #[derive(Clone)]
 pub struct ServiceIdentity {
+    pub(crate) board: Option<std::sync::Arc<tokio::sync::Mutex<project_board_storage::BoardStore>>>,
     pub(crate) service_id: UuidIdentity,
     pub(crate) configuration: crate::AutomationConfigurationHandle,
     pub(crate) configuration_backend:
@@ -18,6 +19,13 @@ pub struct ServiceIdentity {
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
 }
 impl ServiceIdentity {
+    pub fn with_board_store(
+        mut self,
+        store: std::sync::Arc<tokio::sync::Mutex<project_board_storage::BoardStore>>,
+    ) -> Self {
+        self.board = Some(store);
+        self
+    }
     pub fn automation_retention_worker(&self) -> Option<crate::AutomationRetentionWorker> {
         self.automation
             .as_ref()
@@ -128,6 +136,7 @@ impl ServiceIdentity {
             native_backend: None,
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
+            board: None,
             directory: EndpointDirectory::new(
                 UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?,
             ),

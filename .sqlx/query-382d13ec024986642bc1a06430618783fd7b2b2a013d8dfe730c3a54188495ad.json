@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT topic_id,board_id,name,description FROM board_topics WHERE board_id=? AND topic_id>? ORDER BY topic_id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "topic_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "topic_id"
+          }
+        }
+      },
+      {
+        "name": "board_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "board_id"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "description"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "382d13ec024986642bc1a06430618783fd7b2b2a013d8dfe730c3a54188495ad"
+}

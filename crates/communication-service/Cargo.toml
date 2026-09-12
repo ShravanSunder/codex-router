@@ -7,6 +7,8 @@ publish.workspace = true
 [lints]
 workspace = true
 [dependencies]
+project-board = { path = "../project-board", version = "0.1.20" }
+project-board-storage = { path = "../project-board-storage", version = "0.1.20" }
 automation-storage = { path = "../automation-storage", version = "0.1.16" }
 agent-automation = { path = "../agent-automation", version = "0.1.16" }
 base64.workspace = true

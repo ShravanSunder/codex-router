@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM project_boards WHERE project_id=? AND name=? AND (? IS NULL OR board_id<>?))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM project_boards WHERE project_id=? AND name=? AND (? IS NULL OR board_id<>?))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8a73742639d2226a3ef1e60479b4fa908715440fb220663e137bdcce59e9599a"
+}
