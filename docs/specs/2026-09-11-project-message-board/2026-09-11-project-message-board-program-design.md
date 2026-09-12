@@ -150,7 +150,8 @@ Maintain the invariant synchronously in the existing write transaction, with set
 | --- | --- |
 | Main message | Set true for initialized readers of that project other than the actor, where the activity is eligible. Readers already true need no value change. |
 | Thread message or state change | Set true for active eligible watchers other than the actor. |
-| Watch or unwatch | Recompute the affected identity/project summary from eligible activity; ensure its reader-state/summary rows exist. |
+| Watch | Ensure reader-state/summary rows exist and recompute the affected identity/project summary from eligible activity. |
+| Unwatch | Recompute existing summary state without initializing a never-tracked project or creating reader-state/summary rows. |
 | First project inbox | Initialize the main boundary once and recompute without resetting watched-thread unread activity. |
 | Scoped acknowledgement | Advance only that bookmark and recompute the affected identity/project summary; preserve other topics/threads. |
 | Own post | Apply automatic watching if needed, but do not clear existing unread activity or acknowledge its scope. |
