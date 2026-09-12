@@ -207,3 +207,31 @@ fn bounded_text_errors_name_exact_limits_without_echoing_input() {
     assert!(result.contains("--name must contain 1 to 256 UTF-8 bytes after trimming"));
     assert!(!result.contains(&secret_value));
 }
+
+#[test]
+fn mutation_discovery_failure_is_known_unavailable_before_transmission() {
+    let project_id = "018f6f67-64d2-7a21-bf9a-8f193f987090";
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "board",
+            "project",
+            "create",
+            "--project-id",
+            project_id,
+            "--name",
+            "No service",
+            "--actor",
+            HUMAN_ACTOR,
+            "--service-directory",
+            "/tmp/absent-board-pretransmission-service",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3));
+    let response = String::from_utf8_lossy(&output.stdout);
+    assert!(response.contains("boardUnavailable"));
+    assert!(!response.contains("outcomeUnknown"));
+    assert!(!response.contains(project_id));
+}

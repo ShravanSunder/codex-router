@@ -11,7 +11,7 @@ type TestResult<TValue> = Result<TValue, Box<dyn std::error::Error + Send + Sync
 #[tokio::test]
 async fn supplied_create_id_survives_response_loss_without_automatic_replay() -> TestResult<()> {
     let supplied_project_id = project_board::ProjectId::generate();
-    let proof = run_lost_project_create(Some(supplied_project_id.as_str())).await?;
+    let proof = run_lost_project_create(Some(supplied_project_id.as_str()), true).await?;
 
     if proof.transmitted_project_id != supplied_project_id.as_str() {
         return Err("CLI transmitted a different caller-supplied project ID".into());
@@ -26,12 +26,54 @@ async fn supplied_create_id_survives_response_loss_without_automatic_replay() ->
 #[tokio::test]
 async fn generated_create_id_is_reported_after_response_loss_without_automatic_replay()
 -> TestResult<()> {
-    let proof = run_lost_project_create(None).await?;
+    let proof = run_lost_project_create(None, true).await?;
     let _generated_id = project_board::ProjectId::try_from(proof.transmitted_project_id.clone())?;
 
     validate_uncertain_project(&proof.output, &proof.transmitted_project_id)?;
     if proof.second_connection_accepted {
         return Err("CLI reconnected after the transmitted write lost its response".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn human_output_uses_stable_uncertainty_kind_action_and_resource() -> TestResult<()> {
+    let project_id = project_board::ProjectId::generate();
+    let proof = run_lost_project_create(Some(project_id.as_str()), false).await?;
+    if proof.output.status.code() != Some(5) || !proof.output.stdout.is_empty() {
+        return Err("human uncertainty output used the wrong stream or exit status".into());
+    }
+    let stderr = String::from_utf8(proof.output.stderr)?;
+    for expected in [
+        "Error: outcomeUnknown",
+        "Next action: inspectResource",
+        project_id.as_str(),
+    ] {
+        if !stderr.contains(expected) {
+            return Err(format!("human uncertainty output omitted {expected}").into());
+        }
+    }
+    if proof.second_connection_accepted {
+        return Err("CLI reconnected after the transmitted write lost its response".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn human_output_uses_stable_known_rejection_kind_and_action() -> TestResult<()> {
+    let output = run_known_project_rejection().await?;
+    if output.status.code() != Some(4) || !output.stdout.is_empty() {
+        return Err("human rejection output used the wrong stream or exit status".into());
+    }
+    let stderr = String::from_utf8(output.stderr)?;
+    for expected in [
+        "Error: nameConflict",
+        "Next action: selectDifferentName",
+        "Choose another project name.",
+    ] {
+        if !stderr.contains(expected) {
+            return Err(format!("human rejection output omitted {expected}").into());
+        }
     }
     Ok(())
 }
@@ -42,7 +84,10 @@ struct LostWriteProof {
     second_connection_accepted: bool,
 }
 
-async fn run_lost_project_create(project_id: Option<&str>) -> TestResult<LostWriteProof> {
+async fn run_lost_project_create(
+    project_id: Option<&str>,
+    machine_output: bool,
+) -> TestResult<LostWriteProof> {
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "board-write-uncertainty-{}",
         project_board::ProjectId::generate().as_str()
@@ -127,10 +172,12 @@ async fn run_lost_project_create(project_id: Option<&str>) -> TestResult<LostWri
         "Uncertain write proof",
         "--actor",
         HUMAN_ACTOR,
-        "--json",
         "--service-directory",
     ]);
     command.arg(&root);
+    if machine_output {
+        command.arg("--json");
+    }
     if let Some(project_id) = project_id {
         command.args(["--project-id", project_id]);
     }
@@ -152,6 +199,69 @@ async fn read_request(stream: &mut BufReader<tokio::net::UnixStream>) -> TestRes
     let mut line = String::new();
     stream.read_line(&mut line).await?;
     Ok(serde_json::from_str(&line)?)
+}
+
+async fn run_known_project_rejection() -> TestResult<std::process::Output> {
+    let root = std::path::PathBuf::from("/tmp").join(format!(
+        "board-known-rejection-{}",
+        project_board::ProjectId::generate().as_str()
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let listener = tokio::net::UnixListener::bind(root.join("control.sock"))?;
+    let digest = format!("sha256:{}", "b".repeat(64));
+    let manifest = serde_json::from_value(json!({
+        "version":1,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":digest,
+    }))?;
+    let publication = communication_service::ManifestPublication::publish(&root, &manifest)?;
+    let fixture = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut stream = BufReader::new(stream);
+        let initialize = read_request(&mut stream).await?;
+        let initialize_id = initialize
+            .get("id")
+            .cloned()
+            .ok_or("initialize ID missing")?;
+        let initialized = json!({"jsonrpc":"2.0","id":initialize_id,"result":{
+            "version":{"major":1,"minor":0},"serviceId":SERVICE_ID,
+            "serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":digest}});
+        stream
+            .get_mut()
+            .write_all(format!("{initialized}\n").as_bytes())
+            .await?;
+        let write = read_request(&mut stream).await?;
+        let write_id = write.get("id").cloned().ok_or("write ID missing")?;
+        let rejected = json!({"jsonrpc":"2.0","id":write_id,"error":{
+            "code":-32050,"message":"Board operation rejected","data":{
+                "kind":"nameConflict","stage":"admission",
+                "message":"Choose another project name.","nextAction":"selectDifferentName",
+                "details":{"kind":"none"}}}});
+        stream
+            .get_mut()
+            .write_all(format!("{rejected}\n").as_bytes())
+            .await?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "board",
+            "project",
+            "create",
+            "--name",
+            "Known rejection",
+            "--actor",
+            HUMAN_ACTOR,
+            "--service-directory",
+        ])
+        .arg(&root)
+        .output()
+        .await?;
+    fixture.await??;
+    drop(publication);
+    std::fs::remove_file(root.join("control.sock"))?;
+    std::fs::remove_dir(root)?;
+    Ok(output)
 }
 
 fn validate_uncertain_project(

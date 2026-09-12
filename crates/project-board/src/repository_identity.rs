@@ -1,7 +1,10 @@
 use crate::ServiceId;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::path::Path;
+
+pub const MAX_REPOSITORY_LOCATOR_BYTES: usize = 4096;
 
 #[derive(Debug, thiserror::Error, Clone, Eq, PartialEq)]
 #[error("invalid repository {field}: {requirement}")]
@@ -10,14 +13,18 @@ pub struct RepositoryValidationError {
     pub requirement: &'static str,
 }
 
-#[derive(
-    Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct NormalizedOrigin(String);
 impl TryFrom<String> for NormalizedOrigin {
     type Error = RepositoryValidationError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() > MAX_REPOSITORY_LOCATOR_BYTES {
+            return Err(RepositoryValidationError {
+                field: "normalizedOrigin",
+                requirement: "must contain at most 4096 UTF-8 bytes",
+            });
+        }
         let normalized = normalize_git_origin_url(&value).ok_or(RepositoryValidationError {
             field: "normalizedOrigin",
             requirement: "must identify a host and repository path",
@@ -29,6 +36,14 @@ impl TryFrom<String> for NormalizedOrigin {
             });
         }
         Ok(Self(value))
+    }
+}
+impl JsonSchema for NormalizedOrigin {
+    fn schema_name() -> Cow<'static, str> {
+        "NormalizedOrigin".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"string","maxLength":4096,"x-maxUtf8Bytes":4096})
     }
 }
 impl From<NormalizedOrigin> for String {
@@ -43,14 +58,18 @@ impl NormalizedOrigin {
     }
 }
 
-#[derive(
-    Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CommonDirectory(String);
 impl TryFrom<String> for CommonDirectory {
     type Error = RepositoryValidationError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() > MAX_REPOSITORY_LOCATOR_BYTES {
+            return Err(RepositoryValidationError {
+                field: "commonDirectory",
+                requirement: "must contain at most 4096 UTF-8 bytes",
+            });
+        }
         if value.contains('\0') || !Path::new(&value).is_absolute() {
             return Err(RepositoryValidationError {
                 field: "commonDirectory",
@@ -58,6 +77,14 @@ impl TryFrom<String> for CommonDirectory {
             });
         }
         Ok(Self(value))
+    }
+}
+impl JsonSchema for CommonDirectory {
+    fn schema_name() -> Cow<'static, str> {
+        "CommonDirectory".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"string","maxLength":4096,"x-maxUtf8Bytes":4096})
     }
 }
 impl From<CommonDirectory> for String {

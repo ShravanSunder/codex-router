@@ -1,8 +1,8 @@
 use project_board::{
-    ActingForIdentity, ActivitySequence, BoardId, HumanId, Identity, MessageId, MessageListScope,
-    MessagePostRequest, MessageReferences, MessageSelection, MessageText, NormalizedOrigin,
-    Placement, ProjectId, ReferenceTarget, ResourceName, ServiceId, SessionEndpointRef, SessionId,
-    SessionRef, TopicId, normalize_git_origin_url,
+    ActingForIdentity, ActivitySequence, BoardId, CommonDirectory, HumanId, Identity, MessageId,
+    MessageListScope, MessagePostRequest, MessageReferences, MessageSelection, MessageText,
+    NormalizedOrigin, Placement, ProjectId, ReferenceTarget, ResourceName, ServiceId,
+    SessionEndpointRef, SessionId, SessionRef, TopicId, normalize_git_origin_url,
 };
 use serde_json::json;
 
@@ -178,6 +178,26 @@ fn repository_origins_strip_credentials_and_preserve_path_case() {
         Some("github.com/ShravanSunder/MyRepo".to_owned())
     );
     assert!(NormalizedOrigin::try_from("GitHub.com/owner/repo".to_owned()).is_err());
+}
+
+#[test]
+fn repository_locators_enforce_and_publish_the_utf8_byte_bound() {
+    assert!(NormalizedOrigin::try_from(format!("github.com/{}", "a".repeat(4_085))).is_ok());
+    assert!(NormalizedOrigin::try_from(format!("github.com/{}", "a".repeat(4_086))).is_err());
+    assert!(CommonDirectory::try_from(format!("/{}", "a".repeat(4_095))).is_ok());
+    assert!(CommonDirectory::try_from(format!("/{}", "a".repeat(4_096))).is_err());
+    assert!(CommonDirectory::try_from(format!("/{}", "é".repeat(2_048))).is_err());
+
+    let origin_schema = schemars::schema_for!(NormalizedOrigin);
+    let directory_schema = schemars::schema_for!(CommonDirectory);
+    assert_eq!(
+        origin_schema.get("maxLength"),
+        Some(&serde_json::json!(4096))
+    );
+    assert_eq!(
+        directory_schema.get("maxLength"),
+        Some(&serde_json::json!(4096))
+    );
 }
 
 #[test]

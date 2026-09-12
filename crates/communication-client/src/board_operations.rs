@@ -5,21 +5,36 @@ use project_board::*;
 pub enum BoardClientError {
     #[error("{0}")]
     Rejected(Box<BoardError>),
+    #[error("{message}")]
+    OutcomeUnknown {
+        resource: ResourceIdentity,
+        message: &'static str,
+        next_action: BoardNextAction,
+    },
     #[error(transparent)]
     Connection(#[from] ClientError),
 }
+
 impl ControlClient {
     pub async fn board_project_create(
         &mut self,
         request: ProjectCreateRequest,
     ) -> Result<ProjectCreateResult, BoardClientError> {
-        self.board_call("board/projectCreate", request).await
+        let resource = ResourceIdentity::Project {
+            project_id: request.project_id.clone(),
+        };
+        self.board_mutation_call("board/projectCreate", request, resource)
+            .await
     }
     pub async fn board_project_update(
         &mut self,
         request: ProjectUpdateRequest,
     ) -> Result<ProjectUpdateResult, BoardClientError> {
-        self.board_call("board/projectUpdate", request).await
+        let resource = ResourceIdentity::Project {
+            project_id: request.project_id.clone(),
+        };
+        self.board_mutation_call("board/projectUpdate", request, resource)
+            .await
     }
     pub async fn board_project_show(
         &mut self,
@@ -37,13 +52,21 @@ impl ControlClient {
         &mut self,
         request: RepositoryAttachRequest,
     ) -> Result<RepositoryAttachResult, BoardClientError> {
-        self.board_call("board/repositoryAttach", request).await
+        let resource = ResourceIdentity::Project {
+            project_id: request.project_id.clone(),
+        };
+        self.board_mutation_call("board/repositoryAttach", request, resource)
+            .await
     }
     pub async fn board_repository_detach(
         &mut self,
         request: RepositoryDetachRequest,
     ) -> Result<RepositoryDetachResult, BoardClientError> {
-        self.board_call("board/repositoryDetach", request).await
+        let resource = ResourceIdentity::Project {
+            project_id: request.project_id.clone(),
+        };
+        self.board_mutation_call("board/repositoryDetach", request, resource)
+            .await
     }
     pub async fn board_repository_list(
         &mut self,
@@ -55,13 +78,21 @@ impl ControlClient {
         &mut self,
         request: BoardCreateRequest,
     ) -> Result<BoardCreateResult, BoardClientError> {
-        self.board_call("board/create", request).await
+        let resource = ResourceIdentity::Board {
+            board_id: request.board_id.clone(),
+        };
+        self.board_mutation_call("board/create", request, resource)
+            .await
     }
     pub async fn board_update(
         &mut self,
         request: BoardUpdateRequest,
     ) -> Result<BoardUpdateResult, BoardClientError> {
-        self.board_call("board/update", request).await
+        let resource = ResourceIdentity::Board {
+            board_id: request.board_id.clone(),
+        };
+        self.board_mutation_call("board/update", request, resource)
+            .await
     }
     pub async fn board_show(
         &mut self,
@@ -79,19 +110,31 @@ impl ControlClient {
         &mut self,
         request: BoardArchiveRequest,
     ) -> Result<BoardArchiveResult, BoardClientError> {
-        self.board_call("board/archive", request).await
+        let resource = ResourceIdentity::Board {
+            board_id: request.board_id.clone(),
+        };
+        self.board_mutation_call("board/archive", request, resource)
+            .await
     }
     pub async fn board_topic_create(
         &mut self,
         request: TopicCreateRequest,
     ) -> Result<TopicCreateResult, BoardClientError> {
-        self.board_call("board/topicCreate", request).await
+        let resource = ResourceIdentity::Topic {
+            topic_id: request.topic_id.clone(),
+        };
+        self.board_mutation_call("board/topicCreate", request, resource)
+            .await
     }
     pub async fn board_topic_update(
         &mut self,
         request: TopicUpdateRequest,
     ) -> Result<TopicUpdateResult, BoardClientError> {
-        self.board_call("board/topicUpdate", request).await
+        let resource = ResourceIdentity::Topic {
+            topic_id: request.topic_id.clone(),
+        };
+        self.board_mutation_call("board/topicUpdate", request, resource)
+            .await
     }
     pub async fn board_topic_list(
         &mut self,
@@ -103,7 +146,11 @@ impl ControlClient {
         &mut self,
         request: MessagePostRequest,
     ) -> Result<MessagePostResult, BoardClientError> {
-        self.board_call("board/messagePost", request).await
+        let resource = ResourceIdentity::Message {
+            message_id: request.message_id.clone(),
+        };
+        self.board_mutation_call("board/messagePost", request, resource)
+            .await
     }
     pub async fn board_message_show(
         &mut self,
@@ -127,25 +174,41 @@ impl ControlClient {
         &mut self,
         request: ThreadResolveRequest,
     ) -> Result<ThreadResolveResult, BoardClientError> {
-        self.board_call("board/threadResolve", request).await
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadResolve", request, resource)
+            .await
     }
     pub async fn board_thread_unresolve(
         &mut self,
         request: ThreadUnresolveRequest,
     ) -> Result<ThreadUnresolveResult, BoardClientError> {
-        self.board_call("board/threadUnresolve", request).await
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadUnresolve", request, resource)
+            .await
     }
     pub async fn board_thread_watch(
         &mut self,
         request: ThreadWatchRequest,
     ) -> Result<ThreadWatchResult, BoardClientError> {
-        self.board_call("board/threadWatch", request).await
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadWatch", request, resource)
+            .await
     }
     pub async fn board_thread_unwatch(
         &mut self,
         request: ThreadUnwatchRequest,
     ) -> Result<ThreadUnwatchResult, BoardClientError> {
-        self.board_call("board/threadUnwatch", request).await
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadUnwatch", request, resource)
+            .await
     }
     pub async fn board_thread_list(
         &mut self,
@@ -157,19 +220,61 @@ impl ControlClient {
         &mut self,
         request: InboxFetchRequest,
     ) -> Result<InboxFetchResult, BoardClientError> {
-        self.board_call("board/inboxFetch", request).await
+        let resource = ResourceIdentity::Project {
+            project_id: request.project_id.clone(),
+        };
+        self.board_mutation_call("board/inboxFetch", request, resource)
+            .await
     }
     pub async fn board_inbox_acknowledge(
         &mut self,
         request: InboxAcknowledgeRequest,
     ) -> Result<InboxAcknowledgeResult, BoardClientError> {
-        self.board_call("board/inboxAcknowledge", request).await
+        let resource = match &request.scope {
+            ReadScope::Topic { topic_id } => ResourceIdentity::Topic {
+                topic_id: topic_id.clone(),
+            },
+            ReadScope::Thread { root_message_id } => ResourceIdentity::Thread {
+                root_message_id: root_message_id.clone(),
+            },
+        };
+        self.board_mutation_call("board/inboxAcknowledge", request, resource)
+            .await
     }
     pub async fn board_inbox_projects(
         &mut self,
         request: InboxProjectsRequest,
     ) -> Result<InboxProjectsResult, BoardClientError> {
         self.board_call("board/inboxProjects", request).await
+    }
+    async fn board_mutation_call<
+        TRequest: serde::Serialize,
+        TResult: serde::de::DeserializeOwned,
+    >(
+        &mut self,
+        method: &str,
+        request: TRequest,
+        resource: ResourceIdentity,
+    ) -> Result<TResult, BoardClientError> {
+        let params = serde_json::to_value(request)
+            .map_err(|_| ClientError::Protocol("invalid board request"))?;
+        self.connection
+            .validate_call_before_transmission(method, &params)?;
+        let result = match self.connection.call(method, params).await {
+            Ok(result) => result,
+            Err(ClientError::Rejected {
+                code: -32050,
+                data: Some(data),
+            }) => {
+                return Err(BoardClientError::Rejected(Box::new(
+                    serde_json::from_value(data)
+                        .map_err(|_| ClientError::Protocol("invalid board failure"))?,
+                )));
+            }
+            Err(error @ ClientError::Rejected { .. }) => return Err(error.into()),
+            Err(_) => return Err(outcome_unknown(resource)),
+        };
+        serde_json::from_value(result).map_err(|_| outcome_unknown(resource))
     }
     async fn board_call<TRequest: serde::Serialize, TResult: serde::de::DeserializeOwned>(
         &mut self,
@@ -193,5 +298,13 @@ impl ControlClient {
         };
         serde_json::from_value(result)
             .map_err(|_| ClientError::Protocol("invalid board result").into())
+    }
+}
+
+fn outcome_unknown(resource: ResourceIdentity) -> BoardClientError {
+    BoardClientError::OutcomeUnknown {
+        resource,
+        message: "Board write outcome is unknown. Inspect the affected resource before deciding whether to retry.",
+        next_action: BoardNextAction::InspectResource,
     }
 }

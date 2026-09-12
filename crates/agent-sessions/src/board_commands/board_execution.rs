@@ -22,15 +22,13 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
             );
         }
     };
-    let mutation = command.is_mutation();
-    let uncertain_resource = command.uncertain_resource();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
         Err(_) => {
-            return report_connection_failure(context.json, false, None);
+            return report_connection_failure(context.json);
         }
     };
     let result = runtime.block_on(async {
@@ -47,7 +45,7 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
         let _closed = client.close().await;
         result
     });
-    report(result, context.json, mutation, uncertain_resource.as_ref())
+    report(result, context.json)
 }
 
 async fn dispatch(
@@ -201,12 +199,7 @@ fn serialize_result<TValue: Serialize>(value: TValue) -> Result<Value, BoardClie
         .map_err(|_| ClientError::Protocol("board result could not be rendered").into())
 }
 
-fn report(
-    result: Result<Value, CommandExecutionError>,
-    machine: bool,
-    mutation: bool,
-    uncertain_resource: Option<&ResourceIdentity>,
-) -> i32 {
+fn report(result: Result<Value, CommandExecutionError>, machine: bool) -> i32 {
     match result {
         Ok(result) => write_result(result, machine),
         Err(CommandExecutionError::Request(BoardClientError::Rejected(error))) => {
@@ -214,21 +207,57 @@ fn report(
                 write_json(&json!({"kind":"error","error":error}), 4)
             } else {
                 let mut stderr = io::stderr().lock();
+                let kind = wire_name(&error.kind);
+                let next_action = wire_name(&error.next_action);
                 let _written = writeln!(
                     stderr,
-                    "{}\nNext action: {:?}",
-                    error.message, error.next_action
+                    "Error: {kind}\n{}\nNext action: {next_action}",
+                    error.message
                 );
                 4
             }
         }
-        Err(CommandExecutionError::ConnectionBeforeRequest) => {
-            report_connection_failure(machine, false, None)
-        }
+        Err(CommandExecutionError::Request(BoardClientError::OutcomeUnknown {
+            resource,
+            message,
+            next_action,
+        })) => report_uncertain_outcome(machine, &resource, message, next_action),
+        Err(CommandExecutionError::ConnectionBeforeRequest) => report_connection_failure(machine),
         Err(CommandExecutionError::Request(BoardClientError::Connection(_))) => {
-            report_connection_failure(machine, mutation, uncertain_resource)
+            report_connection_failure(machine)
         }
     }
+}
+
+fn report_uncertain_outcome(
+    machine: bool,
+    resource: &ResourceIdentity,
+    message: &str,
+    next_action: BoardNextAction,
+) -> i32 {
+    if machine {
+        write_json(
+            &json!({"kind":"error","error":{"kind":"outcomeUnknown","stage":"inspection","message":message,"nextAction":next_action,"details":{"kind":"resource","resource":resource}}}),
+            5,
+        )
+    } else {
+        let mut stderr = io::stderr().lock();
+        let resource = serde_json::to_string(resource)
+            .unwrap_or_else(|_| "affected resource unavailable".into());
+        let next_action = wire_name(&next_action);
+        let _written = writeln!(
+            stderr,
+            "Error: outcomeUnknown\n{message}\nNext action: {next_action}\nAffected resource: {resource}"
+        );
+        5
+    }
+}
+
+fn wire_name<TValue: Serialize>(value: &TValue) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unavailable".to_owned())
 }
 
 fn write_result(result: Value, machine: bool) -> i32 {
@@ -245,42 +274,20 @@ fn write_result(result: Value, machine: bool) -> i32 {
     }
 }
 
-fn report_connection_failure(
-    machine: bool,
-    mutation: bool,
-    uncertain_resource: Option<&ResourceIdentity>,
-) -> i32 {
-    let (kind, message, code) = if mutation {
-        (
-            "outcomeUnknown",
-            "The board write connection failed. Inspect the supplied resource ID or current state before deciding whether to retry.",
-            5,
-        )
-    } else {
-        (
-            "boardUnavailable",
-            "The board service is unavailable. Check the selected service directory and retry the read.",
+fn report_connection_failure(machine: bool) -> i32 {
+    let message =
+        "The board service is unavailable. Check the selected service directory and retry.";
+    if machine {
+        write_json(
+            &json!({"kind":"error","error":{"kind":"boardUnavailable","stage":"storage","message":message,"nextAction":"retryLater","details":{"kind":"none"}}}),
             3,
         )
-    };
-    if machine {
-        let details = uncertain_resource.map_or_else(
-            || json!({"kind":"none"}),
-            |resource| json!({"kind":"resource","resource":resource}),
-        );
-        write_json(
-            &json!({"kind":"error","error":{"kind":kind,"stage":if mutation {"inspection"} else {"storage"},"message":message,"nextAction":if mutation {"inspectResource"} else {"retryLater"},"details":details}}),
-            code,
-        )
     } else {
-        let mut stderr = io::stderr().lock();
-        let _written = writeln!(stderr, "{message}");
-        if let Some(resource) = uncertain_resource {
-            let rendered = serde_json::to_string(resource)
-                .unwrap_or_else(|_| "affected resource unavailable".into());
-            let _written = writeln!(stderr, "Affected resource: {rendered}");
-        }
-        code
+        let _written = writeln!(
+            io::stderr().lock(),
+            "Error: boardUnavailable\n{message}\nNext action: retryLater"
+        );
+        3
     }
 }
 

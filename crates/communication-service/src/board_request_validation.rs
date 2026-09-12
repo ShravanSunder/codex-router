@@ -256,10 +256,38 @@ fn validate_page(fields: &Map<String, Value>) -> Result<(), BoardError> {
 }
 
 fn validate_repository(fields: &Map<String, Value>) -> Result<(), BoardError> {
-    if let Some(repository) = fields.get("repository")
-        && !repository.is_null()
-        && serde_json::from_value::<RepositoryRef>(repository.clone()).is_err()
-    {
+    let Some(repository) = fields.get("repository") else {
+        return Ok(());
+    };
+    if repository.is_null() {
+        return Ok(());
+    }
+    if let Some(repository_fields) = repository.as_object() {
+        for (field, constructor_valid) in [
+            (
+                "normalizedOrigin",
+                repository_fields
+                    .get("normalizedOrigin")
+                    .and_then(Value::as_str)
+                    .map(|value| NormalizedOrigin::try_from(value.to_owned()).is_ok()),
+            ),
+            (
+                "commonDirectory",
+                repository_fields
+                    .get("commonDirectory")
+                    .and_then(Value::as_str)
+                    .map(|value| CommonDirectory::try_from(value.to_owned()).is_ok()),
+            ),
+        ] {
+            if constructor_valid == Some(false) {
+                return Err(invalid_field(
+                    format!("repository.{field}"),
+                    "must be canonical and contain at most 4096 UTF-8 bytes",
+                ));
+            }
+        }
+    }
+    if serde_json::from_value::<RepositoryRef>(repository.clone()).is_err() {
         return Err(invalid_field(
             "repository",
             "must be a canonical origin or local repository reference",
