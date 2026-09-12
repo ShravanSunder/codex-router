@@ -40,14 +40,12 @@ pub(crate) async fn dispatch(
     let Some(store) = identity.board.as_ref() else {
         return unavailable(id);
     };
-    if let Some(repository) = params.get("repository") {
-        if let Ok(RepositoryRef::Local { service_id, .. }) =
+    if let Some(repository) = params.get("repository")
+        && let Ok(RepositoryRef::Local { service_id, .. }) =
             serde_json::from_value::<RepositoryRef>(repository.clone())
-        {
-            if service_id.as_str() != String::from(identity.service_id.clone()) {
-                return failure(id,BoardError { kind:BoardFailureKind::InvalidField,stage:BoardFailureStage::Validation,message:"Local repository reference belongs to another service. Select the owning service.".into(),next_action:BoardNextAction::CorrectRequest,details:BoardErrorDetails::None });
-            }
-        }
+        && service_id.as_str() != String::from(identity.service_id.clone())
+    {
+        return failure(id, BoardError { kind: BoardFailureKind::InvalidField, stage: BoardFailureStage::Validation, message: "Local repository reference belongs to another service. Select the owning service.".into(), next_action: BoardNextAction::CorrectRequest, details: BoardErrorDetails::None });
     }
 
     macro_rules! call {

@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use project_board::{
     ActingForIdentity, BoardError, BoardErrorDetails, BoardFailureKind, BoardFailureStage,
-    BoardNextAction, Identity, ReadScope, ResourceIdentity,
+    BoardNextAction, Identity, MessageId, ProjectId, ReadScope, ResourceIdentity, TopicId,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::Sha256;
@@ -55,13 +55,7 @@ pub(crate) fn decode_cursor<TValue: DeserializeOwned>(
 }
 
 pub(crate) fn storage_error(_error: sqlx::Error) -> BoardError {
-    BoardError {
-        kind: BoardFailureKind::BoardUnavailable,
-        stage: BoardFailureStage::Storage,
-        message: "Board storage is unavailable. Retry later.".to_owned(),
-        next_action: BoardNextAction::RetryLater,
-        details: BoardErrorDetails::None,
-    }
+    BoardError::board_unavailable()
 }
 
 pub(crate) fn invalid_record() -> BoardError {
@@ -111,24 +105,11 @@ pub(crate) fn invalid_cursor() -> BoardError {
 }
 
 pub(crate) fn resource_not_found(resource: ResourceIdentity) -> BoardError {
-    BoardError {
-        kind: BoardFailureKind::ResourceNotFound,
-        stage: BoardFailureStage::Storage,
-        message: "The requested board resource does not exist.".to_owned(),
-        next_action: BoardNextAction::CorrectRequest,
-        details: BoardErrorDetails::Resource { resource },
-    }
+    BoardError::resource_not_found(resource)
 }
 
 pub(crate) fn resource_already_exists(resource: ResourceIdentity) -> BoardError {
-    BoardError {
-        kind: BoardFailureKind::ResourceAlreadyExists,
-        stage: BoardFailureStage::Storage,
-        message: "That resource ID already exists. Inspect the existing resource before retrying."
-            .to_owned(),
-        next_action: BoardNextAction::InspectResource,
-        details: BoardErrorDetails::Resource { resource },
-    }
+    BoardError::resource_already_exists(resource)
 }
 
 pub(crate) fn name_conflict(message: &str) -> BoardError {
@@ -142,13 +123,7 @@ pub(crate) fn name_conflict(message: &str) -> BoardError {
 }
 
 pub(crate) fn archived_board() -> BoardError {
-    BoardError {
-        kind: BoardFailureKind::ArchivedBoard,
-        stage: BoardFailureStage::Storage,
-        message: "This board is archived and read-only.".to_owned(),
-        next_action: BoardNextAction::InspectResource,
-        details: BoardErrorDetails::None,
-    }
+    BoardError::archived_board()
 }
 
 pub(crate) fn identity_key(identity: &Identity) -> String {
@@ -266,10 +241,15 @@ pub(crate) fn decode_identity(row: &StoredIdentityRow) -> Result<Identity, Board
 pub(crate) async fn current_activity_sequence(
     transaction: &mut BoardTransaction<'_>,
 ) -> Result<i64, BoardError> {
-    sqlx::query_scalar!("SELECT last_sequence FROM activity_checkpoint WHERE singleton=1")
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(storage_error)
+    let sequence =
+        sqlx::query_scalar!("SELECT last_sequence FROM activity_checkpoint WHERE singleton=1")
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(storage_error)?;
+    if sequence < 0 {
+        return Err(invalid_record());
+    }
+    Ok(sequence)
 }
 
 pub(crate) async fn allocate_activity_sequence(
@@ -306,6 +286,8 @@ pub(crate) async fn recompute_project_unread(
     reader_key: &str,
     project_id: &str,
 ) -> Result<bool, BoardError> {
+    let latest = current_activity_sequence(transaction).await?;
+    validate_reader_activity_boundaries(transaction, reader_key, project_id, latest).await?;
     let has_unread = sqlx::query_scalar!(
         "SELECT EXISTS( \
            SELECT 1 FROM board_activity a \
@@ -339,6 +321,113 @@ pub(crate) async fn recompute_project_unread(
     .await
     .map_err(storage_error)?;
     Ok(has_unread)
+}
+
+pub(crate) async fn validate_reader_activity_boundaries(
+    transaction: &mut BoardTransaction<'_>,
+    reader_key: &str,
+    project_id: &str,
+    latest: i64,
+) -> Result<(), BoardError> {
+    let project_resource = ProjectId::try_from(project_id.to_owned())
+        .map(|project_id| ResourceIdentity::Project { project_id })
+        .map_err(|_| invalid_record())?;
+    let main_start = sqlx::query_scalar!(
+        "SELECT main_start FROM project_reader_state WHERE reader_key=? AND project_id=?",
+        reader_key,
+        project_id,
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if let Some(Some(boundary)) = main_start {
+        validate_stored_boundary(boundary, 0, latest, project_resource.clone())?;
+    }
+
+    let watches = sqlx::query!(
+        "SELECT w.root_id,w.active,w.starts_after_activity \
+         FROM thread_watches w \
+         JOIN board_messages m ON m.message_id=w.root_id \
+         JOIN project_boards b ON b.board_id=m.board_id \
+         WHERE w.reader_key=? AND b.project_id=?",
+        reader_key,
+        project_id,
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for watch in watches {
+        let root_message_id = MessageId::try_from(watch.root_id).map_err(|_| invalid_record())?;
+        let resource = ResourceIdentity::Thread { root_message_id };
+        if watch.active != 0 && watch.active != 1 {
+            return Err(BoardError::invalid_record(resource));
+        }
+        validate_stored_boundary(watch.starts_after_activity, 0, latest, resource)?;
+    }
+
+    let topic_bookmarks = sqlx::query!(
+        "SELECT bookmark.topic_id,bookmark.through_activity, \
+           EXISTS(SELECT 1 FROM board_activity activity \
+             WHERE activity.activity_sequence=bookmark.through_activity \
+               AND activity.topic_id=bookmark.topic_id \
+               AND activity.kind='mainMessageCreated') AS valid_scope \
+         FROM topic_read_bookmarks bookmark \
+         JOIN board_topics topic ON topic.topic_id=bookmark.topic_id \
+         JOIN project_boards board ON board.board_id=topic.board_id \
+         WHERE bookmark.reader_key=? AND board.project_id=?",
+        reader_key,
+        project_id,
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for bookmark in topic_bookmarks {
+        let topic_id = TopicId::try_from(bookmark.topic_id).map_err(|_| invalid_record())?;
+        let resource = ResourceIdentity::Topic { topic_id };
+        validate_stored_boundary(bookmark.through_activity, 1, latest, resource.clone())?;
+        if bookmark.valid_scope == 0 {
+            return Err(BoardError::invalid_record(resource));
+        }
+    }
+
+    let thread_bookmarks = sqlx::query!(
+        "SELECT bookmark.root_id,bookmark.through_activity, \
+           EXISTS(SELECT 1 FROM board_activity activity \
+             WHERE activity.activity_sequence=bookmark.through_activity \
+               AND activity.root_id=bookmark.root_id \
+               AND activity.kind<>'mainMessageCreated') AS valid_scope \
+         FROM thread_read_bookmarks bookmark \
+         JOIN board_messages message ON message.message_id=bookmark.root_id \
+         JOIN project_boards board ON board.board_id=message.board_id \
+         WHERE bookmark.reader_key=? AND board.project_id=?",
+        reader_key,
+        project_id,
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for bookmark in thread_bookmarks {
+        let root_message_id =
+            MessageId::try_from(bookmark.root_id).map_err(|_| invalid_record())?;
+        let resource = ResourceIdentity::Thread { root_message_id };
+        validate_stored_boundary(bookmark.through_activity, 1, latest, resource.clone())?;
+        if bookmark.valid_scope == 0 {
+            return Err(BoardError::invalid_record(resource));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_stored_boundary(
+    boundary: i64,
+    minimum: i64,
+    latest: i64,
+    resource: ResourceIdentity,
+) -> Result<(), BoardError> {
+    if boundary < minimum || boundary > latest {
+        return Err(BoardError::invalid_record(resource));
+    }
+    Ok(())
 }
 
 pub(crate) async fn project_for_scope(

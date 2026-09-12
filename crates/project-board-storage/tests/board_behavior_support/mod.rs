@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used)]
+#![allow(dead_code)]
 use project_board::*;
 use project_board_storage::BoardStore;
 

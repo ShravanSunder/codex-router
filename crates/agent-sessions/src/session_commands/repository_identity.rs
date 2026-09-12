@@ -104,9 +104,7 @@ fn git_stdout(current_dir: &Path, arguments: &[&str]) -> Option<String> {
     non_empty_trimmed(&value).map(str::to_owned)
 }
 
-pub(super) fn normalize_git_origin_url(origin: &str) -> Option<String> {
-    project_board::normalize_git_origin_url(origin)
-}
+pub(super) use project_board::normalize_git_origin_url;
 
 pub(super) fn repository_basename_from_evidence(
     normalized_origin: Option<&str>,

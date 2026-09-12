@@ -3,9 +3,9 @@ use crate::BoardStore;
 use crate::board_topic_records::{require_board, require_topic};
 use crate::message_records::{activate_watch, load_message, load_watch_status, require_thread};
 use crate::storage_support::{
-    BoardTransaction, allocate_activity_sequence, archived_board, current_activity_sequence,
-    ensure_acting_for_identity, ensure_identity, invalid_record, recompute_project_unread,
-    resource_already_exists, storage_error,
+    BoardTransaction, allocate_activity_sequence, archived_board, attribute_invalid_record,
+    current_activity_sequence, ensure_acting_for_identity, ensure_identity, invalid_record,
+    recompute_project_unread, resource_already_exists, storage_error,
 };
 use project_board::*;
 use sqlx::Connection;
@@ -224,11 +224,17 @@ async fn enforce_and_record_cooldown(
     .await
     .map_err(storage_error)?;
     if let Some(previous) = previous {
-        let remaining = TOP_LEVEL_COOLDOWN_MILLIS - (now - previous);
-        if remaining > 0 {
-            return Err(BoardError::top_level_message_cooldown(
-                u64::try_from((remaining + 999) / 1000).unwrap_or(30),
-            ));
+        let retry_after_seconds =
+            calculate_cooldown_retry_after_seconds(now, previous).map_err(|error| {
+                attribute_invalid_record(
+                    error,
+                    ResourceIdentity::Board {
+                        board_id: board_id.clone(),
+                    },
+                )
+            })?;
+        if let Some(retry_after_seconds) = retry_after_seconds {
+            return Err(BoardError::top_level_message_cooldown(retry_after_seconds));
         }
     }
     sqlx::query!(
@@ -242,6 +248,30 @@ async fn enforce_and_record_cooldown(
     .await
     .map_err(storage_error)?;
     Ok(())
+}
+
+fn calculate_cooldown_retry_after_seconds(
+    current_time_millis: i64,
+    previous_post_time_millis: i64,
+) -> Result<Option<u64>, BoardError> {
+    if previous_post_time_millis < 0 || previous_post_time_millis > current_time_millis {
+        return Err(invalid_record());
+    }
+    let elapsed_millis = current_time_millis
+        .checked_sub(previous_post_time_millis)
+        .ok_or_else(invalid_record)?;
+    let remaining_millis = TOP_LEVEL_COOLDOWN_MILLIS
+        .checked_sub(elapsed_millis)
+        .ok_or_else(invalid_record)?;
+    if remaining_millis <= 0 {
+        return Ok(None);
+    }
+    let rounded_millis = remaining_millis
+        .checked_add(999)
+        .ok_or_else(invalid_record)?;
+    let retry_after_seconds =
+        u64::try_from(rounded_millis / 1_000).map_err(|_| invalid_record())?;
+    Ok(Some(retry_after_seconds))
 }
 
 async fn publish_message_unread(

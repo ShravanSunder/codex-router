@@ -5,7 +5,8 @@ use crate::project_records::require_project;
 use crate::storage_support::{
     BoardTransaction, current_activity_sequence, decode_cursor, encode_cursor, ensure_identity,
     ensure_project_reader_state, invalid_cursor, invalid_record, project_for_scope,
-    recompute_project_unread, storage_error,
+    recompute_project_unread, storage_error, validate_reader_activity_boundaries,
+    validate_stored_boundary,
 };
 use project_board::*;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,13 @@ impl BoardStore {
         .map_err(storage_error)?;
         ensure_project_reader_state(&mut transaction, &reader_key, request.project_id.as_str())
             .await?;
+        validate_reader_activity_boundaries(
+            &mut transaction,
+            &reader_key,
+            request.project_id.as_str(),
+            latest,
+        )
+        .await?;
         let initialized_now = existing_start.flatten().is_none();
         if initialized_now {
             sqlx::query!("UPDATE project_reader_state SET main_start=? WHERE reader_key=? AND project_id=? AND main_start IS NULL", latest, reader_key, request.project_id.as_str())
@@ -166,6 +174,8 @@ impl BoardStore {
         }
         let project_id = project_for_scope(&mut transaction, &request.scope).await?;
         ensure_project_reader_state(&mut transaction, &reader_key, &project_id).await?;
+        validate_reader_activity_boundaries(&mut transaction, &reader_key, &project_id, latest)
+            .await?;
         let previous: Option<i64> = match &request.scope {
             ReadScope::Topic { topic_id } => sqlx::query_scalar!("SELECT through_activity FROM topic_read_bookmarks WHERE reader_key=? AND topic_id=?", reader_key, topic_id.as_str()).fetch_optional(&mut *transaction).await.map_err(storage_error)?,
             ReadScope::Thread { root_message_id } => sqlx::query_scalar!("SELECT through_activity FROM thread_read_bookmarks WHERE reader_key=? AND root_id=?", reader_key, root_message_id.as_str()).fetch_optional(&mut *transaction).await.map_err(storage_error)?,
@@ -219,6 +229,7 @@ impl BoardStore {
             request.unread_only,
         )?;
         let mut transaction = self.connection.begin().await.map_err(storage_error)?;
+        let latest = current_activity_sequence(&mut transaction).await?;
         let row_limit = i64::from(request.page.limit.get()) + 1;
         let rows = sqlx::query_as!(StoredUnreadSummaryRow, "SELECT project_id,has_unread,main_start FROM project_reader_state WHERE reader_key=? AND project_id>? AND (?=0 OR has_unread=1) ORDER BY project_id LIMIT ?", reader_key, last_project, request.unread_only, row_limit)
             .fetch_all(&mut *transaction).await.map_err(storage_error)?;
@@ -241,10 +252,17 @@ impl BoardStore {
         } else {
             None
         };
-        let records = rows
-            .iter()
-            .map(decode_summary)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in &rows {
+            validate_reader_activity_boundaries(
+                &mut transaction,
+                &reader_key,
+                &row.project_id,
+                latest,
+            )
+            .await?;
+            records.push(decode_summary(row, latest)?);
+        }
         transaction.commit().await.map_err(storage_error)?;
         Ok(InboxProjectsResult {
             page: Page {
@@ -382,13 +400,27 @@ fn decode_summary_cursor(
     }
     Ok(cursor.last_project)
 }
-fn decode_summary(row: &StoredUnreadSummaryRow) -> Result<ProjectUnreadSummary, BoardError> {
+fn decode_summary(
+    row: &StoredUnreadSummaryRow,
+    latest: i64,
+) -> Result<ProjectUnreadSummary, BoardError> {
     let has_unread = row.has_unread;
     if has_unread != 0 && has_unread != 1 {
         return Err(invalid_record());
     }
+    let project_id = ProjectId::try_from(row.project_id.clone()).map_err(|_| invalid_record())?;
+    if let Some(main_start) = row.main_start {
+        validate_stored_boundary(
+            main_start,
+            0,
+            latest,
+            ResourceIdentity::Project {
+                project_id: project_id.clone(),
+            },
+        )?;
+    }
     Ok(ProjectUnreadSummary {
-        project_id: ProjectId::try_from(row.project_id.clone()).map_err(|_| invalid_record())?,
+        project_id,
         has_unread: has_unread == 1,
         main_tracking_initialized: row.main_start.is_some(),
     })

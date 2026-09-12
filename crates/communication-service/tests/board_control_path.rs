@@ -67,7 +67,9 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
             references: vec![].try_into()?,
         })
         .await?;
-    assert!(root.watch_status.watching);
+    if !root.watch_status.watching {
+        return Err("root post did not activate watch".into());
+    }
     let reply = client
         .board_message_post(MessagePostRequest {
             message_id: MessageId::generate(),
@@ -83,14 +85,18 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
             .try_into()?,
         })
         .await?;
-    assert_eq!(reply.message.actor, actor);
+    if reply.message.actor != actor {
+        return Err("thread actor was not preserved".into());
+    }
     let thread = client
         .board_thread_show(ThreadShowRequest {
             root_message_id: root.message.message_id,
             reader: None,
         })
         .await?;
-    assert_eq!(thread.thread.state, ThreadState::Unresolved);
+    if thread.thread.state != ThreadState::Unresolved {
+        return Err("new thread was not unresolved".into());
+    }
     drop(client);
     task.await??;
     drop(store);

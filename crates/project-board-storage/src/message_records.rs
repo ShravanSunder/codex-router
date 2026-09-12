@@ -1,7 +1,8 @@
 //! Shared typed message and thread record access.
 use crate::storage_support::{
-    BoardTransaction, StoredIdentityRow, attribute_invalid_record, decode_identity,
-    ensure_project_reader_state, invalid_record, resource_not_found, storage_error,
+    BoardTransaction, StoredIdentityRow, attribute_invalid_record, current_activity_sequence,
+    decode_identity, ensure_project_reader_state, invalid_record, resource_not_found,
+    storage_error, validate_stored_boundary,
 };
 use project_board::*;
 
@@ -144,6 +145,11 @@ pub(crate) async fn load_watch_status(
     if row.active != 0 && row.active != 1 {
         return Err(invalid_record());
     }
+    let latest = current_activity_sequence(transaction).await?;
+    let thread_resource = ResourceIdentity::Thread {
+        root_message_id: root_message_id.clone(),
+    };
+    validate_stored_boundary(row.starts_after_activity, 0, latest, thread_resource)?;
     let boundary_sequence = activity_sequence(row.starts_after_activity)?;
     let earlier_unwatched_range = (row.starts_after_activity > 0).then(|| HistoryRange {
         scope: MessageListScope::Thread {
