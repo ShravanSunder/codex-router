@@ -87,6 +87,12 @@ agent-sessions wake send \
   --text-file reminder-message.txt --every 10m --for 2h --json
 ```
 
+Wait intervals (`--after`, `--every`) are either under the 29-minute prompt-cache
+ceiling or a real calendar schedule (`--every 1d`, `--cron` with `--timezone`).
+Mid-range waits such as 45 minutes pay a cold resume without being a schedule;
+do not use them unless the recipient is Mini. `--for` / `--until` is assignment
+lifetime, not the wait interval.
+
 Creation means the reminder is durably arranged. Add `--wait-until-first-fire`
 to wait for its first firing; that does not wait for native acceptance or a
 reply. Pause/cancel before the first firing returns an error. Pausing discards
@@ -127,6 +133,10 @@ A minimal `schedule-definition.json` uses the instruction UUID from creation:
   "executionTimeoutSeconds": null
 }
 ```
+
+Interval seconds use the same two regimes as wakes: under 1740 (29 minutes) or a
+real calendar cadence. Do not pick mid-range values such as 2700 (45 minutes)
+unless the worker is Mini.
 
 Disabling a schedule stops future triggers and preserves created Runs. One Run
 occupies its schedule through any required summarization; uncertain cessation
