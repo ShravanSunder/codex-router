@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-automation"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sessions"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -181,7 +181,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automation-storage"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -389,7 +389,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codex-acp-adapter"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "base64",
  "chrono",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "codex-native-integration"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "futures-util",
  "jsonschema",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "agent-sessions",
  "base64",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "automation-storage",
  "chrono",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "base64",
  "codex-router-core",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "codex-native-integration",
  "codex-router-cli",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "iocraft",
 ]
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "communication-client"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "codex-native-integration",
  "communication-protocol",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "communication-protocol"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "communication-service"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -1897,7 +1897,7 @@ dependencies = [
 
 [[package]]
 name = "lifecycle-observation"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "base64",
  "chrono",
