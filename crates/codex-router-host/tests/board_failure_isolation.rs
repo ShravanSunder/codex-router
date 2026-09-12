@@ -45,9 +45,13 @@ async fn board_open_failure_keeps_unrelated_control_methods_available()
         }
     }
     std::fs::remove_dir(root)?;
-    assert!(matches!(
+    if !matches!(
         board_result,
         Err(BoardClientError::Rejected(error)) if error.kind == BoardFailureKind::BoardUnavailable
-    ));
+    ) {
+        return Err(
+            "unavailable board store did not return the typed boardUnavailable error".into(),
+        );
+    }
     Ok(())
 }
