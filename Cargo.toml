@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/project-board",
+    "crates/project-board-storage",
     "crates/agent-automation",
     "crates/automation-storage",
     "crates/codex-acp-adapter",
@@ -25,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

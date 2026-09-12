@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT p.project_id AS \"project_id!\", p.name AS \"name!\", p.description AS \"description!\"\n               FROM board_projects p LEFT JOIN project_repositories r ON r.project_id=p.project_id\n               WHERE p.project_id>? AND (?='' OR r.repository_key=?) ORDER BY p.project_id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_projects",
+            "name": "project_id"
+          }
+        }
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_projects",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "description!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_projects",
+            "name": "description"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9fa18569543f271ec65e9d83136a19bf48bd11cd7de3fc37a14576b2c5af7f0d"
+}

@@ -64,6 +64,8 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
         .unwrap_or_else(|error| panic!("identity cleanup: {error}"));
     std::fs::remove_dir(blocked_database)
         .unwrap_or_else(|error| panic!("database directory cleanup: {error}"));
+    std::fs::remove_file(root.join("project-board.sqlite"))
+        .unwrap_or_else(|error| panic!("board database cleanup: {error}"));
     std::fs::remove_file(root.join("automation.sqlite"))
         .unwrap_or_else(|error| panic!("automation database cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT main_start FROM project_reader_state WHERE reader_key=? AND project_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "main_start",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "project_reader_state",
+            "name": "main_start"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5de0b8f58ec888ecdebc901cd369da9031386a5779b971a7a46c460a0ba8578f"
+}

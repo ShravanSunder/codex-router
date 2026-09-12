@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_threads(root_id,state) VALUES(?,'unresolved')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8e6bc3dcefb9b881eefd83424a0e72ec98712584b7614af88193f6d4250fc888"
+}

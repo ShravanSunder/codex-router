@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cursor_key FROM activity_checkpoint WHERE singleton=1",
+  "describe": {
+    "columns": [
+      {
+        "name": "cursor_key",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "activity_checkpoint",
+            "name": "cursor_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2b26c2a85275d848861ba53e656ae9ca9afb6350ddd6a409be3accc3857f71ef"
+}

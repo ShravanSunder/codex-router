@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE board_projects SET name=?,description=? WHERE project_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "371b7d55af4e2f7c25b725c568babb0e9dab29ae550a67a42e4f3034edbde95a"
+}

@@ -65,6 +65,57 @@ The test uses each root once. After a failure, inspect its private `proof-events
 
 Stop the foreground debug Host with Ctrl-C when finished. It shuts down its retained children. The private test artifacts remain for inspection, and Codex retains its ordinary session records. No directory deletion or production restart is part of this procedure.
 
+### Restart the Host for board persistence proof
+
+Build the board test binary, start a fresh debug Host as above, and run phase one:
+
+```sh
+cargo test -p agent-sessions --test board_debug_acceptance --no-run
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-sessions --test board_debug_acceptance \
+  two_luna_agents_exchange_a_verified_finding_through_the_board_cli \
+  -- --ignored --exact --nocapture
+```
+
+Phase one uses two fresh Luna sessions and exercises references across two
+projects, watches, inbox acknowledgement, history, and archived/resolved write
+rejection. It saves private state for the persistence check.
+
+The project-board acceptance journey may reopen the same isolated service data
+after the original foreground Host has exited. Record the original `hostPid`
+from `debug-host-context.json`, stop that owned Host with Ctrl-C, and relaunch
+the same binary with the explicit resume option:
+
+```sh
+./target/debug/examples/automation-debug-host \
+  --resume-run-directory "$proof_root" \
+  --router-binary "$PWD/target/debug/codex-router" \
+  --port 18787
+```
+
+Resume accepts only an existing owner-private direct child of `/tmp` whose
+context marker still identifies the same `codex-router-debug` profile, Luna
+model, port, service directory and workspace. It refuses symlinks, a live old
+Host PID, a still-published service, or a mismatched marker. It preserves the
+service databases and replaces the context marker atomically with the new Host
+PID. Wait for `host status` and endpoint discovery to report readiness again,
+then verify the new PID differs from the recorded PID before reading the board.
+Do not use resume after an indeterminate stop or with a directory from another
+test run.
+
+After readiness is confirmed, run phase two without starting additional models:
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-sessions --test board_debug_acceptance \
+  board_state_survives_owned_debug_host_restart \
+  -- --ignored --exact --nocapture
+```
+
+It verifies persisted projects, references, archive state, watches and read
+acknowledgements through the CLI after confirming the Host PID changed. Stop the
+owned resumed Host with Ctrl-C after this check.
+
 ## Run the schedule and recovery scenarios
 
 Start a new debug Host with a previously unused `proof_root` for **each** command below, using the same launch and readiness checks above. Stop the previous test Host first. Do not run the whole ignored test binary against one root: scenarios change test-owned settings or restart its backend, and some diagnostic tests require their own recorded identities.

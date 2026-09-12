@@ -460,6 +460,21 @@ impl ClientConnection {
             .map(|bytes| bytes.len())
             .map_err(|_| ClientError::Protocol("request encoding"))
     }
+    pub(crate) fn validate_call_before_transmission(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Result<(), ClientError> {
+        if self.failed || self.next_id >= 65_536 {
+            return Err(ClientError::Protocol("connection is retired"));
+        }
+        if self.encoded_request_len(method, params)?
+            > communication_protocol::MAX_CONTROL_FRAME_BYTES
+        {
+            return Err(ClientError::Protocol("request too large"));
+        }
+        Ok(())
+    }
     async fn exchange(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         let id = format!("client-{}", self.next_id);
         self.next_id += 1;

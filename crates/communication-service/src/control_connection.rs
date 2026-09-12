@@ -322,6 +322,21 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request) if request.method.starts_with("board/") => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::board_request_dispatch::dispatch(
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method == "schedule/prepare" => {
                     let identity = identity.clone();
                     pending.spawn(async move {

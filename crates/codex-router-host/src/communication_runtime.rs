@@ -24,6 +24,7 @@ pub struct BackendSchemaEvidence<'a> {
     pub export: &'a codex_native_integration::NativeSchemaExport,
 }
 pub struct CommunicationRuntime {
+    board_store: Option<std::sync::Arc<tokio::sync::Mutex<project_board_storage::BoardStore>>>,
     directory: PathBuf,
     control_schema: communication_protocol::ControlSchema,
     payload_cache: crate::native_schema_cache::NativeSchemaCache,
@@ -97,6 +98,23 @@ impl CommunicationRuntime {
         .map_err(io::Error::other)?;
         if let Some(journal) = &journal {
             identity = identity.with_journal(std::sync::Arc::clone(journal));
+        }
+        let mut board_store = None;
+        match project_board_storage::BoardStore::open(
+            &inputs.directory.join("project-board.sqlite"),
+        )
+        .await
+        {
+            Ok(store) => {
+                let store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+                identity = identity.with_board_store(store.clone());
+                board_store = Some(store);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "board storage unavailable; other communication remains independent"
+                );
+            }
         }
         let mut settings_backend = None;
         match automation_storage::AutomationStore::open(&inputs.directory.join("automation.sqlite"))
@@ -197,6 +215,7 @@ impl CommunicationRuntime {
             tokio::spawn(async move { maintenance_store.run_maintenance(maintenance_stop).await })
         });
         Ok(Self {
+            board_store,
             directory: inputs.directory,
             control_schema,
             payload_cache: crate::native_schema_cache::NativeSchemaCache::default(),
@@ -471,6 +490,20 @@ impl CommunicationRuntime {
             && task.await.is_err()
         {
             failure.get_or_insert(io::Error::other("automation maintenance shutdown failed"));
+        }
+        if let Some(store) = self.board_store.take() {
+            match std::sync::Arc::try_unwrap(store) {
+                Ok(store) => {
+                    if store.into_inner().close().await.is_err() {
+                        failure.get_or_insert(io::Error::other("board storage close failed"));
+                    }
+                }
+                Err(_) => {
+                    failure.get_or_insert(io::Error::other(
+                        "board storage still owned after listener shutdown",
+                    ));
+                }
+            }
         }
         match failure {
             Some(error) => Err(error),

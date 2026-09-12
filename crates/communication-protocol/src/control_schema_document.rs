@@ -26,6 +26,113 @@ pub fn control_schema_document(
         frames: Vec::new(),
         native_uri,
     };
+    assembly.add_type::<project_board::BoardError>("board-failure")?;
+    assembly
+        .add_method::<project_board::ProjectCreateRequest, project_board::ProjectCreateResult>(
+            "board/projectCreate",
+            &[],
+        )?;
+    assembly
+        .add_method::<project_board::ProjectUpdateRequest, project_board::ProjectUpdateResult>(
+            "board/projectUpdate",
+            &[],
+        )?;
+    assembly.add_method::<project_board::ProjectShowRequest, project_board::ProjectShowResult>(
+        "board/projectShow",
+        &[],
+    )?;
+    assembly.add_method::<project_board::ProjectListRequest, project_board::ProjectListResult>(
+        "board/projectList",
+        &[],
+    )?;
+    assembly.add_method::<project_board::RepositoryAttachRequest, project_board::RepositoryAttachResult>("board/repositoryAttach", &[])?;
+    assembly.add_method::<project_board::RepositoryDetachRequest, project_board::RepositoryDetachResult>("board/repositoryDetach", &[])?;
+    assembly
+        .add_method::<project_board::RepositoryListRequest, project_board::RepositoryListResult>(
+            "board/repositoryList",
+            &[],
+        )?;
+    assembly.add_method::<project_board::BoardCreateRequest, project_board::BoardCreateResult>(
+        "board/create",
+        &[],
+    )?;
+    assembly.add_method::<project_board::BoardUpdateRequest, project_board::BoardUpdateResult>(
+        "board/update",
+        &[],
+    )?;
+    assembly.add_method::<project_board::BoardShowRequest, project_board::BoardShowResult>(
+        "board/show",
+        &[],
+    )?;
+    assembly.add_method::<project_board::BoardListRequest, project_board::BoardListResult>(
+        "board/list",
+        &[],
+    )?;
+    assembly.add_method::<project_board::BoardArchiveRequest, project_board::BoardArchiveResult>(
+        "board/archive",
+        &[],
+    )?;
+    assembly.add_method::<project_board::TopicCreateRequest, project_board::TopicCreateResult>(
+        "board/topicCreate",
+        &[],
+    )?;
+    assembly.add_method::<project_board::TopicUpdateRequest, project_board::TopicUpdateResult>(
+        "board/topicUpdate",
+        &[],
+    )?;
+    assembly.add_method::<project_board::TopicListRequest, project_board::TopicListResult>(
+        "board/topicList",
+        &[],
+    )?;
+    assembly.add_method::<project_board::MessagePostRequest, project_board::MessagePostResult>(
+        "board/messagePost",
+        &[],
+    )?;
+    assembly.add_method::<project_board::MessageShowRequest, project_board::MessageShowResult>(
+        "board/messageShow",
+        &[],
+    )?;
+    assembly.add_method::<project_board::MessageListRequest, project_board::MessageListResult>(
+        "board/messageList",
+        &[],
+    )?;
+    assembly.add_method::<project_board::ThreadShowRequest, project_board::ThreadShowResult>(
+        "board/threadShow",
+        &[],
+    )?;
+    assembly
+        .add_method::<project_board::ThreadResolveRequest, project_board::ThreadResolveResult>(
+            "board/threadResolve",
+            &[],
+        )?;
+    assembly
+        .add_method::<project_board::ThreadUnresolveRequest, project_board::ThreadUnresolveResult>(
+            "board/threadUnresolve",
+            &[],
+        )?;
+    assembly.add_method::<project_board::ThreadWatchRequest, project_board::ThreadWatchResult>(
+        "board/threadWatch",
+        &[],
+    )?;
+    assembly
+        .add_method::<project_board::ThreadUnwatchRequest, project_board::ThreadUnwatchResult>(
+            "board/threadUnwatch",
+            &[],
+        )?;
+    assembly.add_method::<project_board::ThreadListRequest, project_board::ThreadListResult>(
+        "board/threadList",
+        &[],
+    )?;
+    assembly.add_method::<project_board::InboxFetchRequest, project_board::InboxFetchResult>(
+        "board/inboxFetch",
+        &[],
+    )?;
+    assembly.add_method::<project_board::InboxAcknowledgeRequest, project_board::InboxAcknowledgeResult>("board/inboxAcknowledge", &[])?;
+    assembly
+        .add_method::<project_board::InboxProjectsRequest, project_board::InboxProjectsResult>(
+            "board/inboxProjects",
+            &[],
+        )?;
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
     assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/show", &[])?;
@@ -317,6 +424,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if matches!(method, "automation/configure" | "automation/status") {
         data = vec![reference("configuration-failure")];
+    }
+    if method.starts_with("board/") {
+        data = vec![reference("board-failure")];
     }
     if method.starts_with("run/") {
         data = vec![reference("run-failure")];

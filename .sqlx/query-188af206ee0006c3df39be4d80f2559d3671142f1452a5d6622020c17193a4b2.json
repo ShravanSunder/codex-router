@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE board_topics SET name=?,description=? WHERE topic_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "188af206ee0006c3df39be4d80f2559d3671142f1452a5d6622020c17193a4b2"
+}

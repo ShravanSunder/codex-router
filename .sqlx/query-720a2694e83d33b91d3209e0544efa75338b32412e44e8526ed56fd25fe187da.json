@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE thread_watches SET active=0 WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "720a2694e83d33b91d3209e0544efa75338b32412e44e8526ed56fd25fe187da"
+}

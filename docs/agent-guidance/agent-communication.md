@@ -166,7 +166,7 @@ local `endpoint` and absolute `cwd`, then enable it. This configures local
 bindings without allocating a thread or changing mode. Same-ID overwrite
 preserves mode; choosing another mode requires a new schedule.
 
-Completion wake-ups, shared message boards and remote federation are later work.
+Completion wake-ups and remote federation are later work. Project boards use `agent-sessions board`; see [project board guidance](../../agent-skills/agent-communication/references/project-message-board.md).
 B still sends its own reply explicitly.
 
 ## Human input, interruption and other protocols

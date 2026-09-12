@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT through_activity FROM thread_read_bookmarks WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "through_activity",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_read_bookmarks",
+            "name": "through_activity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3168979c36ef93e451c0a12334bbf946595e5606476b164008d0a94b2b7712df"
+}

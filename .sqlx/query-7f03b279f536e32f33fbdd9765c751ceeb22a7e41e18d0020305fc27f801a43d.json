@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM board_activity WHERE root_id=? AND kind='threadMessageCreated' AND activity_sequence<=?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM board_activity WHERE root_id=? AND kind='threadMessageCreated' AND activity_sequence<=?)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7f03b279f536e32f33fbdd9765c751ceeb22a7e41e18d0020305fc27f801a43d"
+}

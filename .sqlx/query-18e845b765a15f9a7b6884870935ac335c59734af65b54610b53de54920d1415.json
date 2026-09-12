@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT through_activity FROM topic_read_bookmarks WHERE reader_key=? AND topic_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "through_activity",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "topic_read_bookmarks",
+            "name": "through_activity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "18e845b765a15f9a7b6884870935ac335c59734af65b54610b53de54920d1415"
+}

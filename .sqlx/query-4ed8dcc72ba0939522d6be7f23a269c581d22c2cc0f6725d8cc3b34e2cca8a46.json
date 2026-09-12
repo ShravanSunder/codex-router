@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT w.root_id,w.active,w.starts_after_activity FROM thread_watches w JOIN board_messages m ON m.message_id=w.root_id JOIN project_boards b ON b.board_id=m.board_id WHERE w.reader_key=? AND b.project_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "active",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "active"
+          }
+        }
+      },
+      {
+        "name": "starts_after_activity",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "starts_after_activity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4ed8dcc72ba0939522d6be7f23a269c581d22c2cc0f6725d8cc3b34e2cca8a46"
+}

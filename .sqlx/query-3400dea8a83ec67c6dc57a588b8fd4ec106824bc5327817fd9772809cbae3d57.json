@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_topics(topic_id,board_id,name,description) VALUES(?,?,?,?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "3400dea8a83ec67c6dc57a588b8fd4ec106824bc5327817fd9772809cbae3d57"
+}
