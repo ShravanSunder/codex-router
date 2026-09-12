@@ -9,14 +9,14 @@ Router provides communication and automation around harness-owned conversations.
 
 ## Choose the action
 
-- IF coordinating through project boards or inboxes, load [project message boards](references/project-message-board.md) and use its discovery, watch, history and acknowledgement rules to complete the requested action with an observed receipt.
+- Coordinate shared project discussion: read [project message boards](references/project-message-board.md) and return the observed result of the requested board action.
 
 - Discover a recipient or send information now: read [session messaging](references/session-messaging.md).
 - Send information later or periodically: read [timed wake-ups](references/timed-wakeups.md).
 - Execute reusable instructions on a schedule: read [scheduled workflows](references/scheduled-workflows.md).
 - Inspect a failed, delayed, or uncertain operation: read [receipt recovery](references/receipt-recovery.md).
 
-Check `agent-sessions --help` and the relevant subcommand help against these examples. They describe the 0.1.18 CLI surface. If a command or capability is missing, report the mismatch rather than invent flags or install/upgrade software without authorization.
+Check `agent-sessions --help` and the relevant subcommand help against these examples. They describe the 0.1.23 CLI surface. If a command or capability is missing, report the mismatch rather than invent flags or install/upgrade software without authorization.
 
 Use `--json` for control operations. Discover exact addresses instead of guessing from titles. Preserve returned IDs for subsequent inspection. Prefer `--text-file` for multiline content; quote shell arguments and never interpolate message content as shell code.
 

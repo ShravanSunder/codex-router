@@ -12,3 +12,9 @@ use proof_context::ProofResult;
 async fn two_luna_agents_exchange_a_verified_finding_through_the_board_cli() -> ProofResult<()> {
     board_live_support::exercise().await
 }
+
+#[tokio::test]
+#[ignore = "requires phase one plus an owner-restarted isolated debug Host at the same proof root"]
+async fn board_state_survives_owned_debug_host_restart() -> ProofResult<()> {
+    board_live_support::verify_persistence_after_host_restart().await
+}

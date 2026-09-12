@@ -449,7 +449,7 @@ async fn reject_board_name(
     .fetch_one(&mut **transaction).await.map_err(storage_error)?;
     if used != 0 {
         return Err(name_conflict(
-            "That name is already used within its parent.",
+            "That board name is already used within its project.",
         ));
     }
     Ok(())
@@ -467,9 +467,14 @@ async fn reject_topic_name(
     )
     .fetch_one(&mut **transaction).await.map_err(storage_error)?;
     if used != 0 {
-        return Err(name_conflict(
-            "That name is already used within its parent.",
-        ));
+        return Err(BoardError {
+            kind: BoardFailureKind::InvalidTopicName,
+            stage: BoardFailureStage::Validation,
+            message: "That topic name is already used in this board. Choose another topic name."
+                .to_owned(),
+            next_action: BoardNextAction::SelectDifferentName,
+            details: BoardErrorDetails::None,
+        });
     }
     Ok(())
 }

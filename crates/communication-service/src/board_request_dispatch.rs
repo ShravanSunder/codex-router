@@ -45,12 +45,21 @@ pub(crate) async fn dispatch(
             serde_json::from_value::<RepositoryRef>(repository.clone())
         && service_id.as_str() != String::from(identity.service_id.clone())
     {
-        return failure(id, BoardError { kind: BoardFailureKind::InvalidField, stage: BoardFailureStage::Validation, message: "Local repository reference belongs to another service. Select the owning service.".into(), next_action: BoardNextAction::CorrectRequest, details: BoardErrorDetails::None });
+        return failure(
+            id,
+            BoardError::invalid_field(
+                "repository.serviceId",
+                "must match the selected board service",
+            ),
+        );
     }
 
     macro_rules! call {
  ($request:ty,$method:ident)=>{{
- let request=match serde_json::from_value::<$request>(params) { Ok(request)=>request,Err(_error)=>return failure(id,BoardError{kind:BoardFailureKind::InvalidField,stage:BoardFailureStage::Validation,message:"Invalid board request. Check required fields, identity variants and value bounds.".into(),next_action:BoardNextAction::CorrectRequest,details:BoardErrorDetails::None}) };
+ let request=match serde_json::from_value::<$request>(params.clone()) {
+     Ok(request)=>request,
+     Err(_error)=>return failure(id,crate::board_request_validation::classify(method,&params)),
+ };
  let result=store.lock().await.$method(request).await;
  match result { Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(error)=>failure(id,error) }
  }};

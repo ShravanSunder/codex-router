@@ -162,3 +162,48 @@ fn message_list_omits_selection_to_use_latest_default() {
     assert!(result.contains("boardUnavailable"));
     assert!(!result.contains("--selection"));
 }
+
+#[test]
+fn creation_and_post_help_expose_exact_utf8_and_reference_bounds() {
+    let project_help = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args(["board", "project", "create", "--help"])
+        .output()
+        .unwrap();
+    assert!(project_help.status.success());
+    let project_help = String::from_utf8_lossy(&project_help.stdout);
+    assert!(project_help.contains("1 to 256 UTF-8 bytes"));
+    assert!(project_help.contains("0 to 16384 UTF-8 bytes"));
+
+    let message_help = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args(["board", "message", "post", "--help"])
+        .output()
+        .unwrap();
+    assert!(message_help.status.success());
+    let message_help = String::from_utf8_lossy(&message_help.stdout);
+    assert!(message_help.contains("1 to 65536 UTF-8 bytes"));
+    assert!(message_help.contains("at most 64 distinct references total"));
+}
+
+#[test]
+fn bounded_text_errors_name_exact_limits_without_echoing_input() {
+    let secret_value = format!("secret-value-{}", "x".repeat(256));
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "board",
+            "project",
+            "create",
+            "--name",
+            &secret_value,
+            "--actor",
+            HUMAN_ACTOR,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let result = String::from_utf8_lossy(&output.stdout);
+    assert!(result.contains("--name must contain 1 to 256 UTF-8 bytes after trimming"));
+    assert!(!result.contains(&secret_value));
+}

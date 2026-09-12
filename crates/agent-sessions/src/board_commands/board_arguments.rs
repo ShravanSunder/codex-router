@@ -169,8 +169,10 @@ pub(super) struct ProjectCreateArguments {
     /// Caller-chosen UUIDv7; generated and reported when omitted.
     #[arg(long)]
     pub project_id: Option<String>,
+    /// Project name: 1 to 256 UTF-8 bytes after trimming.
     #[arg(long)]
     pub name: String,
+    /// Project description: 0 to 16384 UTF-8 bytes.
     #[arg(long, default_value = "")]
     pub description: String,
     #[command(flatten)]
@@ -183,8 +185,10 @@ pub(super) struct ProjectCreateArguments {
 pub(super) struct ProjectUpdateArguments {
     #[arg(long)]
     pub project_id: String,
+    /// Project name: 1 to 256 UTF-8 bytes after trimming.
     #[arg(long)]
     pub name: String,
+    /// Project description: 0 to 16384 UTF-8 bytes.
     #[arg(long)]
     pub description: String,
     #[command(flatten)]
@@ -240,8 +244,10 @@ pub(super) struct BoardCreateArguments {
     pub board_id: Option<String>,
     #[arg(long)]
     pub project_id: String,
+    /// Board name: 1 to 256 UTF-8 bytes after trimming.
     #[arg(long)]
     pub name: String,
+    /// Board description: 0 to 16384 UTF-8 bytes.
     #[arg(long, default_value = "")]
     pub description: String,
     #[command(flatten)]
@@ -254,8 +260,10 @@ pub(super) struct BoardCreateArguments {
 pub(super) struct BoardUpdateArguments {
     #[arg(long)]
     pub board_id: String,
+    /// Board name: 1 to 256 UTF-8 bytes after trimming.
     #[arg(long)]
     pub name: String,
+    /// Board description: 0 to 16384 UTF-8 bytes.
     #[arg(long)]
     pub description: String,
     #[command(flatten)]
@@ -301,8 +309,10 @@ pub(super) struct TopicCreateArguments {
     pub topic_id: Option<String>,
     #[arg(long)]
     pub board_id: String,
+    /// Topic name: 1 to 256 UTF-8 bytes after trimming.
     #[arg(long)]
     pub name: String,
+    /// Topic description: 0 to 16384 UTF-8 bytes.
     #[arg(long, default_value = "")]
     pub description: String,
     #[command(flatten)]
@@ -315,8 +325,10 @@ pub(super) struct TopicCreateArguments {
 pub(super) struct TopicUpdateArguments {
     #[arg(long)]
     pub topic_id: String,
+    /// Topic name: 1 to 256 UTF-8 bytes after trimming.
     #[arg(long)]
     pub name: String,
+    /// Topic description: 0 to 16384 UTF-8 bytes.
     #[arg(long)]
     pub description: String,
     #[command(flatten)]
@@ -355,14 +367,14 @@ pub(super) struct MessagePostArguments {
     /// Root message UUIDv7, required for --placement thread.
     #[arg(long)]
     pub root_message_id: Option<String>,
-    /// Message text. Conflicts with --text-file.
+    /// Message text: 1 to 65536 UTF-8 bytes. Conflicts with --text-file.
     #[arg(
         long,
         conflicts_with = "text_file",
         required_unless_present = "text_file"
     )]
     pub text: Option<String>,
-    /// Read message text from this file. Conflicts with --text.
+    /// Read 1 to 65536 UTF-8 bytes from this file. Conflicts with --text.
     #[arg(
         long,
         value_name = "PATH",
@@ -370,10 +382,10 @@ pub(super) struct MessagePostArguments {
         required_unless_present = "text"
     )]
     pub text_file: Option<PathBuf>,
-    /// Reference a message UUIDv7. May be repeated, up to 64 total references.
+    /// Reference a message UUIDv7. May be repeated; at most 64 distinct references total.
     #[arg(long)]
     pub reference_message: Vec<String>,
-    /// Reference a root thread UUIDv7. May be repeated, up to 64 total references.
+    /// Reference a root thread UUIDv7. May be repeated; at most 64 distinct references total.
     #[arg(long)]
     pub reference_thread: Vec<String>,
     #[command(flatten)]

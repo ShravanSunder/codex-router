@@ -166,8 +166,17 @@ impl GeneratedIdentity for MessageId {
 pub(super) fn parse_bounded_text<TText>(value: String, flag: &str) -> Result<TText, String>
 where
     TText: TryFrom<String>,
+    TText::Error: std::fmt::Display,
 {
-    TText::try_from(value).map_err(|_| format!("{flag} violates its documented UTF-8 byte bound"))
+    TText::try_from(value).map_err(|domain_error| {
+        let requirement = match flag {
+            "--name" => "must contain 1 to 256 UTF-8 bytes after trimming",
+            "--description" => "must contain 0 to 16384 UTF-8 bytes",
+            "--text/--text-file" => "must contain 1 to 65536 UTF-8 bytes",
+            _ => return format!("{flag} is invalid: {domain_error}"),
+        };
+        format!("{flag} {requirement}")
+    })
 }
 
 pub(super) fn prepare_page_request(arguments: PageArguments) -> Result<PageRequest, String> {

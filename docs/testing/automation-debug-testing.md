@@ -65,6 +65,30 @@ The test uses each root once. After a failure, inspect its private `proof-events
 
 Stop the foreground debug Host with Ctrl-C when finished. It shuts down its retained children. The private test artifacts remain for inspection, and Codex retains its ordinary session records. No directory deletion or production restart is part of this procedure.
 
+### Restart the Host for board persistence proof
+
+The project-board acceptance journey may reopen the same isolated service data
+after the original foreground Host has exited. Record the original `hostPid`
+from `debug-host-context.json`, stop that owned Host with Ctrl-C, and relaunch
+the same binary with the explicit resume option:
+
+```sh
+./target/debug/examples/automation-debug-host \
+  --resume-run-directory "$proof_root" \
+  --router-binary "$PWD/target/debug/codex-router" \
+  --port 18787
+```
+
+Resume accepts only an existing owner-private direct child of `/tmp` whose
+context marker still identifies the same `codex-router-debug` profile, Luna
+model, port, service directory and workspace. It refuses symlinks, a live old
+Host PID, a still-published service, or a mismatched marker. It preserves the
+service databases and replaces the context marker atomically with the new Host
+PID. Wait for `host status` and endpoint discovery to report readiness again,
+then verify the new PID differs from the recorded PID before reading the board.
+Do not use resume after an indeterminate stop or with a directory from another
+test run.
+
 ## Run the schedule and recovery scenarios
 
 Start a new debug Host with a previously unused `proof_root` for **each** command below, using the same launch and readiness checks above. Stop the previous test Host first. Do not run the whole ignored test binary against one root: scenarios change test-owned settings or restart its backend, and some diagnostic tests require their own recorded identities.

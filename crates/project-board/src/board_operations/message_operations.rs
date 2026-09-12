@@ -1,7 +1,7 @@
 use crate::{
     ActingForIdentity, ActivitySequence, Identity, Message, MessageId, MessageListScope,
     MessagePage, MessageReferences, MessageSelection, MessageText, Page, PageRequest, Placement,
-    ProjectId, Thread, ThreadState, WatchStatus,
+    ProjectId, Thread, WatchStatus,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -66,12 +66,3 @@ contract!(ThreadListRequest {
     page: PageRequest
 });
 contract!(ThreadListResult { page: Page<Thread> });
-
-#[must_use]
-pub fn requested_thread_state(is_resolve: bool) -> ThreadState {
-    if is_resolve {
-        ThreadState::Resolved
-    } else {
-        ThreadState::Unresolved
-    }
-}

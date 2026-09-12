@@ -90,9 +90,9 @@ impl BoardStore {
             thread,
             activity_sequence: sequence,
             outcome: if changed {
-                "Thread marked unresolved."
+                "Thread marked unresolved; thread messages can be added while the board is active."
             } else {
-                "Thread was already unresolved."
+                "Thread was already unresolved; thread messages can be added while the board is active."
             }
             .to_owned(),
         })
@@ -122,6 +122,10 @@ impl BoardStore {
             .await?;
         let watch_status =
             load_watch_status(&mut transaction, &reader_key, &request.root_message_id).await?;
+        let outcome = format!(
+            "Thread watch is active for future activity. {}",
+            watch_status.message
+        );
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadWatchResult {
             thread: Thread {
@@ -129,7 +133,7 @@ impl BoardStore {
                 state: location.state,
             },
             watch_status,
-            outcome: "Thread watch is active for future activity.".to_owned(),
+            outcome,
         })
     }
 
@@ -158,6 +162,7 @@ impl BoardStore {
             .await?;
         let watch_status =
             load_watch_status(&mut transaction, &reader_key, &request.root_message_id).await?;
+        let outcome = format!("Thread watch is inactive. {}", watch_status.message);
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadUnwatchResult {
             thread: Thread {
@@ -165,7 +170,7 @@ impl BoardStore {
                 state: location.state,
             },
             watch_status,
-            outcome: "Thread watch is inactive.".to_owned(),
+            outcome,
         })
     }
 

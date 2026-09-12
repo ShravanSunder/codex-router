@@ -1,4 +1,7 @@
 //! Real two-agent board collaboration through the public CLI and SDK.
+mod board_cli_runner;
+mod expanded_cli_journey;
+mod persistence_verification;
 use crate::proof_context::{ProofContext, ProofResult, shell_quote};
 use communication_protocol::{MessageContent, MessageDelivery, NativeSendParams, SessionRef};
 use project_board::{
@@ -192,6 +195,19 @@ pub async fn exercise() -> ProofResult<()> {
     {
         return Err("automatic thread watches were not visible for both posting agents".into());
     }
+    expanded_cli_journey::exercise_after_agent_exchange(
+        &mut proof,
+        expanded_cli_journey::AgentExchange {
+            alpha_identity: &alpha_identity,
+            beta_identity: &beta_identity,
+            first_project_id: project_id.as_str(),
+            first_board_id: board_id.as_str(),
+            first_topic_id: topic_id.as_str(),
+            root_message: &root.message,
+            contribution_message: &contribution.message,
+        },
+    )
+    .await?;
     proof.record(
         "boardAgentExchangeVerified",
         json!({
@@ -204,6 +220,10 @@ pub async fn exercise() -> ProofResult<()> {
     )?;
     proof.client.close().await?;
     Ok(())
+}
+
+pub async fn verify_persistence_after_host_restart() -> ProofResult<()> {
+    persistence_verification::verify().await
 }
 
 async fn send_task(

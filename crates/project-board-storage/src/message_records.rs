@@ -1,8 +1,8 @@
 //! Shared typed message and thread record access.
 use crate::storage_support::{
     BoardTransaction, StoredIdentityRow, attribute_invalid_record, current_activity_sequence,
-    decode_identity, ensure_project_reader_state, invalid_record, resource_not_found,
-    storage_error, validate_stored_boundary,
+    decode_identity, ensure_project_reader_state, invalid_record, storage_error,
+    validate_stored_boundary,
 };
 use project_board::*;
 
@@ -39,11 +39,7 @@ async fn require_thread_unattributed(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(storage_error)?
-    .ok_or_else(|| {
-        resource_not_found(ResourceIdentity::Thread {
-            root_message_id: root_message_id.clone(),
-        })
-    })?;
+    .ok_or_else(|| invalid_root_message(root_message_id))?;
     if row.root_id.is_some() {
         return Err(invalid_record());
     }
@@ -126,32 +122,49 @@ pub(crate) async fn load_watch_status(
     root_message_id: &MessageId,
 ) -> Result<WatchStatus, BoardError> {
     let row = sqlx::query!(
-        "SELECT active,starts_after_activity \
-         FROM thread_watches WHERE reader_key=? AND root_id=?",
+        "SELECT watch.active,watch.starts_after_activity,board.state AS board_state \
+         FROM board_threads thread \
+         JOIN board_messages message ON message.message_id=thread.root_id \
+         JOIN project_boards board ON board.board_id=message.board_id \
+         LEFT JOIN thread_watches watch \
+           ON watch.root_id=thread.root_id AND watch.reader_key=? \
+         WHERE thread.root_id=?",
         reader_key,
         root_message_id.as_str(),
     )
     .fetch_optional(&mut **transaction)
     .await
     .map_err(storage_error)?;
-    let Some(row) = row else {
+    let row = row.ok_or_else(|| invalid_root_message(root_message_id))?;
+    let board_lifecycle = match row.board_state.as_str() {
+        "active" => "The board is active.",
+        "archived" => "The board is archived and read-only.",
+        _ => return Err(invalid_record()),
+    };
+    let (Some(active), Some(starts_after_activity)) = (row.active, row.starts_after_activity)
+    else {
+        if row.active.is_some() || row.starts_after_activity.is_some() {
+            return Err(invalid_record());
+        }
         return Ok(WatchStatus {
             watching: false,
             starts_after_activity_sequence: None,
             earlier_unwatched_range: None,
-            message: "This thread is not watched. Watch it to receive future activity.".to_owned(),
+            message: format!(
+                "This thread is not watched. Use thread watch to receive future activity. {board_lifecycle}"
+            ),
         });
     };
-    if row.active != 0 && row.active != 1 {
+    if active != 0 && active != 1 {
         return Err(invalid_record());
     }
     let latest = current_activity_sequence(transaction).await?;
     let thread_resource = ResourceIdentity::Thread {
         root_message_id: root_message_id.clone(),
     };
-    validate_stored_boundary(row.starts_after_activity, 0, latest, thread_resource)?;
-    let boundary_sequence = activity_sequence(row.starts_after_activity)?;
-    let earlier_unwatched_range = (row.starts_after_activity > 0).then(|| HistoryRange {
+    validate_stored_boundary(starts_after_activity, 0, latest, thread_resource)?;
+    let boundary_sequence = activity_sequence(starts_after_activity)?;
+    let earlier_unwatched_range = (starts_after_activity > 0).then(|| HistoryRange {
         scope: MessageListScope::Thread {
             root_message_id: root_message_id.clone(),
         },
@@ -161,16 +174,33 @@ pub(crate) async fn load_watch_status(
         },
     });
     Ok(WatchStatus {
-        watching: row.active == 1,
+        watching: active == 1,
         starts_after_activity_sequence: Some(boundary_sequence),
         earlier_unwatched_range,
-        message: if row.active == 1 {
-            "Watching future thread activity."
+        message: if active == 1 {
+            format!(
+                "Watching future thread activity. Use earlierUnwatchedRange with a message list range request to fetch earlier history. {board_lifecycle}"
+            )
         } else {
-            "This thread is not watched. Watch it to receive future activity."
-        }
-        .to_owned(),
+            format!(
+                "This thread is not watched. Use thread watch to receive future activity. Use earlierUnwatchedRange with a message list range request to fetch earlier history. {board_lifecycle}"
+            )
+        },
     })
+}
+
+fn invalid_root_message(root_message_id: &MessageId) -> BoardError {
+    BoardError {
+        kind: BoardFailureKind::InvalidRootMessage,
+        stage: BoardFailureStage::Validation,
+        message: "The thread root does not exist or is not a top-level message. Choose a top-level message ID.".to_owned(),
+        next_action: BoardNextAction::CorrectRequest,
+        details: BoardErrorDetails::Resource {
+            resource: ResourceIdentity::Thread {
+                root_message_id: root_message_id.clone(),
+            },
+        },
+    }
 }
 
 pub(crate) fn activity_sequence(value: i64) -> Result<ActivitySequence, BoardError> {
