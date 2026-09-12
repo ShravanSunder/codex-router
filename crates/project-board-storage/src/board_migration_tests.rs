@@ -117,3 +117,21 @@ async fn broken_relationship_rejects_migration_before_commit() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn foreign_key_enablement_rejects_an_active_transaction() {
+    let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("BEGIN").execute(&mut connection).await.unwrap();
+
+    let result = enable_foreign_keys(&mut connection).await;
+
+    assert!(matches!(result, Err(BoardStorageError::InvalidSchema)));
+    sqlx::query("ROLLBACK")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}

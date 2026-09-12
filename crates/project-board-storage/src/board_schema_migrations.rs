@@ -46,6 +46,10 @@ async fn initialize_with(
         return Err(BoardStorageError::InvalidSchema);
     }
     transaction.commit().await?;
+    enable_foreign_keys(connection).await
+}
+
+async fn enable_foreign_keys(connection: &mut SqliteConnection) -> Result<(), BoardStorageError> {
     sqlx::query("PRAGMA foreign_keys=ON")
         .execute(&mut *connection)
         .await?;

@@ -6,9 +6,8 @@ use crate::message_records::{
 };
 use crate::storage_support::{
     allocate_activity_sequence, archived_board, current_activity_sequence,
-    decode_cursor as decode_signed_cursor, encode_cursor, ensure_identity,
-    ensure_project_reader_state, invalid_cursor, invalid_record, recompute_project_unread,
-    storage_error,
+    decode_cursor as decode_signed_cursor, encode_cursor, ensure_identity, invalid_cursor,
+    invalid_record, recompute_project_unread, storage_error,
 };
 use project_board::*;
 use serde::{Deserialize, Serialize};
@@ -148,8 +147,6 @@ impl BoardStore {
             .map_err(storage_error)?;
         let location = require_thread(&mut transaction, &request.root_message_id).await?;
         let reader_key = ensure_identity(&mut transaction, &request.actor).await?;
-        ensure_project_reader_state(&mut transaction, &reader_key, location.project_id.as_str())
-            .await?;
         sqlx::query!(
             "UPDATE thread_watches SET active=0 WHERE reader_key=? AND root_id=?",
             reader_key,

@@ -11,7 +11,6 @@ pub enum BoardFailureKind {
     InvalidIdentity,
     InvalidTopicName,
     InvalidRootMessage,
-    InvalidThreadMembership,
     PositionBeyondLatest,
     InvalidAcknowledgement,
     InvalidCursor,

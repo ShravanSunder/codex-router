@@ -262,9 +262,9 @@ async fn scoped_bookmarks_reject_negative_and_future_boundaries() {
     connection.close().await.unwrap();
     assert_eq!(
         store
-            .list_inbox_projects(InboxProjectsRequest {
+            .fetch_inbox(InboxFetchRequest {
+                project_id: fixture.project_id,
                 reader,
-                unread_only: false,
                 page: page(10),
             })
             .await

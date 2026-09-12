@@ -141,52 +141,89 @@ pub(crate) async fn load_watch_status(
         "archived" => "The board is archived and read-only.",
         _ => return Err(invalid_record()),
     };
+    let latest = current_activity_sequence(transaction).await?;
     let (Some(active), Some(starts_after_activity)) = (row.active, row.starts_after_activity)
     else {
         if row.active.is_some() || row.starts_after_activity.is_some() {
             return Err(invalid_record());
         }
+        let earlier_unwatched_range =
+            thread_message_history_range(transaction, root_message_id, latest).await?;
+        let history_guidance = if earlier_unwatched_range.is_some() {
+            " Use earlierUnwatchedRange with a message list range request to fetch earlier history."
+        } else {
+            " No earlier thread-message history is available."
+        };
         return Ok(WatchStatus {
             watching: false,
             starts_after_activity_sequence: None,
-            earlier_unwatched_range: None,
+            earlier_unwatched_range,
             message: format!(
-                "This thread is not watched. Use thread watch to receive future activity. {board_lifecycle}"
+                "This thread is not watched. Use thread watch to receive future activity.{history_guidance} {board_lifecycle}"
             ),
         });
     };
     if active != 0 && active != 1 {
         return Err(invalid_record());
     }
-    let latest = current_activity_sequence(transaction).await?;
     let thread_resource = ResourceIdentity::Thread {
         root_message_id: root_message_id.clone(),
     };
     validate_stored_boundary(starts_after_activity, 0, latest, thread_resource)?;
     let boundary_sequence = activity_sequence(starts_after_activity)?;
-    let earlier_unwatched_range = (starts_after_activity > 0).then(|| HistoryRange {
-        scope: MessageListScope::Thread {
-            root_message_id: root_message_id.clone(),
-        },
-        selection: MessageSelection::Range {
-            from_activity_sequence: ActivitySequence::ZERO,
-            to_activity_sequence: boundary_sequence,
-        },
-    });
+    let history_upper_sequence = if active == 1 {
+        starts_after_activity
+    } else {
+        latest
+    };
+    let earlier_unwatched_range =
+        thread_message_history_range(transaction, root_message_id, history_upper_sequence).await?;
+    let history_guidance = if earlier_unwatched_range.is_some() {
+        " Use earlierUnwatchedRange with a message list range request to fetch earlier history."
+    } else {
+        " No earlier thread-message history is available."
+    };
     Ok(WatchStatus {
         watching: active == 1,
-        starts_after_activity_sequence: Some(boundary_sequence),
+        starts_after_activity_sequence: (active == 1).then_some(boundary_sequence),
         earlier_unwatched_range,
         message: if active == 1 {
-            format!(
-                "Watching future thread activity. Use earlierUnwatchedRange with a message list range request to fetch earlier history. {board_lifecycle}"
-            )
+            format!("Watching future thread activity.{history_guidance} {board_lifecycle}")
         } else {
             format!(
-                "This thread is not watched. Use thread watch to receive future activity. Use earlierUnwatchedRange with a message list range request to fetch earlier history. {board_lifecycle}"
+                "This thread is not watched. Use thread watch to receive future activity.{history_guidance} {board_lifecycle}"
             )
         },
     })
+}
+
+async fn thread_message_history_range(
+    transaction: &mut BoardTransaction<'_>,
+    root_message_id: &MessageId,
+    upper_sequence: i64,
+) -> Result<Option<HistoryRange>, BoardError> {
+    let exists = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM board_activity \
+         WHERE root_id=? AND kind='threadMessageCreated' AND activity_sequence<=?)",
+        root_message_id.as_str(),
+        upper_sequence,
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if exists != 0 {
+        Ok(Some(HistoryRange {
+            scope: MessageListScope::Thread {
+                root_message_id: root_message_id.clone(),
+            },
+            selection: MessageSelection::Range {
+                from_activity_sequence: ActivitySequence::ZERO,
+                to_activity_sequence: activity_sequence(upper_sequence)?,
+            },
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn invalid_root_message(root_message_id: &MessageId) -> BoardError {
@@ -194,7 +231,7 @@ fn invalid_root_message(root_message_id: &MessageId) -> BoardError {
         kind: BoardFailureKind::InvalidRootMessage,
         stage: BoardFailureStage::Validation,
         message: "The thread root does not exist or is not a top-level message. Choose a top-level message ID.".to_owned(),
-        next_action: BoardNextAction::CorrectRequest,
+        next_action: BoardNextAction::InspectResource,
         details: BoardErrorDetails::Resource {
             resource: ResourceIdentity::Thread {
                 root_message_id: root_message_id.clone(),

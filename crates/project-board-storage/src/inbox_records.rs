@@ -132,10 +132,17 @@ impl BoardStore {
             .transpose()?;
         let initialization_boundary = activity_sequence(latest)?;
         let initialization = if initialized_now {
+            let earlier_history_range =
+                project_main_history_range(&mut transaction, &request.project_id, latest).await?;
+            let message = if earlier_history_range.is_some() {
+                "Main-message tracking starts now. Earlier project main messages remain available through earlierHistoryRange with a message list range request."
+            } else {
+                "Main-message tracking starts now. No earlier project main-message history is available."
+            };
             InboxInitializationStatus::Initialized {
                 starts_after_activity_sequence: initialization_boundary,
-                earlier_history_range: (latest > 0).then(|| HistoryRange { scope: MessageListScope::Project { project_id: request.project_id.clone() }, selection: MessageSelection::Range { from_activity_sequence: ActivitySequence::ZERO, to_activity_sequence: initialization_boundary } }),
-                message: "Main-message tracking starts now. Earlier project messages remain available through the supplied history range.".to_owned(),
+                earlier_history_range,
+                message: message.to_owned(),
             }
         } else {
             InboxInitializationStatus::Existing
@@ -173,7 +180,6 @@ impl BoardStore {
             return Err(invalid_acknowledgement());
         }
         let project_id = project_for_scope(&mut transaction, &request.scope).await?;
-        ensure_project_reader_state(&mut transaction, &reader_key, &project_id).await?;
         validate_reader_activity_boundaries(&mut transaction, &reader_key, &project_id, latest)
             .await?;
         let previous: Option<i64> = match &request.scope {
@@ -194,7 +200,7 @@ impl BoardStore {
         let has_unread =
             recompute_project_unread(&mut transaction, &reader_key, &project_id).await?;
         let main_tracking_initialized = sqlx::query_scalar!("SELECT main_start IS NOT NULL FROM project_reader_state WHERE reader_key=? AND project_id=?", reader_key, project_id)
-            .fetch_one(&mut *transaction).await.map_err(storage_error)? != 0;
+            .fetch_optional(&mut *transaction).await.map_err(storage_error)?.unwrap_or(0) != 0;
         transaction.commit().await.map_err(storage_error)?;
         let project_id = ProjectId::try_from(project_id).map_err(|_| invalid_record())?;
         Ok(InboxAcknowledgeResult {
@@ -254,13 +260,6 @@ impl BoardStore {
         };
         let mut records = Vec::with_capacity(rows.len());
         for row in &rows {
-            validate_reader_activity_boundaries(
-                &mut transaction,
-                &reader_key,
-                &row.project_id,
-                latest,
-            )
-            .await?;
             records.push(decode_summary(row, latest)?);
         }
         transaction.commit().await.map_err(storage_error)?;
@@ -270,6 +269,35 @@ impl BoardStore {
                 next_cursor,
             },
         })
+    }
+}
+
+async fn project_main_history_range(
+    transaction: &mut BoardTransaction<'_>,
+    project_id: &ProjectId,
+    upper_sequence: i64,
+) -> Result<Option<HistoryRange>, BoardError> {
+    let exists = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM board_activity \
+         WHERE project_id=? AND kind='mainMessageCreated' AND activity_sequence<=?)",
+        project_id.as_str(),
+        upper_sequence,
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if exists != 0 {
+        Ok(Some(HistoryRange {
+            scope: MessageListScope::Project {
+                project_id: project_id.clone(),
+            },
+            selection: MessageSelection::Range {
+                from_activity_sequence: ActivitySequence::ZERO,
+                to_activity_sequence: activity_sequence(upper_sequence)?,
+            },
+        }))
+    } else {
+        Ok(None)
     }
 }
 

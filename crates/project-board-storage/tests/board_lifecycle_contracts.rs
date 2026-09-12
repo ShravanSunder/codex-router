@@ -116,15 +116,13 @@ async fn watch_messages_explain_history_guidance_and_board_lifecycle() {
         })
         .await
         .unwrap();
-    assert!(watched.watch_status.earlier_unwatched_range.is_some());
+    assert!(watched.watch_status.earlier_unwatched_range.is_none());
     assert!(
-        watched
+        !watched
             .watch_status
             .message
             .contains("earlierUnwatchedRange")
     );
-    assert!(watched.watch_status.message.contains("message list"));
-    assert!(watched.watch_status.message.contains("range"));
     assert!(watched.watch_status.message.contains("active"));
 
     store

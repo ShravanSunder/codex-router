@@ -67,6 +67,20 @@ Stop the foreground debug Host with Ctrl-C when finished. It shuts down its reta
 
 ### Restart the Host for board persistence proof
 
+Build the board test binary, start a fresh debug Host as above, and run phase one:
+
+```sh
+cargo test -p agent-sessions --test board_debug_acceptance --no-run
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-sessions --test board_debug_acceptance \
+  two_luna_agents_exchange_a_verified_finding_through_the_board_cli \
+  -- --ignored --exact --nocapture
+```
+
+Phase one uses two fresh Luna sessions and exercises references across two
+projects, watches, inbox acknowledgement, history, and archived/resolved write
+rejection. It saves private state for the persistence check.
+
 The project-board acceptance journey may reopen the same isolated service data
 after the original foreground Host has exited. Record the original `hostPid`
 from `debug-host-context.json`, stop that owned Host with Ctrl-C, and relaunch
@@ -88,6 +102,19 @@ PID. Wait for `host status` and endpoint discovery to report readiness again,
 then verify the new PID differs from the recorded PID before reading the board.
 Do not use resume after an indeterminate stop or with a directory from another
 test run.
+
+After readiness is confirmed, run phase two without starting additional models:
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-sessions --test board_debug_acceptance \
+  board_state_survives_owned_debug_host_restart \
+  -- --ignored --exact --nocapture
+```
+
+It verifies persisted projects, references, archive state, watches and read
+acknowledgements through the CLI after confirming the Host PID changed. Stop the
+owned resumed Host with Ctrl-C after this check.
 
 ## Run the schedule and recovery scenarios
 

@@ -333,7 +333,7 @@ async fn future_only_watches_scoped_acknowledgements_and_unread_summaries_surviv
         })
         .await
         .unwrap();
-    assert!(watched.watch_status.earlier_unwatched_range.is_some());
+    assert!(watched.watch_status.earlier_unwatched_range.is_none());
 
     let reply = post(
         &mut store,
