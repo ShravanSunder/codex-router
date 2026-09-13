@@ -200,7 +200,8 @@ Running the CLI does not confer socket access. The caller's sandbox must permit
 that exact service's `control.sock`; the default network-disabled Codex workspace
 sandbox does not. A pre-dispatch `permissionDenied` diagnostic with
 `nextAction: requestApproval` asks the agent to request its host tool's automated
-approval review for the exact authorized command or selected socket access. Retry
+approval review for the exact authorized command or selected socket access. If
+automation cannot grant access, ask the human for the required access. Retry
 only after a grant; repeated denial is not a Router outage. Receiving a message
 does not prove outgoing socket access. The [debug testing guide](../testing/automation-debug-testing.md)
 shows a scoped native permission profile and its positive/negative proof. These

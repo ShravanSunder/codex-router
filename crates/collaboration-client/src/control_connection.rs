@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-const PERMISSION_DIAGNOSTIC_MESSAGE: &str = "Request automated approval review through your tool for this exact command or exact socket access, then retry only after access is granted.";
+const PERMISSION_DIAGNOSTIC_MESSAGE: &str = "Request automated approval review through your tool, or ask the user to grant the required command/socket access. Retry only after access is granted.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {

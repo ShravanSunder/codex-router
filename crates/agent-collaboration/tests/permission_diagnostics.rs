@@ -63,6 +63,7 @@ fn endpoint_discovery_reports_typed_permission_recovery_in_json_and_human_output
     assert!(stderr.contains("Stage: manifestRead"));
     assert!(stderr.contains("Next action: requestApproval"));
     assert!(stderr.contains("automated approval review"));
+    assert!(stderr.contains("ask the user"));
 }
 
 #[test]

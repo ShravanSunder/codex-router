@@ -16,7 +16,7 @@ fn denied_discovery_has_permission_diagnostic() {
         serde_json::json!({
             "kind": "permissionDenied",
             "stage": "socketConnect",
-            "message": "Request automated approval review through your tool for this exact command or exact socket access, then retry only after access is granted.",
+            "message": "Request automated approval review through your tool, or ask the user to grant the required command/socket access. Retry only after access is granted.",
             "nextAction": "requestApproval"
         })
     );

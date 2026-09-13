@@ -1,4 +1,7 @@
 //! Opt-in acceptance Host: normal Codex home, existing debug provider, fresh runtime and Luna only.
+#[path = "automation_debug_host/proof_permissions.rs"]
+mod proof_permissions;
+
 use codex_native_integration::{
     AppServerCommandSpec, CodexPaths, CodexRouterProfile, DebugCodexProfile,
 };
@@ -105,6 +108,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Home hooks can inject extra work after a test task ends. Disable them only
     // for this owned acceptance app-server, without editing the home profile.
     let mut native_arguments = vec![OsString::from("-c"), OsString::from("features.hooks=false")];
+    native_arguments.extend(proof_permissions::automation_proof_startup_arguments(
+        &options.run_directory,
+    )?);
     native_arguments.extend(spec.arguments());
     let mut native = ChildCommandSpec::new(spec.executable())
         .with_arguments(native_arguments)

@@ -102,7 +102,7 @@ fn permission_diagnostic_schema_exposes_closed_agent_recovery_contract() {
     let diagnostic = json!({
         "kind": "permissionDenied",
         "stage": "socketConnect",
-        "message": "Request automated approval review through your tool for this exact command or exact socket access, then retry only after access is granted.",
+        "message": "Request automated approval review through your tool, or ask the user to grant the required command/socket access. Retry only after access is granted.",
         "nextAction": "requestApproval"
     });
     assert!(validator.is_valid(&diagnostic));

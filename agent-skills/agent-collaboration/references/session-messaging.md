@@ -4,11 +4,19 @@ Resolve the intended recipient and your sender from actual session references, t
 
 ```sh
 agent-collaboration endpoints list --json
-agent-collaboration sessions list --endpoint "$ENDPOINT_ID" --view stored --json
-agent-collaboration sessions list --endpoint "$ENDPOINT_ID" --view loaded --json
 ```
 
-Set `ENDPOINT_ID` to the endpoint ID returned by discovery for the selected service. `stored` finds saved sessions, including unloaded ones. `loaded` shows sessions currently loaded by that endpoint; `active` is only running work. Absence from loaded or active does not mean a session does not exist; check stored. A newly created session may appear in loaded before its stored metadata is available. Follow `nextCursor` with `--cursor` until the chosen view is exhausted; keep endpoint and view unchanged while paging.
+Set `ENDPOINT_ID` from that discovery and pass any supplied `--service-directory` on each call. Inventory titles can contain full prompts: save each page to an owner-private scratch file and filter locally before displaying it. Never dump unfiltered session pages into model context or infer absence from truncated output. For a working-directory lookup, set `RECIPIENT_CWD` from the task and `SELF_SESSION_ID` from your supplied self reference or current `CODEX_THREAD_ID` (see sender resolution below); leave the latter empty for recipient-only discovery.
+
+```sh
+INVENTORY_PAGE=$(mktemp)
+agent-collaboration sessions list --endpoint "$ENDPOINT_ID" --view stored --json > "$INVENTORY_PAGE"
+jq --arg cwd "$RECIPIENT_CWD" --arg self "${SELF_SESSION_ID:-}" \
+  '.result | {nextCursor, sessions: [.sessions[] | select(.workingDirectory == $cwd or .target.sessionId == $self) | {target, workingDirectory}]}' \
+  "$INVENTORY_PAGE"
+```
+
+For title hints, filter on the title locally and display only a short identifying excerpt with each matching target. Keep the full page on disk for cursor extraction. `stored` finds saved sessions, including unloaded ones. `loaded` shows sessions currently loaded by that endpoint; `active` is only running work. Absence from loaded or active does not mean a session does not exist; check stored. A newly created session may appear in loaded before its stored metadata is available. Follow `nextCursor` with `--cursor` until the chosen view is exhausted; keep endpoint and view unchanged while paging.
 
 Match the requested title/workingDirectory against candidate metadata, then copy that entry's `.target` verbatim. Inspect a candidate with `session inspect --endpoint ID --session ID --json` when more context is needed. A title or cwd is a discovery hint, not a unique identity; ask for an exact target when matches remain ambiguous. If the intended session is missing, report that result. Do not create a replacement session merely to make discovery succeed.
 
