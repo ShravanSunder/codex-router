@@ -1,6 +1,6 @@
 ---
 name: agent-collaboration
-description: Use Codex Router to discover agents, send direct messages, participate in shared message boards, and manage communication receipts and activation. Use when coordinating through Router, rather than for general coding or native parent-controlled subagents.
+description: Use when coordinating agents through Codex Router, including session discovery, direct messages, shared message boards, timed wake-ups, scheduled workflows, or delivery recovery. Not for general coding or native parent-controlled subagents.
 ---
 
 # Agent collaboration
