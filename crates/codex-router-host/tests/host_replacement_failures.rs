@@ -32,6 +32,11 @@ use tokio::io::AsyncWriteExt;
 mod operator_client;
 use operator_client::send_operator_request;
 
+#[path = "support/host_replacement_cleanup.rs"]
+mod host_replacement_cleanup;
+use host_replacement_cleanup::reap_fixture_host;
+use host_replacement_cleanup::terminate_logged_fixture_processes;
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test]
@@ -95,75 +100,83 @@ async fn retained_router_teardown_failure_keeps_restart_busy_and_never_executes(
         )),
     ));
 
-    let startup = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::AwaitHostStart,
-        Duration::from_secs(20),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&startup)?,
-        TerminalClassification::Ready,
-        "teardown fixture Host must start ready",
-    )?;
-    let router_process_id = wait_for_router_signal(&router_log, false).await?;
-    let app_server_process_id = wait_for_process_id(&app_server_log).await?;
-    let first_socket = coordination_paths.operator_socket().to_owned();
-    let first_executable = invalid_executable.clone();
-    let first_restart = tokio::spawn(async move {
-        send_operator_request(
-            &first_socket,
-            OperatorRequest::RestartHost {
-                executable: first_executable,
-            },
+    let proof_result: Result<(), Box<dyn std::error::Error>> = async {
+        let startup = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::AwaitHostStart,
             Duration::from_secs(20),
         )
-        .await
-        .map_err(|error| std::io::Error::other(error.to_string()))
-    });
-    let observed_router_process_id = wait_for_router_signal(&router_log, true).await?;
-    check_equal(
-        observed_router_process_id,
-        router_process_id,
-        "Host replacement must signal the exact retained router",
-    )?;
+        .await?;
+        check_equal(
+            terminal_classification(&startup)?,
+            TerminalClassification::Ready,
+            "teardown fixture Host must start ready",
+        )?;
+        let router_process_id = wait_for_router_signal(&router_log, false).await?;
+        let app_server_process_id = wait_for_process_id(&app_server_log).await?;
+        let first_socket = coordination_paths.operator_socket().to_owned();
+        let first_executable = invalid_executable.clone();
+        let first_restart = tokio::spawn(async move {
+            send_operator_request(
+                &first_socket,
+                OperatorRequest::RestartHost {
+                    executable: first_executable,
+                },
+                Duration::from_secs(20),
+            )
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))
+        });
+        let observed_router_process_id = wait_for_router_signal(&router_log, true).await?;
+        check_equal(
+            observed_router_process_id,
+            router_process_id,
+            "Host replacement must signal the exact retained router",
+        )?;
 
-    let overlapping_restart = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::RestartHost {
-            executable: invalid_executable,
-        },
-        Duration::from_secs(2),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&overlapping_restart)?,
-        TerminalClassification::Busy,
-        "retained teardown must continue owning mutation admission",
-    )?;
-    let first_frames = tokio::time::timeout(Duration::from_secs(15), first_restart).await???;
-    check_equal(
-        terminal_classification(&first_frames)?,
-        TerminalClassification::Failed,
-        "retained router timeout must fail Host replacement",
-    )?;
-    check(
-        matches!(first_frames.first(), Some(OperatorFrame::Progress(_))),
-        "teardown failure must follow replacement-starting progress",
-    )?;
-    check(
-        process_is_running(router_process_id),
-        "timed-out router must remain retained instead of being forgotten",
-    )?;
-    check(
-        !process_is_running(app_server_process_id),
-        "Host replacement must settle the app-server before router teardown",
-    )?;
+        let overlapping_restart = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::RestartHost {
+                executable: invalid_executable,
+            },
+            Duration::from_secs(2),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&overlapping_restart)?,
+            TerminalClassification::Busy,
+            "retained teardown must continue owning mutation admission",
+        )?;
+        let first_frames = tokio::time::timeout(Duration::from_secs(15), first_restart).await???;
+        check_equal(
+            terminal_classification(&first_frames)?,
+            TerminalClassification::Failed,
+            "retained router timeout must fail Host replacement",
+        )?;
+        check(
+            matches!(first_frames.first(), Some(OperatorFrame::Progress(_))),
+            "teardown failure must follow replacement-starting progress",
+        )?;
+        check(
+            process_is_running(router_process_id),
+            "timed-out router must remain retained instead of being forgotten",
+        )?;
+        check(
+            !process_is_running(app_server_process_id),
+            "Host replacement must settle the app-server before router teardown",
+        )
+    }
+    .await;
 
-    kill_process(router_process_id)?;
     runtime.abort();
     let _runtime_result = runtime.await;
-    Ok(())
+    let cleanup_result =
+        terminate_logged_fixture_processes(&[router_log.as_path(), app_server_log.as_path()]);
+    if let Err(error) = proof_result {
+        let _cleanup_result = cleanup_result;
+        return Err(error);
+    }
+    cleanup_result
 }
 
 #[tokio::test]
@@ -209,61 +222,77 @@ async fn signal_owns_shutdown_while_host_replacement_teardown_is_retained()
         .env("CODEX_HOST_SIGNAL_ROUTER_LOG", &router_log)
         .env("CODEX_HOST_SIGNAL_APP_SOCKET", &app_server_socket)
         .env("CODEX_HOST_SIGNAL_APP_LOG", &app_server_log)
+        .kill_on_drop(true)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut host_process = host_process.spawn()?;
-    let host_process_id = host_process.id().ok_or("fixture Host PID is missing")?;
+    let host_process_id = host_process.id();
 
-    let startup = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::AwaitHostStart,
-        Duration::from_secs(20),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&startup)?,
-        TerminalClassification::Ready,
-        "signal fixture Host must start ready",
-    )?;
-    let router_process_id = wait_for_router_signal(&router_log, false).await?;
-    let app_server_process_id = wait_for_process_id(&app_server_log).await?;
-    let restart_socket = coordination_paths.operator_socket().to_owned();
-    let restart_task = tokio::spawn(async move {
-        send_operator_request(
-            &restart_socket,
-            OperatorRequest::RestartHost {
-                executable: invalid_executable,
-            },
+    let proof_result: Result<(), Box<dyn std::error::Error>> = async {
+        let host_process_id = host_process_id.ok_or("fixture Host PID is missing")?;
+        let startup = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::AwaitHostStart,
             Duration::from_secs(20),
         )
-        .await
-        .map_err(|error| std::io::Error::other(error.to_string()))
-    });
-    let _signalled_router = wait_for_router_signal(&router_log, true).await?;
-    signal_process(host_process_id, rustix::process::Signal::TERM)?;
+        .await?;
+        check_equal(
+            terminal_classification(&startup)?,
+            TerminalClassification::Ready,
+            "signal fixture Host must start ready",
+        )?;
+        let router_process_id = wait_for_router_signal(&router_log, false).await?;
+        let app_server_process_id = wait_for_process_id(&app_server_log).await?;
+        let restart_socket = coordination_paths.operator_socket().to_owned();
+        let restart_task = tokio::spawn(async move {
+            send_operator_request(
+                &restart_socket,
+                OperatorRequest::RestartHost {
+                    executable: invalid_executable,
+                },
+                Duration::from_secs(20),
+            )
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))
+        });
+        let _signalled_router = wait_for_router_signal(&router_log, true).await?;
+        signal_process(host_process_id, rustix::process::Signal::TERM)?;
 
-    let host_status = tokio::time::timeout(Duration::from_secs(15), host_process.wait()).await??;
-    check(
-        host_status.success(),
-        "signal-owned shutdown fixture Host must exit cleanly",
-    )?;
-    let restart_frames = tokio::time::timeout(Duration::from_secs(2), restart_task).await???;
-    check(
-        matches!(restart_frames.as_slice(), [OperatorFrame::Progress(_)]),
-        "signal-owned shutdown must close the restart exchange without finalizing replacement",
-    )?;
-    check(
-        process_is_running(router_process_id),
-        "signal settlement must retain the router that exceeded its shutdown bound",
-    )?;
-    check(
-        !process_is_running(app_server_process_id),
-        "signal settlement must preserve completed app-server teardown",
-    )?;
-    let reacquired = HostInstance::acquire(coordination_paths)?;
-    drop(reacquired);
-    kill_process(router_process_id)?;
-    Ok(())
+        let host_status =
+            tokio::time::timeout(Duration::from_secs(15), host_process.wait()).await??;
+        check(
+            host_status.success(),
+            "signal-owned shutdown fixture Host must exit cleanly",
+        )?;
+        let restart_frames = tokio::time::timeout(Duration::from_secs(2), restart_task).await???;
+        check(
+            matches!(restart_frames.as_slice(), [OperatorFrame::Progress(_)]),
+            "signal-owned shutdown must close the restart exchange without finalizing replacement",
+        )?;
+        check(
+            process_is_running(router_process_id),
+            "signal settlement must retain the router that exceeded its shutdown bound",
+        )?;
+        check(
+            !process_is_running(app_server_process_id),
+            "signal settlement must preserve completed app-server teardown",
+        )?;
+        let reacquired = HostInstance::acquire(coordination_paths.clone())?;
+        drop(reacquired);
+        Ok(())
+    }
+    .await;
+
+    let host_cleanup_result = reap_fixture_host(&mut host_process).await;
+    let child_cleanup_result =
+        terminate_logged_fixture_processes(&[router_log.as_path(), app_server_log.as_path()]);
+    if let Err(error) = proof_result {
+        let _host_cleanup_result = host_cleanup_result;
+        let _child_cleanup_result = child_cleanup_result;
+        return Err(error);
+    }
+    host_cleanup_result?;
+    child_cleanup_result
 }
 
 #[tokio::test]
@@ -445,13 +474,6 @@ fn process_is_running(process_id: u32) -> bool {
         .ok()
         .and_then(rustix::process::Pid::from_raw)
         .is_some_and(|process_id| rustix::process::test_kill_process(process_id).is_ok())
-}
-
-fn kill_process(process_id: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let process_id = rustix::process::Pid::from_raw(i32::try_from(process_id)?)
-        .ok_or("fixture process ID must be nonzero")?;
-    rustix::process::kill_process(process_id, rustix::process::Signal::KILL)?;
-    Ok(())
 }
 
 fn signal_process(
