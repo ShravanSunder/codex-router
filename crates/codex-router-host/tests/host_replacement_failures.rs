@@ -34,6 +34,7 @@ use operator_client::send_operator_request;
 
 #[path = "support/host_replacement_cleanup.rs"]
 mod host_replacement_cleanup;
+use host_replacement_cleanup::finish_fixture_proof;
 use host_replacement_cleanup::reap_fixture_host;
 use host_replacement_cleanup::terminate_logged_fixture_processes;
 
@@ -172,11 +173,7 @@ async fn retained_router_teardown_failure_keeps_restart_busy_and_never_executes(
     let _runtime_result = runtime.await;
     let cleanup_result =
         terminate_logged_fixture_processes(&[router_log.as_path(), app_server_log.as_path()]);
-    if let Err(error) = proof_result {
-        let _cleanup_result = cleanup_result;
-        return Err(error);
-    }
-    cleanup_result
+    finish_fixture_proof(proof_result, [cleanup_result])
 }
 
 #[tokio::test]
@@ -286,13 +283,7 @@ async fn signal_owns_shutdown_while_host_replacement_teardown_is_retained()
     let host_cleanup_result = reap_fixture_host(&mut host_process).await;
     let child_cleanup_result =
         terminate_logged_fixture_processes(&[router_log.as_path(), app_server_log.as_path()]);
-    if let Err(error) = proof_result {
-        let _host_cleanup_result = host_cleanup_result;
-        let _child_cleanup_result = child_cleanup_result;
-        return Err(error);
-    }
-    host_cleanup_result?;
-    child_cleanup_result
+    finish_fixture_proof(proof_result, [host_cleanup_result, child_cleanup_result])
 }
 
 #[tokio::test]
