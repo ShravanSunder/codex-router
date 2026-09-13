@@ -26,6 +26,32 @@ use super::operator_client::send_operator_request;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(super) fn assert_explicit_restart_receipt(
+    receipt_path: &Path,
+    expected_process_id: u32,
+    expected_executable: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let receipt = std::fs::read_to_string(receipt_path)?;
+    let mut receipt_lines = receipt.lines();
+    let expected_process_id = expected_process_id.to_string();
+    let expected_executable = expected_executable.to_string_lossy();
+    check_equal(
+        receipt_lines.next(),
+        Some(expected_process_id.as_str()),
+        "same-process exec must preserve the Host PID",
+    )?;
+    check_equal(
+        receipt_lines.next(),
+        Some(expected_executable.as_ref()),
+        "restart must execute the executable selected by the requesting CLI",
+    )?;
+    check_equal(
+        receipt_lines.next(),
+        Some("retained-host-environment"),
+        "restart must retain Host-owned replacement environment",
+    )
+}
+
 pub(super) async fn run_update_case(
     mode: UpdateFixtureMode,
     expected: TerminalClassification,

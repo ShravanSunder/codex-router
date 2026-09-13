@@ -25,16 +25,22 @@ use codex_router_test_support::router_health::PersistentRouterHealthFixture;
 mod operator_client;
 use operator_client::send_operator_request;
 
+#[path = "support/host_replacement_cleanup.rs"]
+mod host_replacement_cleanup;
+use host_replacement_cleanup::finish_fixture_proof;
+use host_replacement_cleanup::reap_fixture_host;
+use host_replacement_cleanup::terminate_logged_fixture_processes;
+
 #[path = "support/update_reexec_fixture.rs"]
 mod update_reexec_fixture;
 use update_reexec_fixture::TestDirectory;
 use update_reexec_fixture::UpdateFixtureMode;
+use update_reexec_fixture::assert_explicit_restart_receipt;
 use update_reexec_fixture::check;
 use update_reexec_fixture::check_equal;
 use update_reexec_fixture::fixture_host_deadlines;
 use update_reexec_fixture::fixture_update_deadlines;
 use update_reexec_fixture::install_updater_fixture;
-use update_reexec_fixture::kill_process;
 use update_reexec_fixture::process_is_running;
 use update_reexec_fixture::required_path;
 use update_reexec_fixture::run_update_case;
@@ -165,56 +171,66 @@ async fn explicit_host_restart_executes_the_requesting_cli_and_retains_host_proj
         .env("CODEX_HOST_RESTART_APP_SOCKET", &app_server_socket)
         .env("CODEX_HOST_RESTART_APP_LOG", &app_server_log)
         .env("CODEX_HOST_RESTART_RECEIPT", &replacement_receipt)
+        .kill_on_drop(true)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut host_process = host_process.spawn()?;
-    let original_host_process_id = host_process.id().ok_or("fixture Host PID is missing")?;
+    let original_host_process_id = host_process.id();
+    let mut host_reaped = false;
 
-    let frames = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::RestartHost {
-            executable: current_executable.clone(),
-        },
-        Duration::from_secs(20),
+    let proof_result: Result<(), Box<dyn std::error::Error>> = async {
+        let original_host_process_id =
+            original_host_process_id.ok_or("fixture Host PID is missing")?;
+        let frames = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::RestartHost {
+                executable: current_executable.clone(),
+            },
+            Duration::from_secs(20),
+        )
+        .await?;
+        check(
+            matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
+            "explicit host restart must emit replacement-starting before old-host EOF",
+        )?;
+        let host_wait = tokio::time::timeout(Duration::from_secs(20), host_process.wait()).await;
+        host_reaped = matches!(&host_wait, Ok(Ok(_)));
+        let output = host_wait??;
+        check(
+            output.success(),
+            "explicit replacement bootstrap fixture failed",
+        )?;
+        assert_explicit_restart_receipt(
+            &replacement_receipt,
+            original_host_process_id,
+            &current_executable,
+        )?;
+        let app_server_pid = wait_for_process_id(&app_server_log).await?;
+        check(
+            !process_is_running(app_server_pid),
+            "explicit host restart must settle the old app-server before exec",
+        )?;
+        let reacquired = HostInstance::acquire(coordination_paths.clone())?;
+        drop(reacquired);
+        Ok(())
+    }
+    .await;
+
+    let host_cleanup_result = if host_reaped {
+        Ok(())
+    } else {
+        reap_fixture_host(&mut host_process).await
+    };
+    let child_cleanup_result = terminate_logged_fixture_processes(&[app_server_log.as_path()]);
+    let router_cleanup_result = router.finish().await;
+    finish_fixture_proof(
+        proof_result,
+        [
+            host_cleanup_result,
+            child_cleanup_result,
+            router_cleanup_result,
+        ],
     )
-    .await?;
-    check(
-        matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
-        "explicit host restart must emit replacement-starting before old-host EOF",
-    )?;
-    let output = tokio::time::timeout(Duration::from_secs(20), host_process.wait()).await??;
-    check(
-        output.success(),
-        "explicit replacement bootstrap fixture failed",
-    )?;
-    let receipt = std::fs::read_to_string(&replacement_receipt)?;
-    let mut receipt_lines = receipt.lines();
-    let expected_process_id = original_host_process_id.to_string();
-    let expected_executable = current_executable.to_string_lossy();
-    check_equal(
-        receipt_lines.next(),
-        Some(expected_process_id.as_str()),
-        "same-process exec must preserve the Host PID",
-    )?;
-    check_equal(
-        receipt_lines.next(),
-        Some(expected_executable.as_ref()),
-        "restart must execute the executable selected by the requesting CLI",
-    )?;
-    check_equal(
-        receipt_lines.next(),
-        Some("retained-host-environment"),
-        "restart must retain Host-owned replacement environment",
-    )?;
-    let app_server_pid = wait_for_process_id(&app_server_log).await?;
-    check(
-        !process_is_running(app_server_pid),
-        "explicit host restart must settle the old app-server before exec",
-    )?;
-    let reacquired = HostInstance::acquire(coordination_paths)?;
-    drop(reacquired);
-    router.finish().await?;
-    Ok(())
 }
 
 #[tokio::test]
@@ -258,69 +274,72 @@ async fn invalid_host_restart_executable_fails_before_child_teardown()
         ManagedUpdateInputs::production(),
     ));
 
-    let startup = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::AwaitHostStart,
-        Duration::from_secs(20),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&startup)?,
-        TerminalClassification::Ready,
-        "invalid-path fixture Host must start ready",
-    )?;
-    let app_server_pid = wait_for_process_id(&app_server_log).await?;
-    let restart = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::RestartHost {
-            executable: PathBuf::from("relative/codex-router"),
-        },
-        Duration::from_secs(20),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&restart)?,
-        TerminalClassification::Failed,
-        "relative replacement path must fail admission",
-    )?;
-    check(
-        process_is_running(app_server_pid),
-        "invalid replacement path must leave the retained app-server running",
-    )?;
-    let missing_projection = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::RestartHost {
-            executable: current_executable,
-        },
-        Duration::from_secs(20),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&missing_projection)?,
-        TerminalClassification::Failed,
-        "missing Host-owned replacement projection must fail admission",
-    )?;
-    check(
-        process_is_running(app_server_pid),
-        "missing replacement projection must leave the retained app-server running",
-    )?;
-    let status = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::Status,
-        Duration::from_secs(20),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&status)?,
-        TerminalClassification::Ready,
-        "invalid replacement path must leave operator readiness published",
-    )?;
+    let proof_result: Result<(), Box<dyn std::error::Error>> = async {
+        let startup = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::AwaitHostStart,
+            Duration::from_secs(20),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&startup)?,
+            TerminalClassification::Ready,
+            "invalid-path fixture Host must start ready",
+        )?;
+        let app_server_pid = wait_for_process_id(&app_server_log).await?;
+        let restart = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::RestartHost {
+                executable: PathBuf::from("relative/codex-router"),
+            },
+            Duration::from_secs(20),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&restart)?,
+            TerminalClassification::Failed,
+            "relative replacement path must fail admission",
+        )?;
+        check(
+            process_is_running(app_server_pid),
+            "invalid replacement path must leave the retained app-server running",
+        )?;
+        let missing_projection = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::RestartHost {
+                executable: current_executable,
+            },
+            Duration::from_secs(20),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&missing_projection)?,
+            TerminalClassification::Failed,
+            "missing Host-owned replacement projection must fail admission",
+        )?;
+        check(
+            process_is_running(app_server_pid),
+            "missing replacement projection must leave the retained app-server running",
+        )?;
+        let status = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::Status,
+            Duration::from_secs(20),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&status)?,
+            TerminalClassification::Ready,
+            "invalid replacement path must leave operator readiness published",
+        )
+    }
+    .await;
 
     runtime.abort();
     let _runtime_result = runtime.await;
-    kill_process(app_server_pid)?;
-    router.finish().await?;
-    Ok(())
+    let child_cleanup_result = terminate_logged_fixture_processes(&[app_server_log.as_path()]);
+    let router_cleanup_result = router.finish().await;
+    finish_fixture_proof(proof_result, [child_cleanup_result, router_cleanup_result])
 }
 
 #[tokio::test]
@@ -353,7 +372,7 @@ async fn host_restart_exec_failure_releases_singleton_after_settling_children()
         directory.path().join("operator.sock"),
         directory.path().join("instance.lock"),
     );
-    let runtime = tokio::spawn(HostRuntime::run(
+    let mut runtime = tokio::spawn(HostRuntime::run(
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router.address(),
@@ -367,43 +386,56 @@ async fn host_restart_exec_failure_releases_singleton_after_settling_children()
         )),
     ));
 
-    let startup = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::AwaitHostStart,
-        Duration::from_secs(20),
-    )
-    .await?;
-    check_equal(
-        terminal_classification(&startup)?,
-        TerminalClassification::Ready,
-        "exec-failure fixture Host must start ready",
-    )?;
-    let app_server_pid = wait_for_process_id(&app_server_log).await?;
-    let frames = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::RestartHost {
-            executable: invalid_executable,
-        },
-        Duration::from_secs(20),
-    )
-    .await?;
-    check(
-        matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
-        "failed exec must close the old connection after replacement progress",
-    )?;
-    let runtime_result = tokio::time::timeout(Duration::from_secs(20), runtime).await??;
-    check(
-        matches!(runtime_result, Err(codex_router_host::HostError::Exec(_))),
-        "failed replacement exec must terminate the foreground Host with an exec error",
-    )?;
-    check(
-        !process_is_running(app_server_pid),
-        "failed replacement exec must occur after app-server settlement",
-    )?;
-    let reacquired = HostInstance::acquire(coordination_paths)?;
-    drop(reacquired);
-    router.finish().await?;
-    Ok(())
+    let mut runtime_observed = false;
+    let proof_result: Result<(), Box<dyn std::error::Error>> = async {
+        let startup = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::AwaitHostStart,
+            Duration::from_secs(20),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&startup)?,
+            TerminalClassification::Ready,
+            "exec-failure fixture Host must start ready",
+        )?;
+        let app_server_pid = wait_for_process_id(&app_server_log).await?;
+        let frames = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::RestartHost {
+                executable: invalid_executable,
+            },
+            Duration::from_secs(20),
+        )
+        .await?;
+        check(
+            matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
+            "failed exec must close the old connection after replacement progress",
+        )?;
+        let runtime_wait = tokio::time::timeout(Duration::from_secs(20), &mut runtime).await;
+        runtime_observed = runtime_wait.is_ok();
+        let runtime_result = runtime_wait??;
+        check(
+            matches!(runtime_result, Err(codex_router_host::HostError::Exec(_))),
+            "failed replacement exec must terminate the foreground Host with an exec error",
+        )?;
+        check(
+            !process_is_running(app_server_pid),
+            "failed replacement exec must occur after app-server settlement",
+        )?;
+        let reacquired = HostInstance::acquire(coordination_paths.clone())?;
+        drop(reacquired);
+        Ok(())
+    }
+    .await;
+
+    if !runtime_observed {
+        runtime.abort();
+        let _runtime_result = runtime.await;
+    }
+    let child_cleanup_result = terminate_logged_fixture_processes(&[app_server_log.as_path()]);
+    let router_cleanup_result = router.finish().await;
+    finish_fixture_proof(proof_result, [child_cleanup_result, router_cleanup_result])
 }
 
 #[tokio::test]

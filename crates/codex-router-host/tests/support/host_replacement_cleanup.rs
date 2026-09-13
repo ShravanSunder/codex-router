@@ -1,6 +1,17 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+pub(super) fn finish_fixture_proof<const CLEANUP_COUNT: usize>(
+    proof_result: Result<(), Box<dyn std::error::Error>>,
+    cleanup_results: [Result<(), Box<dyn std::error::Error>>; CLEANUP_COUNT],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cleanup_error = cleanup_results.into_iter().find_map(Result::err);
+    match proof_result {
+        Err(error) => Err(error),
+        Ok(()) => cleanup_error.map_or(Ok(()), Err),
+    }
+}
+
 pub(super) async fn reap_fixture_host(
     child: &mut tokio::process::Child,
 ) -> Result<(), Box<dyn std::error::Error>> {
