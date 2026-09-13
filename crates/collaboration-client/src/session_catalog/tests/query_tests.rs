@@ -113,7 +113,7 @@ fn checkout_scope_with_broken_git_metadata_uses_exact_cwd_filter() {
         .expect("write broken git metadata");
     let query = SessionCatalogQuery {
         codex_home: fixture_root.join("codex-home"),
-        current_dir: current_dir.clone(),
+        current_dir,
         root: SessionCatalogRoot::Checkout,
         provider: SessionCatalogProvider::Any,
         source: SessionCatalogSource::All,

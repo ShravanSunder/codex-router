@@ -183,8 +183,8 @@ fn repository_basename_prefers_origin_and_git_common_directory_over_invoking_wor
 fn partial_git_evidence_retains_the_current_checkout_as_a_live_root() {
     let checkout = PathBuf::from("/repo/project");
     assert_eq!(
-        live_roots_with_current_checkout_fallback(Vec::new(), &checkout, true),
-        [checkout.clone()]
+        live_roots_with_current_checkout_fallback(Vec::new(), &checkout, true).as_slice(),
+        std::slice::from_ref(&checkout)
     );
     assert!(live_roots_with_current_checkout_fallback(Vec::new(), &checkout, false).is_empty());
 }
