@@ -139,6 +139,7 @@ impl ProcessGroupChild {
         command: &mut Command,
         diagnostic_source: Option<&'static str>,
     ) -> Result<Self, ProcessGroupError> {
+        command.env_remove(crate::inherited_lock_environment());
         command.process_group(0);
         let mut child = command.spawn().map_err(ProcessGroupError::Spawn)?;
         if let (Some(source), Some(stderr)) = (diagnostic_source, child.stderr.take()) {

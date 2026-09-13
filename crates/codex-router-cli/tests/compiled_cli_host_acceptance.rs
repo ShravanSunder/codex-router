@@ -249,9 +249,11 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         check(generations.lines().count() == 4, "whole Host restart child generation missing")?;
         for former_pid in generations.lines().take(3) {
             let former_pid = rustix::process::Pid::from_raw(former_pid.parse()?).ok_or("invalid child PID")?;
-            check(rustix::process::test_kill_process(former_pid).is_err(), "an old app-server child survived replacement")?;
+            check(matches!(rustix::process::test_kill_process(former_pid), Err(rustix::io::Errno::SRCH)), "an old app-server child is still present or its absence could not be verified")?;
         }
-        eprintln!("Host PID {host_process_id} now maps installed image {}; stable lock retained; four child generations settled", replacement_binary.display());
+        let child_environment = std::fs::read_to_string(process_log.with_extension("handoff"))?;
+        check(child_environment.lines().last().is_some_and(|line| line.ends_with(" false")), "replacement app-server inherited the Host-only handoff marker")?;
+        eprintln!("Host PID {host_process_id} now maps installed image {}; stable lock retained; four child generations settled; ordinary child handoff marker absent", replacement_binary.display());
 
         let service_directory = router_root.join("agent-communication");
         let native_path = tokio::task::spawn_blocking(move || {
@@ -321,8 +323,21 @@ async fn compiled_cli_app_server_child_entrypoint() -> Result<(), Box<dyn std::e
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log)?;
+            .open(&log)?;
         std::io::Write::write_all(&mut file, format!("{}\n", std::process::id()).as_bytes())?;
+        let mut environment_log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Path::new(&log).with_extension("handoff"))?;
+        std::io::Write::write_all(
+            &mut environment_log,
+            format!(
+                "{} {}\n",
+                std::process::id(),
+                std::env::var_os(codex_router_host::inherited_lock_environment()).is_some()
+            )
+            .as_bytes(),
+        )?;
     }
     let socket_path = PathBuf::from(
         std::env::var_os("CODEX_ROUTER_COMPILED_CLI_NATIVE_SOCKET")
