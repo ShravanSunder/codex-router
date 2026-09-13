@@ -50,11 +50,12 @@ fn nested_paths_resolve_to_one_common_directory_and_origin_takes_precedence() ->
     let nested_location = BoardRepositoryLocation::discover(&nested)?;
     match (root_location, nested_location) {
         (BoardRepositoryLocation::Local(root), BoardRepositoryLocation::Local(child)) => {
-            assert_eq!(root, child);
-            assert_eq!(
-                Path::new(root.as_str()),
-                fixture.0.join(".git").canonicalize()?
-            );
+            if root != child {
+                return Err("nested path resolved to a different repository".into());
+            }
+            if Path::new(root.as_str()) != fixture.0.join(".git").canonicalize()? {
+                return Err("repository common directory was not canonical".into());
+            }
         }
         _ => {
             return Err(std::io::Error::other(
@@ -82,7 +83,11 @@ fn nested_paths_resolve_to_one_common_directory_and_origin_takes_precedence() ->
                     std::io::Error::other("explicit origin must remain origin-based").into(),
                 );
             };
-            assert_eq!(origin, expected);
+            if origin != expected {
+                return Err(
+                    "discovered origin did not match the normalized explicit origin".into(),
+                );
+            }
         }
         _ => return Err(std::io::Error::other("configured origin must take precedence").into()),
     }
@@ -92,13 +97,17 @@ fn nested_paths_resolve_to_one_common_directory_and_origin_takes_precedence() ->
 #[test]
 fn missing_repository_and_unreadable_path_are_distinct() -> TestResult {
     let fixture = RepositoryFixture::new()?;
-    assert!(matches!(
+    if !matches!(
         BoardRepositoryLocation::discover(&fixture.0),
         Err(BoardRepositoryError::MissingRepository)
-    ));
-    assert!(matches!(
+    ) {
+        return Err("readable non-repository path did not report MissingRepository".into());
+    }
+    if !matches!(
         BoardRepositoryLocation::discover(&fixture.0.join("absent")),
         Err(BoardRepositoryError::UnreadablePath)
-    ));
+    ) {
+        return Err("absent path did not report UnreadablePath".into());
+    }
     Ok(())
 }
