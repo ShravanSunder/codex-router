@@ -1,4 +1,4 @@
-//! Ordered retained-child teardown after a changed managed-Codex update.
+//! Ordered retained-child teardown shared by whole-Host replacement operations.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -8,21 +8,26 @@ use crate::RouterChild;
 use crate::RouterShutdownOutcome;
 use crate::ShutdownOutcome;
 
-pub(crate) type UpdateActivationFuture =
-    Pin<Box<dyn Future<Output = UpdateActivationCompletion> + Send + 'static>>;
+pub(crate) type HostReplacementFuture =
+    Pin<Box<dyn Future<Output = HostReplacementCompletion> + Send + 'static>>;
 
-pub(crate) struct UpdateActivationCompletion {
+pub(crate) struct HostReplacementCompletion {
     pub(crate) app_server: Option<AppServerChild>,
     pub(crate) router: Option<RouterChild>,
     pub(crate) app_server_shutdown: Option<ShutdownOutcome>,
-    pub(crate) succeeded: bool,
-    pub(crate) message: &'static str,
+    pub(crate) failure: Option<HostReplacementFailure>,
 }
 
-pub(crate) fn activate_changed_update(
+#[derive(Clone, Copy)]
+pub(crate) enum HostReplacementFailure {
+    AppServerTeardown,
+    RouterTeardown,
+}
+
+pub(crate) fn activate_host_replacement(
     mut app_server: Option<AppServerChild>,
     mut router: Option<RouterChild>,
-) -> UpdateActivationFuture {
+) -> HostReplacementFuture {
     Box::pin(async move {
         let mut app_server_shutdown = None;
         if let Some(child) = app_server.as_mut() {
@@ -32,21 +37,19 @@ pub(crate) fn activate_changed_update(
                     app_server = None;
                 }
                 Ok(ShutdownOutcome::TimedOutStillRunning) => {
-                    return UpdateActivationCompletion {
+                    return HostReplacementCompletion {
                         app_server,
                         router,
                         app_server_shutdown: Some(ShutdownOutcome::TimedOutStillRunning),
-                        succeeded: false,
-                        message: "updated Codex but app-server teardown failed",
+                        failure: Some(HostReplacementFailure::AppServerTeardown),
                     };
                 }
                 Err(_) => {
-                    return UpdateActivationCompletion {
+                    return HostReplacementCompletion {
                         app_server,
                         router,
                         app_server_shutdown: None,
-                        succeeded: false,
-                        message: "updated Codex but app-server teardown failed",
+                        failure: Some(HostReplacementFailure::AppServerTeardown),
                     };
                 }
             }
@@ -57,22 +60,20 @@ pub(crate) fn activate_changed_update(
                     router = None;
                 }
                 Ok(RouterShutdownOutcome::TimedOutStillRunning) | Err(_) => {
-                    return UpdateActivationCompletion {
+                    return HostReplacementCompletion {
                         app_server,
                         router,
                         app_server_shutdown,
-                        succeeded: false,
-                        message: "updated Codex but router teardown failed",
+                        failure: Some(HostReplacementFailure::RouterTeardown),
                     };
                 }
             }
         }
-        UpdateActivationCompletion {
+        HostReplacementCompletion {
             app_server,
             router,
             app_server_shutdown,
-            succeeded: true,
-            message: "updated Codex and starting replacement host",
+            failure: None,
         }
     })
 }

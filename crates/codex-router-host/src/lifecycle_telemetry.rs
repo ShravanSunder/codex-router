@@ -86,6 +86,7 @@ const fn operation_name(operation: HostOperation) -> &'static str {
     match operation {
         HostOperation::Start => "start",
         HostOperation::Status => "status",
+        HostOperation::RestartHost => "restart_host",
         HostOperation::RestartAppServer => "restart_app_server",
         HostOperation::RestartRouter => "restart_router",
         HostOperation::UpdateCodex => "update_codex",

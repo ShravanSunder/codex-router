@@ -76,7 +76,7 @@ impl ManagedChildLaunchPlans {
     }
 }
 
-/// Inputs owned only by conditional update preparation and changed-update activation.
+/// Inputs for conditional managed-Codex updates and whole-Host replacement.
 pub struct ManagedUpdateInputs {
     update_deadlines: crate::UpdateDeadlines,
     replacement_command: Option<ChildCommandSpec>,
@@ -108,7 +108,7 @@ impl ManagedUpdateInputs {
         self
     }
 
-    /// Supplies the CLI-owned provider flush adapter for changed-update exec.
+    /// Supplies the CLI-owned provider flush adapter for whole-Host replacement.
     #[must_use]
     pub fn with_pre_exec_telemetry(mut self, telemetry: Arc<dyn PreExecTelemetry>) -> Self {
         self.pre_exec_telemetry = Some(telemetry);
@@ -194,7 +194,7 @@ impl HostRuntime {
         .await
     }
 
-    /// Consumes and validates singleton authority inherited across changed-update exec.
+    /// Consumes and validates singleton authority inherited across whole-Host replacement.
     pub async fn run_inherited(
         config: HostConfig,
         child_launch_plans: ManagedChildLaunchPlans,
@@ -303,13 +303,13 @@ impl HostRuntime {
         let mut active_restart = None::<request_admission::ActiveAppServerRestart>;
         let mut active_router_restart = None::<request_admission::ActiveRouterRestart>;
         let mut active_update = None::<request_admission::ActiveUpdate>;
-        let mut active_update_activation = None::<request_admission::ActiveUpdateActivation>;
+        let mut active_host_replacement = None::<request_admission::ActiveHostReplacement>;
         let mut active_status = None::<request_admission::ActiveStatusObservation>;
         let mut pending_identity = None::<codex_native_integration::ExecutableIdentityTask>;
         let mut retained_updater = None::<ProcessGroupChild>;
         loop {
             if let Some(owner) = &mut collaboration {
-                let result = if active_update_activation.is_some() {
+                let result = if active_host_replacement.is_some() {
                     owner.shutdown().await
                 } else {
                     owner
@@ -362,6 +362,7 @@ impl HostRuntime {
                         active_app_server_restart: &mut active_restart,
                         active_router_restart: &mut active_router_restart,
                         active_update: &mut active_update,
+                        active_host_replacement: &mut active_host_replacement,
                         active_status: &mut active_status,
                         update_drain_active,
                     });
@@ -466,13 +467,13 @@ impl HostRuntime {
                         update_inputs: &update_inputs,
                         app_server: &mut app_server,
                         router: &mut router_child,
-                        activation: &mut active_update_activation,
+                        activation: &mut active_host_replacement,
                         pending_identity: &mut pending_identity,
                         retained_updater: &mut retained_updater,
                     });
                 }
-                activation_completion = lifecycle_convergence::wait_for_update_activation(&mut active_update_activation), if active_update_activation.is_some() => {
-                    let Some(active) = active_update_activation.take() else {
+                activation_completion = lifecycle_convergence::wait_for_host_replacement(&mut active_host_replacement), if active_host_replacement.is_some() => {
+                    let Some(active) = active_host_replacement.take() else {
                         continue;
                     };
                     update_activation::apply_activation(update_activation::ActivationContext {
@@ -602,7 +603,7 @@ impl HostRuntime {
                     if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
-                        activation: &mut active_update_activation,
+                        activation: &mut active_host_replacement,
                         active_update: &mut active_update,
                         pending_identity: &mut pending_identity,
                         retained_updater: &mut retained_updater,
@@ -618,7 +619,7 @@ impl HostRuntime {
                     if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
-                        activation: &mut active_update_activation,
+                        activation: &mut active_host_replacement,
                         active_update: &mut active_update,
                         pending_identity: &mut pending_identity,
                         retained_updater: &mut retained_updater,
@@ -634,7 +635,7 @@ impl HostRuntime {
                     if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
-                        activation: &mut active_update_activation,
+                        activation: &mut active_host_replacement,
                         active_update: &mut active_update,
                         pending_identity: &mut pending_identity,
                         retained_updater: &mut retained_updater,

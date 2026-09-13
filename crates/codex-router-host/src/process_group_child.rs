@@ -55,6 +55,13 @@ impl ChildCommandSpec {
         self
     }
 
+    /// Replaces only the executable while preserving the owner-captured projection.
+    #[must_use]
+    pub(crate) fn with_executable(mut self, executable: PathBuf) -> Self {
+        self.executable = executable;
+        self
+    }
+
     /// Adds one explicit environment value required by the child projection.
     #[must_use]
     pub fn with_environment<TKey, TValue>(mut self, key: TKey, value: TValue) -> Self

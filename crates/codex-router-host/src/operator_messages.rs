@@ -1,4 +1,6 @@
-//! Bounded same-version operator messages and codecs.
+//! Bounded versioned operator messages and codecs.
+
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -12,13 +14,18 @@ pub const OPERATOR_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_OPERATOR_FRAME_BYTES: usize = 64 * 1024;
 
 /// One request accepted by the host owner.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperatorRequest {
     /// Observe current state.
     Status,
     /// Wait for this host lifetime's startup terminal state.
     AwaitHostStart,
+    /// Replace the whole Host with the invoking CLI executable.
+    RestartHost {
+        /// Absolute installed CLI path selected by the caller.
+        executable: PathBuf,
+    },
     /// Restart the retained app-server.
     RestartAppServer,
     /// Run the conditional managed Codex update.
@@ -30,10 +37,13 @@ pub enum OperatorRequest {
 impl OperatorRequest {
     /// Returns whether the request needs exclusive mutation ownership.
     #[must_use]
-    pub const fn is_mutating(self) -> bool {
+    pub const fn is_mutating(&self) -> bool {
         matches!(
             self,
-            Self::RestartAppServer | Self::UpdateCodex | Self::RestartRouter
+            Self::RestartHost { .. }
+                | Self::RestartAppServer
+                | Self::UpdateCodex
+                | Self::RestartRouter
         )
     }
 }
@@ -42,7 +52,7 @@ impl OperatorRequest {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostProgress {
-    /// A changed update is beginning ordered child teardown before re-exec.
+    /// Whole-Host replacement is beginning ordered child teardown before re-exec.
     ReplacementStarting,
 }
 
@@ -180,7 +190,7 @@ pub fn encode_operator_request(
 ) -> Result<Vec<u8>, OperatorProtocolError> {
     let mut encoded = serde_json::to_vec(&RequestEnvelope {
         protocol_version: OPERATOR_PROTOCOL_VERSION,
-        request: *request,
+        request: request.clone(),
     })?;
     encoded.push(b'\n');
     Ok(encoded)

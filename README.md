@@ -82,14 +82,29 @@ connections; the native TUI owns bounded reconnection without a Sessions supervi
 cargo run -p agent-collaboration -- --id 019fe7c6-f493-7f02-be72-2feac69d6e6d
 cargo run -p codex-router-cli -- host status
 cargo run -p codex-router-cli -- host restart
+cargo run -p codex-router-cli -- host app-server restart
+cargo run -p codex-router-cli -- host app-server update
 cargo run -p codex-router-cli -- host restart-router
-cargo run -p codex-router-cli -- host update
 ```
 
-`host update` runs the managed Codex updater. If executable content changes,
-the foreground host stops its children and re-execs itself; otherwise the
-running app-server and connected clients are left untouched. This MVP is not a
-background service, launchd agent, or cross-machine control plane.
+`host restart` replaces the whole Host with the installed CLI issuing the
+command and waits for replacement readiness. It retains the Host's configuration
+and does not download a binary. For an installed Host, run `codex-router host
+restart` after installing the newer version.
+
+`host app-server restart` restarts only managed Codex without updating it.
+`host app-server update` runs the managed Codex updater. If executable content
+changes, the foreground Host stops its children and re-execs itself; otherwise
+the running app-server and connected clients are left untouched. `host update`
+is no longer a command. This is a foreground runtime, not a background service
+or launchd agent.
+
+**First upgrade from a Host without whole-Host restart support:** stop the old
+foreground Host in its owning terminal, wait for it to exit, then start the
+newly installed `codex-router host` once. The old process cannot understand the
+new restart request. Subsequent compatible upgrades use `host restart`.
+See [Host restart validation](docs/testing/host-restart.md) for isolation and
+replacement proof.
 
 For discovery, agent-declared messages, queue/steer, timed wake-ups and scheduled
 work, see the [agent CLI guide](docs/agent-guidance/agent-collaboration.md).

@@ -1,4 +1,4 @@
-//! Changed-update activation transitions applied by the single lifecycle owner.
+//! Managed-update preparation and shared Host replacement finalization.
 
 use super::*;
 use crate::OperatorFrame;
@@ -10,7 +10,7 @@ pub(super) struct PreparationContext<'a> {
     pub(super) update_inputs: &'a ManagedUpdateInputs,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
-    pub(super) activation: &'a mut Option<request_admission::ActiveUpdateActivation>,
+    pub(super) activation: &'a mut Option<request_admission::ActiveHostReplacement>,
     pub(super) pending_identity: &'a mut Option<codex_native_integration::ExecutableIdentityTask>,
     pub(super) retained_updater: &'a mut Option<ProcessGroupChild>,
 }
@@ -54,13 +54,15 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
             if context.router.is_some() {
                 context.state.router = RouterCondition::OwnedTransitioning;
             }
-            *context.activation = Some(request_admission::ActiveUpdateActivation {
-                future: crate::changed_update_activation::activate_changed_update(
+            *context.activation = Some(request_admission::ActiveHostReplacement {
+                future: crate::host_replacement_activation::activate_host_replacement(
                     context.app_server.take(),
                     context.router.take(),
                 ),
                 response: context.active.response,
                 replacement_command,
+                request: OperatorRequest::UpdateCodex,
+                operation: HostOperation::UpdateCodex,
                 started_at: context.active.started_at,
             });
             return;
@@ -100,8 +102,8 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
 }
 
 pub(super) struct ActivationContext<'a> {
-    pub(super) completion: crate::changed_update_activation::UpdateActivationCompletion,
-    pub(super) active: request_admission::ActiveUpdateActivation,
+    pub(super) completion: crate::host_replacement_activation::HostReplacementCompletion,
+    pub(super) active: request_admission::ActiveHostReplacement,
     pub(super) state: &'a mut RuntimeState,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
@@ -112,7 +114,7 @@ pub(super) struct ActivationContext<'a> {
 pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(), HostError> {
     *context.app_server = context.completion.app_server;
     *context.router = context.completion.router;
-    if !context.completion.succeeded {
+    if let Some(failure) = context.completion.failure {
         context.state.phase = HostPhase::Steady;
         context.state.app_server = if context.app_server.is_some() {
             AppServerCondition::ShutdownTimedOut
@@ -125,7 +127,7 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
             RouterCondition::Unavailable
         };
         context.state.last_lifecycle_outcome = Some(LifecycleOutcome {
-            operation: HostOperation::UpdateCodex,
+            operation: context.active.operation,
             classification: retained_lifecycle::restart_lifecycle_classification(
                 false,
                 context.completion.app_server_shutdown,
@@ -133,16 +135,16 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         });
         request_admission::send_terminal_response(
             context.active.response,
-            OperatorRequest::UpdateCodex,
+            context.active.request,
             TerminalClassification::Failed,
             context.state.snapshot(),
-            context.completion.message,
+            replacement_failure_message(context.active.operation, failure),
         );
         return Ok(());
     }
 
     context.state.record_lifecycle(
-        HostOperation::UpdateCodex,
+        context.active.operation,
         if matches!(
             context.completion.app_server_shutdown,
             Some(crate::ShutdownOutcome::Forced)
@@ -169,4 +171,29 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         .instance
         .release_prepared_lock_after_exec_failure()?;
     Err(HostError::Exec(error))
+}
+
+const fn replacement_failure_message(
+    operation: HostOperation,
+    failure: crate::host_replacement_activation::HostReplacementFailure,
+) -> &'static str {
+    match (operation, failure) {
+        (
+            HostOperation::RestartHost,
+            crate::host_replacement_activation::HostReplacementFailure::AppServerTeardown,
+        ) => "host restart app-server teardown failed",
+        (
+            HostOperation::RestartHost,
+            crate::host_replacement_activation::HostReplacementFailure::RouterTeardown,
+        ) => "host restart router teardown failed",
+        (
+            HostOperation::UpdateCodex,
+            crate::host_replacement_activation::HostReplacementFailure::AppServerTeardown,
+        ) => "updated Codex but app-server teardown failed",
+        (
+            HostOperation::UpdateCodex,
+            crate::host_replacement_activation::HostReplacementFailure::RouterTeardown,
+        ) => "updated Codex but router teardown failed",
+        _ => "host replacement teardown failed",
+    }
 }

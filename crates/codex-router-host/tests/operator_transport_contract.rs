@@ -73,6 +73,47 @@ fn protocol_is_versioned_bounded_and_accepts_exactly_one_request()
 }
 
 #[test]
+fn restart_host_request_carries_the_invoking_cli_executable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let request = OperatorRequest::RestartHost {
+        executable: PathBuf::from("/opt/codex-router/bin/codex-router"),
+    };
+
+    let encoded = encode_operator_request(&request)?;
+
+    check_equal(
+        encoded.as_slice(),
+        b"{\"protocol_version\":1,\"request\":{\"restart_host\":{\"executable\":\"/opt/codex-router/bin/codex-router\"}}}\n",
+        "restart request wire shape must remain explicit and stable",
+    )?;
+    check_equal(
+        decode_operator_request(&encoded)?,
+        request.clone(),
+        "restart request must preserve the invoking CLI executable",
+    )?;
+    check_equal(
+        decode_operator_request(
+            b"{\"protocol_version\":1,\"request\":{\"restart_host\":{\"executable\":\"/alternate/bin/codex-router\"}}}\n",
+        )?,
+        OperatorRequest::RestartHost {
+            executable: PathBuf::from("/alternate/bin/codex-router"),
+        },
+        "raw restart request must decode its exact executable",
+    )?;
+    check(
+        matches!(
+            decode_operator_request(
+                b"{\"protocol_version\":1,\"request\":{\"restart_host\":{}}}\n",
+            ),
+            Err(OperatorProtocolError::Json(_))
+        ),
+        "restart request without an executable must fail decoding",
+    )?;
+    check(request.is_mutating(), "host restart must be mutating")?;
+    Ok(())
+}
+
+#[test]
 fn request_mutability_supports_immediate_busy_classification() {
     assert!(!OperatorRequest::Status.is_mutating());
     assert!(!OperatorRequest::AwaitHostStart.is_mutating());

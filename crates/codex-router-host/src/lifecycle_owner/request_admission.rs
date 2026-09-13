@@ -22,7 +22,7 @@ enum MutationAdmission {
 #[must_use]
 const fn classify_operator_request(
     active_mutation: Option<HostOperation>,
-    request: OperatorRequest,
+    request: &OperatorRequest,
 ) -> MutationAdmission {
     if !request.is_mutating() {
         return MutationAdmission::ReadOnly;
@@ -31,12 +31,27 @@ const fn classify_operator_request(
         return MutationAdmission::Busy;
     }
     let operation = match request {
+        OperatorRequest::RestartHost { .. } => HostOperation::RestartHost,
         OperatorRequest::RestartAppServer => HostOperation::RestartAppServer,
         OperatorRequest::UpdateCodex => HostOperation::UpdateCodex,
         OperatorRequest::RestartRouter => HostOperation::RestartRouter,
         OperatorRequest::Status | OperatorRequest::AwaitHostStart => HostOperation::Status,
     };
     MutationAdmission::StartMutation(operation)
+}
+
+const fn drain_operation(
+    update_drain_active: bool,
+    request: &OperatorRequest,
+) -> Option<HostOperation> {
+    if !update_drain_active {
+        return None;
+    }
+    match request {
+        OperatorRequest::RestartHost { .. } => Some(HostOperation::RestartHost),
+        OperatorRequest::UpdateCodex => Some(HostOperation::UpdateCodex),
+        _ => None,
+    }
 }
 
 pub(super) struct OperatorWork {
@@ -64,10 +79,12 @@ pub(super) struct ActiveUpdate {
     pub(super) started_at: tokio::time::Instant,
 }
 
-pub(super) struct ActiveUpdateActivation {
-    pub(super) future: crate::changed_update_activation::UpdateActivationFuture,
+pub(super) struct ActiveHostReplacement {
+    pub(super) future: crate::host_replacement_activation::HostReplacementFuture,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) replacement_command: ChildCommandSpec,
+    pub(super) request: OperatorRequest,
+    pub(super) operation: HostOperation,
     pub(super) started_at: tokio::time::Instant,
 }
 
@@ -86,6 +103,7 @@ pub(super) struct OperatorRuntimeContext<'a> {
     pub(super) active_app_server_restart: &'a mut Option<ActiveAppServerRestart>,
     pub(super) active_router_restart: &'a mut Option<ActiveRouterRestart>,
     pub(super) active_update: &'a mut Option<ActiveUpdate>,
+    pub(super) active_host_replacement: &'a mut Option<ActiveHostReplacement>,
     pub(super) active_status: &'a mut Option<ActiveStatusObservation>,
     pub(super) update_drain_active: bool,
 }
@@ -147,6 +165,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
         HostPhase::Mutating { operation, .. } => Some(*operation),
         HostPhase::Starting | HostPhase::Steady | HostPhase::Stopping => None,
     };
+    let draining_operation = drain_operation(context.update_drain_active, &work.request);
     let active_mutation = context
         .active_app_server_restart
         .as_ref()
@@ -163,23 +182,72 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 .as_ref()
                 .map(|_active| HostOperation::UpdateCodex)
         })
-        .or(
-            (context.update_drain_active && work.request == OperatorRequest::UpdateCodex)
-                .then_some(HostOperation::UpdateCodex),
-        )
+        .or(draining_operation)
         .or(phase_mutation);
     if matches!(
-        classify_operator_request(active_mutation, work.request),
+        classify_operator_request(active_mutation, &work.request),
         MutationAdmission::Busy
     ) {
         let _send_result = work.response.try_send(OperatorFrame::busy(
-            work.request,
+            work.request.clone(),
             snapshot,
             "another lifecycle mutation is active".to_owned(),
         ));
         return;
     }
     match work.request {
+        OperatorRequest::RestartHost { executable } => {
+            let request = OperatorRequest::RestartHost {
+                executable: executable.clone(),
+            };
+            if let Err(message) = validate_host_restart_executable(&executable) {
+                send_terminal_response(
+                    work.response,
+                    request,
+                    TerminalClassification::Failed,
+                    snapshot,
+                    message,
+                );
+                return;
+            }
+            let Some(replacement_command) = context.update_inputs.replacement_command.clone()
+            else {
+                send_terminal_response(
+                    work.response,
+                    request,
+                    TerminalClassification::Failed,
+                    snapshot,
+                    "host replacement command is unavailable",
+                );
+                return;
+            };
+            let _progress_result = work.response.try_send(OperatorFrame::Progress(
+                crate::operator_messages::HostProgress::ReplacementStarting,
+            ));
+            context.state.phase = HostPhase::Mutating {
+                operation: HostOperation::RestartHost,
+                phase: "host-restart-teardown".to_owned(),
+            };
+            context.state.app_server = if context.app_server.is_some() {
+                AppServerCondition::Stopping
+            } else {
+                AppServerCondition::Absent
+            };
+            if context.router_child.is_some() {
+                context.state.router = RouterCondition::OwnedTransitioning;
+            }
+            *context.active_host_replacement = Some(ActiveHostReplacement {
+                future: crate::host_replacement_activation::activate_host_replacement(
+                    context.app_server.take(),
+                    context.router_child.take(),
+                ),
+                response: work.response,
+                replacement_command: replacement_command.with_executable(executable),
+                request,
+                operation: HostOperation::RestartHost,
+                started_at: tokio::time::Instant::now(),
+            });
+        }
         OperatorRequest::Status | OperatorRequest::AwaitHostStart => {
             if let Some(active) = context.active_status.as_mut() {
                 active.responses.push((work.request, work.response));
@@ -285,6 +353,21 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
     }
 }
 
+fn validate_host_restart_executable(executable: &std::path::Path) -> Result<(), &'static str> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !executable.is_absolute() {
+        return Err("host replacement executable must be an absolute path");
+    }
+    let Ok(metadata) = std::fs::metadata(executable) else {
+        return Err("host replacement executable is unavailable");
+    };
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err("host replacement executable must be an executable regular file");
+    }
+    Ok(())
+}
+
 pub(super) fn send_terminal_response(
     response_sender: mpsc::Sender<OperatorFrame>,
     request: OperatorRequest,
@@ -308,20 +391,35 @@ mod tests {
         assert_eq!(
             classify_operator_request(
                 Some(HostOperation::RestartAppServer),
-                OperatorRequest::Status,
+                &OperatorRequest::Status,
             ),
             MutationAdmission::ReadOnly
         );
         assert_eq!(
             classify_operator_request(
                 Some(HostOperation::RestartAppServer),
-                OperatorRequest::UpdateCodex,
+                &OperatorRequest::UpdateCodex,
             ),
             MutationAdmission::Busy
         );
         assert_eq!(
-            classify_operator_request(None, OperatorRequest::RestartRouter),
+            classify_operator_request(None, &OperatorRequest::RestartRouter),
             MutationAdmission::StartMutation(HostOperation::RestartRouter)
+        );
+        let restart_host = OperatorRequest::RestartHost {
+            executable: std::path::PathBuf::from("/installed/codex-router"),
+        };
+        assert_eq!(
+            classify_operator_request(None, &restart_host),
+            MutationAdmission::StartMutation(HostOperation::RestartHost)
+        );
+        assert_eq!(
+            classify_operator_request(Some(HostOperation::UpdateCodex), &restart_host),
+            MutationAdmission::Busy
+        );
+        assert_eq!(
+            drain_operation(true, &restart_host),
+            Some(HostOperation::RestartHost)
         );
     }
 

@@ -6,7 +6,7 @@ use std::pin::Pin;
 use super::*;
 
 pub(super) struct ShutdownContext<'a> {
-    pub(super) activation: &'a mut Option<request_admission::ActiveUpdateActivation>,
+    pub(super) activation: &'a mut Option<request_admission::ActiveHostReplacement>,
     pub(super) active_update: &'a mut Option<request_admission::ActiveUpdate>,
     pub(super) pending_identity: &'a mut Option<codex_native_integration::ExecutableIdentityTask>,
     pub(super) retained_updater: &'a mut Option<ProcessGroupChild>,
@@ -18,7 +18,7 @@ pub(super) struct ShutdownContext<'a> {
 }
 
 pub(super) async fn settle_for_shutdown(context: ShutdownContext<'_>) -> Result<(), HostError> {
-    settle_update_activation_for_shutdown(context.activation, context.app_server, context.router)
+    settle_host_replacement_for_shutdown(context.activation, context.app_server, context.router)
         .await;
     settle_active_update_for_shutdown(
         context.active_update,
@@ -192,9 +192,9 @@ pub(super) async fn wait_for_status_observation(
     }
 }
 
-pub(super) async fn wait_for_update_activation(
-    activation: &mut Option<request_admission::ActiveUpdateActivation>,
-) -> crate::changed_update_activation::UpdateActivationCompletion {
+pub(super) async fn wait_for_host_replacement(
+    activation: &mut Option<request_admission::ActiveHostReplacement>,
+) -> crate::host_replacement_activation::HostReplacementCompletion {
     match activation.as_mut() {
         Some(active) => active.future.as_mut().await,
         None => std::future::pending().await,
@@ -292,8 +292,8 @@ pub(super) async fn settle_active_update_for_shutdown(
     }
 }
 
-pub(super) async fn settle_update_activation_for_shutdown(
-    activation: &mut Option<request_admission::ActiveUpdateActivation>,
+pub(super) async fn settle_host_replacement_for_shutdown(
+    activation: &mut Option<request_admission::ActiveHostReplacement>,
     app_server: &mut Option<AppServerChild>,
     router: &mut Option<RouterChild>,
 ) {

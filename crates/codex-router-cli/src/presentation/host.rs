@@ -2,9 +2,39 @@
 
 use std::io::Write;
 
+use crate::host_command::replacement_outcome::HostRestartResult;
 use codex_router_host::HostSnapshot;
 use codex_router_host::OperatorFrame;
 use codex_router_host::UpdateResult;
+
+pub(crate) fn render_restart_result<W: Write>(
+    stdout: &mut W,
+    result: &HostRestartResult,
+) -> std::io::Result<()> {
+    match result {
+        HostRestartResult::Restarted { snapshot } => {
+            writeln!(
+                stdout,
+                "restart_result: host restarted using installed executable"
+            )?;
+            render_snapshot(stdout, snapshot)
+        }
+        HostRestartResult::NotRestarted { response } => {
+            writeln!(stdout, "restart_result: host not restarted")?;
+            writeln!(stdout, "result: {:?}", response.classification())?;
+            writeln!(stdout, "message: {}", response.message())?;
+            render_snapshot(stdout, response.snapshot())
+        }
+        HostRestartResult::ReplacementFailed { message } => {
+            writeln!(stdout, "restart_result: replacement host failed")?;
+            writeln!(stdout, "message: {message}")?;
+            writeln!(
+                stdout,
+                "recovery_action: after the old Host exits, run codex-router host with its original root and port"
+            )
+        }
+    }
+}
 
 pub(crate) fn render_frames<W: Write>(
     stdout: &mut W,

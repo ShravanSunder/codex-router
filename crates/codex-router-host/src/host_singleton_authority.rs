@@ -78,7 +78,7 @@ impl HostInstance {
         Self::bind_with_lock(paths, lock_file)
     }
 
-    /// Places singleton authority on stdin for the one changed-update exec.
+    /// Places singleton authority on stdin for one whole-Host replacement exec.
     pub fn prepare_lock_for_exec(&self) -> Result<(), InstanceAcquireError> {
         rustix::stdio::dup2_stdin(&self.lock_file)
             .map_err(InstanceAcquireError::PrepareInheritedLock)?;
@@ -132,13 +132,13 @@ impl HostInstance {
     }
 }
 
-/// Same-version private marker passed only by changed-update re-exec.
+/// Stable private handoff protocol passed only by whole-Host replacement.
 #[must_use]
 pub const fn inherited_lock_marker() -> &'static str {
-    concat!("codex-router-host/", env!("CARGO_PKG_VERSION"))
+    "codex-router-host-handoff/v1"
 }
 
-/// Private environment key carrying the same-version inherited-lock marker.
+/// Private environment key carrying the inherited-lock handoff marker.
 #[must_use]
 pub const fn inherited_lock_environment() -> &'static str {
     "CODEX_ROUTER_HOST_INHERITED_LOCK"
@@ -174,7 +174,7 @@ pub enum InstanceAcquireError {
     /// Owner-only socket permissions could not be enforced.
     #[error("failed setting operator-socket permissions: {0}")]
     SetSocketPermissions(#[source] std::io::Error),
-    /// Replacement bootstrap did not carry this binary's private marker.
+    /// Replacement bootstrap did not carry the supported handoff marker.
     #[error("inherited host lock marker does not match this binary")]
     InheritedMarkerMismatch,
     /// Inherited stdin metadata could not be inspected.
@@ -201,7 +201,7 @@ pub enum InstanceAcquireError {
     /// A failed exec left singleton authority duplicated on stdin.
     #[error("failed releasing prepared host lock after exec failure: {0}")]
     ReleasePreparedLockAfterExecFailure(#[source] std::io::Error),
-    /// The changed-update path could not unpublish the old operator socket.
+    /// Host replacement could not unpublish the old operator socket.
     #[error("failed removing operator socket before host replacement: {0}")]
     RemoveOperatorSocketForExec(#[source] std::io::Error),
 }

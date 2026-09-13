@@ -15,6 +15,12 @@ use codex_router_host::inherited_lock_marker;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn inherited_lock_marker_names_the_stable_handoff_protocol() {
+    assert_eq!(inherited_lock_marker(), "codex-router-host-handoff/v1");
+    assert!(!inherited_lock_marker().contains(env!("CARGO_PKG_VERSION")));
+}
+
 #[tokio::test]
 async fn live_contender_never_unlinks_and_next_owner_replaces_stale_socket()
 -> Result<(), Box<dyn std::error::Error>> {
