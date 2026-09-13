@@ -554,9 +554,10 @@ commands:
   quota refresh                 Refresh quota data now
   host                           Run the foreground shared Codex host
   host status                    Show shared host status
-  host restart                   Restart the managed app-server
+  host restart                   Replace the whole Host with this installed CLI
+  host app-server restart        Restart managed Codex without updating it
+  host app-server update         Update managed Codex and activate it if changed
   host restart-router            Restart the router when host-owned
-  host update                    Update Codex and restart the host if changed
   doctor                        Diagnose local router setup
   profile print                 Print the Codex profile snippet
 

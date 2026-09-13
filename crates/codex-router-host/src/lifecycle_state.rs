@@ -11,6 +11,8 @@ pub enum HostOperation {
     Start,
     /// Read-only status observation.
     Status,
+    /// Explicit whole-Host replacement.
+    RestartHost,
     /// Explicit app-server restart.
     RestartAppServer,
     /// Conditional managed Codex update.

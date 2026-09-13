@@ -2,12 +2,12 @@
 
 mod app_server_endpoint_guard;
 mod app_server_shutdown;
-mod changed_update_activation;
 mod child_diagnostics;
 mod codex_update_preparation;
 mod explicit_app_server_restart;
 mod explicit_router_restart;
 mod host_configuration;
+mod host_replacement_activation;
 mod host_singleton_authority;
 mod lifecycle_owner;
 mod lifecycle_state;

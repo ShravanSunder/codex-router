@@ -19,7 +19,7 @@ use operator_client::send_operator_request;
 
 mod foreground_launch;
 pub(crate) mod operator_client;
-mod update_outcome;
+pub(crate) mod replacement_outcome;
 
 const DEFAULT_HOST_PORT: u16 = 8787;
 const STATUS_REQUEST_DEADLINE: Duration = Duration::from_secs(40);
@@ -29,9 +29,24 @@ const UPDATE_REQUEST_DEADLINE: Duration = Duration::from_secs(17 * 60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
 pub(crate) enum HostAction {
+    /// Observe the running Host and managed Codex.
     Status,
+    /// Replace the whole Host with this installed CLI and wait for readiness.
     Restart,
+    /// Restart the router child when owned by this Host.
     RestartRouter,
+    /// Restart or update the managed Codex app-server.
+    AppServer {
+        #[command(subcommand)]
+        action: AppServerAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
+pub(crate) enum AppServerAction {
+    /// Restart managed Codex without updating it or replacing the Host.
+    Restart,
+    /// Update managed Codex and activate it if changed.
     Update,
 }
 
@@ -129,19 +144,49 @@ pub(crate) async fn run_host_command<W: Write>(
 
     let request = match command.action() {
         HostAction::Status => OperatorRequest::Status,
-        HostAction::Restart => OperatorRequest::RestartAppServer,
+        HostAction::Restart => OperatorRequest::RestartHost {
+            executable: std::env::current_exe()?,
+        },
         HostAction::RestartRouter => OperatorRequest::RestartRouter,
-        HostAction::Update => OperatorRequest::UpdateCodex,
+        HostAction::AppServer {
+            action: AppServerAction::Restart,
+        } => OperatorRequest::RestartAppServer,
+        HostAction::AppServer {
+            action: AppServerAction::Update,
+        } => OperatorRequest::UpdateCodex,
     };
     let frames = send_operator_request(
         coordination_paths.operator_socket(),
         request,
         operator_request_deadline(command.action()),
     )
-    .await?;
-    if matches!(command.action(), HostAction::Update) {
-        let result = update_outcome::complete_update_result(&coordination_paths, frames).await;
+    .await
+    .map_err(|error| {
+        if command.action() == HostAction::Restart
+            && matches!(error, OperatorClientError::MissingTerminal)
+        {
+            HostCommandError::RestartFailed(
+                "Host returned no restart result; it may predate whole-Host restart support. For the first upgrade, stop the foreground Host in its owning terminal, wait for exit, then start the installed `codex-router host`. No restart was retried.".to_owned(),
+            )
+        } else {
+            HostCommandError::Operator(error)
+        }
+    })?;
+    if matches!(
+        command.action(),
+        HostAction::AppServer {
+            action: AppServerAction::Update
+        }
+    ) {
+        let result = replacement_outcome::complete_update_result(&coordination_paths, frames).await;
         crate::presentation::host::render_update_result(stdout, &result)?;
+    } else if command.action() == HostAction::Restart {
+        let result =
+            replacement_outcome::complete_restart_result(&coordination_paths, frames).await;
+        crate::presentation::host::render_restart_result(stdout, &result)?;
+        if let Some(message) = result.failure_message() {
+            return Err(HostCommandError::RestartFailed(message.to_owned()));
+        }
     } else {
         crate::presentation::host::render_frames(stdout, &frames)?;
     }
@@ -151,14 +196,21 @@ pub(crate) async fn run_host_command<W: Write>(
 const fn operator_request_deadline(action: HostAction) -> Duration {
     match action {
         HostAction::Status => STATUS_REQUEST_DEADLINE,
-        HostAction::Restart => APP_SERVER_RESTART_DEADLINE,
+        HostAction::Restart => Duration::from_secs(150),
+        HostAction::AppServer {
+            action: AppServerAction::Restart,
+        } => APP_SERVER_RESTART_DEADLINE,
         HostAction::RestartRouter => ROUTER_RESTART_DEADLINE,
-        HostAction::Update => UPDATE_REQUEST_DEADLINE,
+        HostAction::AppServer {
+            action: AppServerAction::Update,
+        } => UPDATE_REQUEST_DEADLINE,
     }
 }
 
 #[derive(Debug, Error)]
 pub enum HostCommandError {
+    #[error("Host restart failed: {0}")]
+    RestartFailed(String),
     #[error(transparent)]
     DebugProfile(#[from] codex_native_integration::DebugProfileError),
     #[error("failed resolving host router root: {0}")]
@@ -192,11 +244,13 @@ mod tests {
             "app-server restart must outlive upstream's complete shutdown bound"
         );
         assert!(
-            operator_request_deadline(HostAction::Update) > Duration::from_secs(15 * 60),
+            operator_request_deadline(HostAction::AppServer {
+                action: AppServerAction::Update
+            }) > Duration::from_secs(15 * 60),
             "update transport must outlive the updater's own deadline"
         );
         assert_eq!(
-            update_outcome::REPLACEMENT_CONVERGENCE_DEADLINE,
+            replacement_outcome::REPLACEMENT_CONVERGENCE_DEADLINE,
             Duration::from_secs(40),
             "replacement convergence starts only after old-host EOF"
         );

@@ -1,8 +1,10 @@
-//! Owner-visible update result classification across foreground replacement.
+//! Operator result classification and shared readiness observation across Host replacement.
 
 use std::time::Duration;
 
 use codex_router_host::HostCoordinationPaths;
+use codex_router_host::HostSnapshot;
+use codex_router_host::HostTerminalResponse;
 use codex_router_host::OperatorFrame;
 use codex_router_host::OperatorRequest;
 use codex_router_host::TerminalClassification;
@@ -54,38 +56,91 @@ async fn complete_update_result_with_deadline(
         };
     }
 
-    match send_replacement_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::AwaitHostStart,
-        replacement_deadline,
-    )
-    .await
-    {
-        Ok(replacement) => match replacement.last() {
-            Some(OperatorFrame::Terminal(response))
-                if matches!(
-                    response.classification(),
-                    TerminalClassification::Ready
-                        | TerminalClassification::LocalReadyRemoteDegraded
-                ) =>
-            {
-                UpdateResult::UpdatedAndHostRestarted {
-                    snapshot: response.snapshot().clone(),
-                }
-            }
-            Some(OperatorFrame::Terminal(response)) => UpdateResult::UpdatedButReplacementFailed {
-                message: response.message().to_owned(),
-                recovery_action: REPLACEMENT_RECOVERY_ACTION.to_owned(),
-            },
-            _ => UpdateResult::UpdatedButReplacementFailed {
-                message: "replacement host returned no terminal readiness".to_owned(),
-                recovery_action: REPLACEMENT_RECOVERY_ACTION.to_owned(),
-            },
-        },
-        Err(_) => UpdateResult::UpdatedButReplacementFailed {
-            message: "updated Codex but replacement host did not become ready".to_owned(),
+    match observe_replacement(coordination_paths, replacement_deadline).await {
+        Ok(snapshot) => UpdateResult::UpdatedAndHostRestarted { snapshot },
+        Err(message) => UpdateResult::UpdatedButReplacementFailed {
+            message,
             recovery_action: REPLACEMENT_RECOVERY_ACTION.to_owned(),
         },
+    }
+}
+
+pub(crate) enum HostRestartResult {
+    Restarted { snapshot: HostSnapshot },
+    NotRestarted { response: HostTerminalResponse },
+    ReplacementFailed { message: String },
+}
+
+impl HostRestartResult {
+    pub(crate) fn failure_message(&self) -> Option<&str> {
+        match self {
+            Self::Restarted { .. } => None,
+            Self::NotRestarted { response } => Some(response.message()),
+            Self::ReplacementFailed { message } => Some(message),
+        }
+    }
+}
+
+pub(super) async fn complete_restart_result(
+    coordination_paths: &HostCoordinationPaths,
+    frames: Vec<OperatorFrame>,
+) -> HostRestartResult {
+    complete_restart_result_with_deadline(
+        coordination_paths,
+        frames,
+        REPLACEMENT_CONVERGENCE_DEADLINE,
+    )
+    .await
+}
+
+async fn complete_restart_result_with_deadline(
+    coordination_paths: &HostCoordinationPaths,
+    frames: Vec<OperatorFrame>,
+    deadline: Duration,
+) -> HostRestartResult {
+    if let Some(OperatorFrame::Terminal(response)) = frames.last() {
+        return HostRestartResult::NotRestarted {
+            response: response.clone(),
+        };
+    }
+    if !matches!(
+        frames.last(),
+        Some(OperatorFrame::Progress(
+            codex_router_host::HostProgress::ReplacementStarting
+        ))
+    ) {
+        return HostRestartResult::ReplacementFailed {
+            message: "Host returned no terminal restart result or replacement progress".to_owned(),
+        };
+    }
+    match observe_replacement(coordination_paths, deadline).await {
+        Ok(snapshot) => HostRestartResult::Restarted { snapshot },
+        Err(message) => HostRestartResult::ReplacementFailed { message },
+    }
+}
+
+async fn observe_replacement(
+    coordination_paths: &HostCoordinationPaths,
+    deadline: Duration,
+) -> Result<HostSnapshot, String> {
+    let replacement = send_replacement_operator_request(
+        coordination_paths.operator_socket(),
+        OperatorRequest::AwaitHostStart,
+        deadline,
+    )
+    .await
+    .map_err(|error| format!("replacement Host did not become ready: {error}"))?;
+    match replacement.last() {
+        Some(OperatorFrame::Terminal(response))
+            if matches!(
+                response.classification(),
+                TerminalClassification::Ready | TerminalClassification::LocalReadyRemoteDegraded
+            ) =>
+        {
+            Ok(response.snapshot().clone())
+        }
+        Some(OperatorFrame::Terminal(response)) => Err(response.message().to_owned()),
+        _ => Err("replacement Host returned no terminal readiness".to_owned()),
     }
 }
 
@@ -107,6 +162,66 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn busy_restart_preserves_terminal_result_without_reconnecting() {
+        let result = complete_restart_result_with_deadline(
+            &unused_paths(),
+            vec![OperatorFrame::busy(
+                OperatorRequest::RestartHost {
+                    executable: PathBuf::from("/installed/router"),
+                },
+                ready_snapshot(),
+                "another lifecycle mutation is active".to_owned(),
+            )],
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            matches!(result, HostRestartResult::NotRestarted { response }
+            if response.classification() == TerminalClassification::Busy)
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_progress_without_a_ready_replacement_is_failure() {
+        let result = complete_restart_result_with_deadline(
+            &unused_paths(),
+            vec![OperatorFrame::Progress(HostProgress::ReplacementStarting)],
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            HostRestartResult::ReplacementFailed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn updater_no_change_and_failure_remain_distinct_without_restart() {
+        for classification in [
+            TerminalClassification::Succeeded,
+            TerminalClassification::Failed,
+        ] {
+            let result = complete_update_result_with_deadline(
+                &unused_paths(),
+                vec![OperatorFrame::terminal(HostTerminalResponse::new(
+                    OperatorRequest::UpdateCodex,
+                    classification,
+                    ready_snapshot(),
+                    "managed updater terminal result".to_owned(),
+                ))],
+                Duration::from_millis(10),
+            )
+            .await;
+            match classification {
+                TerminalClassification::Succeeded => {
+                    assert!(matches!(result, UpdateResult::NoChange))
+                }
+                _ => assert!(matches!(result, UpdateResult::FailedWithoutRestart { .. })),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn update_result_maps_post_change_terminal_failure_to_manual_recovery() {

@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn host_lifecycle_commands_have_separate_names() {
+    for words in [
+        vec!["host", "restart"],
+        vec!["host", "app-server", "restart"],
+        vec!["host", "app-server", "update"],
+        vec!["host", "restart-router"],
+    ] {
+        let arguments = std::iter::once(OsString::from("codex-router"))
+            .chain(words.iter().map(|word| OsString::from(*word)));
+        assert!(
+            matches!(CliCommand::parse(arguments), Ok(CliCommand::Host(_))),
+            "expected Host command to parse: {words:?}"
+        );
+    }
+    assert!(CliCommand::parse(["codex-router", "host", "update"].map(OsString::from)).is_err());
+}
+
+#[test]
 fn host_commands_parse_with_explicit_router_root() {
     let router_root = PathBuf::from("/tmp/router-host-test");
     let command = match CliCommand::parse([

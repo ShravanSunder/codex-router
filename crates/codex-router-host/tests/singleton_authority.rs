@@ -11,9 +11,103 @@ use std::sync::atomic::Ordering;
 use codex_router_host::HostCoordinationPaths;
 use codex_router_host::HostInstance;
 use codex_router_host::InstanceAcquireError;
+use codex_router_host::ProcessGroupChild;
+use codex_router_host::inherited_lock_environment;
 use codex_router_host::inherited_lock_marker;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn inherited_lock_marker_names_the_stable_handoff_protocol() {
+    assert_eq!(inherited_lock_marker(), "codex-router-host-handoff/v1");
+    assert!(!inherited_lock_marker().contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[tokio::test]
+async fn inherited_lock_bootstrap_rejects_malformed_marker_without_disturbing_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new("malformed-marker")?;
+    let paths = HostCoordinationPaths::new(
+        directory.path().join("operator.sock"),
+        directory.path().join("instance.lock"),
+    );
+    let owner = HostInstance::acquire(paths.clone())?;
+    let owner_socket_inode = std::fs::metadata(paths.operator_socket())?.ino();
+
+    let inherited = HostInstance::acquire_inherited(paths.clone(), "malformed".as_ref());
+    check(
+        matches!(
+            inherited,
+            Err(InstanceAcquireError::InheritedMarkerMismatch)
+        ),
+        "malformed handoff marker must return the typed marker-mismatch error",
+    )?;
+    check_equal(
+        std::fs::metadata(paths.operator_socket())?.ino(),
+        owner_socket_inode,
+        "malformed handoff must preserve the existing owner socket",
+    )?;
+    check(
+        matches!(
+            HostInstance::acquire(paths),
+            Err(InstanceAcquireError::AlreadyRunning)
+        ),
+        "malformed handoff must preserve the existing singleton owner",
+    )?;
+
+    drop(owner);
+    Ok(())
+}
+
+#[tokio::test]
+async fn inherited_lock_bootstrap_rejects_wrong_descriptor_without_disturbing_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new("wrong-descriptor")?;
+    let paths = HostCoordinationPaths::new(
+        directory.path().join("operator.sock"),
+        directory.path().join("instance.lock"),
+    );
+    let owner = HostInstance::acquire(paths.clone())?;
+    let owner_socket_inode = std::fs::metadata(paths.operator_socket())?.ino();
+    let output = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("wrong_inherited_lock_descriptor_child_entrypoint")
+        .arg("--nocapture")
+        .stdin(Stdio::null())
+        .env("CODEX_ROUTER_HOST_TEST_WRONG_DESCRIPTOR_CHILD", "1")
+        .env(
+            "CODEX_ROUTER_HOST_TEST_OPERATOR_SOCKET",
+            paths.operator_socket(),
+        )
+        .env(
+            "CODEX_ROUTER_HOST_TEST_INSTANCE_LOCK",
+            paths.instance_lock(),
+        )
+        .output()?;
+
+    check(
+        output.status.success(),
+        &format!(
+            "wrong-descriptor child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    check_equal(
+        std::fs::metadata(paths.operator_socket())?.ino(),
+        owner_socket_inode,
+        "wrong descriptor handoff must preserve the existing owner socket",
+    )?;
+    check(
+        matches!(
+            HostInstance::acquire(paths),
+            Err(InstanceAcquireError::AlreadyRunning)
+        ),
+        "wrong descriptor handoff must preserve the existing singleton owner",
+    )?;
+
+    drop(owner);
+    Ok(())
+}
 
 #[tokio::test]
 async fn live_contender_never_unlinks_and_next_owner_replaces_stale_socket()
@@ -74,7 +168,7 @@ async fn live_contender_never_unlinks_and_next_owner_replaces_stale_socket()
 }
 
 #[test]
-fn inherited_lock_bootstrap_validates_same_version_and_retains_authority()
+fn inherited_lock_bootstrap_filters_marker_before_fresh_descendant_acquisition()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new("inherited-lock")?;
     let paths = HostCoordinationPaths::new(
@@ -105,9 +199,14 @@ fn inherited_lock_bootstrap_validates_same_version_and_retains_authority()
             "CODEX_ROUTER_HOST_TEST_INSTANCE_LOCK",
             paths.instance_lock(),
         )
+        .env(inherited_lock_environment(), inherited_lock_marker())
         .env(
-            "CODEX_ROUTER_HOST_TEST_INHERITED_MARKER",
-            inherited_lock_marker(),
+            "CODEX_ROUTER_HOST_TEST_FRESH_OPERATOR_SOCKET",
+            directory.path().join("fresh-operator.sock"),
+        )
+        .env(
+            "CODEX_ROUTER_HOST_TEST_FRESH_INSTANCE_LOCK",
+            directory.path().join("fresh-instance.lock"),
         )
         .output()?;
 
@@ -195,7 +294,7 @@ async fn inherited_lock_child_entrypoint() -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
     let paths = child_coordination_paths()?;
-    let marker = std::env::var_os("CODEX_ROUTER_HOST_TEST_INHERITED_MARKER")
+    let marker = std::env::var_os(inherited_lock_environment())
         .ok_or("inherited child marker is missing")?;
 
     let instance = HostInstance::acquire_inherited(paths.clone(), &marker)?;
@@ -203,15 +302,27 @@ async fn inherited_lock_child_entrypoint() -> Result<(), Box<dyn std::error::Err
         paths.operator_socket().exists(),
         "inherited owner must publish the operator socket",
     )?;
-    let status = Command::new(std::env::current_exe()?)
+    let mut command = tokio::process::Command::new(std::env::current_exe()?);
+    command
         .arg("--exact")
-        .arg("inherited_lock_descriptor_probe_child_entrypoint")
+        .arg("fresh_descendant_host_child_entrypoint")
         .arg("--nocapture")
-        .env("CODEX_ROUTER_HOST_TEST_INHERITED_DESCRIPTOR_PROBE", "1")
-        .status()?;
+        .env("CODEX_ROUTER_HOST_TEST_FRESH_DESCENDANT", "1")
+        .env("CODEX_ROUTER_HOST_TEST_RETAINED_ENVIRONMENT", "retained")
+        .stdout(Stdio::null());
+    let mut descendant = ProcessGroupChild::spawn(&mut command)?;
+    let status =
+        match tokio::time::timeout(std::time::Duration::from_secs(2), descendant.wait()).await {
+            Ok(wait_result) => wait_result?,
+            Err(timeout_error) => {
+                descendant.send_group_kill()?;
+                let _reaped_status = descendant.wait().await?;
+                return Err(timeout_error.into());
+            }
+        };
     check(
         status.success(),
-        "ordinary child spawn must not inherit singleton authority",
+        "ordinary child must use normal singleton acquisition for a fresh root",
     )?;
     drop(instance);
     check(
@@ -221,9 +332,9 @@ async fn inherited_lock_child_entrypoint() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-#[test]
-fn inherited_lock_descriptor_probe_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os("CODEX_ROUTER_HOST_TEST_INHERITED_DESCRIPTOR_PROBE").is_none() {
+#[tokio::test]
+async fn fresh_descendant_host_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CODEX_ROUTER_HOST_TEST_FRESH_DESCENDANT").is_none() {
         return Ok(());
     }
     let lock_path = std::env::var_os("CODEX_ROUTER_HOST_TEST_INSTANCE_LOCK")
@@ -235,7 +346,46 @@ fn inherited_lock_descriptor_probe_child_entrypoint() -> Result<(), Box<dyn std:
             "inherited lock descriptor remained open across ordinary child exec",
         )?;
     }
+    check_equal(
+        std::env::var("CODEX_ROUTER_HOST_TEST_RETAINED_ENVIRONMENT")?,
+        "retained".to_owned(),
+        "ordinary child must preserve unrelated inherited and explicit environment",
+    )?;
+    let paths = HostCoordinationPaths::new(
+        PathBuf::from(
+            std::env::var_os("CODEX_ROUTER_HOST_TEST_FRESH_OPERATOR_SOCKET")
+                .ok_or("fresh descendant operator socket is missing")?,
+        ),
+        PathBuf::from(
+            std::env::var_os("CODEX_ROUTER_HOST_TEST_FRESH_INSTANCE_LOCK")
+                .ok_or("fresh descendant instance lock is missing")?,
+        ),
+    );
+    let instance = match std::env::var_os(inherited_lock_environment()) {
+        Some(marker) => HostInstance::acquire_inherited(paths.clone(), &marker)?,
+        None => HostInstance::acquire(paths.clone())?,
+    };
+    check(
+        paths.operator_socket().exists(),
+        "fresh descendant must publish its operator socket through normal acquisition",
+    )?;
+    drop(instance);
     Ok(())
+}
+
+#[test]
+fn wrong_inherited_lock_descriptor_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CODEX_ROUTER_HOST_TEST_WRONG_DESCRIPTOR_CHILD").is_none() {
+        return Ok(());
+    }
+    let inherited = HostInstance::acquire_inherited(
+        child_coordination_paths()?,
+        inherited_lock_marker().as_ref(),
+    );
+    check(
+        matches!(inherited, Err(InstanceAcquireError::InheritedLockMismatch)),
+        "wrong inherited descriptor must return the typed lock-mismatch error",
+    )
 }
 
 #[tokio::test]

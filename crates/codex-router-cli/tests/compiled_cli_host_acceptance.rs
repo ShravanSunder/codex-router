@@ -1,3 +1,4 @@
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -10,6 +11,10 @@ use futures_util::SinkExt;
 use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
+
+#[path = "support/host_replacement_observation.rs"]
+mod host_replacement_observation;
+use host_replacement_observation::{binary_version, observe_continuous_lock, verify_host_image};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -59,8 +64,18 @@ async fn installed_mode_rejects_host_before_publication_when_fixture_launchctl_f
 }
 
 #[tokio::test]
-async fn installed_mode_runs_status_restart_update_and_public_native_attachment()
+async fn installed_cli_restarts_host_from_new_install_path()
 -> Result<(), Box<dyn std::error::Error>> {
+    run_host_install_journey(false).await
+}
+
+#[tokio::test]
+async fn installed_cli_restarts_host_after_atomic_binary_install()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_host_install_journey(true).await
+}
+
+async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
     let router_root = directory.path().join("router");
     let codex_home = directory.path().join("codex");
@@ -69,6 +84,7 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
     let managed_executable = codex_home.join("packages/standalone/current/codex");
     let launchctl_executable = directory.path().join("launchctl");
     let launchctl_log = directory.path().join("launchctl.log");
+    let process_log = directory.path().join("app-generations.log");
     std::fs::create_dir_all(
         managed_executable
             .parent()
@@ -77,7 +93,33 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
     install_managed_fixture(&managed_executable)?;
     install_launchctl_fixture(&launchctl_executable)?;
     let port = reserve_loopback_port()?;
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
+    let candidate_binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
+    let prior_binary = std::env::var_os("CODEX_ROUTER_RESTART_PRIOR_BINARY").map(PathBuf::from);
+    if let Some(prior) = &prior_binary {
+        let before = binary_version(prior).await?;
+        let after = binary_version(&candidate_binary).await?;
+        check(
+            before != after,
+            "cross-version proof requires different package versions",
+        )?;
+        eprintln!(
+            "cross-version candidate handoff: {before} -> {after}; atomic_install={atomic_install}"
+        );
+    }
+    let old_install = directory.path().join("old-install");
+    let new_install = directory.path().join("new-install");
+    std::fs::create_dir_all(&old_install)?;
+    std::fs::create_dir_all(&new_install)?;
+    let binary = old_install.join("codex-router");
+    std::fs::copy(
+        prior_binary.as_deref().unwrap_or(&candidate_binary),
+        &binary,
+    )?;
+    let replacement_binary = if atomic_install {
+        binary.clone()
+    } else {
+        new_install.join("codex-router")
+    };
 
     let host_stderr = directory.path().join("host-stderr.log");
     let mut host = tokio::process::Command::new(&binary);
@@ -101,6 +143,7 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
         std::env::current_exe()?,
     )
     .env("CODEX_ROUTER_COMPILED_CLI_APP_CHILD", "1")
+    .env("CODEX_ROUTER_COMPILED_CLI_PROCESS_LOG", &process_log)
     .env("CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES", "1")
     .stdout(Stdio::null())
     .stderr(Stdio::from(std::fs::File::create(&host_stderr)?));
@@ -115,7 +158,7 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
         )?;
 
         let status =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, "status").await?;
+            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["status"]).await?;
         check(
             status.status.success(),
             &format!("status: {}", String::from_utf8_lossy(&status.stderr)),
@@ -143,8 +186,11 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
             &status_stdout,
         )?;
 
+        let original_host_pid = host.id().ok_or("owned Host PID missing")?;
+        verify_host_image(original_host_pid, &binary)?;
+        check(std::fs::read_to_string(&process_log)?.lines().count() == 1, "initial app-server generation missing")?;
         let restart =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, "restart")
+            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "restart"])
                 .await?;
         check(
             restart.status.success(),
@@ -155,8 +201,12 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
             "app-server restart did not report success",
         )?;
 
+        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 1, "app-server-only restart replaced the Host")?;
+        check(std::fs::read_to_string(&process_log)?.lines().count() == 2, "app-server restart did not replace exactly one child")?;
+        verify_host_image(original_host_pid, &binary)?;
+
         let update =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, "update").await?;
+            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "update"]).await?;
         check(
             update.status.success(),
             &format!("update: {}", String::from_utf8_lossy(&update.stderr)),
@@ -166,6 +216,44 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
             update_stdout.contains("update_result: updated and host restarted"),
             &update_stdout,
         )?;
+
+        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 2, "changed update did not replace Host once")?;
+        check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "changed update child generation missing")?;
+        let host_process_id = host.id().ok_or("owned Host PID missing")?;
+        verify_host_image(host_process_id, &binary)?;
+        let lock_path = router_root.join("host.lock");
+        let lock_inode = std::fs::metadata(&lock_path)?.ino();
+        let candidate_install = directory.path().join("candidate-install");
+        std::fs::copy(&candidate_binary, &candidate_install)?;
+        let old_inode = std::fs::metadata(&binary)?.ino();
+        std::fs::rename(&candidate_install, &replacement_binary)?;
+        check(std::fs::metadata(&replacement_binary)?.ino() != old_inode, "replacement must be a distinct executable identity")?;
+
+        let (finish_sender, finish_receiver) = tokio::sync::oneshot::channel();
+        let contention = tokio::spawn(observe_continuous_lock(lock_path.clone(), finish_receiver));
+        let restart_result = run_host_subcommand(
+            &replacement_binary, &router_root, &codex_home, &socket_path, &["restart"],
+        ).await;
+        let _finished = finish_sender.send(());
+        contention.await??;
+        let restarted = restart_result?;
+        check(restarted.status.success(), &format!("whole Host restart: {}", String::from_utf8_lossy(&restarted.stderr)))?;
+        let restarted_stdout = String::from_utf8(restarted.stdout)?;
+        check(restarted_stdout.contains("restart_result: host restarted using installed executable"), &restarted_stdout)?;
+        check(restarted_stdout.contains("readiness: Ready"), &restarted_stdout)?;
+        check(host.try_wait()?.is_none(), "original Host PID exited instead of replacing its image")?;
+        verify_host_image(host_process_id, &replacement_binary)?;
+        check(std::fs::metadata(&lock_path)?.ino() == lock_inode, "Host replaced its stable lock artifact")?;
+        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 3, "whole Host restart did not activate once")?;
+        let generations = std::fs::read_to_string(&process_log)?;
+        check(generations.lines().count() == 4, "whole Host restart child generation missing")?;
+        for former_pid in generations.lines().take(3) {
+            let former_pid = rustix::process::Pid::from_raw(former_pid.parse()?).ok_or("invalid child PID")?;
+            check(matches!(rustix::process::test_kill_process(former_pid), Err(rustix::io::Errno::SRCH)), "an old app-server child is still present or its absence could not be verified")?;
+        }
+        let child_environment = std::fs::read_to_string(process_log.with_extension("handoff"))?;
+        check(child_environment.lines().last().is_some_and(|line| line.ends_with(" false")), "replacement app-server inherited the Host-only handoff marker")?;
+        eprintln!("Host PID {host_process_id} now maps installed image {}; stable lock retained; four child generations settled; ordinary child handoff marker absent", replacement_binary.display());
 
         let service_directory = router_root.join("agent-communication");
         let native_path = tokio::task::spawn_blocking(move || {
@@ -230,6 +318,26 @@ async fn compiled_cli_app_server_child_entrypoint() -> Result<(), Box<dyn std::e
             "OAuth refresh token was rejected: invalid_grant: CODEX_ROUTER_CHILD_SECRET_CANARY"
         );
         eprintln!("failed to refresh available models: missing field `display_name`");
+    }
+    if let Some(log) = std::env::var_os("CODEX_ROUTER_COMPILED_CLI_PROCESS_LOG") {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)?;
+        std::io::Write::write_all(&mut file, format!("{}\n", std::process::id()).as_bytes())?;
+        let mut environment_log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Path::new(&log).with_extension("handoff"))?;
+        std::io::Write::write_all(
+            &mut environment_log,
+            format!(
+                "{} {}\n",
+                std::process::id(),
+                std::env::var_os(codex_router_host::inherited_lock_environment()).is_some()
+            )
+            .as_bytes(),
+        )?;
     }
     let socket_path = PathBuf::from(
         std::env::var_os("CODEX_ROUTER_COMPILED_CLI_NATIVE_SOCKET")
@@ -316,17 +424,15 @@ async fn run_host_subcommand(
     router_root: &Path,
     codex_home: &Path,
     app_server_socket: &Path,
-    subcommand: &str,
+    subcommand: &[&str],
 ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
     Ok(tokio::time::timeout(
         Duration::from_secs(12),
         tokio::process::Command::new(binary)
-            .args([
-                "host",
-                subcommand,
-                "--router-root",
-                router_root.to_str().ok_or("router root is not UTF-8")?,
-            ])
+            .arg("host")
+            .args(subcommand)
+            .arg("--router-root")
+            .arg(router_root)
             .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
             .env("OTEL_SDK_DISABLED", "true")
             .env(
@@ -373,7 +479,7 @@ fn install_managed_fixture(executable: &Path) -> std::io::Result<()> {
 fn install_launchctl_fixture(executable: &Path) -> std::io::Result<()> {
     std::fs::write(
         executable,
-        b"#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG\"\n",
+        b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG\"\n",
     )?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
 }
