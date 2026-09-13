@@ -33,7 +33,7 @@ The package names are `message-board` for domain types and rules and `message-bo
 | collaboration-client | Expose typed asynchronous requests, shared RPC schemas/types, connection discovery and reusable session/repository operations; changes with client operations. |
 | collaboration-protocol | Published request/result/error schema; changes with observable contracts. |
 | collaboration-service | Dispatch validated requests and map domain/storage failures to Control results. |
-| project-board | Identity, message placement, watch/read scope and lifecycle rules; changes with board behavior. |
+| message-board | Identity, message placement, watch/read scope and lifecycle rules; changes with board behavior. |
 | message-board-storage | SQLx connection, migrations, constraints and atomic state transitions; changes with durable realization. |
 | codex-router-host | Open/inject/close board storage under existing runtime ownership; changes with process lifecycle. |
 
