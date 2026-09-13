@@ -37,6 +37,8 @@ pub(super) async fn exercise_after_agent_exchange(
         [
             "inbox",
             "fetch",
+            "--scope",
+            "project",
             "--project-id",
             first_project_id,
             "--reader",
@@ -77,6 +79,8 @@ pub(super) async fn exercise_after_agent_exchange(
         [
             "inbox",
             "fetch",
+            "--scope",
+            "project",
             "--project-id",
             first_project_id,
             "--reader",
@@ -235,6 +239,20 @@ pub(super) async fn exercise_after_agent_exchange(
     let cross_project_sequence = result(&cross_project_post, "/message/activitySequence")?
         .as_u64()
         .ok_or("cross-project post omitted activity sequence")?;
+    super::filtered_search_journey::exercise(
+        proof,
+        super::filtered_search_journey::FilteredSearchProof {
+            reader: &beta_actor,
+            selected_project_id: second_project_id.as_str(),
+            selected_board_id: second_board_id.as_str(),
+            selected_topic_id: second_topic_id.as_str(),
+            selected_message_id: cross_project_message_id.as_str(),
+            watched_root_id: root_message.message_id.as_str(),
+            watched_project_id: first_project_id,
+            thread_text: contribution_message.text.as_str(),
+        },
+    )
+    .await?;
     let project_inventory = run_board_cli(
         &proof.service_directory,
         ["project", "list", "--limit", "100"],

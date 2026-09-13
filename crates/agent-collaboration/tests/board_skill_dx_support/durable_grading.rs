@@ -182,7 +182,10 @@ pub(super) async fn grade_inbox(
     let inbox = proof
         .client
         .board_inbox_fetch(InboxFetchRequest {
-            project_id: resources.primary_project.project_id.clone(),
+            scope: InboxScope::Project {
+                project_id: resources.primary_project.project_id.clone(),
+            },
+            read_mode: InboxReadMode::Unread,
             reader: inbox_identity.clone(),
             page: PageRequest::default(),
         })

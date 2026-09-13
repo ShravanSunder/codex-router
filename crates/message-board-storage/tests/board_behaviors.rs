@@ -313,7 +313,10 @@ async fn future_only_watches_scoped_acknowledgements_and_unread_summaries_surviv
 
     let initial = store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: bob.clone(),
             page: page(10),
         })
@@ -357,7 +360,10 @@ async fn future_only_watches_scoped_acknowledgements_and_unread_summaries_surviv
         .unwrap();
     let inbox = store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: bob.clone(),
             page: page(1),
         })
@@ -382,7 +388,10 @@ async fn future_only_watches_scoped_acknowledgements_and_unread_summaries_surviv
     assert!(first_ack.project_unread_summary.has_unread);
     let continued = store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: bob.clone(),
             page: PageRequest {
                 limit: PageLimit::try_from(1).unwrap(),
@@ -508,7 +517,10 @@ async fn escaped_large_messages_page_without_truncation_or_skipping() {
     let bob = actor("bob");
     store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: bob.clone(),
             page: page(100),
         })
@@ -566,7 +578,10 @@ async fn escaped_large_messages_page_without_truncation_or_skipping() {
     loop {
         let result = store
             .fetch_inbox(InboxFetchRequest {
-                project_id: fixture.project_id.clone(),
+                scope: message_board::InboxScope::Project {
+                    project_id: fixture.project_id.clone(),
+                },
+                read_mode: message_board::InboxReadMode::Unread,
                 reader: bob.clone(),
                 page: PageRequest {
                     limit: PageLimit::try_from(100).unwrap(),

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT b.project_id FROM thread_watches w JOIN board_messages m ON m.message_id=w.root_id JOIN project_boards b ON b.board_id=m.board_id WHERE w.reader_key=? AND w.active=1",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "project_boards",
+            "name": "project_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1ec5dddf4b043c93df3a651a8c02ee215179dd66fc5fbd0054ba9c079accbb07"
+}

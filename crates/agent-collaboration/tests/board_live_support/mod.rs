@@ -1,6 +1,7 @@
 //! Real two-agent board collaboration through the public CLI and SDK.
 mod board_cli_runner;
 mod expanded_cli_journey;
+mod filtered_search_journey;
 mod persistence_verification;
 use crate::proof_context::{ProofContext, ProofResult, shell_quote};
 use collaboration_client::board::{

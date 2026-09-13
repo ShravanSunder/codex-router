@@ -84,6 +84,16 @@ pub fn control_schema_document(
         "board/topicList",
         &[],
     )?;
+    assembly
+        .add_method::<message_board::DiscoverySearchRequest, message_board::DiscoverySearchResult>(
+            "board/discoverySearch",
+            &[],
+        )?;
+    assembly
+        .add_method::<message_board::MessageSearchRequest, message_board::MessageSearchResult>(
+            "board/messageSearch",
+            &[],
+        )?;
     assembly.add_method::<message_board::MessagePostRequest, message_board::MessagePostResult>(
         "board/messagePost",
         &[],

@@ -42,7 +42,10 @@ async fn project_main_tracking_rejects_negative_and_future_boundaries() {
     let reader = actor("reader");
     store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: reader.clone(),
             page: page(10),
         })
@@ -58,7 +61,10 @@ async fn project_main_tracking_rejects_negative_and_future_boundaries() {
     let mut store = BoardStore::open(&path).await.unwrap();
     let failure = store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: reader.clone(),
             page: page(10),
         })
@@ -150,7 +156,10 @@ async fn scoped_bookmarks_reject_negative_and_future_boundaries() {
     let reader = actor("reader");
     store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: reader.clone(),
             page: page(10),
         })
@@ -216,7 +225,10 @@ async fn scoped_bookmarks_reject_negative_and_future_boundaries() {
     assert_eq!(
         store
             .fetch_inbox(InboxFetchRequest {
-                project_id: fixture.project_id.clone(),
+                scope: message_board::InboxScope::Project {
+                    project_id: fixture.project_id.clone()
+                },
+                read_mode: message_board::InboxReadMode::Unread,
                 reader: reader.clone(),
                 page: page(10),
             })
@@ -237,7 +249,10 @@ async fn scoped_bookmarks_reject_negative_and_future_boundaries() {
     assert_eq!(
         store
             .fetch_inbox(InboxFetchRequest {
-                project_id: fixture.project_id.clone(),
+                scope: message_board::InboxScope::Project {
+                    project_id: fixture.project_id.clone()
+                },
+                read_mode: message_board::InboxReadMode::Unread,
                 reader: reader.clone(),
                 page: page(10),
             })
@@ -263,7 +278,10 @@ async fn scoped_bookmarks_reject_negative_and_future_boundaries() {
     assert_eq!(
         store
             .fetch_inbox(InboxFetchRequest {
-                project_id: fixture.project_id,
+                scope: message_board::InboxScope::Project {
+                    project_id: fixture.project_id
+                },
+                read_mode: message_board::InboxReadMode::Unread,
                 reader,
                 page: page(10),
             })

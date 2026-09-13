@@ -62,7 +62,10 @@ impl PopulatedBoard {
         for project_id in [&first_project_id, &second_project_id] {
             store
                 .fetch_inbox(InboxFetchRequest {
-                    project_id: project_id.clone(),
+                    scope: message_board::InboxScope::Project {
+                        project_id: project_id.clone(),
+                    },
+                    read_mode: message_board::InboxReadMode::Unread,
                     reader: reader.clone(),
                     page: page(),
                 })
@@ -161,7 +164,7 @@ impl PopulatedBoard {
             "crossProjectTarget": store.show_message(MessageShowRequest { message_id: self.second_root_id.clone() }).await.unwrap(),
             "thread": store.show_thread(ThreadShowRequest { root_message_id: self.first_root_id.clone(), reader: Some(self.reader.clone()) }).await.unwrap(),
             "history": store.list_messages(MessageListRequest { scope: MessageListScope::Thread { root_message_id: self.first_root_id.clone() }, selection: MessageSelection::Latest, page: page() }).await.unwrap(),
-            "inbox": store.fetch_inbox(InboxFetchRequest { project_id: self.first_project_id.clone(), reader: self.reader.clone(), page: page() }).await.unwrap(),
+            "inbox": store.fetch_inbox(InboxFetchRequest { scope: message_board::InboxScope::Project { project_id: self.first_project_id.clone() }, read_mode: message_board::InboxReadMode::Unread, reader: self.reader.clone(), page: page() }).await.unwrap(),
             "summaries": store.list_inbox_projects(InboxProjectsRequest { reader: self.reader.clone(), unread_only: false, page: page() }).await.unwrap(),
         })
     }

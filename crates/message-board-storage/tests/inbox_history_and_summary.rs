@@ -68,7 +68,10 @@ async fn history_guidance_exists_only_for_queryable_scoped_messages() {
 
     let empty_initialization = store
         .fetch_inbox(InboxFetchRequest {
-            project_id: empty_project.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: empty_project.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: actor("empty-reader"),
             page: page(10),
         })
@@ -95,7 +98,10 @@ async fn history_guidance_exists_only_for_queryable_scoped_messages() {
     .await;
     let history_initialization = store
         .fetch_inbox(InboxFetchRequest {
-            project_id: empty_project.project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: empty_project.project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: actor("history-reader"),
             page: page(10),
         })
@@ -389,7 +395,10 @@ async fn never_tracked_acknowledge_and_unwatch_do_not_create_summary_rows() {
     );
     store
         .fetch_inbox(InboxFetchRequest {
-            project_id: fixture.project_id,
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id,
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: acknowledging_reader.clone(),
             page: page(10),
         })

@@ -43,6 +43,7 @@ macro_rules! bounded_text {
 bounded_text!(ResourceName, "name", 1, MAX_NAME_BYTES, true);
 bounded_text!(Description, "description", 0, MAX_DESCRIPTION_BYTES, false);
 bounded_text!(MessageText, "text", 1, MAX_MESSAGE_TEXT_BYTES, false);
+bounded_text!(SearchQuery, "query", 1, MAX_NAME_BYTES, true);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

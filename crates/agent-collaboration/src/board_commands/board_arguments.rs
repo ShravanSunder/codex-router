@@ -1,3 +1,4 @@
+use super::board_search_commands::{DiscoverySearchArguments, MessageSearchArguments};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -14,6 +15,8 @@ pub(super) struct BoardArguments {
 
 #[derive(Subcommand)]
 pub(super) enum BoardCommand {
+    /// Search project, board, and topic names/descriptions with strict location filters.
+    Search(DiscoverySearchArguments),
     /// Create, inspect, update, or list projects.
     Project {
         #[command(subcommand)]
@@ -90,6 +93,8 @@ pub(super) enum TopicCommand {
 
 #[derive(Subcommand)]
 pub(super) enum MessageCommand {
+    /// Search message text, including messages in unwatched threads.
+    Search(MessageSearchArguments),
     /// Post an immutable top-level or thread message.
     Post(MessagePostArguments),
     /// Show one message.
@@ -486,8 +491,17 @@ pub(super) struct ThreadListArguments {
 
 #[derive(Args)]
 pub(super) struct InboxFetchArguments {
+    /// Select top-level messages; independently watched threads are always included.
+    #[arg(long, value_enum)]
+    pub scope: InboxScopeKind,
     #[arg(long)]
-    pub project_id: String,
+    pub project_id: Option<String>,
+    #[arg(long)]
+    pub board_id: Option<String>,
+    #[arg(long)]
+    pub topic_id: Option<String>,
+    #[arg(long, value_enum, default_value = "unread")]
+    pub read_mode: InboxModeKind,
     /// Typed reader Identity JSON. Fetching never acknowledges activity.
     #[arg(long)]
     pub reader: String,
@@ -530,4 +544,16 @@ pub(super) struct InboxProjectsArguments {
     pub page: PageArguments,
     #[command(flatten)]
     pub common: CommonArguments,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum InboxScopeKind {
+    Project,
+    Board,
+    Topic,
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum InboxModeKind {
+    Unread,
+    Latest,
 }

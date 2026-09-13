@@ -50,10 +50,10 @@ async fn malformed_cooldown_timestamps_are_rejected_as_attributed_invalid_record
 }
 
 #[tokio::test]
-async fn cooldown_allows_a_top_level_post_at_the_thirty_second_boundary() {
+async fn cooldown_allows_a_top_level_post_at_the_sixty_second_boundary() {
     let (path, fixture) = prepared_cooldown("exact-boundary").await;
     let now = current_time_millis();
-    overwrite_cooldown(&path, now.checked_sub(30_000).unwrap()).await;
+    overwrite_cooldown(&path, now.checked_sub(60_000).unwrap()).await;
     let mut store = BoardStore::open(&path).await.unwrap();
 
     let posted = store
@@ -71,6 +71,34 @@ async fn cooldown_allows_a_top_level_post_at_the_thirty_second_boundary() {
         .unwrap();
 
     assert_eq!(posted.message.board_id, fixture.board_id);
+    store.close().await.unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn thirty_seconds_is_still_inside_the_board_cooldown() {
+    let (path, fixture) = prepared_cooldown("sixty-second-window").await;
+    overwrite_cooldown(&path, current_time_millis() - 30_000).await;
+    let mut store = BoardStore::open(&path).await.unwrap();
+    let failure = store
+        .post_message(MessagePostRequest {
+            message_id: MessageId::generate(),
+            placement: Placement::Topic {
+                topic_id: fixture.topic_id,
+            },
+            actor: actor("cooldown-reader"),
+            acting_for: None,
+            text: text("still too soon"),
+            references: no_references(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failure.kind, BoardFailureKind::TopLevelMessageCooldown);
+    assert_eq!(failure.next_action, BoardNextAction::PostThreadMessage);
+    assert!(
+        matches!(failure.details, BoardErrorDetails::Cooldown { retry_after_seconds } if (1..=30).contains(&retry_after_seconds))
+    );
+    assert!(failure.message.contains("existing unresolved thread"));
     store.close().await.unwrap();
     std::fs::remove_file(path).unwrap();
 }

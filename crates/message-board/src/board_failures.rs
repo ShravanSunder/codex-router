@@ -116,7 +116,7 @@ impl BoardError {
             kind: BoardFailureKind::TopLevelMessageCooldown,
             stage: BoardFailureStage::Admission,
             message: format!(
-                "Wait {retry_after_seconds} seconds or add a thread message to an unresolved thread."
+                "Wait {retry_after_seconds} seconds before another top-level message in this board, or add a thread message to an existing unresolved thread."
             ),
             next_action: BoardNextAction::PostThreadMessage,
             details: BoardErrorDetails::Cooldown {

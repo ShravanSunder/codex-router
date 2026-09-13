@@ -65,6 +65,8 @@ pub(crate) async fn dispatch(
  }};
  }
     match method {
+        "board/discoverySearch" => call!(DiscoverySearchRequest, search_discovery),
+        "board/messageSearch" => call!(MessageSearchRequest, search_messages),
         "board/projectCreate" => call!(ProjectCreateRequest, create_project),
         "board/projectUpdate" => call!(ProjectUpdateRequest, update_project),
         "board/projectShow" => call!(ProjectShowRequest, show_project),

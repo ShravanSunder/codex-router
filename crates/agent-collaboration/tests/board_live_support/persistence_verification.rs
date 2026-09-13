@@ -135,6 +135,8 @@ pub(super) async fn verify() -> ProofResult<()> {
         [
             "inbox",
             "fetch",
+            "--scope",
+            "project",
             "--project-id",
             first_project_id,
             "--reader",

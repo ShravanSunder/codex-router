@@ -11,7 +11,7 @@ use message_board::*;
 use sqlx::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const TOP_LEVEL_COOLDOWN_MILLIS: i64 = 30_000;
+const TOP_LEVEL_COOLDOWN_MILLIS: i64 = 60_000;
 
 impl BoardStore {
     pub async fn post_message(
@@ -307,4 +307,25 @@ async fn publish_message_unread(
         .map_err(storage_error)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cooldown_boundary_tests {
+    use super::calculate_cooldown_retry_after_seconds;
+
+    #[test]
+    fn top_level_cooldown_waits_sixty_seconds_and_rounds_up() {
+        for (elapsed, expected) in [
+            (0, Some(60)),
+            (1, Some(60)),
+            (30_000, Some(30)),
+            (59_999, Some(1)),
+            (60_000, None),
+        ] {
+            assert_eq!(
+                calculate_cooldown_retry_after_seconds(1_000_000, 1_000_000 - elapsed).unwrap(),
+                expected
+            );
+        }
+    }
 }

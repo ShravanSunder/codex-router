@@ -53,6 +53,12 @@ async fn dispatch(
     command: PreparedBoardCommand,
 ) -> Result<Value, BoardClientError> {
     match command {
+        PreparedBoardCommand::DiscoverySearch(request) => {
+            serialize_result(client.board_discovery_search(request).await?)
+        }
+        PreparedBoardCommand::MessageSearch(request) => {
+            serialize_result(client.board_message_search(request).await?)
+        }
         PreparedBoardCommand::ProjectCreate(request) => {
             serialize_result(client.board_project_create(request).await?)
         }

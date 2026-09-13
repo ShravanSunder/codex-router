@@ -1,6 +1,6 @@
 use crate::{
-    ActingForIdentity, ActivitySequence, Bookmark, Identity, InboxPage, Page, PageRequest,
-    ProjectId, ProjectUnreadSummary, ReadScope,
+    ActingForIdentity, ActivitySequence, Bookmark, Identity, InboxPage, InboxReadMode, InboxScope,
+    Page, PageRequest, ProjectUnreadSummary, ReadScope,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,10 @@ macro_rules! contract {
 }
 
 contract!(InboxFetchRequest {
-    project_id: ProjectId,
+    scope: InboxScope,
     reader: Identity,
+    #[serde(default)]
+    read_mode: InboxReadMode,
     page: PageRequest
 });
 contract!(InboxFetchResult { page: InboxPage });

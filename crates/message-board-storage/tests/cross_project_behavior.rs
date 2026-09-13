@@ -24,7 +24,10 @@ async fn cross_project_references_and_unread_summaries_keep_independent_scope() 
     for project_id in [&first.project_id, &second.project_id] {
         store
             .fetch_inbox(InboxFetchRequest {
-                project_id: project_id.clone(),
+                scope: message_board::InboxScope::Project {
+                    project_id: project_id.clone(),
+                },
+                read_mode: message_board::InboxReadMode::Unread,
                 reader: reader.clone(),
                 page: page(50),
             })

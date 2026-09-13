@@ -89,6 +89,60 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
     if reply.message.actor != actor {
         return Err("thread actor was not preserved".into());
     }
+    let latest = client
+        .board_inbox_fetch(InboxFetchRequest {
+            scope: InboxScope::Topic {
+                topic_id: root.message.topic_id.clone(),
+            },
+            reader: actor.clone(),
+            read_mode: InboxReadMode::Latest,
+            page: PageRequest::default(),
+        })
+        .await?
+        .page;
+    if latest.read_mode != InboxReadMode::Latest
+        || latest.ordering != MessageOrdering::NewestFirst
+        || latest.records.len() != 2
+        || !matches!(
+            latest.initialization,
+            InboxInitializationStatus::NotApplicable
+        )
+        || !matches!(&latest.records[0], InboxActivity::MessageCreated { message, .. } if message.message_id == reply.message.message_id)
+    {
+        return Err(
+            "scoped latest Control read lost mode, order, or watched-thread context".into(),
+        );
+    }
+    let discovery = client
+        .board_discovery_search(DiscoverySearchRequest {
+            query: SearchQuery::try_from("topic".to_owned())?,
+            scope: DiscoveryScope::Board {
+                board_id: root.message.board_id.clone(),
+            },
+            kind: DiscoveryKind::Topic,
+            include_archived: false,
+            page: PageRequest::default(),
+        })
+        .await?;
+    if discovery.page.records.len() != 1 {
+        return Err("Control discovery search did not find topic metadata".into());
+    }
+    let search = client
+        .board_message_search(MessageSearchRequest {
+            query: SearchQuery::try_from("THREAD".to_owned())?,
+            scope: MessageListScope::Thread {
+                root_message_id: root.message.message_id.clone(),
+            },
+            kind: SearchMessageKind::Thread,
+            include_archived: false,
+            page: PageRequest::default(),
+        })
+        .await?;
+    if search.page.records.len() != 1
+        || search.page.records[0].message.message_id != reply.message.message_id
+    {
+        return Err("Control message search did not find actual thread content".into());
+    }
     let thread = client
         .board_thread_show(ThreadShowRequest {
             root_message_id: root.message.message_id,
@@ -126,6 +180,12 @@ async fn malformed_board_requests_return_safe_specific_failures()
     let responses = board_control_support::send_raw_board_requests(
         identity,
         vec![
+            serde_json::json!({"jsonrpc":"2.0","id":"missingScopeFresh","method":"board/inboxFetch","params":{
+                "reader":actor,"readMode":"unread","page":{}
+            }}),
+            serde_json::json!({"jsonrpc":"2.0","id":"missingScopeContinuation","method":"board/inboxFetch","params":{
+                "reader":actor,"readMode":"latest","page":{"cursor":"opaque-continuation"}
+            }}),
             serde_json::json!({"jsonrpc":"2.0","id":"actor","method":"board/projectCreate","params":{
                 "projectId":valid_id,"name":"Project","description":"","actor":{"kind":"futureSecret","private":private_value}
             }}),
@@ -169,6 +229,8 @@ async fn malformed_board_requests_return_safe_specific_failures()
     )
     .await?;
     let expected = [
+        ("invalidField", "scope", "required"),
+        ("invalidField", "scope", "required"),
         ("invalidIdentity", "actor", "4096"),
         ("invalidIdentity", "reader", "4096"),
         ("invalidIdentity", "actingFor", "4096"),
@@ -311,7 +373,10 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
     }
     client
         .board_inbox_fetch(InboxFetchRequest {
-            project_id: project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: bob.clone(),
             page: PageRequest::default(),
         })
@@ -342,7 +407,7 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
         }
     );
     if cooldown.kind != BoardFailureKind::TopLevelMessageCooldown
-        || !matches!(cooldown.details, BoardErrorDetails::Cooldown { retry_after_seconds } if (1..=30).contains(&retry_after_seconds))
+        || !matches!(cooldown.details, BoardErrorDetails::Cooldown { retry_after_seconds } if (1..=60).contains(&retry_after_seconds))
     {
         return Err("Control cooldown failure omitted its actionable remaining duration".into());
     }
@@ -370,7 +435,10 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
         .await?;
     let inbox = client
         .board_inbox_fetch(InboxFetchRequest {
-            project_id: project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: bob.clone(),
             page: PageRequest::default(),
         })

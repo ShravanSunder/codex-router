@@ -14,4 +14,6 @@ mod message_row_decoding;
 mod message_write_operations;
 mod repository_records;
 
+mod discovery_search;
 mod message_history_reads;
+mod message_search;

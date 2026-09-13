@@ -296,7 +296,10 @@ async fn board_update_preserves_history_watch_bookmark_and_thread_list_filter() 
     assert!(
         store
             .fetch_inbox(InboxFetchRequest {
-                project_id: fixture.project_id.clone(),
+                scope: message_board::InboxScope::Project {
+                    project_id: fixture.project_id.clone()
+                },
+                read_mode: message_board::InboxReadMode::Unread,
                 reader: reader.clone(),
                 page: page(10)
             })
