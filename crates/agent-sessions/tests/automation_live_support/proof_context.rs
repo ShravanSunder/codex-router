@@ -104,6 +104,32 @@ impl ProofContext {
         })
     }
     pub async fn start_thread(&mut self, role: &str) -> ProofResult<SessionRef> {
+        self.start_thread_with_instructions(
+            role,
+            format!(
+                "You are {role} in an isolated local acceptance test. Follow the supplied test task. Use only the supplied test commands and this fresh workspace. Never inspect credentials, change configuration, access production services or existing user threads. Do not spawn other agents. A message receipt proves acceptance, not completion."
+            ),
+        )
+        .await
+    }
+
+    // Shared helper is also compiled by scripted acceptance binaries without DX tasks.
+    #[allow(dead_code)]
+    pub async fn start_skill_thread(&mut self, role: &str) -> ProofResult<SessionRef> {
+        self.start_thread_with_instructions(
+            role,
+            format!(
+                "You are {role} in an isolated local developer-experience evaluation. Work from the supplied project context and installed skill guidance. Choose and execute the appropriate workflow yourself. Never inspect credentials, change service configuration, access production services or existing user threads, or spawn other agents. Create or change only the disposable board resources explicitly authorized by your task; otherwise preserve existing resources. Report access or capability failures directly."
+            ),
+        )
+        .await
+    }
+
+    async fn start_thread_with_instructions(
+        &mut self,
+        role: &str,
+        developer_instructions: String,
+    ) -> ProofResult<SessionRef> {
         let reservation = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let proxy_port = reservation.local_addr()?.port();
         let control_socket = self.service_directory.join("control.sock").canonicalize()?;
@@ -120,7 +146,7 @@ impl ProofContext {
         let response = self.native.request_validated(&self.schemas, NativeOperation::StartThread, json!({
             "model":"gpt-5.6-luna","allowProviderModelFallback":false,"cwd":self.workspace,
             "permissions":"automation-proof","approvalPolicy":"never","config":configuration,
-            "developerInstructions":format!("You are {role} in an isolated local acceptance test. Follow the supplied test task. Use only the supplied test commands and this fresh workspace. Never inspect credentials, change configuration, access production services or existing user threads. Do not spawn other agents. A message receipt proves acceptance, not completion.")
+            "developerInstructions":developer_instructions
         })).await;
         let response = match response {
             Ok(response) => response,

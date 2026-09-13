@@ -235,3 +235,75 @@ fn mutation_discovery_failure_is_known_unavailable_before_transmission() {
     assert!(!response.contains("outcomeUnknown"));
     assert!(!response.contains(project_id));
 }
+
+#[test]
+fn combined_board_command_argument_reports_shell_tokenization_error() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .arg("board project list")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("board command was passed as one argument"));
+    assert!(error.contains("Pass each word as a separate argument"));
+    assert!(!error.contains("debug"));
+    assert!(!error.contains("socket"));
+}
+
+#[test]
+fn combined_board_command_argument_preserves_requested_json_error_mode() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .arg("board project list --json")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        error
+            .pointer("/error/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("invalidUsage")
+    );
+    assert_eq!(
+        error
+            .pointer("/error/nextAction")
+            .and_then(serde_json::Value::as_str),
+        Some("correctRequest")
+    );
+}
+
+#[test]
+fn combined_first_argument_is_rejected_even_with_separate_trailing_arguments() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args(["board project list", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("board command was passed as one argument")
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
+        .args([
+            "board project list",
+            "--service-directory",
+            "/tmp/absent-combined-command",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        error
+            .pointer("/error/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("invalidUsage")
+    );
+}

@@ -16,6 +16,27 @@ fn main() {
         print!("{}", agent_sessions::command_help());
         return;
     }
+    if let Some(argument) = arguments.first().and_then(|argument| argument.to_str())
+        && argument.starts_with("board ")
+    {
+        let message = "The board command was passed as one argument. Pass each word as a separate argument, for example: agent-sessions board project list --json";
+        if argument
+            .split_ascii_whitespace()
+            .any(|word| word == "--json")
+            || arguments
+                .iter()
+                .skip(1)
+                .any(|argument| argument == "--json")
+        {
+            println!(
+                "{}",
+                serde_json::json!({"kind":"error","error":{"kind":"invalidUsage","stage":"validation","message":message,"nextAction":"correctRequest","details":{"kind":"none"}}})
+            );
+        } else {
+            eprintln!("{message}");
+        }
+        std::process::exit(2);
+    }
     if arguments.first().is_some_and(|arg| arg == "board") {
         std::process::exit(agent_sessions::run_board_command(arguments));
     }
