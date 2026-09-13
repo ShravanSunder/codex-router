@@ -360,7 +360,7 @@ The protocol schema owner generates distinct common, message, journal-cursor and
 
 ## ACP listener and publication ownership
 
-collaboration-service owns acp_channel_listener.rs and the owner-private agent-communication/codex-acp.sock Unix JSONL listener. Host CommunicationRuntime binds it with control.sock and codex-native.sock before publishing the service manifest; setup failure drops all newly bound owned listeners without touching the native backend socket. The listener uses the same total connection-admission budget as the other public channels and C9 per-direction frame/byte limits. It does not spawn an ACP subprocess.
+collaboration-service owns acp_channel_listener.rs and the owner-private agent-communication/codex-acp.sock Unix JSONL listener. Host CollaborationRuntime binds it with control.sock and codex-native.sock before publishing the service manifest; setup failure drops all newly bound owned listeners without touching the native backend socket. The listener uses the same total connection-admission budget as the other public channels and C9 per-direction frame/byte limits. It does not spawn an ACP subprocess.
 
 BackendPublication publishes the ACP channel only after the listener is accepting, the pinned ACP schema is available and the active native generation has an admitted translation profile. A raw-native-only generation omits ACP from its channel list. Endpoint changes expose capability removal/restoration. The public ACP socket path remains stable across backend replacement; readiness does not imply existing ACP sessions survived replacement.
 
@@ -381,10 +381,10 @@ Real proof uses an independent ACP client through this published socket for init
 
 ## Lifecycle API call paths and proof
 
-The original router baseline had no public C10 predecessor. Current feature code already composes lifecycle storage in codex-router-host/src/collaboration_runtime.rs, synchronizes generations through lifecycle_owner/communication_lifecycle.rs and runs lifecycle-observation/src/native_observation_stream.rs. These added edges remain part of the target; provider routing and native history ownership are preserved.
+The original router baseline had no public C10 predecessor. Current feature code already composes lifecycle storage in codex-router-host/src/collaboration_runtime.rs, synchronizes generations through lifecycle_owner/collaboration_lifecycle.rs and runs lifecycle-observation/src/native_observation_stream.rs. These added edges remain part of the target; provider routing and native history ownership are preserved.
 
 ```text
-Host lifecycle synchronize → CommunicationRuntime backend publication
+Host lifecycle synchronize → CollaborationRuntime backend publication
                             → scoped lifecycle event → reducer/store
 Stored catalog discovery   → inventory reconciliation → reducer/store
 Native observation stream  → ordered event/read reconciliation → reducer/store
@@ -395,6 +395,6 @@ CLI / SDK → Control connection → journal dispatch
           ← typed page or method-specific cursor/storage error
 ```
 
-CommunicationRuntime owns starting/stopping the generation-bound observer and retention task. Native observation owns reconciliation and never starts model work. Storage initialization failure leaves native communication available while C10 reports storage unavailable; endpoint availability alone does not admit stale projection data as fresh. Snapshot/journal readers use the coverage and transactional bounds specified in C10, independently of whether the native backend is currently available. Historical data remains explicitly historical. On process restart coverage is invalidated before C10 publication; native reconnect cannot refresh rows without scoped observations.
+CollaborationRuntime owns starting/stopping the generation-bound observer and retention task. Native observation owns reconciliation and never starts model work. Storage initialization failure leaves native communication available while C10 reports storage unavailable; endpoint availability alone does not admit stale projection data as fresh. Snapshot/journal readers use the coverage and transactional bounds specified in C10, independently of whether the native backend is currently available. Historical data remains explicitly historical. On process restart coverage is invalidated before C10 publication; native reconnect cannot refresh rows without scoped observations.
 
 The C10 real proof seam crosses public Control dispatch, actual SQLite storage, stored catalog discovery and native observation/reconciliation. It covers paged snapshots, journal long-poll, backend replacement, observer loss, abrupt Host restart, retention cursor invalidation and storage failure. Deterministic reducer tests complement this seam; they cannot alone establish that public readers are wired to the actual observation owner.
