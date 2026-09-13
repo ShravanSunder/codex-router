@@ -2,6 +2,23 @@
 use super::*;
 
 #[test]
+fn runtime_picker_empty_native_names_preserve_fallback_titles_and_search() {
+    for (name, fallback, expected) in [
+        (Some(""), "Inventory title", "Inventory title"),
+        (Some(""), "", "runtime-id"),
+        (Some("Native title"), "unused", "Native title"),
+        (None, "Inventory title", "Inventory title"),
+    ] {
+        let row = runtime_record("runtime-id", fallback, "/repo", &json!({"name":name}));
+        assert_eq!(row.title, expected);
+        assert_eq!(row.full_title, expected);
+        assert!(row.matches_search(
+            &collaboration_client::session_catalog::SessionSearchExpression::parse(expected)
+        ));
+    }
+}
+
+#[test]
 fn runtime_picker_preserves_native_subagent_classification() {
     let row = runtime_record(
         "child",

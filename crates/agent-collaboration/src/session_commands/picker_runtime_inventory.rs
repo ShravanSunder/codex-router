@@ -146,8 +146,7 @@ fn runtime_record(
                 fallback_title.to_owned()
             }
         });
-    let derived_title = name.is_none().then_some(title);
-    SessionPickerRecord::from_record(&SessionRecord {
+    let mut row = SessionPickerRecord::from_record(&SessionRecord {
         session_id: id.to_owned(),
         rollout_path: None,
         cwd: Some(cwd.to_owned()),
@@ -177,13 +176,16 @@ fn runtime_record(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
         name,
-        title: derived_title,
+        title: Some(title.clone()),
         preview: None,
         first_user_message: None,
         created_at_ms: time("createdAt"),
         updated_at_ms: time("updatedAt"),
         recency_at_ms: time("updatedAt"),
-    })
+    });
+    // Runtime inventory already chose its title; stored-session formatting is separate.
+    row.title = title;
+    row
 }
 
 /// Cache only remembered addresses/metadata; every refresh must re-establish live status.

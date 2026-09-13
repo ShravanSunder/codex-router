@@ -67,6 +67,9 @@ pub fn read_session_conversation_history(
     let Some(path) = validated_rollout_path(&source.codex_home_path, &source.rollout_path) else {
         return unavailable_history("history unavailable");
     };
+    if !path.is_file() {
+        return unavailable_history("history unavailable");
+    }
     let Ok(text) = read_history_tail(&path) else {
         return unavailable_history("history unavailable");
     };
