@@ -42,14 +42,11 @@ enum JournalCommand {
     },
 }
 pub fn run_journal_command(arguments: Vec<OsString>) -> i32 {
-    let args = match JournalArguments::try_parse_from(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _printed = error.print();
-            return code;
-        }
-    };
+    let args =
+        match crate::automation_argument_feedback::parse_arguments::<JournalArguments>(arguments) {
+            Ok(args) => args,
+            Err(code) => return code,
+        };
     let directory = match resolve_directory(args.service_directory) {
         Ok(directory) => directory,
         Err(message) => return report_failure("invalidUsage", &message, 2, args.json),
@@ -160,11 +157,18 @@ pub fn run_journal_command(arguments: Vec<OsString>) -> i32 {
                 )
             }
         }
-        Err(_) => report_failure(
-            "unavailable",
-            "Journal connection unavailable",
-            3,
+        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+            &error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             args.json,
-        ),
+        )
+        .unwrap_or_else(|| {
+            report_failure(
+                "unavailable",
+                "Journal connection unavailable",
+                3,
+                args.json,
+            )
+        }),
     }
 }

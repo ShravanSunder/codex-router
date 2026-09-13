@@ -12,7 +12,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     name = "addresses",
-    about = "Inspect remembered thread addresses and observation coverage; never load or wake agents"
+    about = "Inspect lifecycle coverage and remembered addresses, not message target discovery; never load or wake agents"
 )]
 struct AddressArguments {
     #[command(subcommand)]
@@ -20,7 +20,7 @@ struct AddressArguments {
 }
 #[derive(Subcommand)]
 enum AddressCommand {
-    /// Read one immutable snapshot page; use nextCursor to continue the same snapshot.
+    /// Read lifecycle coverage, not message target discovery; use nextCursor to continue.
     List {
         #[arg(long)]
         endpoint: String,
@@ -35,14 +35,11 @@ enum AddressCommand {
     },
 }
 pub fn run_address_command(arguments: Vec<OsString>) -> i32 {
-    let arguments = match AddressArguments::try_parse_from(arguments) {
-        Ok(arguments) => arguments,
-        Err(error) => {
-            let status = if error.use_stderr() { 2 } else { 0 };
-            let _printed = error.print();
-            return status;
-        }
-    };
+    let arguments =
+        match crate::automation_argument_feedback::parse_arguments::<AddressArguments>(arguments) {
+            Ok(arguments) => arguments,
+            Err(code) => return code,
+        };
     let AddressCommand::List {
         endpoint,
         page_size,
@@ -130,11 +127,18 @@ pub fn run_address_command(arguments: Vec<OsString>) -> i32 {
         Err(ClientError::Rejected { .. }) => {
             report_failure("rejected", "Address snapshot rejected", 4, machine_output)
         }
-        Err(_) => report_failure(
-            "unavailable",
-            "Address snapshot unavailable",
-            3,
+        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+            &error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine_output,
-        ),
+        )
+        .unwrap_or_else(|| {
+            report_failure(
+                "unavailable",
+                "Address snapshot unavailable",
+                3,
+                machine_output,
+            )
+        }),
     }
 }

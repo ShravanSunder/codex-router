@@ -25,6 +25,7 @@ pub fn protocol_type_schemas() -> Result<BTreeMap<String, Value>, serde_json::Er
     add_type::<crate::FiniteCommandRecord<Value, Value>>(&mut schemas)?;
     add_type::<crate::NativeObservationRecord>(&mut schemas)?;
     add_type::<crate::ConversationRecord>(&mut schemas)?;
+    add_type::<crate::PermissionDiagnostic>(&mut schemas)?;
     if let Some(schema) = schemas.get_mut("ConversationRecord") {
         crate::cli_output_contract::bind_acp_schemas(schema)?;
     }

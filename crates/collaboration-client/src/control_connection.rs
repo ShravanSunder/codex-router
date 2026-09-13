@@ -7,6 +7,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+const PERMISSION_DIAGNOSTIC_MESSAGE: &str = "Request automated approval review through your tool for this exact command or exact socket access, then retry only after access is granted.";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("unsupported protocol capability: {0}")]
@@ -25,11 +27,40 @@ pub enum ClientError {
     #[error("Control request rejected with code {code}")]
     Rejected { code: i64, data: Option<Value> },
 }
+
+impl ClientError {
+    #[must_use]
+    pub fn permission_diagnostic(&self) -> Option<collaboration_protocol::PermissionDiagnostic> {
+        let Self::Discovery { stage, source } = self else {
+            return None;
+        };
+        if source.kind() != std::io::ErrorKind::PermissionDenied {
+            return None;
+        }
+        let stage = match *stage {
+            "manifest-read" => collaboration_protocol::PermissionDiagnosticStage::ManifestRead,
+            "directory-resolve" => {
+                collaboration_protocol::PermissionDiagnosticStage::DirectoryResolve
+            }
+            "socket-resolve" => collaboration_protocol::PermissionDiagnosticStage::SocketResolve,
+            "socket-connect" => collaboration_protocol::PermissionDiagnosticStage::SocketConnect,
+            _ => return None,
+        };
+        Some(collaboration_protocol::PermissionDiagnostic {
+            kind: collaboration_protocol::PermissionDiagnosticKind::PermissionDenied,
+            stage,
+            message: PERMISSION_DIAGNOSTIC_MESSAGE.to_owned(),
+            next_action: collaboration_protocol::PermissionDiagnosticNextAction::RequestApproval,
+        })
+    }
+}
+
 pub struct ControlClient {
     pub(crate) connection: ClientConnection,
     identity: ControlInitializationResult,
     notification_state: EndpointNotificationState,
 }
+
 pub(crate) struct ClientConnection {
     stream: UnixStream,
     decoder: ControlFrameDecoder,
@@ -423,6 +454,7 @@ impl ControlClient {
         Ok(())
     }
 }
+
 impl ClientConnection {
     pub(crate) fn retire(&mut self) {
         self.failed = true;

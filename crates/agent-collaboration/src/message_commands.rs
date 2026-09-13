@@ -26,14 +26,11 @@ enum MessageCommand {
     Send(SendArguments),
 }
 pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
-    let parsed = match MessageArguments::try_parse_from(arguments) {
-        Ok(value) => value,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _printed = error.print();
-            return code;
-        }
-    };
+    let parsed =
+        match crate::automation_argument_feedback::parse_arguments::<MessageArguments>(arguments) {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
     let MessageCommand::Send(args) = parsed.command;
     let machine = args.json;
     let prepared = prepare(&args);
@@ -120,6 +117,16 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
 }
 
 fn report(result: Result<NativeSendReceipt, ClientError>, machine: bool, submitted: bool) -> i32 {
+    if !submitted
+        && let Err(error) = &result
+        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+            error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+            machine,
+        )
+    {
+        return code;
+    }
     let (record, code) = match result {
         Ok(receipt) => (json!({"kind":"result","result":receipt}), 0),
         Err(ClientError::Rejected { code, data }) => {

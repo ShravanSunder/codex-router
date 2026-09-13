@@ -4,6 +4,11 @@ pub use cli_output_contract::{
     ConversationEffect, ConversationRecord, ConversationStage, FiniteCommandRecord,
     NativeObservationRecord, ObservationCloseReason,
 };
+mod permission_diagnostic;
+pub use permission_diagnostic::{
+    PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
+    PermissionDiagnosticStage,
+};
 mod backend_generation;
 mod control_error_validation;
 mod control_schema_document;

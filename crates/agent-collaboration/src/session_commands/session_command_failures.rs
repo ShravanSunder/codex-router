@@ -77,3 +77,17 @@ impl From<collaboration_client::session_catalog::SessionCatalogError> for Sessio
         }
     }
 }
+
+impl SessionsCommandError {
+    pub(crate) fn permission_diagnostic(
+        &self,
+    ) -> Option<&collaboration_client::protocol::PermissionDiagnostic> {
+        let Self::CodexLaunch(error) = self else {
+            return None;
+        };
+        error
+            .get_ref()?
+            .downcast_ref::<collaboration_client::NativeTransportError>()?
+            .permission_diagnostic()
+    }
+}

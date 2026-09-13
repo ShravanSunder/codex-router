@@ -90,3 +90,28 @@ fn initialization_schema_distinguishes_requested_and_negotiated_versions() {
     negotiated["version"]["major"] = json!(2);
     assert!(!result.is_valid(&negotiated));
 }
+
+#[test]
+fn permission_diagnostic_schema_exposes_closed_agent_recovery_contract() {
+    let schemas = protocol_type_schemas().unwrap_or_else(|error| panic!("schemas: {error}"));
+    let schema = schemas
+        .get("PermissionDiagnostic")
+        .unwrap_or_else(|| panic!("permission diagnostic schema"));
+    let validator =
+        jsonschema::validator_for(schema).unwrap_or_else(|error| panic!("validator: {error}"));
+    let diagnostic = json!({
+        "kind": "permissionDenied",
+        "stage": "socketConnect",
+        "message": "Request automated approval review through your tool for this exact command or exact socket access, then retry only after access is granted.",
+        "nextAction": "requestApproval"
+    });
+    assert!(validator.is_valid(&diagnostic));
+
+    let mut invalid_action = diagnostic.clone();
+    invalid_action["nextAction"] = json!("retryLater");
+    assert!(!validator.is_valid(&invalid_action));
+
+    let mut unknown_field = diagnostic;
+    unknown_field["automaticApproval"] = json!(true);
+    assert!(!validator.is_valid(&unknown_field));
+}

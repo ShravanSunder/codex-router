@@ -55,13 +55,11 @@ struct PromptArguments {
     json: bool,
 }
 pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
-    let parsed = match ConversationArguments::try_parse_from(arguments) {
+    let parsed = match crate::automation_argument_feedback::parse_arguments::<ConversationArguments>(
+        arguments,
+    ) {
         Ok(v) => v,
-        Err(e) => {
-            let code = if e.use_stderr() { 2 } else { 0 };
-            let _printed = e.print();
-            return code;
-        }
+        Err(code) => return code,
     };
     let ConversationCommand::Prompt(args) = parsed.command;
     let prepared = prepare(&args);
@@ -97,6 +95,15 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
             Ok(ConversationEnd::TimedOut)=>124,
             Ok(ConversationEnd::Cancelled)=>130,
             Err(error)=>{
+                if stage == "connect"
+                    && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+                        &error,
+                        crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                        args.json,
+                    )
+                {
+                    return code;
+                }
                 let effect=if !matches!(error,ClientError::UnsupportedCapability(_)) && matches!(stage,"new"|"load"|"prompt"){"unknown"}else{"notDispatched"};
                 let exit=match &error{ClientError::UnsupportedCapability(_)=>2,ClientError::Rejected{..}=>4,_ if effect=="unknown"=>5,_=>3};
                 let record=json!({"kind":"conversationError","target":target,"stage":stage,"effect":effect,"message":"ACP conversation failed; no operation replayed"});

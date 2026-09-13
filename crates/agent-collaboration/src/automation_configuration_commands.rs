@@ -137,6 +137,18 @@ pub fn run_automation_command(arguments: Vec<OsString>) -> i32 {
         let _ = client.close().await;
         result
     });
+    if !dispatched
+        && let Err(ConfigurationClientError::Connection(error)) = &result
+        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+            error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Operation(
+                operation_id.as_ref(),
+            ),
+            args.json,
+        )
+    {
+        return code;
+    }
     let (record, code) = match result {
         Ok(result) => (
             json!({"kind":"result","operationId":operation_id,"result":result}),

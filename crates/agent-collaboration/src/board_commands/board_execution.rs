@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::io::{self, Write};
 
 enum CommandExecutionError {
-    ConnectionBeforeRequest,
+    ConnectionBeforeRequest(ClientError),
     Request(BoardClientError),
 }
 
@@ -38,7 +38,7 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
             env!("CARGO_PKG_VERSION"),
         )
         .await
-        .map_err(|_| CommandExecutionError::ConnectionBeforeRequest)?;
+        .map_err(CommandExecutionError::ConnectionBeforeRequest)?;
         let result = dispatch(&mut client, command)
             .await
             .map_err(CommandExecutionError::Request);
@@ -202,7 +202,14 @@ fn report(result: Result<Value, CommandExecutionError>, machine: bool) -> i32 {
             message,
             next_action,
         })) => report_uncertain_outcome(machine, &resource, message, next_action),
-        Err(CommandExecutionError::ConnectionBeforeRequest) => report_connection_failure(machine),
+        Err(CommandExecutionError::ConnectionBeforeRequest(error)) => {
+            crate::permission_diagnostic_reporting::report_permission_error(
+                &error,
+                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                machine,
+            )
+            .unwrap_or_else(|| report_connection_failure(machine))
+        }
         Err(CommandExecutionError::Request(BoardClientError::Connection(_))) => {
             report_connection_failure(machine)
         }

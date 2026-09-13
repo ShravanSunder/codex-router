@@ -101,6 +101,6 @@ fn main() {
     }
     if let Err(error) = agent_collaboration::run_arguments(arguments) {
         eprintln!("{error}");
-        std::process::exit(2);
+        std::process::exit(error.exit_code());
     }
 }

@@ -30,6 +30,15 @@ pub struct ProofContext {
 }
 impl ProofContext {
     pub async fn connect() -> ProofResult<Self> {
+        Self::connect_with_prior_host(None).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn reconnect_after_owned_host_restart(prior_host_pid: u64) -> ProofResult<Self> {
+        Self::connect_with_prior_host(Some(prior_host_pid)).await
+    }
+
+    async fn connect_with_prior_host(prior_host_pid: Option<u64>) -> ProofResult<Self> {
         let root = PathBuf::from(std::env::var_os("CODEX_AUTOMATION_PROOF_ROOT").ok_or(
             "Set CODEX_AUTOMATION_PROOF_ROOT to a fresh automation-debug-host run directory",
         )?)
@@ -51,15 +60,41 @@ impl ProofContext {
             return Err("Host did not establish the isolated debug profile and Luna model".into());
         }
         let workspace = root.join("agent-workspace");
-        if std::fs::read_dir(&workspace)?.next().is_some() {
-            return Err("Live proof requires a previously unused workspace".into());
+        if let Some(prior_host_pid) = prior_host_pid {
+            let resumed_host_pid = marker
+                .get("hostPid")
+                .and_then(Value::as_u64)
+                .filter(|host_pid| *host_pid > 0 && *host_pid != prior_host_pid)
+                .ok_or("Host PID did not change across the requested owned restart")?;
+            if !root.join("proof-started.json").is_file() {
+                return Err("Restarted proof root has no prior proof admission marker".into());
+            }
+            let inspected = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::process::Command::new("ps")
+                    .args(["-p", &resumed_host_pid.to_string(), "-o", "comm="])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await??;
+            if !inspected.status.success()
+                || !String::from_utf8(inspected.stdout)?.contains("automation-debug")
+            {
+                return Err(
+                    "Updated Host PID does not identify the resumed acceptance Host".into(),
+                );
+            }
+        } else {
+            if std::fs::read_dir(&workspace)?.next().is_some() {
+                return Err("Live proof requires a previously unused workspace".into());
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join("proof-started.json"))?
+                .write_all(b"{\"model\":\"gpt-5.6-luna\"}\n")?;
         }
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(root.join("proof-started.json"))?
-            .write_all(b"{\"model\":\"gpt-5.6-luna\"}\n")?;
         let service_directory = root.join("agent-communication");
         let mut client =
             ControlClient::connect(&service_directory, "automation-luna-acceptance", "1").await?;
@@ -86,8 +121,12 @@ impl ProofContext {
         let paths = codex_native_integration::CodexPaths::from_codex_home(home);
         let identity =
             codex_native_integration::executable_identity(&paths.managed_executable()).await?;
-        let export =
-            NativeSchemaExport::generate(&identity, &root.join("proof-native-schema")).await?;
+        let schema_directory = if prior_host_pid.is_some() {
+            "proof-native-schema-after-restart"
+        } else {
+            "proof-native-schema"
+        };
+        let export = NativeSchemaExport::generate(&identity, &root.join(schema_directory)).await?;
         let schemas = NativePayloadSchemas::from_bundle(export.bundle())?;
         if schemas.schema_digest() != String::from(digest) {
             return Err("Running endpoint and proof executable expose different schemas".into());
@@ -127,10 +166,43 @@ impl ProofContext {
         .await
     }
 
+    #[allow(dead_code)]
+    pub async fn start_messaging_skill_thread(
+        &mut self,
+        role: &str,
+        working_directory: &std::path::Path,
+    ) -> ProofResult<SessionRef> {
+        let owned_working_directory = working_directory.canonicalize()?;
+        if !owned_working_directory.starts_with(self.workspace.canonicalize()?) {
+            return Err(
+                "Messaging skill thread cwd must stay inside the owned proof workspace".into(),
+            );
+        }
+        self.start_thread_with_context(
+            role,
+            format!(
+                "You are {role} in an isolated local direct-messaging developer-experience evaluation. Use the supplied communication skill and factual test context to choose the commands yourself. Work only with sessions whose exact working directory the task supplies or your own current session. Never inspect credentials, change service configuration, access production services or unrelated user threads, create replacement sessions, or spawn other agents. A request receipt proves acceptance, not a terminal turn or an actual reply."
+            ),
+            &owned_working_directory,
+        )
+        .await
+    }
+
     async fn start_thread_with_instructions(
         &mut self,
         role: &str,
         developer_instructions: String,
+    ) -> ProofResult<SessionRef> {
+        let workspace = self.workspace.clone();
+        self.start_thread_with_context(role, developer_instructions, &workspace)
+            .await
+    }
+
+    async fn start_thread_with_context(
+        &mut self,
+        role: &str,
+        developer_instructions: String,
+        working_directory: &std::path::Path,
     ) -> ProofResult<SessionRef> {
         let reservation = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let proxy_port = reservation.local_addr()?.port();
@@ -146,7 +218,7 @@ impl ProofContext {
         });
         drop(reservation);
         let response = self.native.request_validated(&self.schemas, NativeOperation::StartThread, json!({
-            "model":"gpt-5.6-luna","allowProviderModelFallback":false,"cwd":self.workspace,
+            "model":"gpt-5.6-luna","allowProviderModelFallback":false,"cwd":working_directory,
             "permissions":"automation-proof","approvalPolicy":"never","config":configuration,
             "developerInstructions":developer_instructions
         })).await;

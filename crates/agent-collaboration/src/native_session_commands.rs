@@ -55,16 +55,14 @@ struct TargetArguments {
     json: bool,
 }
 pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
-    let parsed = NativeControlArguments::try_parse_from(
-        std::iter::once(OsString::from("agent-collaboration")).chain(arguments),
-    );
-    let parsed = match parsed {
+    let arguments = std::iter::once(OsString::from("agent-collaboration"))
+        .chain(arguments)
+        .collect();
+    let parsed = match crate::automation_argument_feedback::parse_arguments::<NativeControlArguments>(
+        arguments,
+    ) {
         Ok(parsed) => parsed,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _printed = error.print();
-            return code;
-        }
+        Err(code) => return code,
     };
     let (target, turn) = match parsed.command {
         NativeControlCommand::Session {
@@ -193,11 +191,18 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
             5,
             machine_output,
         ),
-        Err(_) => crate::endpoint_commands::report_failure(
-            "unavailable",
-            "Native control connection unavailable",
-            3,
+        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+            &error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine_output,
-        ),
+        )
+        .unwrap_or_else(|| {
+            crate::endpoint_commands::report_failure(
+                "unavailable",
+                "Native control connection unavailable",
+                3,
+                machine_output,
+            )
+        }),
     }
 }

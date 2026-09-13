@@ -43,14 +43,12 @@ enum InventoryCommand {
     },
 }
 pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
-    let parsed = match InventoryArguments::try_parse_from(arguments) {
-        Ok(v) => v,
-        Err(e) => {
-            let code = if e.use_stderr() { 2 } else { 0 };
-            let _printed = e.print();
-            return code;
-        }
-    };
+    let parsed =
+        match crate::automation_argument_feedback::parse_arguments::<InventoryArguments>(arguments)
+        {
+            Ok(v) => v,
+            Err(code) => return code,
+        };
     let InventoryCommand::List {
         endpoint,
         view,
@@ -151,11 +149,18 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
             }
             exit
         }
-        Err(_) => crate::endpoint_commands::report_failure(
-            "unavailable",
-            "Session inventory unavailable",
-            3,
+        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+            &error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine,
-        ),
+        )
+        .unwrap_or_else(|| {
+            crate::endpoint_commands::report_failure(
+                "unavailable",
+                "Session inventory unavailable",
+                3,
+                machine,
+            )
+        }),
     }
 }

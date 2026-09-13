@@ -44,9 +44,50 @@ pub(crate) fn app_server_socket_or_default(
         },
     )
 }
-pub fn run_arguments(arguments: Vec<OsString>) -> Result<(), String> {
-    let command = crate::sessions::SessionsCommand::parse(arguments)?;
+#[derive(Debug)]
+pub struct RunArgumentsFailure {
+    message: String,
+    exit_code: i32,
+}
+
+impl std::fmt::Display for RunArgumentsFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RunArgumentsFailure {}
+
+impl RunArgumentsFailure {
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+}
+
+pub fn run_arguments(arguments: Vec<OsString>) -> Result<(), RunArgumentsFailure> {
+    let command = crate::sessions::SessionsCommand::parse(arguments).map_err(|message| {
+        RunArgumentsFailure {
+            message,
+            exit_code: 2,
+        }
+    })?;
     let context = CliContext::new(std::env::vars().collect());
-    crate::sessions::run_sessions_command(&mut std::io::stdout(), command, &context)
-        .map_err(|error| error.to_string())
+    crate::sessions::run_sessions_command(&mut std::io::stdout(), command, &context).map_err(
+        |error| {
+            if let Some(diagnostic) = error.permission_diagnostic() {
+                RunArgumentsFailure {
+                    message: crate::permission_diagnostic_reporting::human_diagnostic_text(
+                        diagnostic,
+                    ),
+                    exit_code: 3,
+                }
+            } else {
+                RunArgumentsFailure {
+                    message: error.to_string(),
+                    exit_code: 2,
+                }
+            }
+        },
+    )
 }

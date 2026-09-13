@@ -2,7 +2,7 @@
 mod session_environment;
 pub use session_environment::CliContext;
 use session_environment::app_server_socket_or_default;
-pub use session_environment::run_arguments;
+pub use session_environment::{RunArgumentsFailure, run_arguments};
 #[path = "session_command_dispatch.rs"]
 mod sessions;
 mod presentation {
@@ -27,6 +27,7 @@ pub fn command_help() -> String {
 }
 
 mod endpoint_commands;
+mod permission_diagnostic_reporting;
 pub use endpoint_commands::run_endpoint_command;
 mod address_book_commands;
 pub use address_book_commands::run_address_command;

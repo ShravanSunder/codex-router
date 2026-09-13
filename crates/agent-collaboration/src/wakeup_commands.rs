@@ -161,6 +161,18 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
         let _ = client.close().await;
         result
     });
+    if !dispatched
+        && let Err(WakeClientError::Connection(error)) = &result
+        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+            error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Operation(
+                invocation.operation_id.as_ref(),
+            ),
+            machine,
+        )
+    {
+        return code;
+    }
     let (record, code) = match result {
         Ok(snapshot) => (
             json!({"kind":"result","operationId":invocation.operation_id,"result":snapshot}),

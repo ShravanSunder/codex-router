@@ -1,5 +1,5 @@
 //! Public endpoint resolution immediately before native TUI launch.
-use crate::ControlClient;
+use crate::{ControlClient, NativeTransportError};
 use collaboration_protocol::{ChannelDescription, EndpointAvailability};
 use std::{
     io,
@@ -17,7 +17,12 @@ pub fn resolve_public_native(directory: &Path) -> io::Result<PathBuf> {
             env!("CARGO_PKG_VERSION"),
         )
         .await
-        .map_err(|_| io::Error::other("communication service unavailable"))?;
+        .map_err(|error| {
+            error.permission_diagnostic().map_or_else(
+                || io::Error::other("communication service unavailable"),
+                |diagnostic| io::Error::other(NativeTransportError::PermissionDenied(diagnostic)),
+            )
+        })?;
         let inventory = client
             .list_endpoints()
             .await

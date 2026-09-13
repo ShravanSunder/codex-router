@@ -14,10 +14,10 @@ pub(crate) enum DeliveryChoice {
 }
 #[derive(Args)]
 pub(crate) struct SendArguments {
-    /// Exact recipient as compact SessionRef JSON from discovery.
+    /// Exact recipient SessionRef JSON; copy `.target` from `sessions list --json`.
     #[arg(long)]
     pub(crate) to: String,
-    /// Self-declared sender SessionRef JSON; not authenticated identity.
+    /// Use the supplied self address as SessionRef JSON; this is not authenticated identity.
     #[arg(
         long = "from",
         required_unless_present = "human_user",
@@ -53,7 +53,7 @@ pub(crate) fn prepare(
     args: &SendArguments,
 ) -> Result<(PathBuf, SessionRef, MessageContent), String> {
     let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
-    let target = serde_json::from_str(&args.to).map_err(|_| "Invalid recipient SessionRef JSON")?;
+    let target = serde_json::from_str(&args.to).map_err(|_| session_ref_guidance("--to"))?;
     if let Some(epoch) = &args.expected_service_epoch {
         let _: collaboration_client::protocol::CodexGeneration = serde_json::from_value(
             json!({"serviceEpoch":epoch,"generation":args.expected_generation}),
@@ -88,10 +88,16 @@ pub(crate) fn prepare(
                 .as_deref()
                 .ok_or("Self-declared sender required")?,
         )
-        .map_err(|_| "Invalid sender SessionRef JSON")?;
+        .map_err(|_| session_ref_guidance("--from"))?;
         MessageContent::Agent { sender, text }
     };
     Ok((directory, target, content))
+}
+
+fn session_ref_guidance(field: &str) -> String {
+    format!(
+        "{field} must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json."
+    )
 }
 
 pub(crate) fn saved_message(args: &SendArguments) -> Result<(PathBuf, SavedMessage), String> {

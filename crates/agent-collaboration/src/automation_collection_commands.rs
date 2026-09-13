@@ -224,6 +224,15 @@ pub(crate) fn run_collection_command(
         let _ = client.close().await;
         result
     });
+    if let Err(ReadCommandError::Client(error)) = &result
+        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+            error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+            context.json,
+        )
+    {
+        return code;
+    }
     let (record, code) = match result {
         Ok(result) => (json!({"kind":"result","result":result}), 0),
         Err(ReadCommandError::Inspection(error)) => (json!({"kind":"error","error":error}), 4),

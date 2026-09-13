@@ -27,13 +27,11 @@ enum EndpointCommand {
 }
 /// Runs discovery without loading a thread or launching a backend.
 pub fn run_endpoint_command(arguments: Vec<OsString>) -> i32 {
-    let arguments = match EndpointArguments::try_parse_from(arguments) {
+    let arguments = match crate::automation_argument_feedback::parse_arguments::<EndpointArguments>(
+        arguments,
+    ) {
         Ok(value) => value,
-        Err(error) => {
-            let code = if error.use_stderr() { 2 } else { 0 };
-            let _printed = error.print();
-            return code;
-        }
+        Err(code) => return code,
     };
     let EndpointCommand::List {
         service_directory,
@@ -86,12 +84,19 @@ pub fn run_endpoint_command(arguments: Vec<OsString>) -> i32 {
         Err(ClientError::Rejected { .. }) => {
             report_failure("rejected", "Endpoint discovery rejected", 4, machine_output)
         }
-        Err(_) => report_failure(
-            "unavailable",
-            "Endpoint discovery unavailable",
-            3,
+        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+            &error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine_output,
-        ),
+        )
+        .unwrap_or_else(|| {
+            report_failure(
+                "unavailable",
+                "Endpoint discovery unavailable",
+                3,
+                machine_output,
+            )
+        }),
     }
 }
 pub(crate) fn resolve_directory(explicit: Option<PathBuf>) -> Result<PathBuf, String> {

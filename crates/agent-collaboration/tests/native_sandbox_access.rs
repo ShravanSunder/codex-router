@@ -47,6 +47,27 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
             "Default network-disabled workspace unexpectedly admitted Control socket access".into(),
         );
     }
+    let denied_response: serde_json::Value = serde_json::from_slice(&denied.stdout)?;
+    if denied.status.code() != Some(3)
+        || denied_response
+            .pointer("/error/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("permissionDenied")
+        || denied_response
+            .pointer("/error/stage")
+            .and_then(serde_json::Value::as_str)
+            != Some("socketConnect")
+        || denied_response
+            .pointer("/error/nextAction")
+            .and_then(serde_json::Value::as_str)
+            != Some("requestApproval")
+    {
+        return Err(format!(
+            "Denied socket did not produce actionable permission feedback: {denied_response}"
+        )
+        .into());
+    }
+    println!("Denied Control CLI receipt: {denied_response}");
     let allowed = sandbox
         .run(
             SocketGrant::CommandFlag(&root.join("control.sock")),

@@ -1,7 +1,8 @@
 //! Native JSONL/WebSocket carrier bridge; no protocol initialization or replay is invented.
 use clap::Parser;
 use collaboration_client::{
-    NATIVE_WEBSOCKET_FRAME_LIMIT, NativeTransportConnection, protocol::EndpointId,
+    NATIVE_WEBSOCKET_FRAME_LIMIT, NativeTransportConnection, NativeTransportError,
+    protocol::EndpointId,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::{ffi::OsString, io, path::PathBuf};
@@ -55,16 +56,33 @@ pub fn run_native_command(arguments: Vec<OsString>) -> i32 {
     runtime.shutdown_background();
     match result {
         Ok(()) => 0,
+        Err(NativeBridgeError::Transport(error)) => match error.permission_diagnostic() {
+            Some(diagnostic) => crate::permission_diagnostic_reporting::report_diagnostic(
+                diagnostic,
+                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                false,
+            ),
+            None => {
+                eprintln!("{error}");
+                3
+            }
+        },
         Err(error) => {
             eprintln!("{error}");
             3
         }
     }
 }
-async fn bridge(directory: PathBuf, endpoint: EndpointId) -> io::Result<()> {
-    let connection = NativeTransportConnection::connect(&directory, endpoint)
-        .await
-        .map_err(io::Error::other)?;
+#[derive(Debug, thiserror::Error)]
+enum NativeBridgeError {
+    #[error(transparent)]
+    Transport(#[from] NativeTransportError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+async fn bridge(directory: PathBuf, endpoint: EndpointId) -> Result<(), NativeBridgeError> {
+    let connection = NativeTransportConnection::connect(&directory, endpoint).await?;
     let socket = connection.stream;
     let (mut writer, mut reader) = socket.split();
     let input = async {
@@ -131,5 +149,5 @@ async fn bridge(directory: PathBuf, endpoint: EndpointId) -> io::Result<()> {
         }
         Ok(())
     };
-    tokio::select! {result=input=>result,result=output=>result}
+    tokio::select! {result=input=>result.map_err(Into::into),result=output=>result.map_err(Into::into)}
 }

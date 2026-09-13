@@ -69,7 +69,14 @@ pub fn run_event_command(arguments: Vec<OsString>) -> i32 {
             let session_id=session.try_into().map_err(|_|collaboration_client::ClientError::Protocol("invalid session"))?;
             NativeObservation::attach_by_ids(&directory,endpoint_id,session_id).await
         }.await;
-        let mut observation=match attached {Ok(value)=>value,Err(_)=>return crate::endpoint_commands::report_failure("unavailable","Native attachment failed; no listener readiness",3,true)};
+        let mut observation=match attached {
+            Ok(value)=>value,
+            Err(error)=>return crate::permission_diagnostic_reporting::report_permission_error(
+                &error,
+                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                true,
+            ).unwrap_or_else(||crate::endpoint_commands::report_failure("unavailable","Native attachment failed; no listener readiness",3,true)),
+        };
         let target=observation.target().clone();let generation=observation.generation().clone();
         if writeln!(io::stdout(),"{}",json!({"kind":"listenerReady","target":target,"generation":generation})).is_err(){return 3;}
         let Some(deadline)=tokio::time::Instant::now().checked_add(Duration::from_secs(timeout_seconds)) else {return 2;};

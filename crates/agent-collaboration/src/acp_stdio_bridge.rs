@@ -54,7 +54,14 @@ pub fn run_acp_command(arguments: Vec<OsString>) -> i32 {
                 eprintln!("ACP channel unsupported");
                 return 2;
             }
-            Err(_) => {
+            Err(error) => {
+                if let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+                    &error,
+                    crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                    false,
+                ) {
+                    return code;
+                }
                 eprintln!("ACP service connection unavailable");
                 return 3;
             }

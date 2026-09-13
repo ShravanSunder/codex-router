@@ -1,16 +1,22 @@
 # Agent collaboration through the CLI
 
 Use `agent-collaboration` to discover, message and observe independently addressed
-Codex threads on this machine. The caller must provide your own complete session
-reference and authorize access to the service. Do not infer your identity from a
-PID, working directory, display name or recently updated thread.
+Codex threads on this machine. Resolve your complete session reference from supplied
+context or verified native thread identity using the [session messaging guide](../../agent-skills/agent-collaboration/references/session-messaging.md).
+The caller must authorize the operation and service access. Do not infer your
+identity from a PID, working directory, display name or recently updated thread.
 
 ```sh
 agent-collaboration endpoints list --json
-agent-collaboration sessions list --endpoint codex-local --view loaded --json
-agent-collaboration sessions list --endpoint codex-local --view stored --json
-agent-collaboration session inspect --endpoint codex-local --session THREAD_ID --json
+agent-collaboration sessions list --endpoint "$ENDPOINT_ID" --view loaded --json
+agent-collaboration sessions list --endpoint "$ENDPOINT_ID" --view stored --json
+agent-collaboration session inspect --endpoint "$ENDPOINT_ID" --session THREAD_ID --json
 ```
+
+Set `ENDPOINT_ID` from endpoint discovery for the selected service. Copy each
+session inventory entry's `.target` verbatim; `addresses list` is lifecycle coverage
+and does not return message targets. Check `stored` for unloaded sessions and
+`loaded` for newly active sessions; a missing result never authorizes a replacement.
 
 An address is compact JSON containing `endpoint.serviceId`,
 `endpoint.endpointId` and `sessionId`. Preserve all three fields. Stored addresses
@@ -51,7 +57,7 @@ do not substitute another thread when a target rejects a request.
 ## Observe and interpret results
 
 ```sh
-agent-collaboration events listen --endpoint codex-local \
+agent-collaboration events listen --endpoint "$ENDPOINT_ID" \
   --session THREAD_ID --attach --timeout-seconds 300
 ```
 
@@ -69,7 +75,7 @@ deduplication guarantee.
 
 Do not automatically resend after an unknown outcome. Preserve independent
 resume/submission effects in errors and inspect the target before deciding on a
-new request. Send exit codes are 0 acceptance, 2 usage/unsupported, 3 unavailable,
+new request. Send exit codes are 0 acceptance, 2 usage/unsupported, 3 unavailable or permission denied,
 4 known rejection and 5 uncertainty. Observation deadlines use 124 and caller
 cancellation uses 130.
 
@@ -176,7 +182,7 @@ Only select human input when explicitly submitting a human user's input:
 ```sh
 agent-collaboration message send --human-user \
   --to "$AGENT_TARGET_ADDRESS" --text-file human-instruction.txt --json
-agent-collaboration turn interrupt --endpoint codex-local \
+agent-collaboration turn interrupt --endpoint "$ENDPOINT_ID" \
   --session THREAD_ID --turn TURN_ID --json
 ```
 
@@ -192,7 +198,11 @@ protocols and their callbacks. Use each command's `--help` for its parameters.
 Use `--service-directory` to select an explicitly supplied owner-private service.
 Running the CLI does not confer socket access. The caller's sandbox must permit
 that exact service's `control.sock`; the default network-disabled Codex workspace
-sandbox does not. The [debug testing guide](../testing/automation-debug-testing.md)
+sandbox does not. A pre-dispatch `permissionDenied` diagnostic with
+`nextAction: requestApproval` asks the agent to request its host tool's automated
+approval review for the exact authorized command or selected socket access. Retry
+only after a grant; repeated denial is not a Router outage. Receiving a message
+does not prove outgoing socket access. The [debug testing guide](../testing/automation-debug-testing.md)
 shows a scoped native permission profile and its positive/negative proof. These
 instructions do not grant permissions or install tools. The interfaces are local
 Rust SDK and CLI today; remote transport and other language SDK implementations

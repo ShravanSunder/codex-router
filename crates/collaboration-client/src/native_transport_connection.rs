@@ -12,6 +12,8 @@ pub const NATIVE_WEBSOCKET_FRAME_LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeTransportError {
+    #[error("permission denied while discovering the service")]
+    PermissionDenied(collaboration_protocol::PermissionDiagnostic),
     #[error("service unavailable")]
     ServiceUnavailable,
     #[error("endpoint discovery unavailable")]
@@ -36,6 +38,16 @@ pub enum NativeTransportError {
     DiscoveryCloseFailed,
 }
 
+impl NativeTransportError {
+    #[must_use]
+    pub fn permission_diagnostic(&self) -> Option<&collaboration_protocol::PermissionDiagnostic> {
+        match self {
+            Self::PermissionDenied(diagnostic) => Some(diagnostic),
+            _ => None,
+        }
+    }
+}
+
 pub struct NativeTransportConnection {
     pub endpoint: EndpointRef,
     pub stream: WebSocketStream<UnixStream>,
@@ -53,7 +65,12 @@ impl NativeTransportConnection {
             env!("CARGO_PKG_VERSION"),
         )
         .await
-        .map_err(|_| NativeTransportError::ServiceUnavailable)?;
+        .map_err(|error| {
+            error.permission_diagnostic().map_or(
+                NativeTransportError::ServiceUnavailable,
+                NativeTransportError::PermissionDenied,
+            )
+        })?;
         let inventory = control
             .list_endpoints()
             .await

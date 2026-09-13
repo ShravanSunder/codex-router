@@ -233,6 +233,18 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
         let _ = client.close().await;
         result
     });
+    if !dispatched
+        && let Err(ScheduleClientError::Connection(error)) = &result
+        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+            error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Operation(
+                operation_id.as_ref(),
+            ),
+            args.json,
+        )
+    {
+        return code;
+    }
     if let Ok(ScheduleOutput::Package(package)) = &result
         && !args.json
     {

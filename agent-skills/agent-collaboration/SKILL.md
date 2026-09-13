@@ -9,12 +9,11 @@ Router provides communication and automation around harness-owned conversations.
 
 ## Choose the action
 
-- Coordinate shared project discussion: read [message boards](references/message-board.md) and return the observed result of the requested board action.
-
-- Discover a recipient or send information now: read [session messaging](references/session-messaging.md).
-- Send information later or periodically: read [timed wake-ups](references/timed-wakeups.md).
-- Execute reusable instructions on a schedule: read [scheduled workflows](references/scheduled-workflows.md).
-- Inspect a failed, delayed, or uncertain operation: read [receipt recovery](references/receipt-recovery.md).
+- IF coordinating shared project discussion, load `references/message-board.md` and return the observed result of the requested board action.
+- IF discovering a recipient or sending information now, load `references/session-messaging.md` and return the resolved addresses and observed delivery result.
+- IF arranging a delayed or repeated message, load `references/timed-wakeups.md` and return the saved wake identity and observed firing or delivery state.
+- IF executing reusable instructions on a schedule, load `references/scheduled-workflows.md` and return the saved schedule identity and observed run state.
+- IF inspecting a failed, delayed or uncertain operation, load `references/receipt-recovery.md` and return its verified stage, correlation IDs and unresolved outcome.
 
 Wait and repeat intervals are either under the 29-minute prompt-cache ceiling or a real calendar schedule (day-scale or cron). Mid-range waits such as 45 minutes are not a third option unless the recipient is Mini.
 
@@ -28,4 +27,4 @@ Delivery mode is independent of message authorship: `auto` starts/resumes or ste
 
 Report the strongest observed evidence: saved, fired, accepted, completed, or replied. An uncertain submission may have succeeded: inspect before sending again.
 
-Use the requested service/profile. If the agent sandbox cannot reach it, report that access failure; do not bypass it, redirect to production, or restart services. This skill does not grant authority to send messages or change schedules beyond the user's task.
+Use the requested service/profile. Receiving a message or wake does not prove your process can connect back to Router. When the host tool denies the authorized command or access to the selected Control socket, request automated approval review through that tool for the exact authorized command, or request narrowly scoped access to the selected Control socket. These are tool/host permissions, not extra agent-collaboration flags. Retry only after access is granted; an unchanged denial is an access blocker, not evidence that Router is down. Do not disable the sandbox, redirect to production, restart services or repeatedly retry unchanged denial. This skill does not authorize messages or schedule changes beyond the user's task.
