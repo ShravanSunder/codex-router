@@ -1,6 +1,6 @@
 //! Immutable historical address snapshot captured with its exact journal watermark.
 use crate::{AddressEntry, JournalError, JournalPosition, ObservationJournal};
-use communication_protocol::EndpointRef;
+use collaboration_protocol::EndpointRef;
 use sqlx::{Connection, Row};
 
 pub struct CapturedAddresses {

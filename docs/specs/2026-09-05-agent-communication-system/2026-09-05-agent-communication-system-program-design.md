@@ -47,7 +47,7 @@ Names below describe responsibilities. Important new/moved file and folder names
 
 ```text
 crates/
-├── communication-protocol/
+├── collaboration-protocol/
 │   └── src/
 │       ├── endpoint_identity.rs
 │       ├── endpoint_description.rs
@@ -55,13 +55,13 @@ crates/
 │       ├── control_operations.rs
 │       ├── control_failures.rs
 │       └── protocol_schema.rs
-├── communication-client/
+├── collaboration-client/
 │   └── src/
 │       ├── service_discovery.rs
 │       ├── control_connection.rs
 │       ├── endpoint_connection.rs
 │       └── observation_session.rs
-├── communication-service/
+├── collaboration-service/
 │   └── src/
 │       ├── service_publication.rs
 │       ├── endpoint_directory.rs
@@ -89,7 +89,7 @@ crates/
 │       ├── thread_address_book.rs
 │       ├── observation_coverage.rs
 │       └── inventory_reconciliation.rs
-└── agent-sessions/
+└── agent-collaboration/
     └── src/
         ├── session_command_dispatch.rs
         ├── session_picker_view.rs
@@ -98,11 +98,11 @@ crates/
 
 language-clients/
 ├── swift-client/
-│   └── communication-client/     Swift package and source modules
+│   └── collaboration-client/     Swift package and source modules
 ├── typescript-client/
-│   └── communication-client/     TypeScript package and source modules
+│   └── collaboration-client/     TypeScript package and source modules
 └── python-client/
-    └── communication_client/    Python package and source modules
+    └── collaboration_client/    Python package and source modules
 
 protocol-schemas/
 ├── communication-control/
@@ -115,14 +115,14 @@ Rust module source names use underscores (`endpoint_identity.rs`), preserving th
 Dependency direction:
 
 ```text
-Host ─────► communication-service ─────► communication-protocol
+Host ─────► collaboration-service ─────► collaboration-protocol
    │                 │
    │                 ├──► codex-native-integration
    │                 ├──► codex-acp-adapter ─► codex-native-integration
    │                 └──► lifecycle-observation
    └──────► existing lifecycle/provider packages
 
-agent-sessions ─► communication-client ─► communication-protocol
+agent-collaboration ─► collaboration-client ─► collaboration-protocol
        └───────► codex-native-integration (native launch/catalog)
 
 language clients ─► published schemas and public transports
@@ -344,7 +344,7 @@ This source observation is not installed-binary or Luna runtime proof. Compatibi
 
 The native connection negotiates experimental API access before invoking queue methods. Admission checks the generated schema for the required methods; no test-message mutation probes backend capability. Upstream app-server/tests/suite/v2/thread_queue.rs includes queue_requires_experimental_handshake and cold_thread_resume_dispatches_a_persisted_queued_submission. The latter verifies that enqueue plus metadata reads leave the thread unloaded and that an explicit resume dispatches its persisted item. These tests were read as source evidence, not executed as local runtime proof.
 
-The current native integration already sends initialize.capabilities.experimentalApi=true in native_protocol_connection.rs. The implementation delta is therefore queue method/profile validation and delivery handling, not a second initialization mechanism. communication-protocol/src/native_control_contract.rs currently defines the superseded input-only NativeSendParams and NativeSendReceipt; those types, schema assembly, client call sites and CLI must change together under C8. The declaration renderer belongs to communication-service and must be exercised through the public request path, so neither a CLI-only prefix nor an SDK-only prefix can masquerade as contract coverage.
+The current native integration already sends initialize.capabilities.experimentalApi=true in native_protocol_connection.rs. The implementation delta is therefore queue method/profile validation and delivery handling, not a second initialization mechanism. collaboration-protocol/src/native_control_contract.rs currently defines the superseded input-only NativeSendParams and NativeSendReceipt; those types, schema assembly, client call sites and CLI must change together under C8. The declaration renderer belongs to collaboration-service and must be exercised through the public request path, so neither a CLI-only prefix nor an SDK-only prefix can masquerade as contract coverage.
 
 Explicit queue performs a metadata-only loaded-target check after schema/generation admission and before its single enqueue request. An observed unloaded target returns threadNotLoaded before enqueue. The public native queue API carries no expected-loaded condition, so this check is not an atomic residency lease. Other native clients and native idle-unload remain independent. If unload wins after admission, native queue acceptance remains valid and pending; the service neither deletes the item nor claims rejection. A service-local mutex would not solve this interleaving and is not added. Auto resume retains partial-effect reporting when later submission fails; native state is never rolled back to hide that effect.
 
@@ -360,14 +360,14 @@ The protocol schema owner generates distinct common, message, journal-cursor and
 
 ## ACP listener and publication ownership
 
-communication-service owns acp_channel_listener.rs and the owner-private agent-communication/codex-acp.sock Unix JSONL listener. Host CommunicationRuntime binds it with control.sock and codex-native.sock before publishing the service manifest; setup failure drops all newly bound owned listeners without touching the native backend socket. The listener uses the same total connection-admission budget as the other public channels and C9 per-direction frame/byte limits. It does not spawn an ACP subprocess.
+collaboration-service owns acp_channel_listener.rs and the owner-private agent-communication/codex-acp.sock Unix JSONL listener. Host CommunicationRuntime binds it with control.sock and codex-native.sock before publishing the service manifest; setup failure drops all newly bound owned listeners without touching the native backend socket. The listener uses the same total connection-admission budget as the other public channels and C9 per-direction frame/byte limits. It does not spawn an ACP subprocess.
 
 BackendPublication publishes the ACP channel only after the listener is accepting, the pinned ACP schema is available and the active native generation has an admitted translation profile. A raw-native-only generation omits ACP from its channel list. Endpoint changes expose capability removal/restoration. The public ACP socket path remains stable across backend replacement; readiness does not imply existing ACP sessions survived replacement.
 
 For each accepted connection, the listener acquires the backend generation gate, captures native path and validated schemas, registers a generation-retirement cancellation token, then passes the owned Unix stream and captured backend configuration to codex-acp-adapter's connection dispatcher. The adapter owns negotiation, per-client session/configuration receipts, prompt tasks and permission correlation; its native connections use only the captured generation. Retirement cancels and drains that connection's owned tasks, closes frontend/native carriers and drops mappings. It does not rebind sessions or replay prompts onto the successor. The Host service lifetime owns listener cancellation and joining; listener cleanup removes only its own socket. A listener failure uses the existing communication-lifecycle failure path and withdraws publication rather than leaving a dead ACP advertisement.
 
 ```text
-ACP client → published codex-acp.sock → communication-service admission
+ACP client → published codex-acp.sock → collaboration-service admission
                                       → captured generation + schemas
                                       → Codex ACP connection dispatcher
                                       → native app-server
@@ -381,7 +381,7 @@ Real proof uses an independent ACP client through this published socket for init
 
 ## Lifecycle API call paths and proof
 
-The original router baseline had no public C10 predecessor. Current feature code already composes lifecycle storage in codex-router-host/src/communication_runtime.rs, synchronizes generations through lifecycle_owner/communication_lifecycle.rs and runs lifecycle-observation/src/native_observation_stream.rs. These added edges remain part of the target; provider routing and native history ownership are preserved.
+The original router baseline had no public C10 predecessor. Current feature code already composes lifecycle storage in codex-router-host/src/collaboration_runtime.rs, synchronizes generations through lifecycle_owner/communication_lifecycle.rs and runs lifecycle-observation/src/native_observation_stream.rs. These added edges remain part of the target; provider routing and native history ownership are preserved.
 
 ```text
 Host lifecycle synchronize → CommunicationRuntime backend publication

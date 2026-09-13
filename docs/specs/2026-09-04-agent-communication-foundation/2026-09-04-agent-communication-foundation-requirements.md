@@ -82,7 +82,7 @@ U1–U26 retain the identities of the September 1 Requirements so existing needs
 | U21 | SDK developer | Use closed Control unions and exact method/params/result/error pairings. | Must; inherited authorized U21. |
 | U22 | Operator | Keep coordination persistence separate from Router routing and Codex history/queue state. | Must; inherited authorized U22. |
 | U23 | Local owner | Do not introduce unauthenticated network ingress or make unsupported security claims. | Must; inherited authorized local-only V1 limit; remote expansion is open below. |
-| U24 | Maintainer | Separate Sessions product from provider Router and native Codex integration responsibilities. | Must; inherited authorized U24, including agent-sessions naming/cutover. |
+| U24 | Maintainer | Separate Sessions product from provider Router and native Codex integration responsibilities. | Must; inherited authorized U24, including agent-collaboration naming/cutover. |
 | U25 | Maintainer | Use responsibility-specific multi-word names for new/moved modules. | Must; inherited authorized U25. |
 | U26 | Human reader | Follow need → observable contract → structural explanation → proof without reading research notes. | Must; inherited authorized U26 and current request. |
 | U27 | Sending agent | Explicitly send information to a separately addressed Codex thread; a reply is another explicit send. | Priority unassigned; authorized outcome from current owner, exact delivery policy subject to U12 and open choices. |

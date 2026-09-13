@@ -1,6 +1,6 @@
-use codex_router_host::{CommunicationRuntime, CommunicationRuntimeInputs};
-use communication_client::{BoardClientError, ControlClient};
-use project_board::{BoardFailureKind, PageLimit, PageRequest, ProjectListRequest};
+use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
+use collaboration_client::{BoardClientError, ControlClient};
+use message_board::{BoardFailureKind, PageLimit, PageRequest, ProjectListRequest};
 use std::os::unix::fs::DirBuilderExt;
 
 #[tokio::test]
@@ -15,7 +15,7 @@ async fn board_open_failure_keeps_unrelated_control_methods_available()
     ));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     std::fs::create_dir(root.join("project-board.sqlite"))?;
-    let runtime = CommunicationRuntime::start(CommunicationRuntimeInputs {
+    let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("absent-native.sock"),

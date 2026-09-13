@@ -1,16 +1,16 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/project-board",
-    "crates/project-board-storage",
+    "crates/message-board",
+    "crates/message-board-storage",
     "crates/agent-automation",
     "crates/automation-storage",
     "crates/codex-acp-adapter",
     "crates/lifecycle-observation",
-    "crates/communication-client",
-    "crates/communication-service",
-    "crates/communication-protocol",
-    "crates/agent-sessions",
+    "crates/collaboration-client",
+    "crates/collaboration-service",
+    "crates/collaboration-protocol",
+    "crates/agent-collaboration",
     "crates/codex-router-auth",
     "crates/codex-router-cli",
     "crates/codex-native-integration",

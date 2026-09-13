@@ -2,7 +2,7 @@
 
 ## Agreed outcome
 
-The existing agent-sessions picker displays runtime status in a new column immediately before the unchanged Upd and New columns. Preserve title, branch/directory metadata, selection, conversation preview, search, native open/new/fork, and current layout shape. Runtime views are Blocked, Active, Idle and All; All is the default. Default interactive scope is Repo, while scope choices remain cwd/repo/all. No worktree scope is invented. Hide the old Threads/source cycling control; interactive discovery includes all sources. Explicit noninteractive source filters remain supported.
+The existing agent-collaboration picker displays runtime status in a new column immediately before the unchanged Upd and New columns. Preserve title, branch/directory metadata, selection, conversation preview, search, native open/new/fork, and current layout shape. Runtime views are Blocked, Active, Idle and All; All is the default. Default interactive scope is Repo, while scope choices remain cwd/repo/all. No worktree scope is invented. Hide the old Threads/source cycling control; interactive discovery includes all sources. Explicit noninteractive source filters remain supported.
 
 Blocked uses ◆ and means native active with waiting-on-approval or waiting-on-user-input flags. Active means active without these flags. Idle requires a native idle observation. Unknown, not loaded and system-error rows appear only in All. Lack of runtime observation never means idle or not loaded. Detailed help is toggled with Ctrl+/ (including equivalent terminal encoding) or F1, with a compact discoverable hint. Ctrl+T cycles views, Ctrl+S scope, Ctrl+O sort, Ctrl+R refresh. Esc closes help before clearing search/exiting.
 

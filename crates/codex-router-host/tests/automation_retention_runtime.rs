@@ -1,6 +1,6 @@
 //! Host starts event maintenance after acquiring its own listeners, without a native runtime.
-use codex_router_host::{CommunicationRuntime, CommunicationRuntimeInputs};
-use communication_protocol::{InstructionText, OperationId};
+use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
+use collaboration_protocol::{InstructionText, OperationId};
 use sqlx::Connection;
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
 
@@ -22,7 +22,7 @@ async fn owned_host_automatically_prunes_events_without_deleting_current_state()
         )
         .await?;
     store.close().await?;
-    let runtime = CommunicationRuntime::start(CommunicationRuntimeInputs {
+    let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("unavailable.sock"),

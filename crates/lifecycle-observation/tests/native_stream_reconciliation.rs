@@ -1,7 +1,7 @@
 use codex_native_integration::{
     NativePayloadSchemas, NativeProtocolConnection, NativeSchemaBundle,
 };
-use communication_protocol::{
+use collaboration_protocol::{
     LifecycleChange, LifecycleSubject, ObservationOrdering, ObservationScope,
 };
 use futures_util::{SinkExt, StreamExt};

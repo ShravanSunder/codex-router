@@ -3,7 +3,7 @@ use crate::{
     InventoryReconciliation, JournalError, LifecycleStore, ReadDisposition, map_native_lifecycle,
 };
 use codex_native_integration::{NativeOperation, NativePayloadSchemas, NativeProtocolConnection};
-use communication_protocol::{
+use collaboration_protocol::{
     LifecycleChange, LifecycleObservation, LifecycleSubject, ObservationOrdering, ObservationScope,
     ObservationSource, SessionId, ThreadAddress,
 };
@@ -25,7 +25,7 @@ pub struct NativeObservationStream {
     last_status_observations: BTreeMap<
         SessionId,
         (
-            communication_protocol::NativeThreadStatus,
+            collaboration_protocol::NativeThreadStatus,
             ObservationOrdering,
         ),
     >,
@@ -291,7 +291,7 @@ struct LoadedPage {
     data: Vec<SessionId>,
     next_cursor: Option<String>,
 }
-fn timestamp() -> Result<communication_protocol::ObservationTimestamp, JournalError> {
+fn timestamp() -> Result<collaboration_protocol::ObservationTimestamp, JournalError> {
     chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         .try_into()

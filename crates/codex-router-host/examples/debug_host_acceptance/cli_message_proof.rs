@@ -1,5 +1,5 @@
 //! Built CLI acceptance against the owned debug service; no shell command interpolation.
-use communication_protocol::SessionRef;
+use collaboration_protocol::SessionRef;
 use serde_json::Value;
 use std::{error::Error, path::Path, time::Duration};
 

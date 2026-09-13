@@ -1,8 +1,8 @@
 //! Real filesystem/SQLite configuration boundaries, with no native process or model.
 use automation_storage::AutomationStore;
 use codex_router_host::AutomationSettingsFile;
-use communication_protocol::{AutomationConfiguration, AutomationConfigureRequest, OperationId};
-use communication_service::{AutomationConfigurationBackend, AutomationConfigurationHandle};
+use collaboration_protocol::{AutomationConfiguration, AutomationConfigureRequest, OperationId};
+use collaboration_service::{AutomationConfigurationBackend, AutomationConfigurationHandle};
 use serde_json::json;
 use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt},

@@ -169,7 +169,7 @@ async fn installed_mode_runs_status_restart_update_and_public_native_attachment(
 
         let service_directory = router_root.join("agent-communication");
         let native_path = tokio::task::spawn_blocking(move || {
-            communication_client::resolve_public_native(&service_directory)
+            collaboration_client::resolve_public_native(&service_directory)
         })
         .await??;
         check(

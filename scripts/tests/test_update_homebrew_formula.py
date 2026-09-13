@@ -52,8 +52,27 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
             source_commit="c" * 40,
         )
         # Assert
-        self.assertIn('    bin.install "agent-sessions"', updated)
-        self.assertEqual(updated.count('bin.install "agent-sessions"'), 1)
+        self.assertIn('    bin.install "agent-collaboration"', updated)
+        self.assertEqual(updated.count('bin.install "agent-collaboration"'), 1)
+
+    def test_replaces_legacy_agent_sessions_install(self) -> None:
+        # Arrange
+        legacy_formula = BASE_FORMULA.replace(
+            '    bin.install "codex-router"',
+            '    bin.install "codex-router"\n    bin.install "agent-sessions"',
+        )
+
+        # Act
+        updated = update_codex_router_formula(
+            formula_text=legacy_formula,
+            version="0.2.0",
+            sha256="b" * 64,
+            source_commit="c" * 40,
+        )
+
+        # Assert
+        self.assertNotIn('bin.install "agent-sessions"', updated)
+        self.assertEqual(updated.count('bin.install "agent-collaboration"'), 1)
 
     def test_second_update_is_idempotent(self) -> None:
         # Arrange

@@ -1,7 +1,7 @@
 //! Native setup runs outside frontend routing; the registry publishes the returned binding.
 use crate::{AcpSchemaCatalog, AcpSessionBinding, SessionSetupError, SessionSetupInputs};
 use codex_native_integration::{NativePayloadSchemas, NativeProtocolConnection};
-use communication_protocol::CodexGeneration;
+use collaboration_protocol::CodexGeneration;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 

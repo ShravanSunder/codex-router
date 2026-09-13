@@ -41,8 +41,8 @@ enum MessageProof {
 
 use codex_native_integration::{DebugCodexProfile, NativeProtocolConnection};
 use codex_router_host::ProcessGroupChild;
-use communication_client::ControlClient;
-use communication_protocol::{ChannelDescription, EndpointAvailability};
+use collaboration_client::ControlClient;
+use collaboration_protocol::{ChannelDescription, EndpointAvailability};
 use owned_thread_registry::OwnedThreadRegistry;
 use process_identity_guard::capture_production_identity;
 use serde_json::json;
@@ -75,17 +75,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("--delivery") => MessageProof::Delivery(std::fs::canonicalize(
             std::env::args_os()
                 .nth(3)
-                .ok_or("--delivery requires built agent-sessions path")?,
+                .ok_or("--delivery requires built agent-collaboration path")?,
         )?),
         Some("--cli-messages") => MessageProof::Cli(std::fs::canonicalize(
             std::env::args_os()
                 .nth(3)
-                .ok_or("--cli-messages requires built agent-sessions path")?,
+                .ok_or("--cli-messages requires built agent-collaboration path")?,
         )?),
         Some("--acp-cli") => MessageProof::AcpCli(std::fs::canonicalize(
             std::env::args_os()
                 .nth(3)
-                .ok_or("--acp-cli requires built agent-sessions path")?,
+                .ok_or("--acp-cli requires built agent-collaboration path")?,
         )?),
         Some("--acp-client") => MessageProof::Acp(std::fs::canonicalize(
             std::env::args_os()
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("--agent-messages") => MessageProof::Agents(std::fs::canonicalize(
             std::env::args_os()
                 .nth(3)
-                .ok_or("--agent-messages requires built agent-sessions path")?,
+                .ok_or("--agent-messages requires built agent-collaboration path")?,
         )?),
         _ => {
             return Err("expected --messages, --cli-messages PATH or --agent-messages PATH".into());
@@ -386,11 +386,11 @@ async fn probe(
             .find(|endpoint| String::from(endpoint.endpoint.endpoint_id.clone()) == "codex-local")
             .ok_or("missing endpoint")?
             .endpoint;
-        let target = communication_protocol::SessionRef {
+        let target = collaboration_protocol::SessionRef {
             endpoint: endpoint.clone(),
             session_id: second.clone().try_into()?,
         };
-        let sender = communication_protocol::SessionRef {
+        let sender = collaboration_protocol::SessionRef {
             endpoint,
             session_id: first.clone().try_into()?,
         };
@@ -430,11 +430,11 @@ async fn probe(
             .find(|e| String::from(e.endpoint.endpoint_id.clone()) == "codex-local")
             .ok_or("missing endpoint")?
             .endpoint;
-        let first_ref = communication_protocol::SessionRef {
+        let first_ref = collaboration_protocol::SessionRef {
             endpoint: endpoint.clone(),
             session_id: first.clone().try_into()?,
         };
-        let second_ref = communication_protocol::SessionRef {
+        let second_ref = collaboration_protocol::SessionRef {
             endpoint,
             session_id: second.clone().try_into()?,
         };

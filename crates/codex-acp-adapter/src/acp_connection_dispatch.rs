@@ -5,7 +5,7 @@ use crate::{
     acp_connection_channels, run_acp_transport,
 };
 use codex_native_integration::NativePayloadSchemas;
-use communication_protocol::CodexGeneration;
+use collaboration_protocol::CodexGeneration;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, future::Future, io, path::PathBuf, pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};

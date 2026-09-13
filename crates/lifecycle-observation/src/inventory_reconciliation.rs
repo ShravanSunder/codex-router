@@ -1,6 +1,6 @@
 //! Per-observer read/event ordering; late completions cannot revive retired coverage.
 use crate::JournalError;
-use communication_protocol::{ObservationOrdering, ObservationScope, SessionId};
+use collaboration_protocol::{ObservationOrdering, ObservationScope, SessionId};
 use std::collections::BTreeMap;
 
 pub struct InventoryReconciliation {

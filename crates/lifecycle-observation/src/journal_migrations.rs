@@ -1,5 +1,5 @@
 //! Native migration ownership for the journal; legacy adoption never rewrites domain rows.
-use communication_protocol::UuidIdentity;
+use collaboration_protocol::UuidIdentity;
 use sqlx::{Connection, Row, SqliteConnection, migrate::MigrateError};
 
 use crate::JournalError;

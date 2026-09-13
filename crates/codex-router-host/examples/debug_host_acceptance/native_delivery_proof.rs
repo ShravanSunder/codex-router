@@ -4,7 +4,7 @@ use super::{
     owned_thread_registry::OwnedThreadRegistry,
 };
 use codex_native_integration::NativeProtocolConnection;
-use communication_client::ControlClient;
+use collaboration_client::ControlClient;
 use serde_json::{Value, json};
 use std::{error::Error, path::Path};
 

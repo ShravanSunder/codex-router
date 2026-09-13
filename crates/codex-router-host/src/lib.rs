@@ -91,9 +91,9 @@ pub use router_compatibility::RouterProbeResult;
 pub use router_compatibility::probe_router;
 mod backend_publication;
 pub use backend_publication::BackendPublication;
-mod communication_runtime;
-pub use communication_runtime::{
-    BackendSchemaEvidence, CommunicationRuntime, CommunicationRuntimeInputs,
+mod collaboration_runtime;
+pub use collaboration_runtime::{
+    BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
 };
 
 mod native_schema_cache;

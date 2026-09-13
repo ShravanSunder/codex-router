@@ -1,6 +1,6 @@
 //! Timestamped debug recovery observations; never resumes or submits to the target.
 use codex_native_integration::NativeProtocolConnection;
-use communication_client::ControlClient;
+use collaboration_client::ControlClient;
 use serde_json::{Value, json};
 use std::{error::Error, path::Path};
 use tokio::io::AsyncBufReadExt;

@@ -17,9 +17,9 @@ SQLX_PREPARATION_TARGETS: t.Final[tuple[SqlxPreparationTarget, ...]] = (
         "account-schema.sqlite",
     ),
     (
-        "project-board-storage",
-        "crates/project-board-storage/migrations",
-        "project-board-schema.sqlite",
+        "message-board-storage",
+        "crates/message-board-storage/migrations",
+        "message-board-schema.sqlite",
     ),
 )
 

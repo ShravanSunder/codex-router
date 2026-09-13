@@ -1,4 +1,4 @@
-# Communication schema artifacts
+# Collaboration schema artifacts
 
 The release archive contains the versioned Control schema, shared type catalog,
 CLI output schemas, and the exact pinned ACP schema plus its upstream license.
@@ -27,8 +27,8 @@ packaging does not invent or freeze a different native method registry.
 Generate the static artifacts without starting Codex or accessing session state:
 
 ```sh
-cargo run -p communication-protocol --example export_control_schema
-cargo run -p communication-protocol --example export_protocol_types
+cargo run -p collaboration-protocol --example export_control_schema
+cargo run -p collaboration-protocol --example export_protocol_types
 ```
 
 The first command writes canonical JSON to stdout and its digest to stderr. It

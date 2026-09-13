@@ -29,7 +29,7 @@ pub use session_connection_registry::{AcpSessionRegistry, SessionRegistryError};
 pub use stored_session_listing::NativeStoredSessions;
 mod tool_progress_projection;
 pub use assistant_text_projection::{PromptTarget, TextProjectionError, project_assistant_text};
-pub use communication_protocol::{
+pub use collaboration_protocol::{
     ACP_SCHEMA_BYTES, ACP_SCHEMA_DIGEST, AcpSchemaCatalog, AcpSchemaError,
 };
 pub use connection_negotiation::{AcpNegotiation, AcpNegotiationError};

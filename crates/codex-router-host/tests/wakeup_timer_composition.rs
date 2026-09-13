@@ -1,6 +1,6 @@
-use codex_router_host::{CommunicationRuntime, CommunicationRuntimeInputs};
-use communication_client::ControlClient;
-use communication_protocol::{OperationId, WakeSendRequest, WakeShowRequest};
+use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
+use collaboration_client::ControlClient;
+use collaboration_protocol::{OperationId, WakeSendRequest, WakeShowRequest};
 use serde_json::json;
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
 
@@ -12,7 +12,7 @@ async fn host_records_firing_without_native_backend_acceptance()
         OperationId::generate().as_str()
     ));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-    let runtime = CommunicationRuntime::start(CommunicationRuntimeInputs {
+    let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("unavailable-native.sock"),
@@ -35,7 +35,7 @@ async fn host_records_firing_without_native_backend_acceptance()
                 })
                 .await?;
             if current.first_fire.is_some() {
-                return Ok::<_, communication_client::WakeClientError>(current);
+                return Ok::<_, collaboration_client::WakeClientError>(current);
             }
         }
     })

@@ -1,4 +1,4 @@
-use communication_protocol::UuidIdentity;
+use collaboration_protocol::UuidIdentity;
 use lifecycle_observation::{JournalError, ObservationJournal};
 use sqlx::{Connection, SqliteConnection};
 

@@ -3,7 +3,7 @@ use crate::{AcpSchemaCatalog, McpConfiguration};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
-use communication_protocol::CodexGeneration;
+use collaboration_protocol::CodexGeneration;
 use serde_json::{Value, json};
 use std::{
     path::{Component, Path, PathBuf},

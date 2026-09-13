@@ -1,4 +1,4 @@
-use communication_protocol::{LifecycleChange, ObservationOrdering, ObservationScope};
+use collaboration_protocol::{LifecycleChange, ObservationOrdering, ObservationScope};
 use lifecycle_observation::map_native_lifecycle;
 use serde_json::json;
 #[test]

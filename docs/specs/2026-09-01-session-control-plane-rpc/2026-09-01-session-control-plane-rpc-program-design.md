@@ -30,7 +30,7 @@ one stable owner-local service directory                     [Host-owned]
                                    ├─ control-state.sqlite
                                    └─ Codex Native Integration
 
-agent-sessions
+agent-collaboration
   ├─ current Sessions discovery, table/JSON, picker, and launch behavior
   ├─ Session Control Client <-> control channel
   └─ Sessions Supervisor -> interactive Codex child -> codex channel
@@ -65,7 +65,7 @@ live in the legacy `codex-router-codex` crate.
 | --- | --- | --- |
 | Host lifecycle | `codex-router host` -> `LifecycleOwner` -> app-server/router retained children | Lifecycle authority remains unchanged; generation publication and channel closure are added after owner-observed transitions. |
 | Operator update | one-shot `host.sock` -> update activation -> stop/re-exec -> replacement `host.sock` | Operator path remains; service manifest/channel paths are rebound by the replacement Host, with persisted generation ordering. |
-| Sessions entry | `codex-router sessions` -> combined query/TUI/runner | Removed; `agent-sessions` becomes the only executable and no forwarding shim remains. |
+| Sessions entry | `codex-router sessions` -> combined query/TUI/runner | Removed; `agent-collaboration` becomes the only executable and no forwarding shim remains. |
 | Thread discovery | Sessions -> read-only normal Codex state | Preserved and moved; filters, pagination, search, previews, and output stay Codex-owned reads. |
 | Interactive launch | runner -> `SessionLaunch` -> spawn once -> wait once | Changed to Supervisor -> register/report -> spawn -> classify -> recover or terminate. Ordered argv remains in memory only. |
 | Native client traffic | client -> app-server socket | Changed to client -> stable Host selector -> transparent generation relay -> app-server socket. Wire frames remain unchanged. |
@@ -111,8 +111,8 @@ channel before protocol initialization.
 | Session Control Plane | JSON-RPC dispatch, revisions, durable managed intent, snapshots, fan-out, send/stop orchestration. | Control clients and Host; changes with coordination policy. |
 | Runtime Thread Observer | Generation-scoped loaded/read/event reconciliation and exact-active projection. | Control Plane; changes with native observation behavior. |
 | Session Control Store | Transactional generations, revisions, managed intent, attachments, bounded outcomes. | Control Plane only; changes with persisted control truth. |
-| Codex Native Integration | Concrete upstream protocol client/types, app-server spawn/readiness, typed thread/turn operations, shared stored-thread catalog, schemas, paths and launch projections. | Host, ACP Adapter, Control Plane, agent-sessions; changes with upstream Codex. |
-| Sessions Supervisor | One interactive child, durable intent reporting, exit classification, identity attachment, and relaunch decision. | `agent-sessions`; changes with managed-child policy. |
+| Codex Native Integration | Concrete upstream protocol client/types, app-server spawn/readiness, typed thread/turn operations, shared stored-thread catalog, schemas, paths and launch projections. | Host, ACP Adapter, Control Plane, agent-collaboration; changes with upstream Codex. |
+| Sessions Supervisor | One interactive child, durable intent reporting, exit classification, identity attachment, and relaunch decision. | `agent-collaboration`; changes with managed-child policy. |
 | Sessions Product | Existing CLI parsing, discovery, search, picker state/rendering, output, and user intent. | Human user; changes with Sessions behavior. |
 | Host Lifecycle Owner | Retained process handles and actual app-server/router start/stop/re-exec authority. | Host/operator; remains authoritative. |
 
@@ -133,7 +133,7 @@ Singular truth rules:
   never a native runtime authority.
 - Codex Native Integration's Stored Thread Catalog alone owns the read-only
   query, scope, filter, search, pagination, and preview semantics used by both
-  `agent-sessions` and `storedThread/list`; their local modules only adapt
+  `agent-collaboration` and `storedThread/list`; their local modules only adapt
   presentation or control-protocol results.
 
 Allowed dependency direction:
@@ -147,8 +147,8 @@ codex-acp-adapter -> codex-native-integration
 session-control-plane -> session-control-protocol
 session-control-plane -> codex-native-integration
 session-control-client -> session-control-protocol
-agent-sessions -> session-control-client
-agent-sessions -> codex-native-integration
+agent-collaboration -> session-control-client
+agent-collaboration -> codex-native-integration
 ```
 
 Forbidden edges are enforced by Cargo dependencies, private modules, schema
@@ -168,7 +168,7 @@ prohibited and requires redesign rather than an oversized exception.
 
 ```text
 crates/
-├── agent-sessions/
+├── agent-collaboration/
 │   ├── Cargo.toml
 │   ├── src/
 │   │   ├── main.rs
@@ -555,7 +555,7 @@ missing final native event.
 ### Sessions launch and recovery
 
 ```text
-agent-sessions -> catalog query/picker or exact/latest/new/fork
+agent-collaboration -> catalog query/picker or exact/latest/new/fork
   -> resume selection keeps selected materialized ID
   -> Start New preparation calls thread/start, captures returned blank ID,
      and retains that subscribed connection as the blank-thread anchor
@@ -598,7 +598,7 @@ ready generation -> Runtime Observer initializes native connection
 
 storedThread/list -> Control projection adapter
   -> Codex Native Integration Stored Thread Catalog
-agent-sessions catalog presentation -> same Stored Thread Catalog
+agent-collaboration catalog presentation -> same Stored Thread Catalog
   -> normal Codex state/history read-only discovery and shared filters
   <- page with native source and independent continuity projection
 ```
@@ -723,8 +723,8 @@ not required for applications.
 | Phase | Authority and permitted paths | Version skew / failure / rollback | Proof seam |
 | --- | --- | --- | --- |
 | Current | `codex-router sessions`, direct app-server socket, current Host state are authoritative. | No target writers/listeners exist. | Existing CLI/Host behavior. |
-| Debug integration | Debug Host alone owns isolated manifest, sockets, control DB, and app-server; `agent-sessions` uses normal Codex home plus debug profile. | Target protocol versions must match generated schemas; failure removes only debug selectors. | Isolated three-channel and two-generation transcripts. |
-| Hard cutover | `agent-sessions` becomes sole Sessions executable; Host publishes service; legacy crate/subcommand removed; control DB becomes sole control writer. | No shim or dual Sessions writer. Failed startup leaves explicit unavailable/failed discovery rather than falling back silently. | Source/dependency/schema inspection plus real CLI/service behavior. |
+| Debug integration | Debug Host alone owns isolated manifest, sockets, control DB, and app-server; `agent-collaboration` uses normal Codex home plus debug profile. | Target protocol versions must match generated schemas; failure removes only debug selectors. | Isolated three-channel and two-generation transcripts. |
+| Hard cutover | `agent-collaboration` becomes sole Sessions executable; Host publishes service; legacy crate/subcommand removed; control DB becomes sole control writer. | No shim or dual Sessions writer. Failed startup leaves explicit unavailable/failed discovery rather than falling back silently. | Source/dependency/schema inspection plus real CLI/service behavior. |
 | Post-cutover rollback | Roll back the complete compatible binary set and its control schema reader. Codex/router databases remain untouched. | A binary unable to read the current control schema must refuse mutation; operator restores compatible binaries, not converts Codex data. | Restart with persisted control state and verify refusal/compatible recovery. |
 
 Production Host, Router, app-server, clients, and state are never stopped,

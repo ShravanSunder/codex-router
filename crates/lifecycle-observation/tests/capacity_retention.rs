@@ -1,7 +1,7 @@
 //! Capacity accounting pressure must attempt only policy-eligible history expiry.
 #[cfg(test)]
 mod tests {
-    use communication_protocol::{LifecycleObservation, UuidIdentity};
+    use collaboration_protocol::{LifecycleObservation, UuidIdentity};
     use lifecycle_observation::{JournalError, LifecycleStore, ObservationJournal};
     use serde_json::json;
     use sqlx::Connection;

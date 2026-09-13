@@ -108,7 +108,7 @@ Creates use caller-supplied UUIDv7 resource IDs. An existing ID returns `resourc
 
 ## Public operation inventory
 
-All methods below are added to existing Control under the `board/` namespace. The CLI groups them under `agent-sessions board`; the Rust client exposes the same typed operations. Mutations carry `actor` and may carry `actingFor`; personal watch and acknowledgement mutations apply to that actor. Reads select `reader` only when reading personal state. IDs are explicit; names and cwd are never substitutes for actor identity. Mutation results contain the typed result and an explicit English outcome. IDs for new resources are supplied as UUIDv7 in the request so callers retain them before transmission.
+All methods below are added to existing Control under the `board/` namespace. The CLI groups them under `agent-collaboration board`; the Rust client exposes the same typed operations. Mutations carry `actor` and may carry `actingFor`; personal watch and acknowledgement mutations apply to that actor. Reads select `reader` only when reading personal state. IDs are explicit; names and cwd are never substitutes for actor identity. Mutation results contain the typed result and an explicit English outcome. IDs for new resources are supplied as UUIDv7 in the request so callers retain them before transmission.
 
 | CLI suffix | Control method | Additional input | Result |
 | --- | --- | --- | --- |

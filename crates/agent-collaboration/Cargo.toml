@@ -1,0 +1,40 @@
+[package]
+name = "agent-collaboration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+quota-reset-test-harness = []
+
+[dependencies]
+tokio-util.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
+codex-native-integration.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+crossterm.workspace = true
+iocraft.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+unicode-width.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+agent-automation = { path = "../agent-automation", version = "0.1.16" }
+automation-storage = { path = "../automation-storage", version = "0.1.16" }
+codex-router-host.workspace = true
+lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
+collaboration-service = { path = "../collaboration-service", version = "0.1.14" }
+tokio-util.workspace = true
+futures-util.workspace = true

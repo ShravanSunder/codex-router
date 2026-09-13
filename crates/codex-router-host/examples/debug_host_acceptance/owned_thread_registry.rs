@@ -37,7 +37,7 @@ impl OwnedThreadRegistry {
         control_socket: &Path,
     ) -> Result<String, Box<dyn Error>> {
         let socket = std::fs::canonicalize(control_socket)?;
-        let profile = "debug-agent-communication";
+        let profile = "debug-agent-collaboration";
         let configuration = json!({
             "permissions":{profile:{"extends":":read-only","network":{
                 "enabled":true,"domains":{},
@@ -69,7 +69,7 @@ impl OwnedThreadRegistry {
             .as_object_mut()
             .ok_or("invalid creation parameters")?;
         if configuration.is_some() {
-            fields.insert("permissions".to_owned(), json!("debug-agent-communication"));
+            fields.insert("permissions".to_owned(), json!("debug-agent-collaboration"));
         } else {
             fields.insert("sandbox".to_owned(), json!("read-only"));
         }

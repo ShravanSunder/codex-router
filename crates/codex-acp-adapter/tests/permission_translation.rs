@@ -4,7 +4,7 @@ use serde_json::json;
 #[test]
 fn native_choices_preserve_order_and_invalid_selection_cancels_without_grant() {
     let mut schema = AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("schema: {error}"));
-    let generation: communication_protocol::CodexGeneration = serde_json::from_value(
+    let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(
         json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
     )
     .unwrap_or_else(|error| panic!("generation: {error}"));
@@ -48,7 +48,7 @@ fn native_choices_preserve_order_and_invalid_selection_cancels_without_grant() {
 #[test]
 fn cancelled_permission_is_native_cancel_and_old_generation_cannot_respond() {
     let mut schema = AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("schema: {error}"));
-    let generation: communication_protocol::CodexGeneration = serde_json::from_value(
+    let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(
         json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
     )
     .unwrap_or_else(|error| panic!("generation: {error}"));

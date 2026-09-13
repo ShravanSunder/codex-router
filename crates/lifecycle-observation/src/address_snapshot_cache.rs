@@ -1,8 +1,8 @@
 //! Bounded paging of captured historical rows, without retaining database transactions.
 use crate::{CapturedAddresses, CoverageView, JournalError};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use communication_protocol::{AddressPage, ObservationTimestamp};
-use communication_protocol::{EndpointRef, UuidIdentity};
+use collaboration_protocol::{AddressPage, ObservationTimestamp};
+use collaboration_protocol::{EndpointRef, UuidIdentity};
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},

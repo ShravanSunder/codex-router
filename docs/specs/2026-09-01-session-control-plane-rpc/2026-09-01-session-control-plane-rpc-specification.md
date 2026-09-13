@@ -572,7 +572,7 @@ delete, control background terminals, undo side effects, or delete queue rows.
 
 ## S10 — Complete Sessions feature disposition (U3–U5, U24)
 
-`agent-sessions` is the sole Sessions executable; `codex-router sessions` is
+`agent-collaboration` is the sole Sessions executable; `codex-router sessions` is
 removed without alias or shim.
 
 | Current capability | Required V1 disposition |
@@ -613,7 +613,7 @@ Debug proof uses router debug state, the normal Codex home, the debug Codex
 profile, and isolated endpoints. It never stops, signals, replaces, installs
 over, or updates production Host, Router, app-server, or clients.
 
-Public boundaries use `codex-router`, `agent-sessions`,
+Public boundaries use `codex-router`, `agent-collaboration`,
 `session-control-protocol`, `session-control-client`,
 `session-control-plane`, and `codex-native-integration`. The legacy
 `codex-router-codex` name is not a target name. New/moved responsibility files

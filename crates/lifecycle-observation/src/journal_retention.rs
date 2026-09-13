@@ -1,6 +1,6 @@
 //! Checkpoint-before-prefix expiry, atomically preserving remembered addresses.
 use crate::{JournalError, JournalPosition, ObservationJournal};
-use communication_protocol::{LifecycleObservation, LifecycleSubject};
+use collaboration_protocol::{LifecycleObservation, LifecycleSubject};
 use sqlx::{Connection, Row};
 
 impl ObservationJournal {

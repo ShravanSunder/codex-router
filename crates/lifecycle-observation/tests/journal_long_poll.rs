@@ -1,4 +1,4 @@
-use communication_protocol::LifecycleObservation;
+use collaboration_protocol::LifecycleObservation;
 use lifecycle_observation::{JournalPosition, LifecycleStore, ObservationJournal};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};

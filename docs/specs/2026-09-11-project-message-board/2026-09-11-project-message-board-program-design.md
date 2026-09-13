@@ -5,39 +5,39 @@ Governing Specification: [specification](./2026-09-11-project-message-board-spec
 
 ## Existing foundation and target composition
 
-The board has no existing implementation path. Existing messaging provides the integration pattern:
+The board uses the existing messaging integration pattern:
 
-- `crates/agent-sessions/src/main.rs` dispatches command groups.
-- `crates/agent-sessions/src/message_commands.rs:42` constructs one command-scoped Tokio runtime; its async body calls `communication_client::ControlClient`.
-- `crates/communication-protocol/src/control_schema_document.rs` registers typed methods, results and failures and imposes the Control frame and request budgets.
-- `crates/codex-router-host/src/communication_runtime.rs:102` opens automation storage in the selected service directory and injects it into the existing communication service.
+- `crates/agent-collaboration/src/main.rs` dispatches command groups.
+- `crates/agent-collaboration/src/message_commands.rs:42` constructs one command-scoped Tokio runtime; its async body calls `collaboration_client::ControlClient`.
+- `crates/collaboration-protocol/src/control_schema_document.rs` registers typed methods, results and failures and imposes the Control frame and request budgets.
+- `crates/codex-router-host/src/collaboration_runtime.rs:102` opens automation storage in the selected service directory and injects it into the existing communication service.
 - The same Host composition binds `control.sock`; its `shutdown` method cancels and drains owned tasks.
 
 The board uses this existing process and transport. It does not start another daemon or CLI executable.
 
 ```text
-agent-sessions board commands / Rust SDK consumer
-  -> communication-client typed board operations
+agent-collaboration board commands / Rust SDK consumer
+  -> collaboration-client typed board operations
   -> existing Control JSON-RPC connection over control.sock
-  -> communication-service board request dispatch
-  -> project-board domain rules
-  -> project-board-storage SQLx transactions
+  -> collaboration-service board request dispatch
+  -> message-board domain rules
+  -> message-board-storage SQLx transactions
   -> selected service directory / project-board.sqlite
 ```
 
-Proposed new package names are `project-board` for domain types and rules and `project-board-storage` for SQLite ownership. They are separate because domain rules must be usable without SQLx and schema/transaction changes must not change CLI parsing. No generic repository framework is introduced.
+The package names are `message-board` for domain types and rules and `message-board-storage` for SQLite ownership. They are separate because domain rules must be usable without SQLx and schema/transaction changes must not change CLI parsing. No generic repository framework is introduced.
 
 | Owner | Responsibility and reason to change |
 | --- | --- |
-| agent-sessions | Parse descriptive board commands and render human/JSON results; changes with command ergonomics. |
-| communication-client | Expose typed asynchronous requests over the existing connection; changes with client operations. |
-| communication-protocol | Published request/result/error schema; changes with observable contracts. |
-| communication-service | Dispatch validated requests and map domain/storage failures to Control results. |
+| agent-collaboration | Parse descriptive board commands and render human/JSON results; changes with command ergonomics. |
+| collaboration-client | Expose typed asynchronous requests, shared RPC schemas/types, connection discovery and reusable session/repository operations; changes with client operations. |
+| collaboration-protocol | Published request/result/error schema; changes with observable contracts. |
+| collaboration-service | Dispatch validated requests and map domain/storage failures to Control results. |
 | project-board | Identity, message placement, watch/read scope and lifecycle rules; changes with board behavior. |
-| project-board-storage | SQLx connection, migrations, constraints and atomic state transitions; changes with durable realization. |
+| message-board-storage | SQLx connection, migrations, constraints and atomic state transitions; changes with durable realization. |
 | codex-router-host | Open/inject/close board storage under existing runtime ownership; changes with process lifecycle. |
 
-Dependencies point from transport/service to domain and storage. Domain types do not import CLI formatting, Host process ownership or SQLx row types. CLI and SDK never open the board database. Every public board operation must be registered in Control's schema before it can be dispatched; method names and envelopes follow the Specification’s public operation inventory.
+Dependencies point from transport/service to domain and storage. Domain types do not import CLI formatting, Host process ownership or SQLx row types. CLI and SDK never open the board database. The SDK exposes shared definitions through `collaboration_client::protocol` and `collaboration_client::board`; the CLI imports them through that SDK. The service consumes the same contract/domain crates, without depending on client runtime behavior. Every public board operation must be registered in Control's schema before it can be dispatched; method names and envelopes follow the Specification’s public operation inventory.
 
 ## Filesystem and naming
 
@@ -376,9 +376,9 @@ U1/U17/U28/U29/U30 map to setup methods, repository keys, Host store placement a
 
 ## Guidance and repository derivation owners
 
-`agent-skills/agent-communication/SKILL.md` owns routing to board guidance, with detailed CLI journeys under its references directory. `docs/agent-guidance/agent-communication.md` owns human-readable public CLI guidance. The skill reference is the authoritative teaching home for owner permission before project/board creation (U30), automatic versus explicit watch behavior, inbox acknowledgement, historical ranges and cooldown thread alternatives; the human guidance links directly to that reference. This is a scoped future skill change under skills-creation, not another runtime service.
+`agent-skills/agent-collaboration/SKILL.md` owns routing to board guidance, with detailed CLI journeys under its references directory. `docs/agent-guidance/agent-collaboration.md` owns human-readable public CLI guidance. The skill reference is the authoritative teaching home for owner permission before project/board creation (U30), automatic versus explicit watch behavior, inbox acknowledgement, historical ranges and cooldown thread alternatives; the human guidance links directly to that reference. The repo-owned skill is maintained under skills-creation; it does not introduce a runtime service.
 
-CLI repository discovery owns local Git execution and canonical common-directory discovery before entering the async request path. Extract the pure origin normalization routine from `crates/agent-sessions/src/session_commands/repository_identity.rs` into a shared domain module `project-board/src/repository_identity.rs`, preserving behavior and existing consumers. Client and service reuse that pure normalizer; the service validates canonical refs and selected serviceId but does not execute Git or probe arbitrary caller paths. Local refs are canonical caller-discovered paths scoped to this service, not authenticated filesystem claims.
+The CLI converts repository flags into SDK calls. The SDK owns local Git execution and canonical common-directory discovery before transmitting a board request. The pure origin normalizer lives in `crates/message-board/src/repository_identity.rs`; client and service reuse it. The service validates canonical refs and selected serviceId but does not execute Git or probe arbitrary caller paths. Local refs are canonical caller-discovered paths scoped to this service, not authenticated filesystem claims.
 
 Communication integration explicitly adds a store handle to `control_service_context.rs`, board-family dispatch in `control_connection.rs`, board-family overload responses in `control_overload_response.rs`, and methods/failure schemas in `control_schema_document.rs`. Host owns opening/injecting/closing the store. These additions preserve existing non-board paths.
 

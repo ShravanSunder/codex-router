@@ -104,19 +104,19 @@ class PrepareSqlxTests(unittest.TestCase):
             [command[4] for command, _ in migration_calls],
             [
                 "crates/codex-router-state/migrations",
-                "crates/project-board-storage/migrations",
+                "crates/message-board-storage/migrations",
             ],
         )
         self.assertEqual(
             [command[command.index("--package") + 1] for command, _ in prepare_calls],
-            ["codex-router-state", "project-board-storage"],
+            ["codex-router-state", "message-board-storage"],
         )
         self.assertEqual(
             [
                 Path(environment["DATABASE_URL"].removeprefix("sqlite://")).name
                 for _, environment in prepare_calls
             ],
-            ["account-schema.sqlite", "project-board-schema.sqlite"],
+            ["account-schema.sqlite", "message-board-schema.sqlite"],
         )
 
     def test_successful_prepare_publishes_combined_metadata(self) -> None:
@@ -130,7 +130,7 @@ class PrepareSqlxTests(unittest.TestCase):
             sorted(path.name for path in self.metadata_directory.glob("query-*.json")),
             [
                 "query-codex-router-state.json",
-                "query-project-board-storage.json",
+                "query-message-board-storage.json",
             ],
         )
         self.assertEqual(
@@ -142,7 +142,7 @@ class PrepareSqlxTests(unittest.TestCase):
 
         result, _ = self.run_workflow(
             check_metadata=False,
-            prepare_failure_package="project-board-storage",
+            prepare_failure_package="message-board-storage",
         )
 
         self.assertEqual(result, 7)

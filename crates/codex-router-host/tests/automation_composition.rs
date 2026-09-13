@@ -1,6 +1,6 @@
-use codex_router_host::{CommunicationRuntime, CommunicationRuntimeInputs};
-use communication_client::ControlClient;
-use communication_protocol::{InstructionCreateParams, InstructionText, OperationId};
+use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
+use collaboration_client::ControlClient;
+use collaboration_protocol::{InstructionCreateParams, InstructionText, OperationId};
 use std::os::unix::fs::DirBuilderExt;
 
 #[tokio::test]
@@ -12,7 +12,7 @@ async fn host_supplies_automation_storage_without_native_backend()
         OperationId::generate().as_str()
     ));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-    let runtime = CommunicationRuntime::start(CommunicationRuntimeInputs {
+    let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("absent-native.sock"),

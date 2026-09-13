@@ -1,4 +1,4 @@
-use communication_protocol::LifecycleObservation;
+use collaboration_protocol::LifecycleObservation;
 use lifecycle_observation::ObservationJournal;
 use serde_json::json;
 #[tokio::test]

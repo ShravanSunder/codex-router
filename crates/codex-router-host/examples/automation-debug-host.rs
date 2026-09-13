@@ -112,9 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (key, value) in spec.environment() {
         native = native.with_environment(key, value);
     }
-    let communication = options.run_directory.join("agent-communication");
+    let collaboration = options.run_directory.join("agent-communication");
     let mut launch = AppServerLaunchPlan::new(native, executable, version)
-        .with_schema_directory(communication.clone());
+        .with_schema_directory(collaboration.clone());
     launch.prepare_schema().await;
     let router = ChildCommandSpec::new(options.router_binary)
         .with_arguments([
@@ -142,11 +142,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         managed_executable: paths.managed_executable(),
         deadlines: HostDeadlines::production(),
     })
-    .with_communication_directory(communication.clone(), codex_home);
+    .with_collaboration_directory(collaboration.clone(), codex_home);
     let prepared = DebugHostContext {
         kind: "debugHostPrepared".to_owned(),
         run_directory: options.run_directory.clone(),
-        service_directory: communication,
+        service_directory: collaboration,
         workspace,
         profile: "codex-router-debug".to_owned(),
         model: "gpt-5.6-luna".to_owned(),

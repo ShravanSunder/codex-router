@@ -58,7 +58,7 @@ External service/native identities MUST be preserved. Local service identity is 
 CLI MUST expose wake send, wake list, wake show and wake cancel. The Rust SDK MUST expose equivalent operations. Wake creation MUST return an identity distinguishable from native delivery acceptance. Wake-up messages MUST retain normal exact recipient, agent declaration or explicit human input, text and delivery mode. A wake-up MUST NOT imply a scheduled workflow or exclusive ownership of the recipient thread. Basis: S18, S24, S25. Proof: V6.
 
 ```sh
-agent-sessions wake send --from "$SELF" --to "$TARGET" \
+agent-collaboration wake send --from "$SELF" --to "$TARGET" \
   --text 'Check deployment X.' --every 10m --for 2h --json
 ```
 

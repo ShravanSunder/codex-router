@@ -1,7 +1,7 @@
 //! Consistent bounds and endpoint-filtered cursor scans, independent of live subscriptions.
 use crate::{JournalError, JournalPosition, ObservationJournal};
-use communication_protocol::{EndpointRef, LifecycleObservation};
-pub use communication_protocol::{JournalBounds, JournalPage, LifecycleRecord};
+use collaboration_protocol::{EndpointRef, LifecycleObservation};
+pub use collaboration_protocol::{JournalBounds, JournalPage, LifecycleRecord};
 use sqlx::{Connection, Row};
 impl ObservationJournal {
     pub async fn bounds(&mut self) -> Result<JournalBounds, JournalError> {

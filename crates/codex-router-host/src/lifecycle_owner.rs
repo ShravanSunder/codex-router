@@ -40,7 +40,7 @@ use crate::TerminalClassification;
 use crate::probe_router;
 use crate::require_unowned_app_server_endpoint;
 
-mod communication_lifecycle;
+mod collaboration_lifecycle;
 mod lifecycle_convergence;
 mod request_admission;
 mod retained_lifecycle;
@@ -132,8 +132,8 @@ pub enum HostExit {
 /// Startup or owner-loop failure.
 #[derive(Debug, Error)]
 pub enum HostError {
-    #[error("agent communication runtime failed: {0}")]
-    Communication(#[source] std::io::Error),
+    #[error("agent collaboration runtime failed: {0}")]
+    Collaboration(#[source] std::io::Error),
     /// Singleton authority or operator socket publication failed.
     #[error(transparent)]
     Instance(#[from] InstanceAcquireError),
@@ -272,18 +272,18 @@ impl HostRuntime {
                 return Err(error);
             }
         };
-        let mut communication = match communication_lifecycle::CommunicationLifecycle::start(
+        let mut collaboration = match collaboration_lifecycle::CollaborationLifecycle::start(
             &config,
             &app_server,
         )
         .await
         {
-            Ok(communication) => communication,
+            Ok(collaboration) => collaboration,
             Err(error) => {
                 app_server.shutdown().await?;
                 startup_convergence::shutdown_owned_router_after_startup_failure(&mut router_child)
                     .await?;
-                return Err(HostError::Communication(error));
+                return Err(HostError::Collaboration(error));
             }
         };
         let mut state = RuntimeState::ready(router_condition, readiness);
@@ -308,7 +308,7 @@ impl HostRuntime {
         let mut pending_identity = None::<codex_native_integration::ExecutableIdentityTask>;
         let mut retained_updater = None::<ProcessGroupChild>;
         loop {
-            if let Some(owner) = &mut communication {
+            if let Some(owner) = &mut collaboration {
                 let result = if active_update_activation.is_some() {
                     owner.shutdown().await
                 } else {
@@ -323,17 +323,17 @@ impl HostRuntime {
                         .await
                 };
                 if let Err(error) = result {
-                    tracing::error!("communication lifecycle synchronization failed");
+                    tracing::error!("collaboration lifecycle synchronization failed");
                     let _shutdown = owner.shutdown().await;
                     // Preserve lifecycle ownership and cleanup; no listener remains advertised.
                     let _reported = error;
                 }
             }
             tokio::select! {
-                failure = communication_lifecycle::wait_failure(&mut communication), if communication.is_some() => {
-                    tracing::error!("communication listener failed");
+                failure = collaboration_lifecycle::wait_failure(&mut collaboration), if collaboration.is_some() => {
+                    tracing::error!("collaboration listener failed");
                     let _failure = failure;
-                    if let Some(owner) = &mut communication { let _closed = owner.shutdown().await; }
+                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
                 }
                 accepted = instance.listener().accept() => {
                     if let Ok((stream, _peer)) = accepted
@@ -599,7 +599,7 @@ impl HostRuntime {
                     });
                 }
                 _ = interrupt.recv() => {
-                    if let Some(owner) = &mut communication { let _closed = owner.shutdown().await; }
+                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_update_activation,
@@ -615,7 +615,7 @@ impl HostRuntime {
                     return Ok(HostExit::Signal);
                 }
                 _ = terminate.recv() => {
-                    if let Some(owner) = &mut communication { let _closed = owner.shutdown().await; }
+                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_update_activation,
@@ -631,7 +631,7 @@ impl HostRuntime {
                     return Ok(HostExit::Signal);
                 }
                 _ = hangup.recv() => {
-                    if let Some(owner) = &mut communication { let _closed = owner.shutdown().await; }
+                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_update_activation,

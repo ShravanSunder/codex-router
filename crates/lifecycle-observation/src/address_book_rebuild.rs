@@ -1,6 +1,6 @@
 //! Transactional reconstruction from checkpoint plus retained observations.
 use crate::{AddressEntry, JournalError, JournalPosition, ObservationJournal};
-use communication_protocol::{LifecycleObservation, LifecycleSubject};
+use collaboration_protocol::{LifecycleObservation, LifecycleSubject};
 use sqlx::{Connection, Row};
 
 impl ObservationJournal {

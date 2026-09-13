@@ -1,7 +1,7 @@
 //! Transactional lifecycle append storage. Public projection/replay admission is separate.
-use communication_protocol::AddressEntry;
-use communication_protocol::JournalPosition;
-use communication_protocol::{LifecycleObservation, LifecycleSubject, ThreadAddress, UuidIdentity};
+use collaboration_protocol::AddressEntry;
+use collaboration_protocol::JournalPosition;
+use collaboration_protocol::{LifecycleObservation, LifecycleSubject, ThreadAddress, UuidIdentity};
 use sqlx::{
     Connection, Row, SqliteConnection,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},

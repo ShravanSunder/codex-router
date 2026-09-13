@@ -45,7 +45,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
             NativePayloadSchemas::from_bundle(&bundle)
                 .unwrap_or_else(|error| panic!("schemas: {error}")),
         );
-        let generation: communication_protocol::CodexGeneration = serde_json::from_value(
+        let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(
             json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
         )
         .unwrap_or_else(|error| panic!("generation: {error}"));

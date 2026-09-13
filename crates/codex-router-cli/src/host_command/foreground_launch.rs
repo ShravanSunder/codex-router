@@ -97,7 +97,7 @@ pub(super) async fn run_foreground_host(
             .with_schema_directory(router_root.join("agent-communication"));
     app_server.prepare_schema().await;
     let current_executable = std::env::current_exe()?;
-    let communication_directory = router_root.join("agent-communication");
+    let collaboration_directory = router_root.join("agent-communication");
     let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
         context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
     );
@@ -127,7 +127,7 @@ pub(super) async fn run_foreground_host(
         managed_executable: codex_paths.managed_executable(),
         deadlines: HostDeadlines::production(),
     })
-    .with_communication_directory(communication_directory, codex_home);
+    .with_collaboration_directory(collaboration_directory, codex_home);
     let child_launch_plans = ManagedChildLaunchPlans::new(Some(router_command), app_server);
     let mut update_inputs =
         ManagedUpdateInputs::production().with_replacement_command(replacement_command);

@@ -1,10 +1,10 @@
 //! Lifecycle-owned endpoint publication without process-control authority in clients.
-use communication_protocol::{
+use collaboration_protocol::{
     ChannelDescription, CodexGeneration, EndpointAvailability, EndpointDescription, EndpointRef,
     GenerationNumber, NativeCarrier, NonEmptyText, ObservationTimestamp, SchemaDigest,
     UuidIdentity,
 };
-use communication_service::{EndpointDirectory, NativeGenerationGate};
+use collaboration_service::{EndpointDirectory, NativeGenerationGate};
 use std::io;
 use std::path::PathBuf;
 
@@ -51,7 +51,7 @@ impl BackendPublication {
     }
     pub fn with_acp_listener(mut self) -> io::Result<Self> {
         self.acp_schema = Some(
-            format!("sha256:{}", communication_service::ACP_SCHEMA_DIGEST)
+            format!("sha256:{}", collaboration_service::ACP_SCHEMA_DIGEST)
                 .try_into()
                 .map_err(io::Error::other)?,
         );
@@ -137,7 +137,7 @@ impl BackendPublication {
             && let Some(schema_digest) = &self.acp_schema
         {
             channels.push(ChannelDescription::Acp {
-                transport: communication_protocol::AcpCarrier::UnixJsonLines,
+                transport: collaboration_protocol::AcpCarrier::UnixJsonLines,
                 path: self.acp_path.clone(),
                 schema_digest: schema_digest.clone(),
             });
