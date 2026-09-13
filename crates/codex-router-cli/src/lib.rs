@@ -149,7 +149,7 @@ pub async fn run_quota_reset_test_harness() -> i32 {
 #[cfg(feature = "quota-reset-test-harness")]
 #[doc(hidden)]
 pub fn run_sessions_picker_test_harness() -> i32 {
-    let result = agent_sessions::run_sessions_picker_test_harness();
+    let result = agent_collaboration::run_sessions_picker_test_harness();
     if let Err(error) = result {
         let _ = writeln!(std::io::stderr(), "{error}");
         return 2;
@@ -560,7 +560,7 @@ commands:
   doctor                        Diagnose local router setup
   profile print                 Print the Codex profile snippet
 
-Sessions and agent communication: run agent-sessions --help.
+Collaboration: run agent-collaboration --help.
 ";
 
 #[cfg(test)]

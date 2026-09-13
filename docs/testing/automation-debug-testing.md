@@ -9,7 +9,7 @@ Run from the repository root:
 ```sh
 cargo build -p codex-router-cli --bin codex-router
 cargo build -p codex-router-host --example automation-debug-host
-cargo test -p agent-sessions --test debug_luna_acceptance --no-run
+cargo test -p agent-collaboration --test debug_luna_acceptance --no-run
 ```
 
 The last command also builds the CLI used by the agent. The live test is ignored by default and requires an explicit invocation.
@@ -34,7 +34,7 @@ Keep this foreground process running. An existing directory, occupied port, prod
 proof_root=/tmp/luna-proof-my-check
 ./target/debug/codex-router host status \
   --router-root "$proof_root" --port 18787 --require-debug-isolation
-./target/debug/agent-sessions endpoints list \
+./target/debug/agent-collaboration endpoints list \
   --service-directory "$proof_root/agent-communication" --json
 ```
 
@@ -46,7 +46,7 @@ The outer test process needs permission to use the debug Unix sockets and normal
 
 ```sh
 CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
-  cargo test -p agent-sessions --test debug_luna_acceptance \
+  cargo test -p agent-collaboration --test debug_luna_acceptance \
   luna_agents_arrange_wake_and_reply_through_the_real_cli \
   -- --ignored --exact --nocapture
 ```
@@ -57,13 +57,64 @@ A separate opt-in OS test verifies the socket permission boundary without a
 model or app-server:
 
 ```sh
-cargo test -p agent-sessions --test native_sandbox_access \
+cargo test -p agent-collaboration --test native_sandbox_access \
   codex_sandbox_requires_exact_control_socket_permission -- --ignored --exact --nocapture
 ```
 
 The test uses each root once. After a failure, inspect its private `proof-events.jsonl`; do not rerun against those same threads or silently resubmit unknown work. A newly created thread may reject history before its first input and briefly after acceptance while native metadata becomes available. The helper records the exact known readiness errors and keeps observing within its deadline. It still requires actual turn history and receipts to pass; it never resends input to make history appear.
 
 Stop the foreground debug Host with Ctrl-C when finished. It shuts down its retained children. The private test artifacts remain for inspection, and Codex retains its ordinary session records. No directory deletion or production restart is part of this procedure.
+
+### Restart the Host for board persistence proof
+
+Build the board test binary, start a fresh debug Host as above, and run phase one:
+
+```sh
+cargo test -p agent-collaboration --test board_debug_acceptance --no-run
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-collaboration --test board_debug_acceptance \
+  two_luna_agents_exchange_a_verified_finding_through_the_board_cli \
+  -- --ignored --exact --nocapture
+```
+
+Phase one uses two fresh Luna sessions and exercises references across two
+projects, watches, inbox acknowledgement, history, and archived/resolved write
+rejection. It saves private state for the persistence check.
+
+The project-board acceptance journey may reopen the same isolated service data
+after the original foreground Host has exited. Record the original `hostPid`
+from `debug-host-context.json`, stop that owned Host with Ctrl-C, and relaunch
+the same binary with the explicit resume option:
+
+```sh
+./target/debug/examples/automation-debug-host \
+  --resume-run-directory "$proof_root" \
+  --router-binary "$PWD/target/debug/codex-router" \
+  --port 18787
+```
+
+Resume accepts only an existing owner-private direct child of `/tmp` whose
+context marker still identifies the same `codex-router-debug` profile, Luna
+model, port, service directory and workspace. It refuses symlinks, a live old
+Host PID, a still-published service, or a mismatched marker. It preserves the
+service databases and replaces the context marker atomically with the new Host
+PID. Wait for `host status` and endpoint discovery to report readiness again,
+then verify the new PID differs from the recorded PID before reading the board.
+Do not use resume after an indeterminate stop or with a directory from another
+test run.
+
+After readiness is confirmed, run phase two without starting additional models:
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-collaboration --test board_debug_acceptance \
+  board_state_survives_owned_debug_host_restart \
+  -- --ignored --exact --nocapture
+```
+
+It verifies persisted projects, references, archive state, watches and read
+acknowledgements through the CLI after confirming the Host PID changed. Stop the
+owned resumed Host with Ctrl-C after this check.
 
 ## Run the schedule and recovery scenarios
 
@@ -73,7 +124,7 @@ Fresh scheduled execution with continuity:
 
 ```sh
 CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
-  cargo test -p agent-sessions --test debug_luna_acceptance \
+  cargo test -p agent-collaboration --test debug_luna_acceptance \
   fresh_scheduled_run_uses_previous_luna_summary \
   -- --ignored --exact --nocapture
 ```
@@ -84,7 +135,7 @@ Busy-thread behavior and owned app-server replacement:
 
 ```sh
 CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
-  cargo test -p agent-sessions --test debug_luna_acceptance \
+  cargo test -p agent-collaboration --test debug_luna_acceptance \
   scheduled_work_waits_while_ordinary_messages_steer \
   -- --ignored --exact --nocapture
 ```
@@ -95,7 +146,7 @@ Worker timeout, summary retry, import and durable delivery:
 
 ```sh
 CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
-  cargo test -p agent-sessions --test debug_luna_acceptance \
+  cargo test -p agent-collaboration --test debug_luna_acceptance \
   summary_recovery_and_durable_delivery_preserve_original_work \
   -- --ignored --exact --nocapture
 ```
@@ -109,12 +160,12 @@ For delivery recovery, this scenario uses production service code over paired Un
 The following commands use the same Rust SDK as applications. Replace each identity with the UUID from its creation or listing response:
 
 ```sh
-./target/debug/agent-sessions operation show --operation-id UUID --service-directory "$proof_root/agent-communication" --json
-./target/debug/agent-sessions operation reconcile --operation-id UUID --service-directory "$proof_root/agent-communication" --json
-./target/debug/agent-sessions delivery show --delivery-id UUID --service-directory "$proof_root/agent-communication" --json
-./target/debug/agent-sessions delivery reconcile --delivery-id UUID --service-directory "$proof_root/agent-communication" --json
-./target/debug/agent-sessions run show --run-id UUID --service-directory "$proof_root/agent-communication" --json
-./target/debug/agent-sessions run reconcile --run-id UUID --service-directory "$proof_root/agent-communication" --json
+./target/debug/agent-collaboration operation show --operation-id UUID --service-directory "$proof_root/agent-communication" --json
+./target/debug/agent-collaboration operation reconcile --operation-id UUID --service-directory "$proof_root/agent-communication" --json
+./target/debug/agent-collaboration delivery show --delivery-id UUID --service-directory "$proof_root/agent-communication" --json
+./target/debug/agent-collaboration delivery reconcile --delivery-id UUID --service-directory "$proof_root/agent-communication" --json
+./target/debug/agent-collaboration run show --run-id UUID --service-directory "$proof_root/agent-communication" --json
+./target/debug/agent-collaboration run reconcile --run-id UUID --service-directory "$proof_root/agent-communication" --json
 ```
 
 Use these while the owning Host is running. Reconciliation observes native evidence and may persist a confirmed outcome; it never resends input, starts a native thread or interrupts work. Configuration reconciliation can recover the original intended local settings-file update. Reconciliation of an older completed operation returns its original outcome without restoring old settings.
@@ -150,4 +201,4 @@ python3 -m unittest scripts.tests.test_update_homebrew_formula -v
 
 CI also builds the router with all features, checks an isolated Cargo installation, and runs the quota-reset PTY harness. Preserve those gates when preparing the PR.
 
-Source: [debug Host launcher](../../crates/codex-router-host/examples/automation-debug-host.rs), [live acceptance test](../../crates/agent-sessions/tests/debug_luna_acceptance.rs), [scheduled workflow requirements](../specs/2026-09-07-scheduled-agent-workflows/2026-09-07-scheduled-agent-workflows-requirements.md).
+Source: [debug Host launcher](../../crates/codex-router-host/examples/automation-debug-host.rs), [live acceptance test](../../crates/agent-collaboration/tests/debug_luna_acceptance.rs), [scheduled workflow requirements](../specs/2026-09-07-scheduled-agent-workflows/2026-09-07-scheduled-agent-workflows-requirements.md).

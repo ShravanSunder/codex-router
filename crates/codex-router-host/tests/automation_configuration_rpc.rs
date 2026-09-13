@@ -1,7 +1,7 @@
 //! Host configuration is changed through the real SDK, then verified after Host restart.
-use codex_router_host::{CommunicationRuntime, CommunicationRuntimeInputs};
-use communication_client::ControlClient;
-use communication_protocol::{AutomationConfigureRequest, OperationId};
+use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
+use collaboration_client::ControlClient;
+use collaboration_protocol::{AutomationConfigureRequest, OperationId};
 use std::os::unix::fs::DirBuilderExt;
 #[tokio::test]
 async fn host_persists_configured_budgets_and_loads_them_on_restart()
@@ -12,7 +12,7 @@ async fn host_persists_configured_budgets_and_loads_them_on_restart()
     ));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     for first in [true, false] {
-        let runtime = CommunicationRuntime::start(CommunicationRuntimeInputs {
+        let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
             directory: root.clone(),
             codex_home: root.clone(),
             backend_socket: root.join("absent.sock"),

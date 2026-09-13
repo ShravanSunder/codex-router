@@ -1,8 +1,8 @@
 //! A failed filesystem write must not leave a receipt claiming no write was attempted.
 use automation_storage::{AutomationStore, StoredOperationState};
 use codex_router_host::AutomationSettingsFile;
-use communication_protocol::{AutomationConfigureRequest, OperationId};
-use communication_service::{AutomationConfigurationBackend, AutomationConfigurationHandle};
+use collaboration_protocol::{AutomationConfigureRequest, OperationId};
+use collaboration_service::{AutomationConfigurationBackend, AutomationConfigurationHandle};
 use std::{os::unix::fs::DirBuilderExt, sync::Arc};
 
 #[tokio::test]

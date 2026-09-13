@@ -1,6 +1,6 @@
 //! Model-driven CLI collaboration; the harness observes but never forwards the answer.
 use codex_native_integration::NativeProtocolConnection;
-use communication_protocol::SessionRef;
+use collaboration_protocol::SessionRef;
 use serde_json::Value;
 use std::{error::Error, path::Path, time::Duration};
 

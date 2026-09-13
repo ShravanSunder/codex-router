@@ -1,0 +1,45 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT bookmark.root_id,bookmark.through_activity, EXISTS(SELECT 1 FROM board_activity activity WHERE activity.activity_sequence=bookmark.through_activity AND activity.root_id=bookmark.root_id AND activity.kind<>'mainMessageCreated') AS valid_scope FROM thread_read_bookmarks bookmark JOIN board_messages message ON message.message_id=bookmark.root_id JOIN project_boards board ON board.board_id=message.board_id WHERE bookmark.reader_key=? AND board.project_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_read_bookmarks",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "through_activity",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_read_bookmarks",
+            "name": "through_activity"
+          }
+        }
+      },
+      {
+        "name": "valid_scope",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "42aa45316d7a3cb8b3949a1a6eda1c2a7d561e30a754c88d39af584c238bfb3c"
+}

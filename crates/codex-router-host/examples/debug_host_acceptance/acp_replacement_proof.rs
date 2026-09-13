@@ -1,8 +1,8 @@
 //! Owned Host restart coordinated with independent ACP loss and explicit recovery.
 use super::owned_thread_registry::OwnedThreadRegistry;
 use codex_native_integration::NativeProtocolConnection;
-use communication_client::ControlClient;
-use communication_protocol::{ChannelDescription, CodexGeneration, EndpointAvailability};
+use collaboration_client::ControlClient;
+use collaboration_protocol::{ChannelDescription, CodexGeneration, EndpointAvailability};
 use serde_json::{Value, json};
 use std::{error::Error, os::unix::fs::OpenOptionsExt, path::Path, process::Stdio, time::Duration};
 use tokio::{

@@ -6,7 +6,7 @@
 
 A developer can keep using a managed Codex session while Codex Host replaces
 its app-server. Live connections and active turns may end, but the service
-remains discoverable at one owner-local address and `agent-sessions` returns to
+remains discoverable at one owner-local address and `agent-collaboration` returns to
 the same materialized thread without manual recovery.
 
 Applications receive three supported public interfaces without flattening
@@ -34,7 +34,7 @@ find, filter, search, resume, fork, or start a Codex thread
 
 The existing Sessions command is a product, not merely a launcher. Its scopes,
 filters, formats, search language, picker, launch choices, and Codex argument
-passthrough must survive the move to `agent-sessions`.
+passthrough must survive the move to `agent-collaboration`.
 
 ### Application or agent client
 
@@ -114,7 +114,7 @@ currently applicable.
 | U21 | Must | Maintainer | Session Control uses closed discriminated unions, validated domain types, exact method/params/result/error pairing, and deliberate absence/null semantics. |
 | U22 | Must | Operator | Persist control metadata separately from router account/quota state and Codex history/queue state. |
 | U23 | Must | Local owner | V1 has no protocol authentication, authorization, network ingress, remote deployment, or multi-user security claim. |
-| U24 | Must | Repository maintainer | `agent-sessions` is separate; `codex-router` retains serve/host/accounts/quota; `codex-native-integration` replaces the legacy `codex-router-codex` name. |
+| U24 | Must | Repository maintainer | `agent-collaboration` is separate; `codex-router` retains serve/host/accounts/quota; `codex-native-integration` replaces the legacy `codex-router-codex` name. |
 | U25 | Must | Repository maintainer | New or moved responsibility-bearing file/folder names use at least two meaningful words; conventional structural entries are exempt. |
 | U26 | Must | Human reader | Requirements, Specification, and Program Design remain distinct, linked, human-readable, and traceable to proof. |
 

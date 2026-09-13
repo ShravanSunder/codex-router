@@ -1,6 +1,6 @@
 //! Minimal lifecycle projection from a schema-admitted native notification stream.
 use crate::JournalError;
-use communication_protocol::{
+use collaboration_protocol::{
     LifecycleChange, LifecycleObservation, LifecycleSubject, ObservationOrdering, ObservationScope,
     ObservationSource, ObservationTimestamp, SessionId, TerminalStatus, ThreadAddress,
 };

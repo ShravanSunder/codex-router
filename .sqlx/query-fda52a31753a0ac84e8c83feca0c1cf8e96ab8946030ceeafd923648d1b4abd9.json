@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.root_id,t.state FROM board_threads t JOIN board_messages m ON m.message_id=t.root_id JOIN project_boards b ON b.board_id=m.board_id LEFT JOIN thread_watches w ON w.root_id=t.root_id AND w.reader_key=? WHERE b.project_id=? AND t.root_id>? AND (?=0 OR w.active=1) ORDER BY t.root_id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_threads",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_threads",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "fda52a31753a0ac84e8c83feca0c1cf8e96ab8946030ceeafd923648d1b4abd9"
+}

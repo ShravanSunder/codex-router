@@ -1,10 +1,10 @@
-use communication_protocol::{ObservationOrdering, ObservationScope};
+use collaboration_protocol::{ObservationOrdering, ObservationScope};
 use lifecycle_observation::{InventoryReconciliation, ReadDisposition};
 use serde_json::json;
 #[test]
 fn overlapping_reads_retry_boundedly_and_disconnect_discards_completion() {
     let scope:ObservationScope=serde_json::from_value(json!({"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1},"observerId":"00000000-0000-4000-8000-000000000003"})).unwrap_or_else(|e|panic!("scope: {e}"));
-    let thread: communication_protocol::SessionId = "t"
+    let thread: collaboration_protocol::SessionId = "t"
         .to_owned()
         .try_into()
         .unwrap_or_else(|e| panic!("thread: {e}"));

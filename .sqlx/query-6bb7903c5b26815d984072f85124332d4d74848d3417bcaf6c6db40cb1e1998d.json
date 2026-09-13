@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE project_reader_state SET main_start=? WHERE reader_key=? AND project_id=? AND main_start IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6bb7903c5b26815d984072f85124332d4d74848d3417bcaf6c6db40cb1e1998d"
+}

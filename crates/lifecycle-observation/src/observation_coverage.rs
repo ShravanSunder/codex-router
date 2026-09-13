@@ -1,6 +1,6 @@
 //! Disposable observer coverage; persisted status never creates live authority.
 use crate::JournalError;
-use communication_protocol::{
+use collaboration_protocol::{
     BackendStatus, CoverageState, CoverageView, EndpointRef, LifecycleChange, LifecycleObservation,
     ObservationScope, ObservationTimestamp,
 };

@@ -1,8 +1,8 @@
 //! Real public lifecycle readers fed by the owned backend and normal read-only catalog.
 use super::owned_thread_registry::OwnedThreadRegistry;
 use codex_native_integration::NativeProtocolConnection;
-use communication_client::ControlClient;
-use communication_protocol::{
+use collaboration_client::ControlClient;
+use collaboration_protocol::{
     AddressEntry, CoverageState, CoverageView, JournalPosition, JournalStatus, LifecycleChange,
     LifecycleSubject, NativeSessionListParams, NativeSessionView, NativeThreadStatus,
     ObservationSource, StatusOrdering,
@@ -39,7 +39,7 @@ pub async fn run_reader_proof(
     if owned.observe_text(native, receipt).await?.trim() != "LIFECYCLE_READER_READY" {
         return Err("lifecycle preparation failed".into());
     }
-    let endpoint = communication_protocol::EndpointRef {
+    let endpoint = collaboration_protocol::EndpointRef {
         service_id: client.identity().service_id.clone(),
         endpoint_id: "codex-local".to_owned().try_into()?,
     };

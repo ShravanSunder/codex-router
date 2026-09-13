@@ -1,5 +1,5 @@
 use codex_native_integration::NativeProtocolConnection;
-use communication_protocol::{LifecycleChange, ObservationScope};
+use collaboration_protocol::{LifecycleChange, ObservationScope};
 use futures_util::{SinkExt, StreamExt};
 use lifecycle_observation::{
     JournalPosition, LifecycleStore, NativeObservationStream, ObservationJournal,

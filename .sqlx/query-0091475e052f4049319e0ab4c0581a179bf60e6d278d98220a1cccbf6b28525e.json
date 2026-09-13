@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO message_references(source_id,ordinal,kind,target_message_id,target_root_id) VALUES(?,?,?,?,?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "0091475e052f4049319e0ab4c0581a179bf60e6d278d98220a1cccbf6b28525e"
+}

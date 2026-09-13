@@ -71,7 +71,7 @@ Host can publish the service before native readiness using the unavailable varia
 
 Each connection chooses one channel before its first application message. A method name or `initialize` payload cannot switch channels.
 
-- ACP: UTF-8 newline-delimited JSON, one ACP JSON-RPC message per line, following the pinned SDK. A standard stdio client can launch `agent-sessions acp`; that command copies ACP messages to/from the local ACP socket and sends diagnostics only to stderr.
+- ACP: UTF-8 newline-delimited JSON, one ACP JSON-RPC message per line, following the pinned SDK. A standard stdio client can launch `agent-collaboration acp`; that command copies ACP messages to/from the local ACP socket and sends diagnostics only to stderr.
 - Native: WebSocket over Unix, standard HTTP Upgrade at `/`, preserving upstream text/binary/control-frame policy. Application payloads are forwarded without changing their envelope or JSON representation.
 - Control: UTF-8 JSON Lines. One line holds one JSON-RPC 2.0 object or one nonempty batch array. A trailing LF terminates the frame. Raw LF inside a string is invalid JSON; escaped newline content is ordinary data. EOF before a terminating LF is a truncated frame.
 
@@ -461,7 +461,7 @@ Acceptance timeout after native dispatch means `nativeOutcomeUnknown`; it does n
 
 ## R6 — Sessions launch and native-owned recovery (U1–U5, U16–U18, U24)
 
-`agent-sessions` becomes the sole Sessions executable at hard cutover. `codex-router sessions` is removed without a forwarding alias; provider/Host/account/quota commands remain in codex-router. Hosted Sessions launches the native CLI against the stable native selector. `--local` retains direct local Codex behavior.
+`agent-collaboration` becomes the sole Sessions executable at hard cutover. `codex-router sessions` is removed without a forwarding alias; provider/Host/account/quota commands remain in codex-router. Hosted Sessions launches the native CLI against the stable native selector. `--local` retains direct local Codex behavior.
 
 The existing feature inventory remains: table/JSON; exact cwd/checkout/repository/all scopes; any/current/exact provider; interactive/all/subagent filters; newest-created/updated sorting; limits and keyset paging; exact/latest/new/resume/fork; dry-run; ordered lossless native argv; bare/quoted AND and `id:`, `b:`/`branch:`, `repo:` search; lazy bounded previews; pointer and keyboard controls; loading/coalescing; supported terminal-width layouts; and distinct non-TTY/narrow/invalid/missing/discovery/launch failures. Incidental existing option-precedence or rendering quirks are not silently repaired in this work.
 
@@ -497,10 +497,10 @@ The generated Rust/TypeScript clients expose discovery, initialization, typed Co
 CLI entrypoints are:
 
 ```text
-agent-sessions                         existing picker and launch options
-agent-sessions acp                     ACP stdio bridge to owner-local service
-agent-sessions native                  native JSONL ↔ native WebSocket bridge
-agent-sessions control                 Control JSONL ↔ Control socket bridge
+agent-collaboration                         existing picker and launch options
+agent-collaboration acp                     ACP stdio bridge to owner-local service
+agent-collaboration native                  native JSONL ↔ native WebSocket bridge
+agent-collaboration control                 Control JSONL ↔ Control socket bridge
 ```
 
 Protocol bridges accept `--service-directory <absolute-path>`. stdout contains only protocol frames; stderr carries bounded diagnostics. They preserve EOF/cancellation and close their owned connections without stopping Host. Native JSONL is a carrier adaptation only: JSON application envelopes are not translated, and one line corresponds to one native text message. Unsupported native binary frames fail the bridge visibly; full native WebSocket access remains available for clients requiring them.
@@ -514,14 +514,14 @@ Raw protocol bridges are advanced interfaces. The ordinary agent workflow uses t
 
 | Command | Behavior |
 | --- | --- |
-| `agent-sessions service describe --json` | Read the service manifest and initialize channels as needed to obtain capabilities and current observed availability; do not start a thread. |
-| `agent-sessions threads list --view stored\|runtime\|active --json` | List the selected projection. Default view is stored; filters, paging and state distinctions retain R5/R6 semantics. |
-| `agent-sessions thread inspect --thread <id> --json` | Native read without resume or a new turn; return the native thread observation. |
-| `agent-sessions message send --thread <id> --text <text> --json` | Invoke state-aware Control send, with generation/schema taken from the initialized client. Return acceptance, not a completed peer reply. |
-| `agent-sessions context append --thread <id> --text <text> --json` | Invoke native injection for an already-loaded direct-input-capable thread; never implicitly resume or start a turn. |
-| `agent-sessions events listen --scope control` | Stream Control notifications without loading a thread. |
-| `agent-sessions events listen --thread <id> --attach` | Explicit native resume/subscription and event observation; `--attach` is mandatory because listening this way has native attachment effects. |
-| `agent-sessions thread interrupt --thread <id> --turn <id> --json` | Interrupt the exact turn through Control; closing a listener is not this operation. |
+| `agent-collaboration service describe --json` | Read the service manifest and initialize channels as needed to obtain capabilities and current observed availability; do not start a thread. |
+| `agent-collaboration threads list --view stored\|runtime\|active --json` | List the selected projection. Default view is stored; filters, paging and state distinctions retain R5/R6 semantics. |
+| `agent-collaboration thread inspect --thread <id> --json` | Native read without resume or a new turn; return the native thread observation. |
+| `agent-collaboration message send --thread <id> --text <text> --json` | Invoke state-aware Control send, with generation/schema taken from the initialized client. Return acceptance, not a completed peer reply. |
+| `agent-collaboration context append --thread <id> --text <text> --json` | Invoke native injection for an already-loaded direct-input-capable thread; never implicitly resume or start a turn. |
+| `agent-collaboration events listen --scope control` | Stream Control notifications without loading a thread. |
+| `agent-collaboration events listen --thread <id> --attach` | Explicit native resume/subscription and event observation; `--attach` is mandatory because listening this way has native attachment effects. |
+| `agent-collaboration thread interrupt --thread <id> --turn <id> --json` | Interrupt the exact turn through Control; closing a listener is not this operation. |
 
 All commands accept the explicit local service-directory selector. No command interprets a thread title as a unique address. `message send` and `context append` accept `--text-file <path>` instead of `--text`, including `--text-file -` for stdin; exactly one content source is required. Empty content is rejected before dispatch. Context append constructs only native user-role text, exposes the R4 acceptance/persistence limits, and offers no developer/system-role flag. Send optionally forwards a caller-provided native client-message ID; it never describes that ID as deduplication.
 

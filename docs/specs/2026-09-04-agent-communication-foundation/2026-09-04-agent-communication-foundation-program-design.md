@@ -57,7 +57,7 @@ Router source baseline is `afc4bcaad4d44b24d619c6302748dd717a327818`. Native beh
 
 | Current source path | Current entry-to-effect path | Target change |
 | --- | --- | --- |
-| `crates/codex-router-cli/src/sessions.rs:513` | Sessions command → discovery/picker → native launch projection → spawn and wait once | Move product behavior to agent-sessions; retain native new/resume/fork launch and native-owned recovery; add truthful process/control observations only. |
+| `crates/codex-router-cli/src/sessions.rs:513` | Sessions command → discovery/picker → native launch projection → spawn and wait once | Move product behavior to agent-collaboration; retain native new/resume/fork launch and native-owned recovery; add truthful process/control observations only. |
 | `crates/codex-router-codex/src/session.rs:15` | SessionLaunch → `codex --remote unix://...` → direct app-server | Keep native CLI behavior; hosted target becomes the stable native selector. Local launch stays direct. |
 | `crates/codex-router-codex/src/app_server_control_protocol.rs:169` | Unix connect → WebSocket initialize → bounded version/readiness result | Replace handwritten projections with version-bounded native typed integration. |
 | `crates/codex-router-host/src/lifecycle_owner.rs:249` | LifecycleOwner → retained AppServerChild → observed readiness → operator snapshot | Preserve actual process owner; add generation/schema publication after observed transitions. |
@@ -124,11 +124,11 @@ codex-acp-adapter → codex-native-integration
 session-control-plane → session-control-protocol
 session-control-plane → codex-native-integration
 session-control-client → session-control-protocol
-agent-sessions → session-control-client
-agent-sessions → codex-native-integration
+agent-collaboration → session-control-client
+agent-collaboration → codex-native-integration
 ```
 
-`agent-sessions` is the sole Sessions executable. The legacy `codex-router-codex` crate is removed at cutover in favor of `codex-native-integration`; it is not kept as an alias. Existing Router provider/account/quota crates remain in place.
+`agent-collaboration` is the sole Sessions executable. The legacy `codex-router-codex` crate is removed at cutover in favor of `codex-native-integration`; it is not kept as an alias. Existing Router provider/account/quota crates remain in place.
 
 Protocol modules depend on neither storage nor processes. The relay depends on carrier/generation interfaces, never the native method registry. The catalog is read-only. The process wrapper cannot own a second reconnect loop or infer the native TUI's current selection from its launch arguments. ACP and Control may initiate native operations but cannot write Codex databases. Presentation cannot signal Host-owned children.
 
@@ -204,7 +204,7 @@ Current: no ACP entrypoint. Added path:
 
 ```text
 ACP client
-  → agent-sessions acp or acp.sock                    [carrier only]
+  → agent-collaboration acp or acp.sock                    [carrier only]
   → ACP Connection Session: initialize/capabilities  [connection state]
   → ACP Session Mapping: new/load                   [native attachment]
   → Native Integration: subscribe before prompt     [native effects]
@@ -389,7 +389,7 @@ Metrics report channel, method category, generation, duration, queue pressure, n
 | --- | --- | --- |
 | Existing system | Current sessions command, direct native socket, Host lifecycle | No target Control writer; existing behavior remains authoritative. |
 | Isolated validation | Debug Host, isolated service/store, normal Codex home | Protocol/schema mismatches fail visibly; no production replacement. |
-| Product cutover | agent-sessions and new Host service; legacy command/crate removed | Compatible binary set is installed together; no compatibility forwarding shim. |
+| Product cutover | agent-collaboration and new Host service; legacy command/crate removed | Compatible binary set is installed together; no compatibility forwarding shim. |
 | Rollback | Complete compatible binary/schema-reader set | Old code that cannot read Control schema refuses mutation; never converts Codex history. |
 
 The design exposes independent delivery boundaries—native integration/discovery, transparent native access, Control coordination, Sessions recovery, ACP adaptation and client ergonomics. These are capability seams, not PR assignments. Planning will determine dependent PR order after this design's owner choices and review are resolved.

@@ -101,7 +101,7 @@ impl AppServerLaunchPlan {
                     "schema export directory must be private and absolute",
                 ));
             }
-            let suffix = String::from(communication_service::new_service_uuid()?);
+            let suffix = String::from(collaboration_service::new_service_uuid()?);
             let output = directory.join(format!("native-schema-export-{suffix}"));
             codex_native_integration::NativeSchemaExport::generate(&self.identity, &output)
                 .await

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.project_id FROM board_topics t JOIN project_boards b ON b.board_id=t.board_id WHERE t.topic_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "project_boards",
+            "name": "project_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "43a78793bcb7c000f5e63348f2cc10284d2b9e6ccc747fe9457c1aaf3d5c0c24"
+}

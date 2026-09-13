@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE project_boards SET state='archived' WHERE board_id=? AND state='active'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0fb7dfbc160c8de541827e71c2f1792c700a16011d63260d77f51de42d43fba3"
+}

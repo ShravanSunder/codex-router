@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT project_id,has_unread,main_start FROM project_reader_state WHERE reader_key=? AND project_id>? AND (?=0 OR has_unread=1) ORDER BY project_id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "project_reader_state",
+            "name": "project_id"
+          }
+        }
+      },
+      {
+        "name": "has_unread",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "project_reader_state",
+            "name": "has_unread"
+          }
+        }
+      },
+      {
+        "name": "main_start",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "project_reader_state",
+            "name": "main_start"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e7f479248528c3f096a5aebe1d828ed6891a6414e66ac16d304eac58b50294db"
+}

@@ -85,7 +85,7 @@ impl NativeProtocolConnection {
             .await
             .map_err(|_| NativeConnectionError::Unavailable)??;
         let mut client = Self::from_websocket(socket);
-        client.request("initialize",json!({"clientInfo":{"name":"agent_sessions","title":"Agent Sessions","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
+        client.request("initialize",json!({"clientInfo":{"name":"agent_collaboration","title":"Agent Collaboration","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         client
             .socket
             .send(Message::Text(
@@ -121,7 +121,7 @@ impl NativeProtocolConnection {
         if self.failed {
             return Err(NativeConnectionError::Unavailable);
         }
-        let id = format!("agent-sessions-{}", self.next_id);
+        let id = format!("agent-collaboration-{}", self.next_id);
         self.next_id = self
             .next_id
             .checked_add(1)

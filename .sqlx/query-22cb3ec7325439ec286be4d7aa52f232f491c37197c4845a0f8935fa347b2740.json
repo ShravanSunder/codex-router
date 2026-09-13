@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS( SELECT 1 FROM board_activity a JOIN project_reader_state prs ON prs.reader_key=? AND prs.project_id=a.project_id LEFT JOIN topic_read_bookmarks tb ON tb.reader_key=prs.reader_key AND tb.topic_id=a.topic_id LEFT JOIN thread_watches w ON w.reader_key=prs.reader_key AND w.root_id=a.root_id LEFT JOIN thread_read_bookmarks rb ON rb.reader_key=prs.reader_key AND rb.root_id=a.root_id WHERE a.project_id=? AND a.actor_key<>prs.reader_key AND ( (a.kind='mainMessageCreated' AND prs.main_start IS NOT NULL AND a.activity_sequence>prs.main_start AND a.activity_sequence>COALESCE(tb.through_activity,0)) OR (a.kind<>'mainMessageCreated' AND w.active=1 AND a.activity_sequence>w.starts_after_activity AND a.activity_sequence>COALESCE(rb.through_activity,0)) ) )",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS( SELECT 1 FROM board_activity a JOIN project_reader_state prs ON prs.reader_key=? AND prs.project_id=a.project_id LEFT JOIN topic_read_bookmarks tb ON tb.reader_key=prs.reader_key AND tb.topic_id=a.topic_id LEFT JOIN thread_watches w ON w.reader_key=prs.reader_key AND w.root_id=a.root_id LEFT JOIN thread_read_bookmarks rb ON rb.reader_key=prs.reader_key AND rb.root_id=a.root_id WHERE a.project_id=? AND a.actor_key<>prs.reader_key AND ( (a.kind='mainMessageCreated' AND prs.main_start IS NOT NULL AND a.activity_sequence>prs.main_start AND a.activity_sequence>COALESCE(tb.through_activity,0)) OR (a.kind<>'mainMessageCreated' AND w.active=1 AND a.activity_sequence>w.starts_after_activity AND a.activity_sequence>COALESCE(rb.through_activity,0)) ) )",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "22cb3ec7325439ec286be4d7aa52f232f491c37197c4845a0f8935fa347b2740"
+}

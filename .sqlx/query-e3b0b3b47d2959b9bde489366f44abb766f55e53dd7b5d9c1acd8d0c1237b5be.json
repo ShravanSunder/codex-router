@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_sequence FROM activity_checkpoint WHERE singleton=1",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_sequence",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "activity_checkpoint",
+            "name": "last_sequence"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e3b0b3b47d2959b9bde489366f44abb766f55e53dd7b5d9c1acd8d0c1237b5be"
+}

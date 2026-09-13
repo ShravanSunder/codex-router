@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO project_repositories(project_id,repository_key,kind,origin,service_id,common_directory) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,repository_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "06e57246baa7ab920a337332a756c98d7ecb0c4940089f1445a448ff11f459c6"
+}

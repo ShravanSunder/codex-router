@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT main_start IS NOT NULL FROM project_reader_state WHERE reader_key=? AND project_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "main_start IS NOT NULL",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0eeeccf6e14514a6f287cfc15b04ff173efefe70e1719af5b38e2581c4ac9f79"
+}

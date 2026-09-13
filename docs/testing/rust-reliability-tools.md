@@ -6,7 +6,7 @@ replacing globally installed tools:
 ```sh
 scripts/tooling/bootstrap-tools.sh ci
 export PATH="$PWD/tmp/rust-tools/bin:$PATH"
-cargo nextest run -p communication-protocol
+cargo nextest run -p collaboration-protocol
 cargo nextest run --profile ci --workspace
 ```
 

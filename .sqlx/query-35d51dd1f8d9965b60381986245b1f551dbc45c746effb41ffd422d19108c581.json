@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE project_reader_state SET has_unread=? WHERE reader_key=? AND project_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "35d51dd1f8d9965b60381986245b1f551dbc45c746effb41ffd422d19108c581"
+}

@@ -211,7 +211,7 @@ surface. The selection crate owns its domain strategies. Proptest is a dev-only
 dependency; no new production package, runtime scheduler, or generic test framework
 is introduced. The workspace lockfile records the resolved dependency.
 
-Current anchors: [frame tests](../../../crates/communication-protocol/tests/control_frame_decoding.rs)
+Current anchors: [frame tests](../../../crates/collaboration-protocol/tests/control_frame_decoding.rs)
 and [selection examples](../../../crates/codex-router-selection/src/lib.rs).
 
 ```text

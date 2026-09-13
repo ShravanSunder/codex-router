@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_projects(project_id,name,description) VALUES(?,?,?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "8561138dcfc93a54cd3c1122c3f3faca330fa60d78385c02b81d6ff628f43352"
+}

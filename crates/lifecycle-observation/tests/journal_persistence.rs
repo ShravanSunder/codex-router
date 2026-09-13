@@ -1,4 +1,4 @@
-use communication_protocol::LifecycleObservation;
+use collaboration_protocol::LifecycleObservation;
 use lifecycle_observation::ObservationJournal;
 
 #[tokio::test]
@@ -38,7 +38,7 @@ async fn invalid_coverage_restore_does_not_commit_or_consume_sequence() {
         .read_wait(&observation.scope.endpoint, position, 100, 0)
         .await
         .unwrap_or_else(|error| panic!("read: {error}"));
-    observation.change = communication_protocol::LifecycleChange::CoverageLost;
+    observation.change = collaboration_protocol::LifecycleChange::CoverageLost;
     let next = store
         .append(&observation, 80)
         .await

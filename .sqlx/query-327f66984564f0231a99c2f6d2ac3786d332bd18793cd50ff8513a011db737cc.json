@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT topic_id,board_id,name,description FROM board_topics WHERE topic_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "topic_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "topic_id"
+          }
+        }
+      },
+      {
+        "name": "board_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "board_id"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "description"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "327f66984564f0231a99c2f6d2ac3786d332bd18793cd50ff8513a011db737cc"
+}

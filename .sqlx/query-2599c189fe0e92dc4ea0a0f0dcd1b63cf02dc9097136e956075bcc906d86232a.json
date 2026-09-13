@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT kind,target_message_id,target_root_id FROM message_references WHERE source_id=? ORDER BY ordinal",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message_references",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "target_message_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message_references",
+            "name": "target_message_id"
+          }
+        }
+      },
+      {
+        "name": "target_root_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message_references",
+            "name": "target_root_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "2599c189fe0e92dc4ea0a0f0dcd1b63cf02dc9097136e956075bcc906d86232a"
+}

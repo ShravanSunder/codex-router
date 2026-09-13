@@ -1,6 +1,6 @@
 //! Single storage owner with commit-triggered journal reads and bounded maintenance.
 use crate::{JournalError, JournalPage, JournalPosition, JournalRow, ObservationJournal};
-use communication_protocol::{EndpointRef, LifecycleObservation};
+use collaboration_protocol::{EndpointRef, LifecycleObservation};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, watch};
@@ -196,8 +196,8 @@ impl LifecycleStore {
         endpoint: &EndpointRef,
         page_size: usize,
         cursor: Option<&str>,
-        snapshot_id: communication_protocol::UuidIdentity,
-        captured_at: communication_protocol::ObservationTimestamp,
+        snapshot_id: collaboration_protocol::UuidIdentity,
+        captured_at: collaboration_protocol::ObservationTimestamp,
     ) -> Result<crate::AddressPage, JournalError> {
         self.require_available()?;
         if let Some(cursor) = cursor {

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO actor_board_cooldowns(actor_key,board_id,last_post_at_ms) VALUES(?,?,?) ON CONFLICT(actor_key,board_id) DO UPDATE SET last_post_at_ms=excluded.last_post_at_ms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e0d7b7b3c957d33619e2f0a3a615ef5776b02ac27bbfdc4b2e5ed706b11c17e2"
+}

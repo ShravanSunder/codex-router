@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM board_activity WHERE project_id=? AND kind='mainMessageCreated' AND activity_sequence<=?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM board_activity WHERE project_id=? AND kind='mainMessageCreated' AND activity_sequence<=?)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9810776d45f103ef4eda4b106c8f3bb710bc4b02b04fa47d6d1ac42abacee422"
+}

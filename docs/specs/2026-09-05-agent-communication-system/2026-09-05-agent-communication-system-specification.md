@@ -321,19 +321,19 @@ Exact interruption rejects an empty turnId before dispatch and waits for the nat
 
 ### Public command vocabulary
 
-`agent-sessions` owns the picker/launch product and communication commands. Product naming is unchanged elsewhere; no agent-router rename is part of V1. The prior codex-router sessions command is removed at product cutover, with no forwarding compatibility layer.
+`agent-collaboration` owns the picker/launch product and communication commands. Product naming is unchanged elsewhere; no agent-router rename is part of V1. The prior codex-router sessions command is removed at product cutover, with no forwarding compatibility layer.
 
 ```text
-agent-sessions endpoints list --json
-agent-sessions sessions list --endpoint ID --view stored|loaded|active --json
-agent-sessions session inspect --endpoint ID --session ID --json
-agent-sessions message send --to ADDRESS --from ADDRESS --text-file PATH --json
-agent-sessions message send --to ADDRESS --from ADDRESS --delivery steer --text-file PATH --json
-agent-sessions message send --human-user --to ADDRESS --text-file PATH --json
-agent-sessions events listen --endpoint ID --session ID --attach
-agent-sessions turn interrupt --endpoint ID --session ID --turn ID --json
-agent-sessions acp --endpoint ID
-agent-sessions native --endpoint ID
+agent-collaboration endpoints list --json
+agent-collaboration sessions list --endpoint ID --view stored|loaded|active --json
+agent-collaboration session inspect --endpoint ID --session ID --json
+agent-collaboration message send --to ADDRESS --from ADDRESS --text-file PATH --json
+agent-collaboration message send --to ADDRESS --from ADDRESS --delivery steer --text-file PATH --json
+agent-collaboration message send --human-user --to ADDRESS --text-file PATH --json
+agent-collaboration events listen --endpoint ID --session ID --attach
+agent-collaboration turn interrupt --endpoint ID --session ID --turn ID --json
+agent-collaboration acp --endpoint ID
+agent-collaboration native --endpoint ID
 ```
 
 Every command accepts `--service-directory` and uses the discovered service identity. For content, exactly one of `--text` and `--text-file` is required; `--text-file -` reads stdin. Empty text is rejected. The message command has one send operation. --human-user selects explicit human input; absent it, --from is required and selects agent communication. --from with --human-user is a usage error. --delivery accepts auto, queue or steer and defaults to auto. Help states that auto can resume a stored thread and make its existing queue eligible; explicit queue and steer never resume. ADDRESS is a compact JSON serialization of SessionRef, suitable for lossless copy from discovery; the receiver must belong to the selected service. The sender is declared routing context and need not resolve locally. Clients must not infer it from cwd, process IDs or recent sessions. SDK sendAgentMessage and sendHumanInput methods construct the same closed MessageContent variants and accept the same delivery choice.
@@ -347,9 +347,9 @@ Finite command stdout is one `{kind:"result",result}` or `{kind:"error",error}` 
 ### Descriptive ACP conversation command
 
 ```text
-agent-sessions conversation prompt --endpoint codex-local \
+agent-collaboration conversation prompt --endpoint codex-local \
   --new --cwd /absolute/worktree --text-file task.txt --json
-agent-sessions conversation prompt --endpoint codex-local \
+agent-collaboration conversation prompt --endpoint codex-local \
   --session THREAD_ID --cwd /absolute/worktree --text-file reply.txt --json
 ```
 

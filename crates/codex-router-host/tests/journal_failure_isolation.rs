@@ -1,6 +1,6 @@
-use codex_router_host::{CommunicationRuntime, CommunicationRuntimeInputs};
-use communication_client::{ControlClient, JournalStatus};
-use communication_protocol::EndpointAvailability;
+use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
+use collaboration_client::{ControlClient, JournalStatus};
+use collaboration_protocol::EndpointAvailability;
 use std::os::unix::fs::DirBuilderExt;
 
 #[tokio::test]
@@ -15,7 +15,7 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
     std::fs::create_dir(&blocked_database)
         .unwrap_or_else(|error| panic!("blocked database: {error}"));
     // Act: callers can still discover the service and its explicit storage-unavailable state.
-    let mut runtime = CommunicationRuntime::start(CommunicationRuntimeInputs {
+    let mut runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("backend.sock"),
@@ -64,6 +64,8 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
         .unwrap_or_else(|error| panic!("identity cleanup: {error}"));
     std::fs::remove_dir(blocked_database)
         .unwrap_or_else(|error| panic!("database directory cleanup: {error}"));
+    std::fs::remove_file(root.join("project-board.sqlite"))
+        .unwrap_or_else(|error| panic!("board database cleanup: {error}"));
     std::fs::remove_file(root.join("automation.sqlite"))
         .unwrap_or_else(|error| panic!("automation database cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));

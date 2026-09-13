@@ -1,10 +1,10 @@
 //! Host-owned configuration file adapter; SQLite owns receipts, not filesystem replacement.
 use automation_storage::{AutomationStore, ConfigurationAdmission};
-use communication_protocol::{
+use collaboration_protocol::{
     AutomationConfiguration, AutomationConfigureRequest, ConfigurationFailure,
     ConfigurationFailureKind, ConfigurationFileState, ConfigurationNextAction, OperationId,
 };
-use communication_service::{AutomationConfigurationBackend, AutomationConfigurationHandle};
+use collaboration_service::{AutomationConfigurationBackend, AutomationConfigurationHandle};
 use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
@@ -22,8 +22,8 @@ mod crash_tests;
 struct SettingsDocument {
     format_version: u8,
     operation_id: OperationId,
-    execution_timeout_seconds: communication_protocol::PositiveSeconds,
-    summary_timeout_seconds: communication_protocol::PositiveSeconds,
+    execution_timeout_seconds: collaboration_protocol::PositiveSeconds,
+    summary_timeout_seconds: collaboration_protocol::PositiveSeconds,
 }
 impl SettingsDocument {
     fn configuration(&self) -> AutomationConfiguration {

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_watches(reader_key,root_id,active,starts_after_activity) VALUES(?,?,1,?) ON CONFLICT(reader_key,root_id) DO UPDATE SET active=1, starts_after_activity=CASE WHEN thread_watches.active=1 THEN thread_watches.starts_after_activity ELSE excluded.starts_after_activity END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "3771b86014cdebb06f925f109acfcbdc07b645e116fc7742e8b2d9e449931777"
+}

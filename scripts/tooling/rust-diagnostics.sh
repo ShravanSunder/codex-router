@@ -7,8 +7,8 @@ export SQLX_OFFLINE=true
 mode="${1:-}"
 package="${2:-}"
 case "$package" in
-  codex-router-selection|communication-protocol|codex-router-state|automation-storage) ;;
-  *) echo "choose an affected package: codex-router-selection, communication-protocol, codex-router-state, automation-storage" >&2; exit 2 ;;
+  codex-router-selection|collaboration-protocol|codex-router-state|automation-storage) ;;
+  *) echo "choose an affected package: codex-router-selection, collaboration-protocol, codex-router-state, automation-storage" >&2; exit 2 ;;
 esac
 "$repository_root/scripts/tooling/bootstrap-tools.sh" ci --check
 "$repository_root/scripts/tooling/bootstrap-tools.sh" diagnostic --check
@@ -25,7 +25,7 @@ case "$mode" in
     ;;
   mutants)
     [[ $# -eq 3 ]] || { echo "usage: $0 mutants PACKAGE SOURCE_FILE" >&2; exit 2; }
-    case "$package" in codex-router-selection|communication-protocol) ;; *) echo "mutation scope is selection/protocol logic" >&2; exit 2 ;; esac
+    case "$package" in codex-router-selection|collaboration-protocol) ;; *) echo "mutation scope is selection/protocol logic" >&2; exit 2 ;; esac
     source_file="$3"
     case "$source_file" in "crates/$package/src/"*.rs) ;; *) echo "source must belong to the selected package" >&2; exit 2 ;; esac
     [[ "$source_file" != *..* && -f "$source_file" ]] || { echo "invalid source file" >&2; exit 2; }

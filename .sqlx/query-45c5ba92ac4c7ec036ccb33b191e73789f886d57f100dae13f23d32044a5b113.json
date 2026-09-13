@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE project_reader_state SET has_unread=1 WHERE project_id=? AND reader_key<>? AND main_start IS NOT NULL AND main_start<(SELECT last_sequence FROM activity_checkpoint WHERE singleton=1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "45c5ba92ac4c7ec036ccb33b191e73789f886d57f100dae13f23d32044a5b113"
+}

@@ -7,7 +7,7 @@ Governing documents: [Requirements](2026-09-07-scheduled-agent-workflows-require
 The existing Host remains the local process owner. Communication owns native protocol effects. Automation owns future work and its durable obligations. Clients call the service rather than opening SQLite. The component and transaction boundaries below realize the governing contracts.
 
 ```text
-agent-sessions CLI                       communication-client SDK
+agent-collaboration CLI                       collaboration-client SDK
         └──────────────────────┬──────────────────────┘
                                ▼
                      Public Control RPC
@@ -40,14 +40,14 @@ A separate automation daemon is not required for the local slice. Embedding the 
 
 Current source anchors in the foundation checkout:
 
-- `crates/agent-sessions/src/message_commands.rs`: parses input, captures file contents, discovers generation, calls the Rust client, reports native receipt/effect errors.
-- `crates/communication-client/src/service_discovery.rs`: verifies service manifest against initialized connection identity.
-- `crates/communication-protocol/src/message_content.rs`: tagged agent/human content and independent auto/steer/queue delivery preference.
-- `crates/communication-protocol/src/native_control_contract.rs`: native request generation and accepted-operation variants.
-- `crates/communication-service/src/control_connection.rs`: admitted asynchronous request dispatch.
-- `crates/communication-service/src/native_message_dispatch.rs`: native read/resume/start/steer/queue path.
-- `crates/communication-service/src/message_effect_state.rs`: request-local effects, explicitly not a replay store.
-- `crates/codex-router-host/src/communication_runtime.rs`: listener, journal, generation and process composition.
+- `crates/agent-collaboration/src/message_commands.rs`: parses input, captures file contents, discovers generation, calls the Rust client, reports native receipt/effect errors.
+- `crates/collaboration-client/src/service_discovery.rs`: verifies service manifest against initialized connection identity.
+- `crates/collaboration-protocol/src/message_content.rs`: tagged agent/human content and independent auto/steer/queue delivery preference.
+- `crates/collaboration-protocol/src/native_control_contract.rs`: native request generation and accepted-operation variants.
+- `crates/collaboration-service/src/control_connection.rs`: admitted asynchronous request dispatch.
+- `crates/collaboration-service/src/native_message_dispatch.rs`: native read/resume/start/steer/queue path.
+- `crates/collaboration-service/src/message_effect_state.rs`: request-local effects, explicitly not a replay store.
+- `crates/codex-router-host/src/collaboration_runtime.rs`: listener, journal, generation and process composition.
 
 The unchanged native path remains authoritative:
 
@@ -83,11 +83,11 @@ Names below identify responsibility boundaries, not permission to refactor unrel
 | --- | --- | --- |
 | agent-automation | Scheduling, wake-up and workflow domain rules; timing and repository ports | Workflow and reminder semantics |
 | automation-storage | SQLx repository, current/history transactions, row decoding | Persistence schema and recovery mechanics |
-| communication-protocol | Public automation requests/results and generated schemas alongside existing message contracts | Public wire contract |
-| communication-client | Typed automation operations and wait interaction | Client protocol behavior |
-| communication-service | Automation RPC dispatch and native submission adapter | Service admission and protocol integration |
+| collaboration-protocol | Public automation requests/results and generated schemas alongside existing message contracts | Public wire contract |
+| collaboration-client | Typed automation operations and wait interaction | Client protocol behavior |
+| collaboration-service | Automation RPC dispatch and native submission adapter | Service admission and protocol integration |
 | codex-router-host | Construction, shutdown and background worker ownership | Process composition |
-| agent-sessions | CLI parsing and human/machine rendering | Command UX |
+| agent-collaboration | CLI parsing and human/machine rendering | Command UX |
 
 The domain does not depend on Host, CLI, SQLx or JSON-RPC. The persistence adapter depends on domain contracts, not Host. Host composes implementations; it does not acquire scheduling policy. Internal modules such as `schedule_admission.rs`, `wakeup_lifecycle.rs`, `delivery_recovery.rs` and `timing_calculation.rs` each have one reason to change.
 

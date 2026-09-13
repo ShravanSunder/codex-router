@@ -1,6 +1,6 @@
 //! Connection/generation-scoped permission correlation without responder exclusivity claims.
 use crate::AcpSchemaCatalog;
-use communication_protocol::CodexGeneration;
+use collaboration_protocol::CodexGeneration;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 

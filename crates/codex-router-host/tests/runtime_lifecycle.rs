@@ -77,7 +77,7 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         endpoint_inspection: Duration::from_millis(200),
         operator_request: Duration::from_secs(15),
     })?;
-    let communication_directory = directory.path().join("agent-communication");
+    let collaboration_directory = directory.path().join("agent-communication");
     let config = HostConfig::new(HostConfigInputs {
         coordination_paths: coordination_paths.clone(),
         router_endpoint: router.address(),
@@ -85,9 +85,9 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         managed_executable: managed_executable.clone(),
         deadlines,
     })
-    .with_communication_directory(
-        communication_directory.clone(),
-        communication_directory.clone(),
+    .with_collaboration_directory(
+        collaboration_directory.clone(),
+        collaboration_directory.clone(),
     );
     let child_launch_plans = ManagedChildLaunchPlans::new(None, app_server);
 
@@ -122,18 +122,18 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         codex_router_host::HostedReadiness::Ready,
         "host startup must reach full readiness",
     )?;
-    let mut communication = communication_client::ControlClient::connect(
-        &communication_directory,
+    let mut collaboration = collaboration_client::ControlClient::connect(
+        &collaboration_directory,
         "host-loop-proof",
         "1",
     )
     .await?;
-    let initial_inventory = communication.list_endpoints().await?;
+    let initial_inventory = collaboration.list_endpoints().await?;
     check(
         initial_inventory.endpoints.iter().any(|endpoint| {
             matches!(
                 endpoint.availability,
-                communication_protocol::EndpointAvailability::Available { .. }
+                collaboration_protocol::EndpointAvailability::Available { .. }
             )
         }),
         "main Host loop must publish its ready backend",
@@ -214,12 +214,12 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         ),
         "second unexpected exit must not start a third app-server",
     )?;
-    let unavailable_inventory = communication.list_endpoints().await?;
+    let unavailable_inventory = collaboration.list_endpoints().await?;
     check(
         unavailable_inventory.endpoints.iter().all(|endpoint| {
             matches!(
                 endpoint.availability,
-                communication_protocol::EndpointAvailability::Unavailable { .. }
+                collaboration_protocol::EndpointAvailability::Unavailable { .. }
             )
         }),
         "exhausted recovery must withdraw native admission",
@@ -236,17 +236,17 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         TerminalClassification::Succeeded,
         "explicit native-ready restart must succeed after recovery exhaustion",
     )?;
-    let restarted_inventory = communication.list_endpoints().await?;
+    let restarted_inventory = collaboration.list_endpoints().await?;
     check(
         restarted_inventory.endpoints.iter().any(|endpoint| {
             matches!(
                 endpoint.availability,
-                communication_protocol::EndpointAvailability::Available { .. }
+                collaboration_protocol::EndpointAvailability::Available { .. }
             )
         }),
         "explicit restart must restore communication publication",
     )?;
-    communication.close().await?;
+    collaboration.close().await?;
     let explicitly_restarted_processes = wait_for_process_ids(&process_log, 3).await?;
     check_equal(
         terminal_snapshot(&restart_frames)?.recovery_budget(),

@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT a.activity_sequence,a.kind,a.message_id,a.root_id,a.topic_id,a.actor_key FROM board_activity a JOIN project_reader_state prs ON prs.reader_key=? AND prs.project_id=a.project_id LEFT JOIN topic_read_bookmarks tb ON tb.reader_key=prs.reader_key AND tb.topic_id=a.topic_id LEFT JOIN thread_watches w ON w.reader_key=prs.reader_key AND w.root_id=a.root_id LEFT JOIN thread_read_bookmarks rb ON rb.reader_key=prs.reader_key AND rb.root_id=a.root_id WHERE a.project_id=? AND a.activity_sequence>? AND a.activity_sequence<=? AND a.actor_key<>prs.reader_key AND ((a.kind='mainMessageCreated' AND prs.main_start IS NOT NULL AND a.activity_sequence>prs.main_start AND a.activity_sequence>COALESCE(tb.through_activity,0)) OR (a.kind<>'mainMessageCreated' AND w.active=1 AND a.activity_sequence>w.starts_after_activity AND a.activity_sequence>COALESCE(rb.through_activity,0))) ORDER BY a.activity_sequence ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "activity_sequence",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "activity_sequence"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "message_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "message_id"
+          }
+        }
+      },
+      {
+        "name": "root_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "topic_id",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "topic_id"
+          }
+        }
+      },
+      {
+        "name": "actor_key",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "actor_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "aabb3440de3a0af9537ebfae1410dae316417e0cfd7a0c3ba7a6ac737c40be9a"
+}

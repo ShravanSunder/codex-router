@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_identities(identity_key,kind,service_id,endpoint_id,session_id,human_id) VALUES(?,?,?,?,?,?) ON CONFLICT(identity_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "34796d72d50970137727e888b2f5000c20cdaf223d3bc712f3c7b0f27e6369cc"
+}

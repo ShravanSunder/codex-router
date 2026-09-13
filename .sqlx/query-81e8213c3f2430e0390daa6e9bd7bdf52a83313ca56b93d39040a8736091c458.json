@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE activity_checkpoint SET last_sequence=last_sequence+1 WHERE singleton=1 RETURNING last_sequence",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_sequence",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "activity_checkpoint",
+            "name": "last_sequence"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "81e8213c3f2430e0390daa6e9bd7bdf52a83313ca56b93d39040a8736091c458"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_post_at_ms FROM actor_board_cooldowns WHERE actor_key=? AND board_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_post_at_ms",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "actor_board_cooldowns",
+            "name": "last_post_at_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1f3bdabcac4a82ec0b70b8f7b030c83ff964eb33fbdb440fddf44c091241937c"
+}

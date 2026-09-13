@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO project_reader_state(reader_key,project_id,main_start,has_unread) VALUES(?,?,NULL,0) ON CONFLICT(reader_key,project_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "215a1eb8e1e2b606db1b4dc453877cd57178a56f931a861e992b4023e44fc351"
+}

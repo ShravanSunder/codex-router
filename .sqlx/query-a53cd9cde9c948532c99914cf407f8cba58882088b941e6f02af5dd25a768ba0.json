@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_read_bookmarks(reader_key,root_id,through_activity) VALUES(?,?,?) ON CONFLICT(reader_key,root_id) DO UPDATE SET through_activity=excluded.through_activity",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a53cd9cde9c948532c99914cf407f8cba58882088b941e6f02af5dd25a768ba0"
+}

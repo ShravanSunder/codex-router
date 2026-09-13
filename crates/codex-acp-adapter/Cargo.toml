@@ -14,7 +14,7 @@ chrono.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-communication-protocol = { path = "../communication-protocol", version = "0.1.14" }
+collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
 codex-native-integration.workspace = true
 jsonschema.workspace = true
 serde.workspace = true

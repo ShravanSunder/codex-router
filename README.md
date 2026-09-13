@@ -7,8 +7,17 @@ The product boundary is intentionally narrow:
 - Codex remains the CLI, protocol client, session owner, installer, config owner, hook runner, MCP owner, and log/session/history owner.
 - `codex-router serve` owns local router authentication, upstream OAuth accounts, quota snapshots, account selection, and byte-preserving forwarding of Codex model-provider traffic.
 - The optional foreground `codex-router host` command owns one local router and one native Codex app-server child, and composes owner-local Control, native Codex relay, and ACP channels. Codex still owns native threads, queues, permissions, and agent execution.
-- The separate `agent-sessions` CLI and reusable `communication-client` Rust SDK provide session discovery, explicit messaging, observation, and exact interruption. Lifecycle metadata lives separately from provider state and Codex history.
+- The separate `agent-collaboration` CLI and reusable `collaboration-client` Rust SDK provide session discovery, explicit messaging, observation, and exact interruption. Lifecycle metadata lives separately from provider state and Codex history.
 - Prodex is source-mining reference material only. This repo is not a Prodex fork.
+
+The collaboration CLI is an interface to the Rust SDK. Reusable connection and
+session operations belong to `collaboration-client`; `collaboration-protocol`
+defines the shared RPC contracts. `collaboration-service` handles requests inside
+the Router Host. Message-board types and rules live in `message-board`, with SQLx
+persistence in `message-board-storage`.
+RPC schemas and types are available through `collaboration_client::protocol`;
+board request/result types through `collaboration_client::board`. SDK consumers
+do not need to invoke the CLI or depend on its argument types.
 
 Current design source of truth:
 
@@ -65,12 +74,12 @@ cargo run -p codex-router-cli -- host
 
 The host starts `codex-router serve` when a compatible router is absent, starts
 the managed Codex app-server, and keeps lifecycle
-control on an owner-only Unix socket. Hosted `agent-sessions` new/resume launches
+control on an owner-only Unix socket. Hosted `agent-collaboration` new/resume launches
 resolve the advertised public native selector. Backend replacement closes native
 connections; the native TUI owns bounded reconnection without a Sessions supervisor.
 
 ```shell
-cargo run -p agent-sessions -- --id 019fe7c6-f493-7f02-be72-2feac69d6e6d
+cargo run -p agent-collaboration -- --id 019fe7c6-f493-7f02-be72-2feac69d6e6d
 cargo run -p codex-router-cli -- host status
 cargo run -p codex-router-cli -- host restart
 cargo run -p codex-router-cli -- host restart-router
@@ -83,8 +92,9 @@ running app-server and connected clients are left untouched. This MVP is not a
 background service, launchd agent, or cross-machine control plane.
 
 For discovery, agent-declared messages, queue/steer, timed wake-ups and scheduled
-work, see the [agent CLI guide](docs/agent-guidance/agent-communication.md).
+work, see the [agent CLI guide](docs/agent-guidance/agent-collaboration.md).
 Automation uses a separate `automation.sqlite` database and the same Rust SDK
 and CLI. [Debug testing instructions](docs/testing/automation-debug-testing.md)
-cover the opt-in Luna acceptance runner and its isolated Host. Other language
-SDK implementations, shared message boards and remote transport follow separately.
+cover the opt-in Luna acceptance runner and its isolated Host. Shared message boards use the same client and service; see the
+[agent collaboration skill](agent-skills/agent-collaboration/SKILL.md). Other language
+SDK implementations and remote transport follow separately.

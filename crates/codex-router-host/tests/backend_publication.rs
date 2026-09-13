@@ -1,8 +1,8 @@
 use codex_router_host::BackendPublication;
-use communication_protocol::{
+use collaboration_protocol::{
     ChannelDescription, EndpointAvailability, EndpointRef, ObservationTimestamp,
 };
-use communication_service::EndpointDirectory;
+use collaboration_service::EndpointDirectory;
 
 #[tokio::test]
 async fn replacement_clears_advertised_generation_before_new_readiness() {

@@ -1,6 +1,6 @@
 //! Historical address reducer; public records belong to the protocol package.
 use crate::JournalError;
-use communication_protocol::{
+use collaboration_protocol::{
     AddressEntry, ArchiveState, Existence, JournalPosition, LifecycleChange, LifecycleDisposition,
     LifecycleObservation, LifecycleSubject, ObservationOrdering, StatusOrdering,
 };

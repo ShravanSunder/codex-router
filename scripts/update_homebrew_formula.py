@@ -106,10 +106,19 @@ def update_codex_router_formula(
             1,
         )
 
-    if '    bin.install "agent-sessions"' not in updated_formula:
+    legacy_binary_install = '    bin.install "agent-sessions"'
+    collaboration_binary_install = '    bin.install "agent-collaboration"'
+    if legacy_binary_install in updated_formula:
+        replacement = (
+            ""
+            if collaboration_binary_install in updated_formula
+            else collaboration_binary_install
+        )
+        updated_formula = updated_formula.replace(legacy_binary_install, replacement, 1)
+    elif collaboration_binary_install not in updated_formula:
         updated_formula = updated_formula.replace(
             '    bin.install "codex-router"',
-            '    bin.install "codex-router"\n    bin.install "agent-sessions"',
+            f'    bin.install "codex-router"\n{collaboration_binary_install}',
             1,
         )
     return updated_formula

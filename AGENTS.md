@@ -59,3 +59,18 @@
 - Keep navigation, content, flexible empty space, and bottom shortcuts as
   distinct iocraft siblings. Use a flex-growing spacer to pin shortcuts to the
   bottom while allowing detail panels to remain content-sized.
+
+## SQLite And Rust Validation
+
+- Use SQL CHECK constraints only for boolean storage (`0` or `1`). Do not
+  encode enum/tag membership, string lengths, numeric ranges, or variant
+  cross-field rules in database CHECK constraints.
+- Enforce those rules through Rust enums, Serde, and validated domain
+  constructors, both on incoming requests and when decoding stored rows.
+  Reject invalid stored values explicitly; never silently coerce them.
+- Keep primary keys, foreign keys, NOT NULL constraints, and unique indexes
+  for relational integrity. SQLx checked queries validate SQL/schema
+  compatibility; they do not replace domain validation.
+- Keep evolving domain rules out of table definitions to avoid unnecessary
+  SQLite table rebuilds. This rule does not authorize removing existing
+  constraints or rewriting migrations outside the requested scope.
