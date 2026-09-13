@@ -473,21 +473,29 @@ async fn quota_reset_async_dispatch_prints_migration_without_state_or_network() 
 
 #[test]
 fn sessions_sql_boundary_uses_sqlx_without_rusqlite() {
-    let sessions_source = must_ok(fs::read_to_string(
+    let sdk_sessions_source = must_ok(fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../agent-collaboration/src/session_commands/session_catalog_query.rs"),
+            .join("../collaboration-client/src/session_catalog/query.rs"),
     ));
 
-    assert!(sessions_source.contains("use sqlx::"));
+    assert!(sdk_sessions_source.contains("use sqlx::"));
     let catalog_source = must_ok(fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../codex-native-integration/src/stored_thread_catalog.rs"),
     ));
-    assert!(sessions_source.contains("StoredThreadCatalog::open"));
+    assert!(sdk_sessions_source.contains("StoredThreadCatalog::open"));
     assert!(catalog_source.contains("SqliteConnectOptions"));
     assert!(catalog_source.contains(".read_only(true)"));
     assert!(!catalog_source.contains("rusqlite"));
-    assert!(!sessions_source.contains("rusqlite"));
+    assert!(!sdk_sessions_source.contains("rusqlite"));
+
+    let cli_sessions_source = must_ok(fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../agent-collaboration/src/session_commands/session_catalog_query.rs"),
+    ));
+    assert!(cli_sessions_source.contains("load_stored_sessions"));
+    assert!(!cli_sessions_source.contains("sqlx::"));
+    assert!(!cli_sessions_source.contains("StoredThreadCatalog::open"));
 
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
