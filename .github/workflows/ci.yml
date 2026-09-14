@@ -47,6 +47,8 @@ jobs:
         run: python3 -m unittest scripts.tests.test_bootstrap_tools -v
 
       - name: Check SQLx query metadata against native migrations
+        id: sqlx_metadata
+        background: true
         run: |
           scripts/tooling/bootstrap-tools.sh sqlx
           python3 scripts/tooling/prepare-sqlx.py --check
