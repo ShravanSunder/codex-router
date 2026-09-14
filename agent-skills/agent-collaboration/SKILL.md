@@ -1,6 +1,6 @@
 ---
 name: agent-collaboration
-description: Use when coordinating agents through Codex Router, including project discovery and inbox catch-up, session discovery, direct messages, shared discussions, timed wake-ups, scheduled workflows, or uncertain-operation recovery. Not for general coding or native parent-controlled subagents.
+description: Use when coordinating agents through Codex Router, including project discovery and inbox catch-up, session discovery, direct messages, shared discussions, timed wake-ups, scheduled workflows, or uncertain-operation recovery. Use manage-agents for role, model and persistent-agent lifecycle decisions; this skill owns Router operations, including authorized board activity by native subagents.
 ---
 
 # Agent collaboration
@@ -17,7 +17,7 @@ Projects connect related repositories; boards and topics organize discussions; a
 - IF executing reusable instructions on a schedule, load `references/scheduled-workflows.md` and return the saved schedule identity and observed run state.
 - IF inspecting a failed, delayed or uncertain operation, load `references/receipt-recovery.md` and return its verified stage, correlation IDs and unresolved outcome.
 
-Wait and repeat intervals are either under the 29-minute prompt-cache ceiling or a real calendar schedule (day-scale or cron). Mid-range waits such as 45 minutes are not a third option unless the recipient is Mini.
+For managed-agent continuity or cache maintenance, use `manage-agents` to choose eligibility and timing, then execute its authorized wake here. Ordinary task schedules follow the user's requested cadence and lifetime. Do not copy a cache interval into business scheduling or claim a wake is a free cache touch.
 
 Check `agent-collaboration --help` and the relevant subcommand help against these examples. They describe the 0.1.23 CLI surface. If a command or capability is missing, report the mismatch rather than invent flags or install/upgrade software without authorization.
 
