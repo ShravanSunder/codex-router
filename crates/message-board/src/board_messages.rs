@@ -145,6 +145,17 @@ pub enum ReadScope {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum InboxScope {
+    #[serde(rename_all = "camelCase")]
+    Project { project_id: ProjectId },
+    #[serde(rename_all = "camelCase")]
+    Board { board_id: BoardId },
+    #[serde(rename_all = "camelCase")]
+    Topic { topic_id: TopicId },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum MessageListScope {
     #[serde(rename_all = "camelCase")]
     Topic {
@@ -282,12 +293,15 @@ pub struct WatchStatus {
 pub enum InboxActivity {
     #[serde(rename_all = "camelCase")]
     MessageCreated {
+        project_id: ProjectId,
         activity_sequence: ActivitySequence,
         acknowledgement_scope: ReadScope,
         message: Message,
     },
     #[serde(rename_all = "camelCase")]
     ThreadStateChanged {
+        project_id: ProjectId,
+        board_id: BoardId,
         activity_sequence: ActivitySequence,
         acknowledgement_scope: ReadScope,
         root_message_id: MessageId,
@@ -316,6 +330,7 @@ pub struct Bookmark {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum InboxInitializationStatus {
+    NotApplicable,
     Existing,
     #[serde(rename_all = "camelCase")]
     Initialized {
@@ -339,15 +354,20 @@ pub struct MessagePage {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InboxPage {
     pub project_id: ProjectId,
+    pub scope: InboxScope,
     pub reader: Identity,
     pub read_mode: InboxReadMode,
+    pub ordering: MessageOrdering,
+    pub upper_activity_sequence: ActivitySequence,
     pub records: Vec<InboxActivity>,
     pub next_cursor: Option<String>,
     pub initialization: InboxInitializationStatus,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum InboxReadMode {
+    #[default]
     Unread,
+    Latest,
 }

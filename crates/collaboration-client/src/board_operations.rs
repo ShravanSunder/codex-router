@@ -16,6 +16,19 @@ pub enum BoardClientError {
 }
 
 impl ControlClient {
+    pub async fn board_discovery_search(
+        &mut self,
+        request: DiscoverySearchRequest,
+    ) -> Result<DiscoverySearchResult, BoardClientError> {
+        self.board_call("board/discoverySearch", request).await
+    }
+    pub async fn board_message_search(
+        &mut self,
+        request: MessageSearchRequest,
+    ) -> Result<MessageSearchResult, BoardClientError> {
+        self.board_call("board/messageSearch", request).await
+    }
+
     pub async fn board_project_create(
         &mut self,
         request: ProjectCreateRequest,
@@ -220,8 +233,19 @@ impl ControlClient {
         &mut self,
         request: InboxFetchRequest,
     ) -> Result<InboxFetchResult, BoardClientError> {
-        let resource = ResourceIdentity::Project {
-            project_id: request.project_id.clone(),
+        if request.read_mode == InboxReadMode::Latest {
+            return self.board_call("board/inboxFetch", request).await;
+        }
+        let resource = match &request.scope {
+            InboxScope::Project { project_id } => ResourceIdentity::Project {
+                project_id: project_id.clone(),
+            },
+            InboxScope::Board { board_id } => ResourceIdentity::Board {
+                board_id: board_id.clone(),
+            },
+            InboxScope::Topic { topic_id } => ResourceIdentity::Topic {
+                topic_id: topic_id.clone(),
+            },
         };
         self.board_mutation_call("board/inboxFetch", request, resource)
             .await

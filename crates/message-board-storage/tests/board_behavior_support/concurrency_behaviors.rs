@@ -401,7 +401,10 @@ async fn assert_summary_matches_inbox(
 ) {
     let inbox_has_records = !store
         .fetch_inbox(InboxFetchRequest {
-            project_id: project_id.clone(),
+            scope: message_board::InboxScope::Project {
+                project_id: project_id.clone(),
+            },
+            read_mode: message_board::InboxReadMode::Unread,
             reader: reader.clone(),
             page: page(100),
         })

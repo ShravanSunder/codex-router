@@ -11,6 +11,37 @@ fn id_string(sequence_suffix: u32) -> String {
 }
 
 #[test]
+fn inbox_fetch_requires_explicit_top_level_scope_and_supports_latest() {
+    let request = serde_json::from_value::<message_board::InboxFetchRequest>(json!({
+        "scope": {"kind": "topic", "topicId": id_string(1)},
+        "reader": {"kind": "human", "humanId": "reader"},
+        "readMode": "latest",
+        "page": {}
+    }));
+    assert!(
+        request.is_ok(),
+        "scoped latest request must decode: {request:?}"
+    );
+    let missing_scope = serde_json::from_value::<message_board::InboxFetchRequest>(json!({
+        "reader": {"kind": "human", "humanId": "reader"},
+        "readMode": "unread",
+        "page": {}
+    }));
+    assert!(missing_scope.is_err());
+}
+
+#[test]
+fn search_queries_are_trimmed_nonempty_and_utf8_byte_bounded() {
+    let query = message_board::SearchQuery::try_from(" \tneedle\n ".to_owned()).unwrap();
+    assert_eq!(query.as_str(), "needle");
+    assert!(message_board::SearchQuery::try_from(" \t\n ".to_owned()).is_err());
+    assert!(message_board::SearchQuery::try_from("n".repeat(256)).is_ok());
+    assert!(message_board::SearchQuery::try_from("n".repeat(257)).is_err());
+    assert!(message_board::SearchQuery::try_from("é".repeat(128)).is_ok());
+    assert!(message_board::SearchQuery::try_from("é".repeat(129)).is_err());
+}
+
+#[test]
 fn resource_ids_accept_only_canonical_uuid_v7() {
     let project_id = ProjectId::try_from(id_string(1)).expect("fixture is UUIDv7");
     assert_eq!(project_id.as_str(), id_string(1));

@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT resource_kind AS \"resource_kind!: i64\",resource_id AS \"resource_id!: String\" FROM (\n                 SELECT 0 AS resource_kind,p.project_id AS resource_id FROM board_projects p\n                 WHERE (?='all' OR (?='project' AND p.project_id=?)) AND (instr(lower(p.name),?)>0 OR instr(lower(p.description),?)>0)\n                 UNION ALL\n                 SELECT 1,b.board_id FROM project_boards b\n                 WHERE (?='all' OR (?='project' AND b.project_id=?) OR (?='board' AND b.board_id=?))\n                   AND (? OR b.state='active') AND (instr(lower(b.name),?)>0 OR instr(lower(b.description),?)>0)\n                 UNION ALL\n                 SELECT 2,t.topic_id FROM board_topics t JOIN project_boards b ON b.board_id=t.board_id\n                 WHERE (?='all' OR (?='project' AND b.project_id=?) OR (?='board' AND b.board_id=?))\n                   AND (? OR b.state='active') AND (instr(lower(t.name),?)>0 OR instr(lower(t.description),?)>0)\n               ) WHERE (?=-1 OR resource_kind=?) AND (resource_kind>? OR (resource_kind=? AND resource_id>?))\n               ORDER BY resource_kind,resource_id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "resource_kind!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "resource_id!: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_topics",
+            "name": "topic_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 27
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ce010f7623b5b4fe015d98d4b92af1748c7f68a89a6ba33128deb05f7b14a149"
+}

@@ -211,7 +211,7 @@ fn decode_message_cursor(
     })
 }
 
-fn message_scope_parts(scope: &MessageListScope) -> (&'static str, &str) {
+pub(super) fn message_scope_parts(scope: &MessageListScope) -> (&'static str, &str) {
     match scope {
         MessageListScope::Topic { topic_id } => ("topic", topic_id.as_str()),
         MessageListScope::Thread { root_message_id } => ("thread", root_message_id.as_str()),
@@ -221,7 +221,7 @@ fn message_scope_parts(scope: &MessageListScope) -> (&'static str, &str) {
     }
 }
 
-async fn validate_message_scope(
+pub(super) async fn validate_message_scope(
     transaction: &mut BoardTransaction<'_>,
     scope: &MessageListScope,
 ) -> Result<(), BoardError> {

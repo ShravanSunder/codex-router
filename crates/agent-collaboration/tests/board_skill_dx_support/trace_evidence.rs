@@ -23,6 +23,8 @@ impl OperatorTrace {
 }
 
 const REQUIRED_OPERATIONS: &[(&str, &str)] = &[
+    ("board/discoverySearch", " board search "),
+    ("board/messageSearch", " board message search "),
     ("board/projectCreate", " board project create "),
     ("board/projectUpdate", " board project update "),
     ("board/projectShow", " board project show "),

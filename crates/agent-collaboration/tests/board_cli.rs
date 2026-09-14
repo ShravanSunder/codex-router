@@ -1,5 +1,54 @@
 use std::process::Command;
 
+#[test]
+fn inbox_fetch_help_separates_top_level_scope_from_read_mode() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "inbox", "fetch", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--scope",
+        "--project-id",
+        "--board-id",
+        "--topic-id",
+        "--read-mode",
+    ] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    assert!(help.contains("independently watched threads"));
+}
+
+#[test]
+fn resource_and_message_search_have_distinct_filtered_commands() {
+    for arguments in [
+        vec!["board", "search", "--help"],
+        vec!["board", "message", "search", "--help"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let help = String::from_utf8_lossy(&output.stdout);
+        for flag in [
+            "--query",
+            "--scope",
+            "--kind",
+            "--include-archived",
+            "--limit",
+            "--cursor",
+        ] {
+            assert!(help.contains(flag), "missing {flag}: {help}");
+        }
+    }
+}
+
 const HUMAN_ACTOR: &str = r#"{"kind":"human","humanId":"cli-test-human"}"#;
 
 #[test]

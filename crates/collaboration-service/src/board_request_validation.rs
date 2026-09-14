@@ -302,7 +302,45 @@ fn validate_closed_variants(method: &str, fields: &Map<String, Value>) -> Result
         "placement",
         "must be topic or thread with its required UUIDv7 field",
     )?;
-    if method == "board/messageList" {
+    if method == "board/discoverySearch" || method == "board/messageSearch" {
+        if fields
+            .get("query")
+            .and_then(Value::as_str)
+            .and_then(|value| SearchQuery::try_from(value.to_owned()).ok())
+            .is_none()
+        {
+            return Err(invalid_field(
+                "query",
+                "must contain 1 to 256 UTF-8 bytes after trimming",
+            ));
+        }
+        if !fields.contains_key("scope") {
+            return Err(invalid_field("scope", "is required"));
+        }
+        if method == "board/discoverySearch" {
+            validate_variant::<DiscoveryScope>(
+                fields,
+                "scope",
+                "must select allProjects, project, or board",
+            )?;
+            validate_variant::<DiscoveryKind>(
+                fields,
+                "kind",
+                "must be all, project, board, or topic",
+            )?;
+        } else {
+            validate_variant::<MessageListScope>(
+                fields,
+                "scope",
+                "must select allProjects, project, board, topic, or thread",
+            )?;
+            validate_variant::<SearchMessageKind>(
+                fields,
+                "kind",
+                "must be both, topLevel, or thread",
+            )?;
+        }
+    } else if method == "board/messageList" {
         validate_variant::<MessageListScope>(
             fields,
             "scope",
@@ -313,6 +351,19 @@ fn validate_closed_variants(method: &str, fields: &Map<String, Value>) -> Result
             "selection",
             "must be latest, afterPosition, or an ordered inclusive range",
         )?;
+    } else if method == "board/inboxFetch" {
+        if !fields.contains_key("scope") {
+            return Err(invalid_field(
+                "scope",
+                "is required and must select project, board, or topic",
+            ));
+        }
+        validate_variant::<InboxScope>(
+            fields,
+            "scope",
+            "must be project, board, or topic with its required UUIDv7 field",
+        )?;
+        validate_variant::<InboxReadMode>(fields, "readMode", "must be unread or latest")?;
     } else if method == "board/inboxAcknowledge" {
         validate_variant::<ReadScope>(
             fields,

@@ -10,6 +10,8 @@ pub(super) struct CommandContext {
 }
 
 pub(super) enum PreparedBoardCommand {
+    DiscoverySearch(DiscoverySearchRequest),
+    MessageSearch(MessageSearchRequest),
     ProjectCreate(ProjectCreateRequest),
     ProjectUpdate(ProjectUpdateRequest),
     ProjectShow(ProjectShowRequest),
@@ -56,6 +58,9 @@ pub(super) fn prepare(
     command: BoardCommand,
 ) -> Result<(PreparedBoardCommand, CommandContext), String> {
     match command {
+        BoardCommand::Search(arguments) => {
+            super::board_search_commands::prepare_discovery_search(arguments)
+        }
         BoardCommand::Project { command } => prepare_project(command),
         BoardCommand::Repository { command } => prepare_repository_command(command),
         BoardCommand::Create(arguments) => {
@@ -253,6 +258,9 @@ fn prepare_message(
     command: MessageCommand,
 ) -> Result<(PreparedBoardCommand, CommandContext), String> {
     match command {
+        MessageCommand::Search(arguments) => {
+            super::board_search_commands::prepare_message_search(arguments)
+        }
         MessageCommand::Post(arguments) => {
             let (actor, acting_for) = parse_mutation_identity(&arguments.identity)?;
             let placement = match arguments.placement {
@@ -415,7 +423,11 @@ fn prepare_inbox(command: InboxCommand) -> Result<(PreparedBoardCommand, Command
     match command {
         InboxCommand::Fetch(arguments) => Ok((
             PreparedBoardCommand::InboxFetch(InboxFetchRequest {
-                project_id: parse_uuid_v7(arguments.project_id, "--project-id")?,
+                scope: inbox_scope(&arguments)?,
+                read_mode: match arguments.read_mode {
+                    InboxModeKind::Unread => InboxReadMode::Unread,
+                    InboxModeKind::Latest => InboxReadMode::Latest,
+                },
                 reader: parse_identity(&arguments.reader, "--reader")?,
                 page: prepare_page_request(arguments.page)?,
             }),

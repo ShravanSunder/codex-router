@@ -54,7 +54,10 @@ async fn concurrent_inbox_reads_preserve_summaries_and_report_latency() {
                 let reading = Instant::now();
                 let inbox = store
                     .fetch_inbox(InboxFetchRequest {
-                        project_id: project_id.clone(),
+                        scope: message_board::InboxScope::Project {
+                            project_id: project_id.clone(),
+                        },
+                        read_mode: message_board::InboxReadMode::Unread,
                         reader: reader.clone(),
                         page: page(100),
                     })
@@ -109,7 +112,10 @@ async fn concurrent_inbox_reads_preserve_summaries_and_report_latency() {
     for reader in readers {
         let inbox = store
             .fetch_inbox(InboxFetchRequest {
-                project_id: fixture.project_id.clone(),
+                scope: message_board::InboxScope::Project {
+                    project_id: fixture.project_id.clone(),
+                },
+                read_mode: message_board::InboxReadMode::Unread,
                 reader,
                 page: page(100),
             })

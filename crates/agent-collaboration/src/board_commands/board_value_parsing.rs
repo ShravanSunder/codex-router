@@ -168,6 +168,7 @@ where
 {
     TText::try_from(value).map_err(|domain_error| {
         let requirement = match flag {
+            "--query" => "must contain 1 to 256 UTF-8 bytes after trimming",
             "--name" => "must contain 1 to 256 UTF-8 bytes after trimming",
             "--description" => "must contain 0 to 16384 UTF-8 bytes",
             "--text/--text-file" => "must contain 1 to 65536 UTF-8 bytes",
@@ -261,4 +262,39 @@ pub(super) fn read_message_file(path: &Path) -> Result<String, String> {
         return Err("--text-file exceeds the 65536-byte message limit".into());
     }
     String::from_utf8(bytes).map_err(|_| "--text-file must contain valid UTF-8".into())
+}
+
+pub(super) fn inbox_scope(arguments: &InboxFetchArguments) -> Result<InboxScope, String> {
+    let supplied = [
+        arguments.project_id.is_some(),
+        arguments.board_id.is_some(),
+        arguments.topic_id.is_some(),
+    ]
+    .into_iter()
+    .filter(|value| *value)
+    .count();
+    if supplied != 1 {
+        return Err("--scope requires exactly its matching project/board/topic ID".into());
+    }
+    match arguments.scope {
+        InboxScopeKind::Project => arguments
+            .project_id
+            .clone()
+            .map(|value| parse_uuid_v7(value, "--project-id"))
+            .transpose()?
+            .map(|project_id| InboxScope::Project { project_id }),
+        InboxScopeKind::Board => arguments
+            .board_id
+            .clone()
+            .map(|value| parse_uuid_v7(value, "--board-id"))
+            .transpose()?
+            .map(|board_id| InboxScope::Board { board_id }),
+        InboxScopeKind::Topic => arguments
+            .topic_id
+            .clone()
+            .map(|value| parse_uuid_v7(value, "--topic-id"))
+            .transpose()?
+            .map(|topic_id| InboxScope::Topic { topic_id }),
+    }
+    .ok_or_else(|| "--scope requires exactly its matching project/board/topic ID".into())
 }
