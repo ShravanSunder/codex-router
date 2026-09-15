@@ -355,7 +355,7 @@ fn refusal_command(
 ) -> String {
     let actor = |identity: &Identity| {
         serde_json::to_string(identity)
-            .map(|value| format!("'{value}'"))
+            .map(|value| shell_single_quoted_argument(&value))
             .unwrap_or_else(|_| "<actor>".to_owned())
     };
     match (&error.next_action, &error.details) {
@@ -364,10 +364,10 @@ fn refusal_command(
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "<path>".to_owned());
             format!(
-                "agent-collaboration board thread create --topic-id {} --actor {} --role <role> (--watch | --no-watch) --text-file '{}' --json",
+                "agent-collaboration board thread create --topic-id {} --actor {} --role <role> (--watch | --no-watch) --text-file {} --json",
                 refusal.topic_id.as_str(),
                 actor(&refusal.actor),
-                text_file.replace('\'', "'\\''")
+                shell_single_quoted_argument(&text_file)
             )
         }
         (BoardNextAction::JoinThread, BoardErrorDetails::ParticipantRefusal { refusal }) => {
@@ -427,6 +427,10 @@ fn refusal_command(
         ),
         _ => wire_name(&error.next_action),
     }
+}
+
+fn shell_single_quoted_argument(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn report_uncertain_outcome(
@@ -516,18 +520,89 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn topic_post_refusal_preserves_the_supplied_text_file_path() {
+    fn actor_and_text_file_arguments_escape_apostrophes() {
         let topic_id =
             TopicId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned()).expect("topic ID");
         let actor = Identity::Human {
-            human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+            human_id: HumanId::try_from("owner's".to_owned()).expect("human ID"),
         };
         let text = MessageText::try_from("root text".to_owned()).expect("message text");
         let refusal = BoardError::session_topic_post(topic_id, actor, text);
-        let command = refusal_command(&refusal, Some(Path::new("/tmp/root message.txt")));
+        let command = refusal_command(&refusal, Some(Path::new("/tmp/owner's message.txt")));
 
-        assert!(command.contains("--text-file '/tmp/root message.txt'"));
+        assert!(command.contains("--actor '{\"kind\":\"human\",\"humanId\":\"owner'\\''s\"}'"));
+        assert!(command.contains("--text-file '/tmp/owner'\\''s message.txt'"));
         assert!(!command.contains("--text-file '<path>'"));
+    }
+
+    #[test]
+    fn holder_argument_escapes_apostrophes() {
+        let root_message_id =
+            MessageId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned())
+                .expect("message ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("requester".to_owned()).expect("human ID"),
+        };
+        let holder = Identity::Human {
+            human_id: HumanId::try_from("holder's".to_owned()).expect("human ID"),
+        };
+        let refusal = BoardError {
+            kind: BoardFailureKind::OrchestratorAlreadyExists,
+            stage: BoardFailureStage::Admission,
+            message: "holder exists".to_owned(),
+            next_action: BoardNextAction::ReplaceOrchestrator,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                    root_message_id,
+                    missing_root_message_ids: Vec::new(),
+                    actor,
+                    allowed_roles: Vec::new(),
+                    holder: Some(holder),
+                    holder_last_seen_activity: None,
+                    target: None,
+                    named_holder: None,
+                }),
+            },
+        };
+
+        let command = refusal_command(&refusal, None);
+
+        assert!(command.contains("--replace '{\"kind\":\"human\",\"humanId\":\"holder'\\''s\"}'"));
+    }
+
+    #[test]
+    fn handover_target_argument_escapes_apostrophes() {
+        let root_message_id =
+            MessageId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned())
+                .expect("message ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("orchestrator".to_owned()).expect("human ID"),
+        };
+        let target = Identity::Human {
+            human_id: HumanId::try_from("target's".to_owned()).expect("human ID"),
+        };
+        let refusal = BoardError {
+            kind: BoardFailureKind::HandoverTargetNotParticipant,
+            stage: BoardFailureStage::Admission,
+            message: "target must join".to_owned(),
+            next_action: BoardNextAction::JoinHandoverTarget,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                    root_message_id,
+                    missing_root_message_ids: Vec::new(),
+                    actor,
+                    allowed_roles: Vec::new(),
+                    holder: None,
+                    holder_last_seen_activity: None,
+                    target: Some(target),
+                    named_holder: None,
+                }),
+            },
+        };
+
+        let command = refusal_command(&refusal, None);
+
+        assert!(command.contains("--actor '{\"kind\":\"human\",\"humanId\":\"target'\\''s\"}'"));
     }
 
     #[test]
