@@ -20,7 +20,7 @@ Use the returned instruction ID in a definition file:
 
 `unprepared` selects a reusable owned thread. `freshEachRunUnprepared` selects a new thread per run. Make this context choice explicit: reusing a thread retains its conversation; fresh runs use recorded continuity when available, not the entire prior conversation. `null` uses the service timeout configuration; built-in defaults are 3600 seconds for execution and 900 seconds for summary work.
 
-For a managed-agent continuity schedule, consume the eligibility/timing decision from `manage-agents`. Ordinary workflows preserve the user's requested timing; do not impose or duplicate a cache-maintenance interval here. A reused schedule thread and its cache state are separate concerns.
+Use caller-supplied timing, lifetime, and destination requirements; do not impose a cache-maintenance interval here. A reused schedule thread and its cache state are separate concerns.
 
 ```sh
 agent-collaboration schedule create --definition-file "$DEFINITION_FILE" --json
