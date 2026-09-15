@@ -1,12 +1,12 @@
 //! Process-owned Thread Listen delivery writes each Batch set directly to stdout.
-use super::board_preparation::CommandContext;
+use super::board_preparation::{self, CommandContext, PendingThreadListen};
 use collaboration_client::board::*;
 use collaboration_client::{BoardClientError, ControlClient};
 use serde_json::json;
 use std::io::{self, Write};
 use std::time::Duration;
 
-pub(super) fn execute(request: ThreadListenRequest, context: CommandContext) -> i32 {
+pub(super) fn execute(pending: PendingThreadListen, context: CommandContext) -> i32 {
     let directory = match crate::endpoint_commands::resolve_directory(context.service_directory) {
         Ok(directory) => directory,
         Err(message) => return report_error("invalidUsage", &message),
@@ -18,7 +18,7 @@ pub(super) fn execute(request: ThreadListenRequest, context: CommandContext) -> 
         Ok(runtime) => runtime,
         Err(_) => return report_error("boardUnavailable", "Thread Listen runtime unavailable"),
     };
-    runtime.block_on(run(request, directory))
+    runtime.block_on(run(pending, directory))
 }
 
 pub(super) fn execute_show(request: ThreadListenShowRequest, context: CommandContext) -> i32 {
@@ -100,16 +100,7 @@ fn render_control_result<TValue: serde::Serialize>(
     })
 }
 
-async fn run(request: ThreadListenRequest, directory: std::path::PathBuf) -> i32 {
-    let lifetime_seconds = match request.mode {
-        ThreadListenMode::Once { max_wait_seconds } => max_wait_seconds,
-        ThreadListenMode::Repeating { lifetime_seconds } => lifetime_seconds,
-    };
-    let request_timeout = Duration::from_secs(lifetime_seconds)
-        .checked_add(Duration::from_secs(5))
-        .unwrap_or(Duration::MAX);
-    let acknowledge = request.acknowledge;
-    let reader = request.reader.clone();
+async fn run(mut pending: PendingThreadListen, directory: std::path::PathBuf) -> i32 {
     let mut client = match ControlClient::connect(
         &directory,
         "agent-collaboration-thread-listen",
@@ -120,6 +111,33 @@ async fn run(request: ThreadListenRequest, directory: std::path::PathBuf) -> i32
         Ok(client) => client,
         Err(error) => return report_client_error(&error.to_string()),
     };
+    let request = match board_preparation::finalize_actor(&pending.actor, &client) {
+        Ok(reader) => {
+            pending.request.reader = reader;
+            pending.request
+        }
+        Err(message) => {
+            return crate::endpoint_commands::report_failure("invalidField", &message, 2, true);
+        }
+    };
+    let code = run_with_client(request, &mut client).await;
+    let _closed = client.close().await;
+    code
+}
+
+pub(super) async fn run_with_client(
+    request: ThreadListenRequest,
+    client: &mut ControlClient,
+) -> i32 {
+    let lifetime_seconds = match request.mode {
+        ThreadListenMode::Once { max_wait_seconds } => max_wait_seconds,
+        ThreadListenMode::Repeating { lifetime_seconds } => lifetime_seconds,
+    };
+    let request_timeout = Duration::from_secs(lifetime_seconds)
+        .checked_add(Duration::from_secs(5))
+        .unwrap_or(Duration::MAX);
+    let acknowledge = request.acknowledge;
+    let reader = request.reader.clone();
     let listen = match client.board_thread_listen(request).await {
         Ok(result) => result.listen,
         Err(error) => return report_board_error(&error),
@@ -162,7 +180,6 @@ async fn run(request: ThreadListenRequest, directory: std::path::PathBuf) -> i32
             }
         }
         if let Some(end) = result.end {
-            let _closed = client.close().await;
             return thread_listen_exit_code(end.reason, emitted);
         }
     }

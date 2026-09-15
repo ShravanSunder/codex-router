@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_participants(reader_key,root_id,role,note,joined_at_activity,last_seen_activity,closed_at_activity,closed_reason,replaced_by) VALUES(?,?,?,NULL,?,?,NULL,NULL,NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "dd7c166fc138fea4dfd95f946c28be9bed56a75ad4944f4071510d7c47659c00"
+}

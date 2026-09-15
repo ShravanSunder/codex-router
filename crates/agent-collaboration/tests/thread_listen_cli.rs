@@ -38,7 +38,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
     let service_task = tokio::spawn(service.run(stop.clone()));
     let mut client = ControlClient::connect(&root, "thread-listen-fixture", "1").await?;
     let owner = actor("owner")?;
-    let reader = actor("reader")?;
+    let reader = session_actor("thread-listen-self")?;
     let writer = actor("writer")?;
     let project_id = ProjectId::generate();
     let board_id = BoardId::generate();
@@ -83,17 +83,73 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         })
         .await?
         .message;
-    let reader_json = serde_json::to_string(&reader)?;
+    for (environment, expected) in [
+        (
+            "missing",
+            "requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID",
+        ),
+        ("both", "is ambiguous"),
+        ("invalid", "contain a non-empty session ID"),
+    ] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
+        command
+            .args(["board", "thread", "listen", "--root-message-id"])
+            .arg(root_message.message_id.as_str())
+            .args(["--once", "--max-wait", "1s", "--actor", "self"])
+            .arg("--no-acknowledge")
+            .arg("--service-directory")
+            .arg(&root)
+            .arg("--json")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .kill_on_drop(true);
+        match environment {
+            "both" => {
+                command
+                    .env("CODEX_THREAD_ID", "ambiguous-codex")
+                    .env("CLAUDE_CODE_SESSION_ID", "ambiguous-claude");
+            }
+            "invalid" => {
+                command.env("CODEX_THREAD_ID", "");
+            }
+            _ => {}
+        }
+        let output = command.output().await?;
+        if output.status.code() != Some(2)
+            || !String::from_utf8_lossy(&output.stdout).contains(expected)
+        {
+            return Err(format!(
+                "--actor self {environment} environment did not fail before mutation: status {:?}, stdout {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout)
+            )
+            .into());
+        }
+    }
+    if !client
+        .board_thread_participant_list(ThreadParticipantListRequest {
+            root_message_id: root_message.message_id.clone(),
+            page: PageRequest::default(),
+        })
+        .await?
+        .page
+        .records
+        .is_empty()
+    {
+        return Err("invalid --actor self attempts mutated Participant state".into());
+    }
     let mut listen = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
     listen
-        .args(["board", "thread", "listen", "--root-message-id"])
+        .args(["board", "thread", "join", "--root-message-id"])
         .arg(root_message.message_id.as_str())
-        .args(["--once", "--max-wait", "2m", "--actor"])
-        .arg(&reader_json)
+        .args(["--actor", "self", "--role", "advisor", "--watch"])
+        .args(["--listen", "once", "--max-wait", "2m"])
         .arg("--acknowledge")
         .arg("--service-directory")
         .arg(&root)
         .arg("--json")
+        .env("CODEX_THREAD_ID", "thread-listen-self")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .kill_on_drop(true);
     let listen_task = tokio::spawn(async move { listen.output().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -137,7 +193,23 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         )
         .into());
     }
-    let batch_set: ThreadListenBatchSet = serde_json::from_slice(&output.stdout)?;
+    let output_lines = String::from_utf8(output.stdout)?;
+    let mut output_lines = output_lines.lines();
+    let join_result: serde_json::Value = serde_json::from_str(
+        output_lines
+            .next()
+            .ok_or("Join-plus-Listen omitted the committed Join result")?,
+    )?;
+    if join_result.pointer("/result/participant").is_none() {
+        return Err("Join-plus-Listen did not write the Join result before waiting".into());
+    }
+    let batch_line = output_lines
+        .next()
+        .ok_or("Join-plus-Listen omitted its Batch set")?;
+    if output_lines.next().is_some() {
+        return Err("Join-plus-Listen wrote an unexpected extra stdout record".into());
+    }
+    let batch_set: ThreadListenBatchSet = serde_json::from_str(batch_line)?;
     if batch_set.kind != ThreadListenOutputKind::BatchSet
         || batch_set.batches.len() != 1
         || batch_set.batches[0].messages.len() != 1
@@ -162,12 +234,13 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
     let timeout = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["board", "thread", "listen", "--root-message-id"])
         .arg(root_message.message_id.as_str())
-        .args(["--once", "--max-wait", "1s", "--actor"])
-        .arg(reader_json)
+        .args(["--once", "--max-wait", "1s", "--actor", "self"])
         .arg("--no-acknowledge")
         .arg("--service-directory")
         .arg(&root)
         .arg("--json")
+        .env("CODEX_THREAD_ID", "thread-listen-self")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .kill_on_drop(true)
         .output()
         .await?;
@@ -198,5 +271,17 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
 fn actor(value: &str) -> Result<Identity, IdentityValidationError> {
     Ok(Identity::Human {
         human_id: HumanId::try_from(value.to_owned())?,
+    })
+}
+
+fn session_actor(value: &str) -> Result<Identity, IdentityValidationError> {
+    Ok(Identity::Session {
+        session: SessionRef {
+            endpoint: SessionEndpointRef {
+                service_id: ServiceId::try_from(SERVICE_ID.to_owned())?,
+                endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+            },
+            session_id: SessionId::try_from(value.to_owned())?,
+        },
     })
 }

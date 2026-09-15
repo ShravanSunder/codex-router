@@ -6,12 +6,14 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const BASELINE: &str = include_str!("../migrations/202609120001_project_board.sql");
 const THREAD_DELIVERY_POSITIONS: &str =
     include_str!("../migrations/202609140001_thread_delivery_positions.sql");
+const THREAD_PARTICIPANTS: &str =
+    include_str!("../migrations/202609150001_thread_participants.sql");
 
 pub(crate) async fn initialize(connection: &mut SqliteConnection) -> Result<(), BoardStorageError> {
     initialize_with(
         connection,
         &MIGRATOR,
-        &format!("{BASELINE} {THREAD_DELIVERY_POSITIONS}"),
+        &format!("{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS}"),
     )
     .await
 }

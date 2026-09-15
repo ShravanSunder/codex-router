@@ -1,4 +1,7 @@
-use crate::{BoardId, MessageId, ProjectId, TopicId};
+use crate::{
+    ActivitySequence, BoardId, Identity, MessageId, MessageText, ParticipantRole, ProjectId,
+    TopicId,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +26,15 @@ pub enum BoardFailureKind {
     Overloaded,
     ThreadResolved,
     InvalidRecord,
+    ParticipantRequired,
+    OrchestratorRequired,
+    OrchestratorAlreadyExists,
+    OrchestratorHandoverRequired,
+    HandoverTargetNotParticipant,
+    StaleOrchestrator,
+    SelfReplace,
+    OrchestratorRoleChange,
+    SessionTopicPost,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -43,6 +55,13 @@ pub enum BoardNextAction {
     RetryLater,
     UnresolveThread,
     PostThreadMessage,
+    CreateThread,
+    JoinThread,
+    ReplaceOrchestrator,
+    LeaveWithHandoverOrResolve,
+    JoinHandoverTarget,
+    InspectParticipants,
+    RepeatJoinWithoutReplace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -77,6 +96,50 @@ pub enum BoardErrorDetails {
     Cooldown {
         retry_after_seconds: u64,
     },
+    #[serde(rename_all = "camelCase")]
+    ParticipantRefusal {
+        #[serde(flatten)]
+        refusal: Box<ParticipantRefusalDetails>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ThreadCreateRefusal {
+        #[serde(flatten)]
+        refusal: Box<ThreadCreateRefusalDetails>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ParticipantRefusalDetails {
+    pub root_message_id: MessageId,
+    pub actor: Identity,
+    pub allowed_roles: Vec<ParticipantRole>,
+    pub holder: Option<Identity>,
+    pub holder_last_seen_activity: Option<ActivitySequence>,
+    pub target: Option<Identity>,
+    pub named_holder: Option<Identity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadCreateRefusalDetails {
+    pub topic_id: TopicId,
+    pub actor: Identity,
+    pub text: MessageText,
+    pub allowed_roles: Vec<ParticipantRole>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParticipantRefusal {
+    pub kind: BoardFailureKind,
+    pub message: String,
+    pub next_action: BoardNextAction,
+    pub root_message_id: MessageId,
+    pub actor: Identity,
+    pub holder: Option<Identity>,
+    pub holder_last_seen_activity: Option<ActivitySequence>,
+    pub target: Option<Identity>,
+    pub named_holder: Option<Identity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -90,6 +153,100 @@ pub struct BoardError {
 }
 
 impl BoardError {
+    fn all_roles() -> Vec<ParticipantRole> {
+        vec![
+            ParticipantRole::Orchestrator,
+            ParticipantRole::Advisor,
+            ParticipantRole::Reviewer,
+            ParticipantRole::Participant,
+        ]
+    }
+
+    #[must_use]
+    pub fn participant_required(root_message_id: MessageId, actor: Identity) -> Self {
+        Self {
+            kind: BoardFailureKind::ParticipantRequired,
+            stage: BoardFailureStage::Admission,
+            message: "This session must Join the Thread before continuing.".to_owned(),
+            next_action: BoardNextAction::JoinThread,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                    root_message_id,
+                    actor,
+                    allowed_roles: Self::all_roles(),
+                    holder: None,
+                    holder_last_seen_activity: None,
+                    target: None,
+                    named_holder: None,
+                }),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn session_topic_post(topic_id: TopicId, actor: Identity, text: MessageText) -> Self {
+        Self {
+            kind: BoardFailureKind::SessionTopicPost,
+            stage: BoardFailureStage::Admission,
+            message: "A session creates a Thread with thread create and an explicit Role and Watch choice.".to_owned(),
+            next_action: BoardNextAction::CreateThread,
+            details: BoardErrorDetails::ThreadCreateRefusal {
+                refusal: Box::new(ThreadCreateRefusalDetails {
+                    topic_id,
+                    actor,
+                    text,
+                    allowed_roles: Self::all_roles(),
+                }),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn orchestrator_already_exists(
+        root_message_id: MessageId,
+        actor: Identity,
+        holder: Identity,
+        holder_last_seen_activity: ActivitySequence,
+    ) -> Self {
+        Self {
+            kind: BoardFailureKind::OrchestratorAlreadyExists,
+            stage: BoardFailureStage::Admission,
+            message: "This Thread already has an Orchestrator. Name that holder explicitly to Replace it.".to_owned(),
+            next_action: BoardNextAction::ReplaceOrchestrator,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                root_message_id,
+                actor,
+                allowed_roles: vec![ParticipantRole::Orchestrator],
+                holder: Some(holder),
+                holder_last_seen_activity: Some(holder_last_seen_activity),
+                target: None,
+                named_holder: None,
+                }),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn participant_refusal(refusal: ParticipantRefusal) -> Self {
+        Self {
+            kind: refusal.kind,
+            stage: BoardFailureStage::Admission,
+            message: refusal.message,
+            next_action: refusal.next_action,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                    root_message_id: refusal.root_message_id,
+                    actor: refusal.actor,
+                    allowed_roles: Self::all_roles(),
+                    holder: refusal.holder,
+                    holder_last_seen_activity: refusal.holder_last_seen_activity,
+                    target: refusal.target,
+                    named_holder: refusal.named_holder,
+                }),
+            },
+        }
+    }
     #[must_use]
     pub fn archived_board() -> Self {
         Self::simple(

@@ -143,7 +143,7 @@ async fn immutable_messages_threads_references_and_signed_pagination_share_one_a
         vec![],
     )
     .await;
-    assert!(root.watch_status.watching);
+    assert!(!root.watch_status.watching);
     let reply = post(
         &mut store,
         Placement::Thread {

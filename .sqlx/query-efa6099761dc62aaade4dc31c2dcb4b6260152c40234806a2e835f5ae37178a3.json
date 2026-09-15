@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM board_activity WHERE activity_sequence=? AND root_id=? AND kind IN ('threadMessageCreated','threadResolved','threadUnresolved'))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM board_activity WHERE activity_sequence=? AND root_id=? AND kind IN ('threadMessageCreated','threadResolved','threadUnresolved'))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "efa6099761dc62aaade4dc31c2dcb4b6260152c40234806a2e835f5ae37178a3"
+}

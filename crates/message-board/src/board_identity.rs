@@ -166,4 +166,18 @@ impl Identity {
             Self::Session { .. } => None,
         }
     }
+
+    #[must_use]
+    pub fn short_form(&self) -> String {
+        match self {
+            Self::Session { session } => {
+                let endpoint = session.endpoint.endpoint_id.as_str();
+                let harness = endpoint
+                    .split_once('-')
+                    .map_or(endpoint, |(harness, _attachment)| harness);
+                format!("{harness}:{}", session.session_id.as_str())
+            }
+            Self::Human { human_id } => human_id.as_str().to_owned(),
+        }
+    }
 }

@@ -1,6 +1,8 @@
 //! Transactional Thread listening storage; Delivered and Acknowledged positions remain separate.
 use crate::BoardStore;
 use crate::message_records::{activate_watch, activity_sequence, load_message, require_thread};
+use crate::participant_records::advance_participant_last_seen;
+use crate::participant_row_decoding::require_open_participant;
 use crate::storage_support::{
     current_activity_sequence, ensure_identity, invalid_record, storage_error,
     validate_stored_boundary,
@@ -120,6 +122,10 @@ impl BoardStore {
         let mut threads = Vec::with_capacity(roots.len());
         for root_message_id in roots {
             let location = require_thread(&mut transaction, &root_message_id).await?;
+            if matches!(request.reader, Identity::Session { .. }) {
+                require_open_participant(&mut transaction, &request.reader, &root_message_id)
+                    .await?;
+            }
             if selected_project
                 .as_ref()
                 .is_some_and(|project_id| *project_id != location.project_id)
@@ -363,6 +369,13 @@ impl BoardStore {
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            advance_participant_last_seen(
+                &mut transaction,
+                &reader_key,
+                &batch.root_message_id,
+                delivered_value,
+            )
+            .await?;
         }
         transaction.commit().await.map_err(storage_error)?;
         Ok(batch_set)

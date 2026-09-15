@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM board_activity WHERE activity_sequence=? AND root_id=?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM board_activity WHERE activity_sequence=? AND root_id=?)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b46d28c6621d2ad70a9fa31b0fb07b496b65ce618fa71b3fc0ba40660149303"
+}

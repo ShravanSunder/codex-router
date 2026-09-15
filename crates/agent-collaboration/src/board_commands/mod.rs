@@ -24,8 +24,8 @@ pub fn run_board_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     match command {
-        board_preparation::PreparedBoardCommand::ThreadListen(request) => {
-            board_thread_listen_execution::execute(request, context)
+        board_preparation::PreparedBoardCommand::ThreadListen(pending) => {
+            board_thread_listen_execution::execute(pending, context)
         }
         board_preparation::PreparedBoardCommand::ThreadListenShow(request) => {
             board_thread_listen_execution::execute_show(request, context)

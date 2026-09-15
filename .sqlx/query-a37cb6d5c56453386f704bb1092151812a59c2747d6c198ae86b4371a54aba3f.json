@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE thread_participants SET last_seen_activity=?,closed_at_activity=?,closed_reason='left',replaced_by=NULL WHERE reader_key=? AND root_id=? AND closed_at_activity IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a37cb6d5c56453386f704bb1092151812a59c2747d6c198ae86b4371a54aba3f"
+}

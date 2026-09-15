@@ -5,6 +5,8 @@ pub use board_connection::{BoardStorageError, BoardStore};
 
 mod inbox_records;
 mod message_records;
+mod participant_records;
+mod participant_row_decoding;
 mod project_records;
 mod storage_support;
 mod thread_listen_records;

@@ -1,7 +1,8 @@
 use crate::{
     ActingForIdentity, ActivitySequence, Identity, Message, MessageId, MessageListScope,
-    MessagePage, MessageReferences, MessageSelection, MessageText, Page, PageRequest, Placement,
-    ProjectId, Thread, WatchStatus,
+    MessagePage, MessageReferences, MessageSelection, MessageText, OrchestratorHolder, Page,
+    PageRequest, Participant, ParticipantNote, ParticipantRole, Placement, ProjectId, Thread,
+    TopicId, WatchStatus,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -66,3 +67,67 @@ contract!(ThreadListRequest {
     page: PageRequest
 });
 contract!(ThreadListResult { page: Page<Thread> });
+
+contract!(ThreadCreateRequest {
+    message_id: MessageId,
+    topic_id: TopicId,
+    actor: Identity,
+    acting_for: Option<ActingForIdentity>,
+    text: MessageText,
+    references: MessageReferences,
+    role: Option<ParticipantRole>,
+    watch: bool
+});
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ThreadCreatorParticipation {
+    #[serde(rename_all = "camelCase")]
+    Joined {
+        participant: Box<Participant>,
+    },
+    NotJoined,
+}
+
+contract!(ThreadCreateResult {
+    message: Message,
+    creator_participation: ThreadCreatorParticipation,
+    orchestrator: Option<OrchestratorHolder>,
+    watch_status: WatchStatus,
+    outcome: String
+});
+contract!(ThreadJoinRequest {
+    root_message_id: MessageId,
+    actor: Identity,
+    role: ParticipantRole,
+    watch: bool,
+    replace: Option<Identity>,
+    note: Option<ParticipantNote>
+});
+contract!(ThreadJoinResult {
+    participant: Participant,
+    orchestrator: Option<OrchestratorHolder>,
+    watch_status: WatchStatus,
+    outcome: String
+});
+contract!(ThreadLeaveRequest {
+    root_message_id: MessageId,
+    actor: Identity,
+    to: Option<Identity>,
+    resolve: bool
+});
+contract!(ThreadLeaveResult {
+    participant: Participant,
+    thread: Thread,
+    orchestrator: Option<OrchestratorHolder>,
+    watch_status: WatchStatus,
+    outcome: String
+});
+contract!(ThreadParticipantListRequest {
+    root_message_id: MessageId,
+    page: PageRequest
+});
+contract!(ThreadParticipantListResult {
+    page: Page<Participant>,
+    orchestrator: Option<OrchestratorHolder>
+});

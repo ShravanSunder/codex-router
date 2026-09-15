@@ -2,7 +2,7 @@
 mod board_behavior_support;
 
 use board_behavior_support::*;
-use message_board::Placement;
+use message_board::{Placement, ThreadWatchRequest};
 use message_board_storage::BoardStore;
 use sqlx::{Connection, SqliteConnection};
 
@@ -11,16 +11,25 @@ async fn sqlite_rejects_non_boolean_watch_and_summary_values() {
     let path = database_path("boolean-checks");
     let mut store = BoardStore::open(&path).await.unwrap();
     let fixture = create_fixture(&mut store).await;
-    post(
+    let author = actor("author");
+    let root = post(
         &mut store,
         Placement::Topic {
             topic_id: fixture.topic_id,
         },
-        actor("author"),
+        author.clone(),
         "Create a watch and its project summary",
         vec![],
     )
     .await;
+    store
+        .watch_thread(ThreadWatchRequest {
+            root_message_id: root.message.message_id,
+            actor: author,
+            acting_for: None,
+        })
+        .await
+        .unwrap();
     store.close().await.unwrap();
     let mut connection = SqliteConnection::connect(&format!("sqlite://{}", path.display()))
         .await

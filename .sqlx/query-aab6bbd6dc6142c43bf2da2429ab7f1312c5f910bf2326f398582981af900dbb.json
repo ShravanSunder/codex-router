@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE thread_participants SET last_seen_activity=MAX(last_seen_activity,?) WHERE reader_key=? AND root_id=? AND closed_at_activity IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "aab6bbd6dc6142c43bf2da2429ab7f1312c5f910bf2326f398582981af900dbb"
+}
