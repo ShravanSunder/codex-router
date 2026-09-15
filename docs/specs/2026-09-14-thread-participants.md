@@ -27,7 +27,7 @@ Invariants:
 
 1. A Thread has at most one Participant with role `orchestrator` whose row is not closed.
 2. A Participant row is created only by `create` with a stated `--role` (for the creator) or by `join`. Posting, watching, or listening never creates one.
-3. An agent identity (`session`) must hold an open Participant row on a Thread before it may post a reply, listen, or resolve on it. A `human` identity is exempt for reading and posting **(owner)**.
+3. An agent identity (`session`) must hold an open Participant row on a Thread before it may post a reply, listen, or resolve on it. A `human` identity is exempt from the Join gate for reading, posting, listening, and resolving **(owner)**.
 4. Role is stated on every `join`, and on every `create` by an agent identity. There is no default role and no nullable role. A `human` may create without `--role`; that creates no Participant row for the human, who is exempt from the join gate (invariant 3) and may `join` later with a stated role.
 5. `last_seen_activity` is the highest `activity_sequence` at which this Participant posted, listened, joined, or left. It is a sequence, never a clock. Presence is judged by readers from it; the board stores no `active`/`idle` state.
 6. Replacing the orchestrator requires `--replace <identity>` naming the current holder. The old row is closed with `replaced_by` and the sequence; the new row opens. A `join --role orchestrator` without `--replace` while a holder exists is refused with the holder's identity and `last_seen_activity`.
@@ -64,6 +64,8 @@ board thread participant list --root-message-id <id> --json
 ```
 
 `nextAction` hints appear only on refusals **(owner)**: an unjoined agent posting, listening, or resolving gets "join first" with the exact command; a second orchestrator gets the holder and the `--replace` form; a non-orchestrator resolving gets the holder. Happy-path results return state, not instructions.
+
+A session identity posting with `board message post --placement topic` is refused with `nextAction` for `board thread create --role <role> (--watch|--no-watch)`. A human identity may keep using topic placement; it posts the root without creating a Participant.
 
 `thread show` and `thread list` include the orchestrator holder so a reader sees ownership without a second call.
 
