@@ -322,6 +322,29 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "board/threadListen"
+                            | "board/threadWait"
+                            | "board/threadListenShow"
+                            | "board/threadListenCancel"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::thread_listen_dispatch::dispatch(
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method.starts_with("board/") => {
                     let identity = identity.clone();
                     pending.spawn(async move {

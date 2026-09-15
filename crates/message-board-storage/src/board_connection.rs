@@ -18,6 +18,7 @@ pub enum BoardStorageError {
 pub struct BoardStore {
     pub(crate) connection: SqliteConnection,
     pub(crate) cursor_key: [u8; 32],
+    pub(crate) activity_sender: tokio::sync::broadcast::Sender<()>,
 }
 impl BoardStore {
     pub async fn open(path: &Path) -> Result<Self, BoardStorageError> {
@@ -40,6 +41,7 @@ impl BoardStore {
         Ok(Self {
             connection,
             cursor_key,
+            activity_sender: activity_sender(),
         })
     }
     pub async fn close(self) -> Result<(), BoardStorageError> {
@@ -52,4 +54,18 @@ impl BoardStore {
             .await?;
         Ok(value == 1)
     }
+
+    #[must_use]
+    pub fn subscribe_activity(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.activity_sender.subscribe()
+    }
+
+    pub(crate) fn notify_activity(&self) {
+        let _receiver_count = self.activity_sender.send(());
+    }
+}
+
+pub(crate) fn activity_sender() -> tokio::sync::broadcast::Sender<()> {
+    const ACTIVITY_NOTIFICATION_CAPACITY: usize = 64;
+    tokio::sync::broadcast::channel(ACTIVITY_NOTIFICATION_CAPACITY).0
 }

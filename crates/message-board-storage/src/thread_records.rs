@@ -62,6 +62,9 @@ impl BoardStore {
             ThreadState::Resolved,
         )
         .await?;
+        if changed {
+            self.notify_activity();
+        }
         Ok(ThreadResolveResult {
             thread,
             activity_sequence: sequence,
@@ -85,6 +88,9 @@ impl BoardStore {
             ThreadState::Unresolved,
         )
         .await?;
+        if changed {
+            self.notify_activity();
+        }
         Ok(ThreadUnresolveResult {
             thread,
             activity_sequence: sequence,

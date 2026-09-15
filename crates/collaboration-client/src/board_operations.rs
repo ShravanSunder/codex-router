@@ -1,6 +1,7 @@
 //! Typed board calls share Control transport and never replay uncertain writes.
 use crate::{ClientError, ControlClient};
 use message_board::*;
+use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum BoardClientError {
     #[error("{0}")]
@@ -228,6 +229,51 @@ impl ControlClient {
         request: ThreadListRequest,
     ) -> Result<ThreadListResult, BoardClientError> {
         self.board_call("board/threadList", request).await
+    }
+    pub async fn board_thread_listen(
+        &mut self,
+        request: ThreadListenRequest,
+    ) -> Result<ThreadListenResult, BoardClientError> {
+        self.board_call("board/threadListen", request).await
+    }
+    pub async fn board_thread_wait(
+        &mut self,
+        request: ThreadWaitRequest,
+        timeout: Duration,
+    ) -> Result<ThreadWaitResult, BoardClientError> {
+        let params = serde_json::to_value(request)
+            .map_err(|_| ClientError::Protocol("invalid Thread Wait request"))?;
+        let result = match self
+            .connection
+            .call_with_timeout("board/threadWait", params, timeout)
+            .await
+        {
+            Ok(result) => result,
+            Err(ClientError::Rejected {
+                code: -32050,
+                data: Some(data),
+            }) => {
+                return Err(BoardClientError::Rejected(Box::new(
+                    serde_json::from_value(data)
+                        .map_err(|_| ClientError::Protocol("invalid board failure"))?,
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::from_value(result)
+            .map_err(|_| ClientError::Protocol("invalid Thread Wait result").into())
+    }
+    pub async fn board_thread_listen_show(
+        &mut self,
+        request: ThreadListenShowRequest,
+    ) -> Result<ThreadListenShowResult, BoardClientError> {
+        self.board_call("board/threadListenShow", request).await
+    }
+    pub async fn board_thread_listen_cancel(
+        &mut self,
+        request: ThreadListenCancelRequest,
+    ) -> Result<ThreadListenCancelResult, BoardClientError> {
+        self.board_call("board/threadListenCancel", request).await
     }
     pub async fn board_inbox_fetch(
         &mut self,

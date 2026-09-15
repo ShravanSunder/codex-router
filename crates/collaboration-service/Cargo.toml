@@ -30,3 +30,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
+tokio = { workspace = true, features = ["test-util"] }

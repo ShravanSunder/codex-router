@@ -43,7 +43,7 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
         self.assertIn(f'  sha256 "{expected_sha256}"', updated_formula)
         self.assertIn(f"  # Source commit: {expected_source_commit}", updated_formula)
 
-    def test_installs_both_public_executables(self) -> None:
+    def test_installs_all_public_executables(self) -> None:
         # Arrange / Act
         updated = update_codex_router_formula(
             formula_text=BASE_FORMULA,
@@ -53,7 +53,9 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
         )
         # Assert
         self.assertIn('    bin.install "agent-collaboration"', updated)
+        self.assertIn('    bin.install "agent-session"', updated)
         self.assertEqual(updated.count('bin.install "agent-collaboration"'), 1)
+        self.assertEqual(updated.count('bin.install "agent-session"'), 1)
 
     def test_replaces_legacy_agent_sessions_install(self) -> None:
         # Arrange
@@ -73,6 +75,7 @@ class UpdateCodexRouterFormulaTests(unittest.TestCase):
         # Assert
         self.assertNotIn('bin.install "agent-sessions"', updated)
         self.assertEqual(updated.count('bin.install "agent-collaboration"'), 1)
+        self.assertEqual(updated.count('bin.install "agent-session"'), 1)
 
     def test_second_update_is_idempotent(self) -> None:
         # Arrange

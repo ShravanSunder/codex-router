@@ -99,6 +99,14 @@ pub(crate) async fn activate_watch(
     boundary: i64,
 ) -> Result<(), BoardError> {
     ensure_project_reader_state(transaction, reader_key, project_id.as_str()).await?;
+    let previous_active: Option<i64> = sqlx::query_scalar!(
+        "SELECT active FROM thread_watches WHERE reader_key=? AND root_id=?",
+        reader_key,
+        root_message_id.as_str(),
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
     sqlx::query!(
         "INSERT INTO thread_watches(reader_key,root_id,active,starts_after_activity) \
          VALUES(?,?,1,?) \
@@ -113,6 +121,16 @@ pub(crate) async fn activate_watch(
     .execute(&mut **transaction)
     .await
     .map_err(storage_error)?;
+    if previous_active == Some(0) {
+        sqlx::query!(
+            "DELETE FROM thread_delivery_positions WHERE reader_key=? AND root_id=?",
+            reader_key,
+            root_message_id.as_str(),
+        )
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage_error)?;
+    }
     Ok(())
 }
 

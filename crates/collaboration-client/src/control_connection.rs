@@ -460,13 +460,22 @@ impl ClientConnection {
         self.failed = true;
     }
     pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+        self.call_with_timeout(method, params, Duration::from_secs(30))
+            .await
+    }
+
+    pub(crate) async fn call_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ClientError> {
         if self.failed || self.next_id >= 65_536 {
             return Err(ClientError::Protocol("connection is retired"));
         }
         // Set before awaiting: a dropped future leaves the exchange retired.
         self.failed = true;
-        let result =
-            tokio::time::timeout(Duration::from_secs(30), self.exchange(method, params)).await;
+        let result = tokio::time::timeout(timeout, self.exchange(method, params)).await;
         match result {
             Ok(Ok(value)) => {
                 self.failed = false;

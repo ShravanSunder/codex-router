@@ -147,6 +147,7 @@ impl BoardStore {
         let message = load_message(&mut transaction, &request.message_id).await?;
         let watch_status = load_watch_status(&mut transaction, &actor_key, watched_root).await?;
         transaction.commit().await.map_err(storage_error)?;
+        self.notify_activity();
         Ok(MessagePostResult {
             message,
             watch_status,

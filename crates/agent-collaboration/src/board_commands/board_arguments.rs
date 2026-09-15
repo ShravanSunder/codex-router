@@ -117,6 +117,16 @@ pub(super) enum ThreadCommand {
     Unwatch(ThreadMutationArguments),
     /// List project threads and reader watch status.
     List(ThreadListArguments),
+    /// Wait for Thread Activity. Delivery marks it seen; acknowledgement remains separate.
+    Listen(ThreadListenArguments),
+}
+
+#[derive(Subcommand)]
+pub(super) enum ThreadListenControlCommand {
+    /// Show an active Repeating Listen.
+    Show(ThreadListenControlArguments),
+    /// Cancel an active Repeating Listen.
+    Cancel(ThreadListenControlArguments),
 }
 
 #[derive(Subcommand)]
@@ -485,6 +495,50 @@ pub(super) struct ThreadListArguments {
     pub watched_only: bool,
     #[command(flatten)]
     pub page: PageArguments,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub(super) struct ThreadListenArguments {
+    #[command(subcommand)]
+    pub control: Option<ThreadListenControlCommand>,
+    /// Select every Thread with an active Watch for this Reader.
+    #[arg(long, conflicts_with = "root_message_id")]
+    pub watched: bool,
+    /// Select a named Thread. May be repeated.
+    #[arg(long)]
+    pub root_message_id: Vec<String>,
+    /// Wait for the first Batch set and exit.
+    #[arg(long, conflicts_with = "lifetime")]
+    pub once: bool,
+    /// Repeating Listen lifetime: integer followed by s, m, h, or d.
+    #[arg(long = "for", value_name = "DURATION")]
+    pub lifetime: Option<String>,
+    /// Once maximum wait: integer followed by s, m, h, or d.
+    #[arg(long, requires = "once")]
+    pub max_wait: Option<String>,
+    /// Initialize the Delivered position for a first Listen from this Activity sequence.
+    #[arg(long = "from")]
+    pub from_activity_sequence: Option<u64>,
+    /// Advance each Thread's Acknowledged position after its Batch is written to stdout.
+    #[arg(long)]
+    pub acknowledge: bool,
+    /// Leave each emitted Batch's Acknowledged position unchanged.
+    #[arg(long, conflicts_with = "acknowledge")]
+    pub no_acknowledge: bool,
+    /// Typed Reader Identity JSON.
+    #[arg(long)]
+    pub actor: Option<String>,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
+pub(super) struct ThreadListenControlArguments {
+    #[arg(long)]
+    pub listen_id: String,
     #[command(flatten)]
     pub common: CommonArguments,
 }

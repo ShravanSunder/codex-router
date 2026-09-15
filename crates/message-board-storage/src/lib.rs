@@ -7,6 +7,7 @@ mod inbox_records;
 mod message_records;
 mod project_records;
 mod storage_support;
+mod thread_listen_records;
 mod thread_records;
 
 mod board_topic_records;

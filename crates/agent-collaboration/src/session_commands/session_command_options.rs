@@ -318,10 +318,10 @@ impl ClapSessionsCommand {
 }
 
 /// Renders the parser-owned public help text without starting native work.
-pub fn command_help() -> String {
+pub fn command_help(executable_name: &'static str) -> String {
     use clap::CommandFactory;
     ClapSessionsCommand::command()
-        .name("agent-collaboration")
+        .name(executable_name)
         .render_long_help()
         .to_string()
 }
