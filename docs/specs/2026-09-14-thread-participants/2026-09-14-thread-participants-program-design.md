@@ -128,7 +128,7 @@ All state-changing paths use `BEGIN IMMEDIATE`, allocate any Activity sequence i
 | Join | Thread/Board state, existing Participant, holder, named Replace holder | Join Activity, one upserted Participant, optional closed old holder, explicit Watch state, unread summaries |
 | post reply | Thread/Board state, open Participant for session actor | message Activity and message, Participant `last_seen_activity`; no Watch mutation |
 | Leave | caller Participant and Role | Leave/handover Activity, closed caller, optional promoted target, caller Watch deactivation, unread summaries |
-| resolve | Thread, current Orchestrator, all open Participants | Thread-state Activity, resolved Thread, every open Participant closed at same sequence |
+| resolve | Thread, all open Participants, and current Orchestrator for a session actor | Thread-state Activity, resolved Thread, every open Participant closed at same sequence |
 | Listen batch | selected Threads and session Participant gate, Watch/Delivered state, eligible messages | emitted-batch Delivered positions and corresponding Participant `last_seen_activity` in the existing selection transaction |
 
 The partial unique index is the final storage guard for concurrent Orchestrator attempts. The repository catches that specific uniqueness failure, reloads the committed holder, and returns the domain refusal. It never exposes a raw SQL constraint error.
@@ -167,9 +167,20 @@ sequenceDiagram
     B->>D: insert message Activity + update last_seen_activity
     B->>D: COMMIT
     S-->>C: message result; Watch unchanged
+
+    C->>S: board/messagePost (topic placement)
+    S->>B: existing request
+    B->>D: BEGIN IMMEDIATE + decode actor identity
+    alt session identity
+      B-->>S: refusal with thread create nextAction; no mutation
+    else human identity
+      B->>D: insert root message + Thread + Activity; no Participant
+      B->>D: COMMIT
+      S-->>C: root message result
+    end
 ```
 
-The generic post repository loses its unconditional `activate_watch` call. Thread create and Join become the only operations in this slice that apply a new explicit Watch choice. Existing explicit watch/unwatch commands remain personal Watch controls and never create a Participant.
+The generic post repository loses its unconditional `activate_watch` call. It admits topic placement only for a human identity; a session identity is refused before cooldown or message mutation with the `thread create` nextAction. Thread create and Join become the only operations in this slice that apply a new explicit Watch choice. Existing explicit watch/unwatch commands remain personal Watch controls and never create a Participant.
 
 ### 5.2 Join with Listen and Listen gate
 
@@ -244,7 +255,7 @@ sequenceDiagram
     S-->>C: success state
 ```
 
-The existing `board/threadResolve` path moves to the same repository owner used by Leave `--resolve`. It requires the current Orchestrator. This prevents separate resolve implementations from drifting on authorization or Participant closeout. `threadUnresolve` remains separate and changes no Participant.
+The existing `board/threadResolve` path moves to the same repository owner used by Leave `--resolve`. Its authorization branches on the existing `Identity`: a session must be the open Orchestrator, while a human bypasses the Participant lookup and may resolve regardless of the current holder. Both branches use the same transaction to resolve the Thread and close every open Participant. This preserves human control of boards without weakening the session gate. `threadUnresolve` remains separate and changes no Participant.
 
 ## 6. Participant lifecycle state
 
@@ -332,7 +343,9 @@ flowchart LR
 The migration is additive and performs no backfill. Existing Threads therefore start with an empty Orchestrator seat and no Participants. The feature then cuts behavior over in one version:
 
 - generic posting no longer activates Watches;
-- session Thread post, Listen, and resolve paths require an open Participant;
+- a session topic-placement post is refused with a `thread create` nextAction; a human topic-placement post remains allowed and creates no Participant;
+- session Thread post and Listen paths require an open Participant, and session resolve requires the open Orchestrator;
+- human post, Listen, and resolve paths remain exempt from the Join gate;
 - create and Join require explicit Watch choice and become the documented Thread entry path;
 - current Watch, Delivered, Acknowledged, message, and Thread-state data remain intact;
 - unresolve never synthesizes Participant state.
@@ -346,8 +359,8 @@ There is no compatibility path that infers Participants from old state.
 | closed Role set and row validity | message-board constructors + storage decoder | domain round trips and injected invalid stored rows |
 | one Orchestrator | partial unique index + conflict translation | concurrent Join/Replace and mutation-free self-Replace tests |
 | atomic create/Join/Leave/Replace/resolve | BoardStore transaction owners | storage integration tests with reopen and rollback checks |
-| no automatic Participant or Watch | post repository path | post/read integration tests inspecting both tables |
-| Join gate | post transaction, Listen entry admission, resolve owner | real Control-path tests with session and human identities |
+| no automatic Participant or Watch | post repository path | session topic-placement refusal, human topic-placement success, and post/read integration tests inspecting both tables |
+| Join gate | post transaction, Listen entry admission, resolve owner | real Control-path tests covering session refusal and human post/Listen/resolve exemption |
 | sequence-based presence | mutation and Batch-selection transactions | exact sequence assertions for every transition, including an older Batch after newer presence |
 | refusal guidance | domain errors + CLI renderer | protocol schema/round-trip and CLI refusal journeys |
 | holder projections | show/list queries | paged storage and CLI results |

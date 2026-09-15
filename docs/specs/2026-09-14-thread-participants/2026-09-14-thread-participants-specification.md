@@ -83,6 +83,8 @@ When `--listen` is present, all Listen mode, bound, and acknowledgement choices 
 
 An existing `board message post --placement thread` by a session identity MUST be refused unless that identity has an open Participant on the selected Thread. A human identity remains exempt. Posting MUST NOT create, reopen, or change a Participant Role or Watch.
 
+An existing `board message post --placement topic` by a session identity MUST be refused before mutation. Its `nextAction` MUST render `board thread create --topic-id <id> --actor <identity|self> --role <role> (--watch|--no-watch) --text-file <path> --json`, preserving the supplied topic and text-file path where available. A human identity MAY continue using topic placement; it creates the root without creating a Participant.
+
 A successful Participant post MUST update that Participant's `lastSeenActivity` to the message Activity sequence in the same transaction as the message.
 
 ### 3.4 Listen
@@ -107,7 +109,7 @@ An Orchestrator MUST state exactly one of `--to` or `--resolve`:
 - `--to` MUST name a different open Participant on the same Thread. The operation MUST close the leaving Orchestrator with reason `replaced`, set `replacedBy` to the named Participant, promote that Participant to Orchestrator, advance both affected Participants to the Replace Activity sequence, and deactivate the leaving Participant's Watch in one commit.
 - `--resolve` MUST resolve the Thread and close every open Participant with reason `resolved` at the resolution Activity sequence in one commit. It MUST deactivate the leaving Orchestrator's Watch; other Watch choices remain personal state and are not implicitly changed by resolution.
 
-The existing Thread resolve operation MUST require an open Participant with Role `orchestrator` for both session and human identities. The human exemption applies to reading and posting, not resolution. Resolution MUST close every open Participant atomically.
+The existing Thread resolve operation MUST require a session identity to be the open Orchestrator. A human identity MAY resolve without a Participant and regardless of the current Orchestrator holder, preserving the human's control of the board. Either successful resolution MUST close every open Participant atomically.
 
 Unresolving MUST NOT reopen any Participant or restore any Role.
 
@@ -142,6 +144,7 @@ Participant refusals MUST have stable machine-readable failure kinds, structured
 | Refusal | Required details | Corrective command intent |
 | --- | --- | --- |
 | session is not joined for post, Listen, or resolve | Thread, actor, allowed Roles | `board thread join ... --role <role> (--watch|--no-watch)` |
+| session uses topic-placement post | topic, actor, text source | `board thread create ... --role <role> (--watch|--no-watch)` |
 | Orchestrator already exists | Thread, holder identity, holder `lastSeenActivity` | repeat Join with `--role orchestrator --replace <holder>` |
 | non-Orchestrator attempts resolve | Thread, actor, holder identity or absence | identify the current holder; no success-path hint |
 | Orchestrator Leave omits handover/resolve | Thread, actor | repeat Leave with exactly one of `--to` or `--resolve` |
@@ -157,6 +160,7 @@ Validation errors for omitted choices MUST name the CLI flag. Domain refusals MU
 This is a hard CLI and behavior cutover:
 
 - Thread creation moves from generic top-level message posting to `board thread create` when Participant semantics are required.
+- A session topic-placement post is refused and directed to `board thread create`; a human topic-placement post remains allowed and creates no Participant.
 - Posting a Thread reply no longer changes Watch state.
 - Creating or joining owns the explicit Watch choice.
 - Existing Threads begin with no Participant records and no Orchestrator. Session identities must Join before their next post, Listen, or resolve after the feature lands.
@@ -179,7 +183,7 @@ This is a hard CLI and behavior cutover:
 | U1–U4, U10 | Domain and storage tests show non-null closed Roles, role-less human create without a Participant, agent create with a Participant, repeat Join reopening one row, and note preservation. |
 | U5, U12, U15 | CLI/protocol validation tests show every omitted choice and missing/ambiguous `self` input fails with the named flag or environment variable before mutation. |
 | U6, U8, U9 | Storage concurrency and transaction tests show a single Orchestrator, exact Replace, atomic handover, and resolution closing all open Participants. |
-| U7, U18 | Real Control-path tests show unjoined session post/Listen/resolve refusals occur at entry, human read/post without Join succeeds, and human resolve without the Orchestrator Role is refused. |
+| U7, U18 | Real Control-path tests show unjoined session post/Listen/resolve refusals occur at entry, while human read/post/Listen/resolve without Join succeeds and human resolution closes every open Participant. |
 | U11 | Storage tests show `lastSeenActivity` advances only by the relevant Activity sequences for Join, post, Listen, Leave, Replace, and resolution. |
 | U13 | Protocol and CLI tests show refusal-specific structured `nextAction` commands and no `nextAction` on successful results. |
 | U14 | Thread show/list and CLI tests show holder identity or `null`. |
