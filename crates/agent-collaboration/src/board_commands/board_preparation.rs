@@ -525,6 +525,7 @@ fn prepare_thread(
             command_context(arguments.common),
         )),
         ThreadCommand::Listen(arguments) => prepare_thread_listen(arguments),
+        ThreadCommand::Wait(arguments) => prepare_thread_wait(arguments),
     }
 }
 
@@ -854,6 +855,68 @@ fn prepare_thread_listen(
     ))
 }
 
+fn prepare_thread_wait(
+    arguments: ThreadWaitArguments,
+) -> Result<(PreparedBoardCommand, CommandContext), String> {
+    require_thread_wait_json(&arguments.common)?;
+    let selection = match (arguments.watched, arguments.root_message_id.is_empty()) {
+        (true, true) => ThreadListenSelection::Watched,
+        (false, false) => ThreadListenSelection::Roots {
+            root_message_ids: arguments
+                .root_message_id
+                .into_iter()
+                .map(|value| parse_uuid_v7(value, "--root-message-id"))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        _ => {
+            return Err(
+                "Choose exactly one Thread selection: --watched or repeated --root-message-id"
+                    .into(),
+            );
+        }
+    };
+    let actor = arguments
+        .actor
+        .as_deref()
+        .ok_or_else(|| "Thread Wait requires --actor".to_owned())
+        .and_then(parse_actor_input)?;
+    let acknowledge = match (arguments.acknowledge, arguments.no_acknowledge) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => {
+            return Err(
+                "Choose exactly one acknowledgement mode: --acknowledge or --no-acknowledge"
+                    .to_owned(),
+            );
+        }
+    };
+    let request = ThreadListenRequest {
+        reader: match &actor {
+            ActorInput::Explicit(identity) => identity.clone(),
+            ActorInput::Self_ => placeholder_identity()?,
+        },
+        selection,
+        mode: ThreadListenMode::Once {
+            max_wait_seconds: parse_duration_seconds(
+                arguments
+                    .max_wait
+                    .as_deref()
+                    .ok_or_else(|| "Thread Wait requires --max-wait <duration>".to_owned())?,
+                "--max-wait",
+            )?,
+        },
+        from_activity_sequence: arguments
+            .from_activity_sequence
+            .map(|value| activity_sequence(value, "--from"))
+            .transpose()?,
+        acknowledge,
+    };
+    Ok((
+        PreparedBoardCommand::ThreadListen(PendingThreadListen { request, actor }),
+        command_context(arguments.common),
+    ))
+}
+
 fn require_thread_json(common: &CommonArguments, command: &str) -> Result<(), String> {
     if common.json {
         Ok(())
@@ -867,6 +930,14 @@ fn require_thread_listen_json(common: &CommonArguments) -> Result<(), String> {
         Ok(())
     } else {
         Err("Thread Listen requires --json because stdout is its Delivery target".into())
+    }
+}
+
+fn require_thread_wait_json(common: &CommonArguments) -> Result<(), String> {
+    if common.json {
+        Ok(())
+    } else {
+        Err("Thread Wait requires --json".into())
     }
 }
 

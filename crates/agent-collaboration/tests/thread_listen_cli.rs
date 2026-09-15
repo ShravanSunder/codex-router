@@ -295,9 +295,9 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
     }
 
     let timeout = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
-        .args(["board", "thread", "listen", "--root-message-id"])
+        .args(["board", "thread", "wait", "--root-message-id"])
         .arg(root_message.message_id.as_str())
-        .args(["--once", "--max-wait", "1s", "--actor", "self"])
+        .args(["--max-wait", "1s", "--actor", "self"])
         .arg("--no-acknowledge")
         .arg("--service-directory")
         .arg(&root)

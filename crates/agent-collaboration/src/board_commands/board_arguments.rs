@@ -130,6 +130,8 @@ pub(super) enum ThreadCommand {
     List(ThreadListArguments),
     /// Wait for Thread Activity. Delivery marks it seen; acknowledgement remains separate.
     Listen(ThreadListenArguments),
+    /// Wait once for watched or named Thread Activity and then exit.
+    Wait(ThreadWaitArguments),
 }
 
 #[derive(Subcommand)]
@@ -642,6 +644,33 @@ pub(super) struct ThreadListenArguments {
     #[arg(long, conflicts_with = "acknowledge")]
     pub no_acknowledge: bool,
     /// Typed Reader Identity JSON.
+    #[arg(long)]
+    pub actor: Option<String>,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
+pub(super) struct ThreadWaitArguments {
+    /// Select every Thread with an active Watch for this Reader.
+    #[arg(long, conflicts_with = "root_message_id")]
+    pub watched: bool,
+    /// Select a named Thread. May be repeated.
+    #[arg(long)]
+    pub root_message_id: Vec<String>,
+    /// Maximum wait: integer followed by s, m, h, or d.
+    #[arg(long)]
+    pub max_wait: Option<String>,
+    /// Initialize the Delivered position for a first Wait from this Activity sequence.
+    #[arg(long = "from")]
+    pub from_activity_sequence: Option<u64>,
+    /// Advance each Thread's Acknowledged position after its Batch is written to stdout.
+    #[arg(long)]
+    pub acknowledge: bool,
+    /// Leave each emitted Batch's Acknowledged position unchanged.
+    #[arg(long, conflicts_with = "acknowledge")]
+    pub no_acknowledge: bool,
+    /// Typed Reader Identity JSON, or self for the current Codex or Claude Code session.
     #[arg(long)]
     pub actor: Option<String>,
     #[command(flatten)]
