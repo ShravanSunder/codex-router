@@ -2,6 +2,7 @@ use collaboration_client::ControlClient;
 use collaboration_client::board::*;
 use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
 use message_board_storage::BoardStore;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -113,6 +114,68 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
                 command.env("CODEX_THREAD_ID", "");
             }
             _ => {}
+        }
+        let output = command.output().await?;
+        if output.status.code() != Some(2)
+            || !String::from_utf8_lossy(&output.stdout).contains(expected)
+        {
+            return Err(format!(
+                "--actor self {environment} environment did not fail before mutation: status {:?}, stdout {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout)
+            )
+            .into());
+        }
+    }
+    for (environment, codex_thread_id, claude_code_session_id, expected) in [
+        (
+            "invalid Codex",
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            None,
+            "contain a non-empty session ID",
+        ),
+        (
+            "invalid Claude",
+            None,
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            "contain a non-empty session ID",
+        ),
+        (
+            "invalid Codex with Claude",
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            Some(std::ffi::OsString::from("ambiguous-claude")),
+            "is ambiguous",
+        ),
+        (
+            "Codex with invalid Claude",
+            Some(std::ffi::OsString::from("ambiguous-codex")),
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            "is ambiguous",
+        ),
+        (
+            "both invalid",
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            Some(std::ffi::OsString::from_vec(vec![0x81])),
+            "is ambiguous",
+        ),
+    ] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
+        command
+            .args(["board", "thread", "listen", "--root-message-id"])
+            .arg(root_message.message_id.as_str())
+            .args(["--once", "--max-wait", "1s", "--actor", "self"])
+            .arg("--no-acknowledge")
+            .arg("--service-directory")
+            .arg(&root)
+            .arg("--json")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .kill_on_drop(true);
+        if let Some(value) = codex_thread_id {
+            command.env("CODEX_THREAD_ID", value);
+        }
+        if let Some(value) = claude_code_session_id {
+            command.env("CLAUDE_CODE_SESSION_ID", value);
         }
         let output = command.output().await?;
         if output.status.code() != Some(2)

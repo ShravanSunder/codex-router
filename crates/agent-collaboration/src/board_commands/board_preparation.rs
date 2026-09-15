@@ -105,8 +105,8 @@ pub(super) fn finalize_actor(
 }
 
 fn self_identity(client: &ControlClient) -> Result<Identity, String> {
-    let codex = std::env::var("CODEX_THREAD_ID").ok();
-    let claude = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+    let codex = std::env::var_os("CODEX_THREAD_ID");
+    let claude = std::env::var_os("CLAUDE_CODE_SESSION_ID");
     let (session_id, endpoint_id) = match (codex, claude) {
         (Some(_), Some(_)) => return Err("--actor self is ambiguous: set exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
         (None, None) => return Err("--actor self requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
@@ -116,6 +116,9 @@ fn self_identity(client: &ControlClient) -> Result<Identity, String> {
     let service_id: ServiceId = String::from(client.identity().service_id.clone())
         .try_into()
         .map_err(|_| "--actor self could not use the verified service identity".to_owned())?;
+    let session_id = session_id.into_string().map_err(|_| {
+        "--actor self requires CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID to contain a non-empty session ID without NUL".to_owned()
+    })?;
     let session_id = SessionId::try_from(session_id).map_err(|_| {
         "--actor self requires CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID to contain a non-empty session ID without NUL".to_owned()
     })?;

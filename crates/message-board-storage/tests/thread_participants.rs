@@ -22,6 +22,12 @@ fn session(name: &str) -> Identity {
     }
 }
 
+fn maximum_escape_heavy_session(index: usize) -> Identity {
+    let prefix = format!("{index:04}");
+    let session_id = format!("{prefix}{}", "\u{1}".repeat(4_096 - prefix.len()));
+    session(&session_id)
+}
+
 fn page(limit: u32) -> PageRequest {
     PageRequest {
         limit: PageLimit::try_from(limit).unwrap(),
@@ -113,6 +119,62 @@ impl Fixture {
         self.store.close().await.unwrap();
         std::fs::remove_file(self.path).unwrap();
     }
+}
+
+#[tokio::test]
+async fn thread_list_pages_escape_heavy_holders_with_complete_cursor_traversal() {
+    let mut fixture = Fixture::open("thread-list-frame-budget").await;
+    let mut expected_roots = Vec::new();
+    for index in 0..100 {
+        let created = fixture
+            .create(
+                maximum_escape_heavy_session(index),
+                Some(ParticipantRole::Orchestrator),
+                false,
+            )
+            .await;
+        expected_roots.push(created.message.message_id);
+    }
+    expected_roots.sort();
+
+    let mut cursor = None;
+    let mut observed_roots = Vec::new();
+    loop {
+        let result = fixture
+            .store
+            .list_threads(ThreadListRequest {
+                project_id: fixture.project_id.clone(),
+                reader: human("inspector"),
+                watched_only: false,
+                page: PageRequest {
+                    limit: PageLimit::try_from(100).unwrap(),
+                    cursor,
+                },
+            })
+            .await
+            .unwrap();
+        assert!(serde_json::to_vec(&result).unwrap().len() < 1_048_576);
+        assert!(
+            result
+                .page
+                .records
+                .iter()
+                .all(|thread| thread.orchestrator.is_some())
+        );
+        observed_roots.extend(
+            result
+                .page
+                .records
+                .into_iter()
+                .map(|thread| thread.root_message_id),
+        );
+        let Some(next_cursor) = result.page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    assert_eq!(observed_roots, expected_roots);
+    fixture.finish().await;
 }
 
 #[tokio::test]

@@ -5,6 +5,22 @@ use message_board_storage::BoardStore;
 use std::sync::Arc;
 mod board_control_support;
 
+fn maximum_escape_heavy_session(index: usize) -> Result<Identity, Box<dyn std::error::Error>> {
+    let prefix = format!("{index:04}");
+    Ok(Identity::Session {
+        session: SessionRef {
+            endpoint: SessionEndpointRef {
+                service_id: ServiceId::try_from("00000000-0000-4000-8000-000000000001".to_owned())?,
+                endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+            },
+            session_id: SessionId::try_from(format!(
+                "{prefix}{}",
+                "\u{1}".repeat(4_096 - prefix.len())
+            ))?,
+        },
+    })
+}
+
 #[tokio::test]
 async fn board_control_roundtrip_preserves_root_thread_and_actor()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -153,6 +169,129 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
         return Err("new thread was not unresolved".into());
     }
     drop(client);
+    task.await??;
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn control_thread_list_pages_escape_heavy_holders_without_skips_or_repeats()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "board-control-thread-list-frame-budget-{}.sqlite",
+        MessageId::generate().as_str()
+    ));
+    let mut seed = BoardStore::open(&path).await?;
+    let owner = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned())?,
+    };
+    let project_id = ProjectId::generate();
+    seed.create_project(ProjectCreateRequest {
+        project_id: project_id.clone(),
+        name: ResourceName::try_from("Project".to_owned())?,
+        description: Description::try_from(String::new())?,
+        actor: owner.clone(),
+        acting_for: None,
+    })
+    .await?;
+    let board_id = BoardId::generate();
+    seed.create_board(BoardCreateRequest {
+        board_id: board_id.clone(),
+        project_id: project_id.clone(),
+        name: ResourceName::try_from("Board".to_owned())?,
+        description: Description::try_from(String::new())?,
+        actor: owner.clone(),
+        acting_for: None,
+    })
+    .await?;
+    let topic_id = TopicId::generate();
+    seed.create_topic(TopicCreateRequest {
+        topic_id: topic_id.clone(),
+        board_id,
+        name: ResourceName::try_from("Topic".to_owned())?,
+        description: Description::try_from(String::new())?,
+        actor: owner.clone(),
+        acting_for: None,
+    })
+    .await?;
+    let mut expected_roots = Vec::new();
+    for index in 0..100 {
+        let created = seed
+            .create_thread(ThreadCreateRequest {
+                message_id: MessageId::generate(),
+                topic_id: topic_id.clone(),
+                actor: maximum_escape_heavy_session(index)?,
+                acting_for: None,
+                text: MessageText::try_from("Root".to_owned())?,
+                references: MessageReferences::try_from(Vec::new())?,
+                role: Some(ParticipantRole::Orchestrator),
+                watch: false,
+            })
+            .await?;
+        expected_roots.push(created.message.message_id);
+    }
+    expected_roots.sort();
+    seed.close().await?;
+
+    let store = Arc::new(tokio::sync::Mutex::new(BoardStore::open(&path).await?));
+    let identity = ServiceIdentity::new(
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        &format!("sha256:{}", "a".repeat(64)),
+    )
+    .map_err(std::io::Error::other)?
+    .with_board_store(store.clone());
+    let (socket, server) = tokio::net::UnixStream::pair()?;
+    let task = tokio::spawn(serve_control_connection(server, identity));
+    let mut client = ControlClient::initialize(socket, "thread-list-frame-budget", "1").await?;
+    let mut cursor = None;
+    let mut observed_roots = Vec::new();
+    loop {
+        let result = client
+            .board_thread_list(ThreadListRequest {
+                project_id: project_id.clone(),
+                reader: owner.clone(),
+                watched_only: false,
+                page: PageRequest {
+                    limit: PageLimit::try_from(100)?,
+                    cursor,
+                },
+            })
+            .await?;
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "thread-list-frame-budget",
+            "result": result,
+        });
+        if serde_json::to_vec(&response)?.len() >= collaboration_protocol::MAX_CONTROL_FRAME_BYTES {
+            return Err("Control Thread list exceeded its frame budget".into());
+        }
+        let result: ThreadListResult = serde_json::from_value(response["result"].clone())?;
+        if result
+            .page
+            .records
+            .iter()
+            .any(|thread| thread.orchestrator.is_none())
+        {
+            return Err("Control Thread list dropped a holder projection".into());
+        }
+        observed_roots.extend(
+            result
+                .page
+                .records
+                .into_iter()
+                .map(|thread| thread.root_message_id),
+        );
+        let Some(next_cursor) = result.page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    if observed_roots != expected_roots {
+        return Err("Control Thread list cursor traversal skipped or repeated a Thread".into());
+    }
+    client.close().await?;
     task.await??;
     drop(store);
     std::fs::remove_file(path)?;

@@ -17,6 +17,8 @@ use message_board::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Connection;
 
+const THREAD_PAGE_RECORDS_BYTE_BUDGET: usize = 900 * 1024;
+
 #[derive(Serialize, Deserialize)]
 struct ThreadCursor {
     operation: String,
@@ -259,13 +261,36 @@ impl BoardStore {
         .fetch_all(&mut *transaction)
         .await
         .map_err(storage_error)?;
-        let has_more = rows.len() > request.page.limit.get() as usize;
-        let rows = rows
-            .into_iter()
-            .take(request.page.limit.get() as usize)
-            .collect::<Vec<_>>();
+        let mut records = Vec::with_capacity(request.page.limit.get() as usize);
+        let mut encoded_bytes = 2_usize;
+        let mut has_more = false;
+        for row in rows {
+            if records.len() == request.page.limit.get() as usize {
+                has_more = true;
+                break;
+            }
+            let thread = decode_thread(row)?;
+            let thread_bytes = serde_json::to_vec(&thread)
+                .map_err(|_| invalid_record())?
+                .len();
+            let separator_bytes = usize::from(!records.is_empty());
+            if encoded_bytes + separator_bytes + thread_bytes > THREAD_PAGE_RECORDS_BYTE_BUDGET {
+                if records.is_empty() {
+                    return Err(invalid_record());
+                }
+                has_more = true;
+                break;
+            }
+            encoded_bytes += separator_bytes + thread_bytes;
+            records.push(thread);
+        }
         let next_cursor = if has_more {
-            let last = rows.last().ok_or_else(invalid_record)?.root_id.clone();
+            let last = records
+                .last()
+                .ok_or_else(invalid_record)?
+                .root_message_id
+                .as_str()
+                .to_owned();
             Some(encode_cursor(
                 &self.cursor_key,
                 &ThreadCursor {
@@ -279,10 +304,6 @@ impl BoardStore {
         } else {
             None
         };
-        let mut records = Vec::with_capacity(rows.len());
-        for row in rows {
-            records.push(decode_thread(row)?);
-        }
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadListResult {
             page: Page {
