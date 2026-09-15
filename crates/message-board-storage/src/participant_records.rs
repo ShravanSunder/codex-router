@@ -83,13 +83,14 @@ async fn upsert_joined_participant(
     transaction: &mut BoardTransaction<'_>,
     reader_key: &str,
     root_message_id: &MessageId,
+    actor: &Identity,
     role: ParticipantRole,
     note: Option<&ParticipantNote>,
     sequence: i64,
 ) -> Result<(), BoardError> {
-    let role = role_name(role);
+    let role_name = role_name(role);
     let note = note.map(ParticipantNote::as_str);
-    sqlx::query!(
+    match sqlx::query!(
         "INSERT INTO thread_participants(reader_key,root_id,role,note,joined_at_activity,last_seen_activity,closed_at_activity,closed_reason,replaced_by) \
          VALUES(?,?,?,?,?,?,NULL,NULL,NULL) \
          ON CONFLICT(reader_key,root_id) DO UPDATE SET role=excluded.role, \
@@ -98,15 +99,34 @@ async fn upsert_joined_participant(
            closed_at_activity=NULL,closed_reason=NULL,replaced_by=NULL",
         reader_key,
         root_message_id.as_str(),
-        role,
+        role_name,
         note,
         sequence,
         sequence,
     )
     .execute(&mut **transaction)
     .await
-    .map_err(storage_error)?;
-    Ok(())
+    {
+        Ok(_) => Ok(()),
+        Err(error) if role == ParticipantRole::Orchestrator && is_orchestrator_unique_error(&error) => {
+            let Some(holder) = load_orchestrator(transaction, root_message_id).await? else {
+                return Err(storage_error(error));
+            };
+            Err(BoardError::orchestrator_already_exists(
+                root_message_id.clone(),
+                actor.clone(),
+                holder.identity,
+                holder.last_seen_activity,
+            ))
+        }
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
+fn is_orchestrator_unique_error(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(database_error)
+        if database_error.code().as_deref() == Some("2067")
+            && database_error.message() == "UNIQUE constraint failed: thread_participants.root_id")
 }
 
 impl BoardStore {
@@ -230,6 +250,7 @@ impl BoardStore {
             &mut transaction,
             &actor_key,
             &request.root_message_id,
+            &request.actor,
             request.role,
             request.note.as_ref(),
             sequence,
@@ -581,4 +602,44 @@ fn decode_participant_cursor(
         return Err(invalid_cursor());
     }
     Ok(cursor.last_reader_key)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::is_orchestrator_unique_error;
+    use sqlx::Connection;
+
+    #[tokio::test]
+    async fn classifies_only_the_named_orchestrator_unique_constraint() {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE thread_participants(reader_key TEXT,root_id TEXT,role TEXT,closed_at_activity INTEGER,PRIMARY KEY(reader_key,root_id))")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE UNIQUE INDEX thread_single_orchestrator ON thread_participants(root_id) WHERE role='orchestrator' AND closed_at_activity IS NULL")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO thread_participants(reader_key,root_id,role,closed_at_activity) VALUES('first','root','orchestrator',NULL)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+
+        let orchestrator_conflict = sqlx::query("INSERT INTO thread_participants(reader_key,root_id,role,closed_at_activity) VALUES('second','root','orchestrator',NULL)")
+            .execute(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(is_orchestrator_unique_error(&orchestrator_conflict));
+
+        let primary_key_conflict = sqlx::query("INSERT INTO thread_participants(reader_key,root_id,role,closed_at_activity) VALUES('first','root','participant',NULL)")
+            .execute(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(!is_orchestrator_unique_error(&primary_key_conflict));
+        connection.close().await.unwrap();
+    }
 }
