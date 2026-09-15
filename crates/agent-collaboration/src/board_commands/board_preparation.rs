@@ -49,6 +49,9 @@ pub(super) enum PreparedBoardCommand {
     ThreadWatch(ThreadWatchRequest),
     ThreadUnwatch(ThreadUnwatchRequest),
     ThreadList(ThreadListRequest),
+    ThreadListen(ThreadListenRequest),
+    ThreadListenShow(ThreadListenShowRequest),
+    ThreadListenCancel(ThreadListenCancelRequest),
     InboxFetch(InboxFetchRequest),
     InboxAcknowledge(InboxAcknowledgeRequest),
     InboxProjects(InboxProjectsRequest),
@@ -402,6 +405,103 @@ fn prepare_thread(
             }),
             command_context(arguments.common),
         )),
+        ThreadCommand::Listen(arguments) => prepare_thread_listen(arguments),
+    }
+}
+
+fn prepare_thread_listen(
+    arguments: ThreadListenArguments,
+) -> Result<(PreparedBoardCommand, CommandContext), String> {
+    if let Some(control) = arguments.control {
+        return match control {
+            ThreadListenControlCommand::Show(control) => {
+                require_thread_listen_json(&control.common)?;
+                Ok((
+                    PreparedBoardCommand::ThreadListenShow(ThreadListenShowRequest {
+                        listen_id: parse_uuid_v7(control.listen_id, "--listen-id")?,
+                    }),
+                    command_context(control.common),
+                ))
+            }
+            ThreadListenControlCommand::Cancel(control) => {
+                require_thread_listen_json(&control.common)?;
+                Ok((
+                    PreparedBoardCommand::ThreadListenCancel(ThreadListenCancelRequest {
+                        listen_id: parse_uuid_v7(control.listen_id, "--listen-id")?,
+                    }),
+                    command_context(control.common),
+                ))
+            }
+        };
+    }
+    require_thread_listen_json(&arguments.common)?;
+    let selection = match (arguments.watched, arguments.root_message_id.is_empty()) {
+        (true, true) => ThreadListenSelection::Watched,
+        (false, false) => ThreadListenSelection::Roots {
+            root_message_ids: arguments
+                .root_message_id
+                .into_iter()
+                .map(|value| parse_uuid_v7(value, "--root-message-id"))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        _ => {
+            return Err(
+                "Choose exactly one Thread selection: --watched or repeated --root-message-id"
+                    .into(),
+            );
+        }
+    };
+    let mode = match (arguments.once, arguments.lifetime) {
+        (true, None) => ThreadListenMode::Once {
+            max_wait_seconds: parse_duration_seconds(
+                arguments
+                    .max_wait
+                    .as_deref()
+                    .ok_or_else(|| "Once Listen requires --max-wait <duration>".to_owned())?,
+                "--max-wait",
+            )?,
+        },
+        (false, Some(lifetime)) => ThreadListenMode::Repeating {
+            lifetime_seconds: parse_duration_seconds(&lifetime, "--for")?,
+        },
+        _ => return Err("Choose exactly one Listen mode: --once or --for <duration>".into()),
+    };
+    let reader = arguments
+        .actor
+        .as_deref()
+        .ok_or_else(|| "Thread Listen requires --actor".to_owned())
+        .and_then(|actor| parse_identity(actor, "--actor"))?;
+    let acknowledge = match (arguments.acknowledge, arguments.no_acknowledge) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => {
+            return Err(
+                "Choose exactly one acknowledgement mode: --acknowledge or --no-acknowledge"
+                    .to_owned(),
+            );
+        }
+    };
+    let request = ThreadListenRequest {
+        reader,
+        selection,
+        mode,
+        from_activity_sequence: arguments
+            .from_activity_sequence
+            .map(|value| activity_sequence(value, "--from"))
+            .transpose()?,
+        acknowledge,
+    };
+    Ok((
+        PreparedBoardCommand::ThreadListen(request),
+        command_context(arguments.common),
+    ))
+}
+
+fn require_thread_listen_json(common: &CommonArguments) -> Result<(), String> {
+    if common.json {
+        Ok(())
+    } else {
+        Err("Thread Listen requires --json because stdout is its Delivery target".into())
     }
 }
 

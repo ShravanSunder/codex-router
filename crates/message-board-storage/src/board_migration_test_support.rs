@@ -290,6 +290,7 @@ pub(super) async fn store_from_connection(mut connection: SqliteConnection) -> B
     BoardStore {
         connection,
         cursor_key: key.try_into().unwrap(),
+        activity_sender: crate::board_connection::activity_sender(),
     }
 }
 pub(super) async fn migration_versions(connection: &mut SqliteConnection) -> Vec<i64> {

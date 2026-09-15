@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM thread_delivery_positions WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "de314ea52de2d8a99502e57344001cc4c28693409b6d0a87b01b00a5e8421c3e"
+}

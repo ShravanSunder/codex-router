@@ -95,6 +95,30 @@ pub(super) fn activity_sequence(value: u64, flag: &str) -> Result<ActivitySequen
         .map_err(|_| format!("{flag} must not exceed the maximum SQLite activity position"))
 }
 
+pub(super) fn parse_duration_seconds(value: &str, flag: &str) -> Result<u64, String> {
+    let error = || format!("{flag} requires a positive integer followed by s, m, h, or d");
+    let (number, multiplier) = if let Some(number) = value.strip_suffix('s') {
+        (number, 1_u64)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 60 * 60)
+    } else if let Some(number) = value.strip_suffix('d') {
+        (number, 24 * 60 * 60)
+    } else {
+        return Err(error());
+    };
+    let seconds = number
+        .parse::<u64>()
+        .map_err(|_| error())?
+        .checked_mul(multiplier)
+        .ok_or_else(error)?;
+    if seconds == 0 {
+        return Err(error());
+    }
+    Ok(seconds)
+}
+
 pub(super) fn parse_mutation_identity(
     arguments: &MutationIdentityArguments,
 ) -> Result<(Identity, Option<ActingForIdentity>), String> {

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT active FROM thread_watches WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "active",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "active"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e83f4b049cf6990c21864f79a8f47df33fd907d672be2cdbe107ac9d2315a4f9"
+}

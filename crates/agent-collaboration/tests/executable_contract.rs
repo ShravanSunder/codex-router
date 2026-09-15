@@ -79,6 +79,34 @@ fn help_uses_the_independent_executable_name() {
 }
 
 #[test]
+fn session_tui_uses_the_singular_executable_name() {
+    // Arrange / Act: the session picker has its own executable identity.
+    let version = Command::new(env!("CARGO_BIN_EXE_agent-session"))
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| panic!("session version command should execute: {error}"));
+    let help = Command::new(env!("CARGO_BIN_EXE_agent-session"))
+        .arg("--help")
+        .output()
+        .unwrap_or_else(|error| panic!("session help command should execute: {error}"));
+
+    // Assert: it presents the singular session name and picker-specific options.
+    assert!(version.status.success());
+    assert_eq!(
+        version.stdout,
+        format!("agent-session {}\n", env!("CARGO_PKG_VERSION")).as_bytes()
+    );
+    assert!(version.stderr.is_empty());
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("agent-session"));
+    assert!(text.contains("--dry-run"));
+    assert!(text.contains("--local"));
+    assert!(!text.contains("board"));
+    assert!(help.stderr.is_empty());
+}
+
+#[test]
 #[cfg(debug_assertions)]
 fn debug_dry_run_preserves_isolated_socket_and_never_executes_codex() {
     // Arrange: deliberately no executable search path; dry-run must not launch Codex.

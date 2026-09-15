@@ -365,6 +365,38 @@ pub(crate) async fn validate_reader_activity_boundaries(
         validate_stored_boundary(watch.starts_after_activity, 0, latest, resource)?;
     }
 
+    let delivered_positions = sqlx::query!(
+        "SELECT position.root_id,position.delivered_through,watch.starts_after_activity, \
+           EXISTS(SELECT 1 FROM board_activity activity \
+             WHERE activity.activity_sequence=position.delivered_through \
+               AND activity.root_id=position.root_id \
+               AND activity.kind='threadMessageCreated') AS valid_scope \
+         FROM thread_delivery_positions position \
+         JOIN thread_watches watch ON watch.reader_key=position.reader_key AND watch.root_id=position.root_id \
+         JOIN board_messages message ON message.message_id=position.root_id \
+         JOIN project_boards board ON board.board_id=message.board_id \
+         WHERE position.reader_key=? AND board.project_id=? AND watch.active=1",
+        reader_key,
+        project_id,
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for position in delivered_positions {
+        let root_message_id =
+            MessageId::try_from(position.root_id).map_err(|_| invalid_record())?;
+        let resource = ResourceIdentity::Thread { root_message_id };
+        validate_stored_boundary(
+            position.delivered_through,
+            position.starts_after_activity,
+            latest,
+            resource.clone(),
+        )?;
+        if position.valid_scope == 0 {
+            return Err(BoardError::invalid_record(resource));
+        }
+    }
+
     let topic_bookmarks = sqlx::query!(
         "SELECT bookmark.topic_id,bookmark.through_activity, \
            EXISTS(SELECT 1 FROM board_activity activity \

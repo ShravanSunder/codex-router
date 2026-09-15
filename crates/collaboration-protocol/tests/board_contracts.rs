@@ -1,7 +1,7 @@
 use collaboration_protocol::{control_error_is_valid, control_schema_document};
 use serde_json::{Value, json};
 
-const BOARD_METHODS: [&str; 29] = [
+const BOARD_METHODS: [&str; 33] = [
     "board/discoverySearch",
     "board/messageSearch",
     "board/projectCreate",
@@ -28,6 +28,10 @@ const BOARD_METHODS: [&str; 29] = [
     "board/threadWatch",
     "board/threadUnwatch",
     "board/threadList",
+    "board/threadListen",
+    "board/threadWait",
+    "board/threadListenShow",
+    "board/threadListenCancel",
     "board/inboxFetch",
     "board/inboxAcknowledge",
     "board/inboxProjects",
@@ -191,6 +195,41 @@ fn board_variants_and_nested_records_fail_closed() -> Result<(), Box<dyn std::er
     ensure(
         !validator.is_valid(&extra_request_field),
         "extra request field rejected",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn thread_listen_contract_is_closed_and_has_no_delivery_target()
+-> Result<(), Box<dyn std::error::Error>> {
+    let schema = board_schema()?;
+    let validator =
+        jsonschema::validator_for(&method_schema(&schema, "board/threadListen", "request")?)?;
+    let root_id = "01890f2e-7b4c-7cc0-98c4-000000000002";
+    let valid = json!({
+        "jsonrpc":"2.0",
+        "id":"thread-listen-1",
+        "method":"board/threadListen",
+        "params":{
+            "reader":{"kind":"human","humanId":"reader"},
+            "selection":{"kind":"roots","rootMessageIds":[root_id]},
+            "mode":{"kind":"once","maxWaitSeconds":540},
+            "fromActivitySequence":null,
+            "acknowledge":false
+        }
+    });
+    ensure(validator.is_valid(&valid), "valid Thread Listen request")?;
+    let mut unknown_selection = valid.clone();
+    unknown_selection["params"]["selection"]["kind"] = json!("topics");
+    ensure(
+        !validator.is_valid(&unknown_selection),
+        "unknown Thread selection rejected",
+    )?;
+    let mut delivery_target = valid;
+    delivery_target["params"]["target"] = json!({"kind":"session"});
+    ensure(
+        !validator.is_valid(&delivery_target),
+        "removed Delivery target rejected",
     )?;
     Ok(())
 }

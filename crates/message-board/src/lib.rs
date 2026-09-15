@@ -8,6 +8,7 @@ mod board_operations;
 mod board_pagination;
 mod board_search;
 mod repository_identity;
+mod thread_listening;
 
 pub use board_failures::*;
 pub use board_identity::*;
@@ -17,3 +18,4 @@ pub use board_operations::*;
 pub use board_pagination::*;
 pub use board_search::*;
 pub use repository_identity::*;
+pub use thread_listening::*;

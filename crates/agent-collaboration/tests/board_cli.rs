@@ -52,6 +52,184 @@ fn resource_and_message_search_have_distinct_filtered_commands() {
 const HUMAN_ACTOR: &str = r#"{"kind":"human","humanId":"cli-test-human"}"#;
 
 #[test]
+fn thread_listen_help_exposes_exact_process_owned_contract() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "listen", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for required in [
+        "--watched",
+        "--root-message-id",
+        "--once",
+        "--max-wait",
+        "--for",
+        "--from",
+        "--acknowledge",
+        "--no-acknowledge",
+        "Delivery marks it seen",
+        "acknowledgement remains separate",
+    ] {
+        assert!(help.contains(required), "missing {required}: {help}");
+    }
+    for excluded in ["--deliver-to", "--delivery", "--debounce"] {
+        assert!(!help.contains(excluded), "unexpected {excluded}: {help}");
+    }
+}
+
+#[test]
+fn thread_listen_requires_one_selection_one_mode_actor_and_json() {
+    for (arguments, expected) in [
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--once",
+                "--actor",
+                HUMAN_ACTOR,
+                "--json",
+            ],
+            "Choose exactly one Thread selection",
+        ),
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--watched",
+                "--actor",
+                HUMAN_ACTOR,
+                "--json",
+            ],
+            "Choose exactly one Listen mode",
+        ),
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--watched",
+                "--once",
+                "--max-wait",
+                "1s",
+                "--no-acknowledge",
+                "--json",
+            ],
+            "Thread Listen requires --actor",
+        ),
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--watched",
+                "--once",
+                "--max-wait",
+                "1s",
+                "--no-acknowledge",
+                "--actor",
+                HUMAN_ACTOR,
+            ],
+            "Thread Listen requires --json",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            rendered.contains(expected),
+            "missing {expected}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn thread_listen_requires_explicit_bound_and_acknowledgement_choice() {
+    for (arguments, expected) in [
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--watched",
+                "--once",
+                "--no-acknowledge",
+                "--actor",
+                HUMAN_ACTOR,
+                "--json",
+            ],
+            "--max-wait",
+        ),
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--watched",
+                "--once",
+                "--max-wait",
+                "1s",
+                "--actor",
+                HUMAN_ACTOR,
+                "--json",
+            ],
+            "--acknowledge or --no-acknowledge",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            rendered.contains(expected),
+            "missing {expected}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn thread_listen_show_and_cancel_have_nested_cli_paths() {
+    for command in ["show", "cancel"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(["board", "thread", "listen", command, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("--listen-id"));
+
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args([
+                "board",
+                "thread",
+                "listen",
+                command,
+                "--listen-id",
+                "018f6f67-64d2-7a21-bf9a-8f193f987001",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires --json"));
+    }
+}
+
+#[test]
 fn board_help_lists_every_descriptive_command_family() {
     let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["board", "--help"])

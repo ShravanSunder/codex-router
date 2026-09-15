@@ -5,6 +5,7 @@ use collaboration_protocol::{EndpointDescription, UuidIdentity};
 #[derive(Clone)]
 pub struct ServiceIdentity {
     pub(crate) board: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
+    pub(crate) thread_listens: crate::thread_listen_registry::ThreadListenRegistry,
     pub(crate) service_id: UuidIdentity,
     pub(crate) configuration: crate::AutomationConfigurationHandle,
     pub(crate) configuration_backend:
@@ -137,6 +138,7 @@ impl ServiceIdentity {
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
             board: None,
+            thread_listens: crate::thread_listen_registry::ThreadListenRegistry::new(),
             directory: EndpointDirectory::new(
                 UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?,
             ),

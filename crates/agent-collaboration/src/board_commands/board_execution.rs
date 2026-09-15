@@ -168,6 +168,15 @@ async fn dispatch(
         PreparedBoardCommand::ThreadList(request) => {
             serialize_result(client.board_thread_list(request).await?)
         }
+        PreparedBoardCommand::ThreadListen(_) => {
+            Err(ClientError::Protocol("Thread Listen must use streaming stdout execution").into())
+        }
+        PreparedBoardCommand::ThreadListenShow(request) => {
+            serialize_result(client.board_thread_listen_show(request).await?)
+        }
+        PreparedBoardCommand::ThreadListenCancel(request) => {
+            serialize_result(client.board_thread_listen_cancel(request).await?)
+        }
         PreparedBoardCommand::InboxFetch(request) => {
             serialize_result(client.board_inbox_fetch(request).await?)
         }

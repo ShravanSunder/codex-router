@@ -3,6 +3,7 @@ mod board_arguments;
 mod board_execution;
 mod board_preparation;
 mod board_search_commands;
+mod board_thread_listen_execution;
 mod board_value_parsing;
 
 use board_arguments::BoardArguments;
@@ -22,5 +23,16 @@ pub fn run_board_command(arguments: Vec<OsString>) -> i32 {
             return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
         }
     };
-    board_execution::execute(command, context)
+    match command {
+        board_preparation::PreparedBoardCommand::ThreadListen(request) => {
+            board_thread_listen_execution::execute(request, context)
+        }
+        board_preparation::PreparedBoardCommand::ThreadListenShow(request) => {
+            board_thread_listen_execution::execute_show(request, context)
+        }
+        board_preparation::PreparedBoardCommand::ThreadListenCancel(request) => {
+            board_thread_listen_execution::execute_cancel(request, context)
+        }
+        command => board_execution::execute(command, context),
+    }
 }

@@ -1,0 +1,57 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT position.root_id,position.delivered_through,watch.starts_after_activity, EXISTS(SELECT 1 FROM board_activity activity WHERE activity.activity_sequence=position.delivered_through AND activity.root_id=position.root_id AND activity.kind='threadMessageCreated') AS valid_scope FROM thread_delivery_positions position JOIN thread_watches watch ON watch.reader_key=position.reader_key AND watch.root_id=position.root_id JOIN board_messages message ON message.message_id=position.root_id JOIN project_boards board ON board.board_id=message.board_id WHERE position.reader_key=? AND board.project_id=? AND watch.active=1",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_delivery_positions",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "delivered_through",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_delivery_positions",
+            "name": "delivered_through"
+          }
+        }
+      },
+      {
+        "name": "starts_after_activity",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "starts_after_activity"
+          }
+        }
+      },
+      {
+        "name": "valid_scope",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "17d8900430f1a2115afea413bb392e26ff988b7e10543a7defe0736abf126414"
+}

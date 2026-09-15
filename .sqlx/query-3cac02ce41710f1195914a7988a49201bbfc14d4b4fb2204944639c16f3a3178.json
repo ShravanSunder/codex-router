@@ -1,0 +1,45 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT watch.starts_after_activity,position.delivered_through, CASE WHEN position.delivered_through IS NULL THEN 1 ELSE EXISTS( SELECT 1 FROM board_activity activity WHERE activity.activity_sequence=position.delivered_through AND activity.root_id=watch.root_id AND activity.kind='threadMessageCreated') END AS valid_scope FROM thread_watches watch LEFT JOIN thread_delivery_positions position ON position.reader_key=watch.reader_key AND position.root_id=watch.root_id WHERE watch.reader_key=? AND watch.root_id=? AND watch.active=1",
+  "describe": {
+    "columns": [
+      {
+        "name": "starts_after_activity",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_watches",
+            "name": "starts_after_activity"
+          }
+        }
+      },
+      {
+        "name": "delivered_through",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_delivery_positions",
+            "name": "delivered_through"
+          }
+        }
+      },
+      {
+        "name": "valid_scope",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "3cac02ce41710f1195914a7988a49201bbfc14d4b4fb2204944639c16f3a3178"
+}
