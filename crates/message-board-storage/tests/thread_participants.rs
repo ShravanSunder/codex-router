@@ -531,6 +531,59 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
 }
 
 #[tokio::test]
+async fn listen_refuses_every_missing_session_participant_without_creating_watches() {
+    let mut fixture = Fixture::open("listen-all-missing").await;
+    let first_root = fixture
+        .create(human("owner-one"), None, false)
+        .await
+        .message
+        .message_id;
+    let second_root = fixture
+        .create(human("owner-two"), None, false)
+        .await
+        .message
+        .message_id;
+    let reader = session("unjoined-listener");
+
+    let failure = fixture
+        .store
+        .prepare_thread_listen(&ThreadListenRequest {
+            reader: reader.clone(),
+            selection: ThreadListenSelection::Roots {
+                root_message_ids: vec![first_root.clone(), second_root.clone()],
+            },
+            mode: ThreadListenMode::Once {
+                max_wait_seconds: 1,
+            },
+            acknowledge: false,
+            from_activity_sequence: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failure.kind, BoardFailureKind::ParticipantRequired);
+    let BoardErrorDetails::ParticipantRefusal { refusal } = failure.details else {
+        panic!("missing participant refusal details");
+    };
+    assert_eq!(refusal.root_message_id, first_root);
+    assert_eq!(
+        refusal.missing_root_message_ids,
+        vec![first_root.clone(), second_root.clone()]
+    );
+    for root_message_id in [first_root, second_root] {
+        let thread = fixture
+            .store
+            .show_thread(ThreadShowRequest {
+                root_message_id,
+                reader: Some(reader.clone()),
+            })
+            .await
+            .unwrap();
+        assert!(!thread.watch_status.unwrap().watching);
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn concurrent_orchestrator_joins_commit_one_holder_and_report_the_winner() {
     let mut fixture = Fixture::open("concurrent-holder").await;
     let created = fixture.create(human("owner"), None, false).await;
@@ -815,6 +868,111 @@ async fn participant_cursor_is_thread_bound_and_unknown_stored_role_is_rejected(
     let failure = store
         .list_thread_participants(ThreadParticipantListRequest {
             root_message_id: first_root,
+            page: page(100),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failure.kind, BoardFailureKind::InvalidRecord);
+    store.close().await.unwrap();
+    std::fs::remove_file(fixture.path).unwrap();
+}
+
+#[tokio::test]
+async fn thread_list_rejects_corrupt_projected_orchestrator_records() {
+    let mut fixture = Fixture::open("thread-list-orchestrator-corruption").await;
+    let first = fixture
+        .create(
+            session("first-orchestrator"),
+            Some(ParticipantRole::Orchestrator),
+            false,
+        )
+        .await;
+    let second = fixture.create(human("second-owner"), None, false).await;
+    let first_root = first.message.message_id;
+    let second_root = second.message.message_id;
+    let foreign_sequence = fixture
+        .store
+        .join_thread(ThreadJoinRequest {
+            root_message_id: second_root,
+            actor: session("foreign-participant"),
+            role: ParticipantRole::Participant,
+            watch: false,
+            replace: None,
+            note: None,
+        })
+        .await
+        .unwrap()
+        .participant
+        .joined_at_activity;
+
+    fixture.store.close().await.unwrap();
+    let mut connection =
+        sqlx::SqliteConnection::connect(&format!("sqlite://{}", fixture.path.display()))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE thread_participants SET role='driver' WHERE root_id=?")
+        .bind(first_root.as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let mut store = BoardStore::open(&fixture.path).await.unwrap();
+    let failure = store
+        .list_threads(ThreadListRequest {
+            project_id: fixture.project_id.clone(),
+            reader: human("inspector"),
+            watched_only: false,
+            page: page(100),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failure.kind, BoardFailureKind::InvalidRecord);
+    store.close().await.unwrap();
+
+    let mut connection =
+        sqlx::SqliteConnection::connect(&format!("sqlite://{}", fixture.path.display()))
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE thread_participants SET role='orchestrator',closed_reason='left' WHERE root_id=?",
+    )
+    .bind(first_root.as_str())
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+    let mut store = BoardStore::open(&fixture.path).await.unwrap();
+    let failure = store
+        .list_threads(ThreadListRequest {
+            project_id: fixture.project_id.clone(),
+            reader: human("inspector"),
+            watched_only: false,
+            page: page(100),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failure.kind, BoardFailureKind::InvalidRecord);
+    store.close().await.unwrap();
+
+    let mut connection =
+        sqlx::SqliteConnection::connect(&format!("sqlite://{}", fixture.path.display()))
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE thread_participants SET closed_reason=NULL,last_seen_activity=? WHERE root_id=?",
+    )
+    .bind(i64::try_from(foreign_sequence.get()).unwrap())
+    .bind(first_root.as_str())
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+    let mut store = BoardStore::open(&fixture.path).await.unwrap();
+    let failure = store
+        .list_threads(ThreadListRequest {
+            project_id: fixture.project_id.clone(),
+            reader: human("inspector"),
+            watched_only: false,
             page: page(100),
         })
         .await

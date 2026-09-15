@@ -83,7 +83,7 @@ pub(crate) async fn decode_participant(
     transaction: &mut BoardTransaction<'_>,
     row: StoredParticipantRow,
 ) -> Result<Participant, BoardError> {
-    let root_message_id = MessageId::try_from(row.root_id).map_err(|_| invalid_record())?;
+    let root_message_id = MessageId::try_from(row.root_id.clone()).map_err(|_| invalid_record())?;
     for sequence in [
         Some(row.joined_at_activity),
         Some(row.last_seen_activity),
@@ -99,10 +99,45 @@ pub(crate) async fn decode_participant(
         }
     }
     let identity = load_identity(transaction, &row.reader_key).await?;
-    let replaced_by = match row.replaced_by {
+    let replaced_by = match row.replaced_by.clone() {
         Some(key) => Some(load_identity(transaction, &key).await?),
         None => None,
     };
+    decode_participant_with_identity(row, identity, replaced_by)
+}
+
+pub(crate) fn decode_projected_participant(
+    row: StoredParticipantRow,
+    identity: Identity,
+    joined_activity_on_thread: bool,
+    last_seen_activity_on_thread: bool,
+    closed_activity_on_thread: bool,
+) -> Result<Participant, BoardError> {
+    let root_message_id = MessageId::try_from(row.root_id.clone()).map_err(|_| invalid_record())?;
+    if !joined_activity_on_thread
+        || !last_seen_activity_on_thread
+        || (row.closed_at_activity.is_some() && !closed_activity_on_thread)
+    {
+        return Err(BoardError::invalid_record(ResourceIdentity::Thread {
+            root_message_id,
+        }));
+    }
+    decode_participant_with_identity(row, identity, None)
+}
+
+fn decode_participant_with_identity(
+    row: StoredParticipantRow,
+    identity: Identity,
+    replaced_by: Option<Identity>,
+) -> Result<Participant, BoardError> {
+    let root_message_id = MessageId::try_from(row.root_id).map_err(|_| invalid_record())?;
+    if identity_key(&identity) != row.reader_key
+        || row.replaced_by.is_some() != replaced_by.is_some()
+    {
+        return Err(BoardError::invalid_record(ResourceIdentity::Thread {
+            root_message_id,
+        }));
+    }
     Participant::new(
         identity,
         decode_role(&row.role)?,

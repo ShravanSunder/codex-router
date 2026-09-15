@@ -5,11 +5,13 @@ use crate::message_records::{
     activate_watch, activity_sequence, load_watch_status, require_thread,
 };
 use crate::participant_records::resolve_in_transaction;
-use crate::participant_row_decoding::{load_orchestrator, load_participant};
+use crate::participant_row_decoding::{
+    StoredParticipantRow, decode_projected_participant, load_orchestrator, load_participant,
+};
 use crate::storage_support::{
-    allocate_activity_sequence, archived_board, current_activity_sequence,
-    decode_cursor as decode_signed_cursor, encode_cursor, ensure_identity, invalid_cursor,
-    invalid_record, recompute_project_unread, storage_error,
+    StoredIdentityRow, allocate_activity_sequence, archived_board, current_activity_sequence,
+    decode_cursor as decode_signed_cursor, decode_identity, encode_cursor, ensure_identity,
+    invalid_cursor, invalid_record, recompute_project_unread, storage_error,
 };
 use message_board::*;
 use serde::{Deserialize, Serialize};
@@ -27,8 +29,24 @@ struct ThreadCursor {
 struct StoredThreadRow {
     root_id: String,
     state: String,
-    orchestrator_key: Option<String>,
-    orchestrator_last_seen: Option<i64>,
+    orchestrator_reader_key: Option<String>,
+    orchestrator_root_id: Option<String>,
+    orchestrator_role: Option<String>,
+    orchestrator_note: Option<String>,
+    orchestrator_joined_at_activity: Option<i64>,
+    orchestrator_last_seen_activity: Option<i64>,
+    orchestrator_closed_at_activity: Option<i64>,
+    orchestrator_closed_reason: Option<String>,
+    orchestrator_replaced_by: Option<String>,
+    orchestrator_identity_key: Option<String>,
+    orchestrator_identity_kind: Option<String>,
+    orchestrator_identity_service_id: Option<String>,
+    orchestrator_identity_endpoint_id: Option<String>,
+    orchestrator_identity_session_id: Option<String>,
+    orchestrator_identity_human_id: Option<String>,
+    orchestrator_joined_activity_on_thread: i64,
+    orchestrator_last_seen_activity_on_thread: i64,
+    orchestrator_closed_activity_on_thread: i64,
 }
 
 impl BoardStore {
@@ -204,12 +222,32 @@ impl BoardStore {
         let query_limit = i64::from(request.page.limit.get()) + 1;
         let rows = sqlx::query_as!(
             StoredThreadRow,
-            "SELECT t.root_id,t.state,p.reader_key AS orchestrator_key,p.last_seen_activity AS orchestrator_last_seen \
+            "SELECT t.root_id,t.state, \
+                    p.reader_key AS orchestrator_reader_key,p.root_id AS orchestrator_root_id, \
+                    p.role AS orchestrator_role,p.note AS orchestrator_note, \
+                    p.joined_at_activity AS orchestrator_joined_at_activity, \
+                    p.last_seen_activity AS orchestrator_last_seen_activity, \
+                    p.closed_at_activity AS orchestrator_closed_at_activity, \
+                    p.closed_reason AS orchestrator_closed_reason,p.replaced_by AS orchestrator_replaced_by, \
+                    i.identity_key AS orchestrator_identity_key,i.kind AS orchestrator_identity_kind, \
+                    i.service_id AS orchestrator_identity_service_id,i.endpoint_id AS orchestrator_identity_endpoint_id, \
+                    i.session_id AS orchestrator_identity_session_id,i.human_id AS orchestrator_identity_human_id, \
+                    EXISTS(SELECT 1 FROM board_activity joined_activity \
+                      WHERE joined_activity.activity_sequence=p.joined_at_activity AND joined_activity.root_id=p.root_id) \
+                      AS orchestrator_joined_activity_on_thread, \
+                    EXISTS(SELECT 1 FROM board_activity last_seen_activity \
+                      WHERE last_seen_activity.activity_sequence=p.last_seen_activity AND last_seen_activity.root_id=p.root_id) \
+                      AS orchestrator_last_seen_activity_on_thread, \
+                    EXISTS(SELECT 1 FROM board_activity closed_activity \
+                      WHERE closed_activity.activity_sequence=p.closed_at_activity AND closed_activity.root_id=p.root_id) \
+                      AS orchestrator_closed_activity_on_thread \
              FROM board_threads t \
              JOIN board_messages m ON m.message_id=t.root_id \
              JOIN project_boards b ON b.board_id=m.board_id \
              LEFT JOIN thread_watches w ON w.root_id=t.root_id AND w.reader_key=? \
-             LEFT JOIN thread_participants p ON p.root_id=t.root_id AND p.role='orchestrator' AND p.closed_at_activity IS NULL \
+             LEFT JOIN thread_participants p ON p.root_id=t.root_id AND p.closed_at_activity IS NULL \
+                 AND (p.role='orchestrator' OR p.role NOT IN ('advisor','reviewer','participant')) \
+             LEFT JOIN board_identities i ON i.identity_key=p.reader_key \
              WHERE b.project_id=? AND t.root_id>? AND (?=0 OR w.active=1) \
              ORDER BY t.root_id LIMIT ?",
             reader_key,
@@ -243,7 +281,7 @@ impl BoardStore {
         };
         let mut records = Vec::with_capacity(rows.len());
         for row in rows {
-            records.push(decode_thread(&mut transaction, row).await?);
+            records.push(decode_thread(row)?);
         }
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadListResult {
@@ -374,27 +412,87 @@ async fn set_thread_state(
     ))
 }
 
-async fn decode_thread(
-    transaction: &mut crate::storage_support::BoardTransaction<'_>,
-    row: StoredThreadRow,
-) -> Result<Thread, BoardError> {
-    let orchestrator = match (row.orchestrator_key, row.orchestrator_last_seen) {
-        (None, None) => None,
-        (Some(key), Some(sequence)) => Some(OrchestratorHolder {
-            identity: crate::message_records::load_identity(transaction, &key).await?,
-            last_seen_activity: activity_sequence(sequence)?,
-        }),
+fn decode_thread(row: StoredThreadRow) -> Result<Thread, BoardError> {
+    let root_message_id = MessageId::try_from(row.root_id.clone()).map_err(|_| invalid_record())?;
+    let state = match row.state.as_str() {
+        "unresolved" => ThreadState::Unresolved,
+        "resolved" => ThreadState::Resolved,
         _ => return Err(invalid_record()),
     };
+    let orchestrator = decode_projected_orchestrator(&root_message_id, row)?;
     Ok(Thread {
-        root_message_id: MessageId::try_from(row.root_id).map_err(|_| invalid_record())?,
-        state: match row.state.as_str() {
-            "unresolved" => ThreadState::Unresolved,
-            "resolved" => ThreadState::Resolved,
-            _ => return Err(invalid_record()),
-        },
+        root_message_id,
+        state,
         orchestrator,
     })
+}
+
+fn decode_projected_orchestrator(
+    thread_root_message_id: &MessageId,
+    row: StoredThreadRow,
+) -> Result<Option<OrchestratorHolder>, BoardError> {
+    let Some(reader_key) = row.orchestrator_reader_key else {
+        if row.orchestrator_root_id.is_some()
+            || row.orchestrator_role.is_some()
+            || row.orchestrator_note.is_some()
+            || row.orchestrator_joined_at_activity.is_some()
+            || row.orchestrator_last_seen_activity.is_some()
+            || row.orchestrator_closed_at_activity.is_some()
+            || row.orchestrator_closed_reason.is_some()
+            || row.orchestrator_replaced_by.is_some()
+            || row.orchestrator_identity_key.is_some()
+            || row.orchestrator_identity_kind.is_some()
+            || row.orchestrator_identity_service_id.is_some()
+            || row.orchestrator_identity_endpoint_id.is_some()
+            || row.orchestrator_identity_session_id.is_some()
+            || row.orchestrator_identity_human_id.is_some()
+        {
+            return Err(invalid_record());
+        }
+        return Ok(None);
+    };
+    let participant_root_id = row.orchestrator_root_id.ok_or_else(invalid_record)?;
+    let participant_root_message_id =
+        MessageId::try_from(participant_root_id).map_err(|_| invalid_record())?;
+    if participant_root_message_id != *thread_root_message_id {
+        return Err(invalid_record());
+    }
+    let identity = decode_identity(&StoredIdentityRow {
+        identity_key: row.orchestrator_identity_key.ok_or_else(invalid_record)?,
+        kind: row.orchestrator_identity_kind.ok_or_else(invalid_record)?,
+        service_id: row.orchestrator_identity_service_id,
+        endpoint_id: row.orchestrator_identity_endpoint_id,
+        session_id: row.orchestrator_identity_session_id,
+        human_id: row.orchestrator_identity_human_id,
+    })?;
+    let participant = decode_projected_participant(
+        StoredParticipantRow {
+            reader_key,
+            root_id: participant_root_message_id.as_str().to_owned(),
+            role: row.orchestrator_role.ok_or_else(invalid_record)?,
+            note: row.orchestrator_note,
+            joined_at_activity: row
+                .orchestrator_joined_at_activity
+                .ok_or_else(invalid_record)?,
+            last_seen_activity: row
+                .orchestrator_last_seen_activity
+                .ok_or_else(invalid_record)?,
+            closed_at_activity: row.orchestrator_closed_at_activity,
+            closed_reason: row.orchestrator_closed_reason,
+            replaced_by: row.orchestrator_replaced_by,
+        },
+        identity,
+        row.orchestrator_joined_activity_on_thread != 0,
+        row.orchestrator_last_seen_activity_on_thread != 0,
+        row.orchestrator_closed_activity_on_thread != 0,
+    )?;
+    if participant.role != ParticipantRole::Orchestrator || !participant.is_open() {
+        return Err(invalid_record());
+    }
+    Ok(Some(OrchestratorHolder {
+        identity: participant.identity,
+        last_seen_activity: participant.last_seen_activity,
+    }))
 }
 fn decode_cursor(
     cursor_key: &[u8; 32],

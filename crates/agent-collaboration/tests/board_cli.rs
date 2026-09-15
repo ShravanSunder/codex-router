@@ -212,6 +212,49 @@ fn participant_commands_refuse_omitted_semantic_choices_before_connection() {
 }
 
 #[test]
+fn join_listen_uses_the_specified_once_and_repeating_grammar() {
+    let root = "018f6f67-64d2-7a21-bf9a-8f193f987001";
+    let common = [
+        "board",
+        "thread",
+        "join",
+        "--root-message-id",
+        root,
+        "--actor",
+        HUMAN_ACTOR,
+        "--role",
+        "advisor",
+        "--watch",
+    ];
+    for listen in [
+        vec!["--listen", "once", "--max-wait", "1s", "--acknowledge"],
+        vec!["--listen", "for", "1s", "--no-acknowledge"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(common)
+            .args(listen)
+            .args(["--service-directory", "/tmp/absent-join-listen", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(3));
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(common)
+        .args([
+            "--listen",
+            "for",
+            "--for",
+            "1s",
+            "--no-acknowledge",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn thread_listen_requires_one_selection_one_mode_actor_and_json() {
     for (arguments, expected) in [
         (

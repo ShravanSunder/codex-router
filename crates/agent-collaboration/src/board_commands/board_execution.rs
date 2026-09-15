@@ -289,7 +289,10 @@ fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine
             thread_create_text_file,
         }) => {
             if machine {
-                write_json(&json!({"kind":"error","error":error}), 4)
+                write_json(
+                    &refusal_output(&error, thread_create_text_file.as_deref()),
+                    4,
+                )
             } else {
                 let mut stderr = io::stderr().lock();
                 let kind = wire_name(&error.kind);
@@ -327,6 +330,20 @@ fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine
             ..
         }) => report_connection_failure(machine),
     }
+}
+
+fn refusal_output(error: &BoardError, thread_create_text_file: Option<&std::path::Path>) -> Value {
+    json!({
+        "kind": "error",
+        "error": {
+            "kind": &error.kind,
+            "stage": &error.stage,
+            "message": &error.message,
+            "nextAction": &error.next_action,
+            "details": &error.details,
+            "correctiveCommand": refusal_command(error, thread_create_text_file),
+        },
+    })
 }
 
 fn refusal_command(
@@ -491,7 +508,7 @@ fn write_json(value: &Value, success_code: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::refusal_command;
+    use super::{refusal_command, refusal_output};
     use collaboration_client::board::*;
     use std::path::Path;
 
@@ -508,5 +525,32 @@ mod tests {
 
         assert!(command.contains("--text-file '/tmp/root message.txt'"));
         assert!(!command.contains("--text-file '<path>'"));
+    }
+
+    #[test]
+    fn machine_refusal_serialization_includes_the_corrective_command() {
+        let topic_id =
+            TopicId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned()).expect("topic ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+        };
+        let text = MessageText::try_from("root text".to_owned()).expect("message text");
+        let refusal = BoardError::session_topic_post(topic_id.clone(), actor, text);
+        let output = serde_json::from_str::<serde_json::Value>(
+            &serde_json::to_string(&refusal_output(
+                &refusal,
+                Some(Path::new("/tmp/root message.txt")),
+            ))
+            .expect("refusal JSON serializes"),
+        )
+        .expect("refusal JSON parses");
+
+        assert_eq!(output["kind"], "error");
+        assert_eq!(output["error"]["nextAction"], "createThread");
+        assert_eq!(
+            output["error"]["correctiveCommand"],
+            "agent-collaboration board thread create --topic-id 018f6f67-64d2-7a21-bf9a-8f193f987091 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role <role> (--watch | --no-watch) --text-file '/tmp/root message.txt' --json"
+        );
+        assert_eq!(output["error"]["details"]["topicId"], topic_id.as_str());
     }
 }

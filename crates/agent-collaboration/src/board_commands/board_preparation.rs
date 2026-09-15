@@ -658,7 +658,6 @@ fn prepare_thread_join(
     let listen = prepare_join_listen(
         arguments.listen,
         arguments.max_wait,
-        arguments.lifetime,
         arguments.acknowledge,
         arguments.no_acknowledge,
         request.root_message_id.clone(),
@@ -698,47 +697,41 @@ fn prepare_thread_leave(
 }
 
 fn prepare_join_listen(
-    kind: Option<JoinListenKind>,
+    listen: Option<Vec<String>>,
     max_wait: Option<String>,
-    lifetime: Option<String>,
     acknowledge: bool,
     no_acknowledge: bool,
     root_message_id: MessageId,
     actor: ActorInput,
 ) -> Result<Option<PendingThreadListen>, String> {
-    let Some(kind) = kind else {
-        if max_wait.is_some() || lifetime.is_some() || acknowledge || no_acknowledge {
-            return Err("--max-wait, --for, and acknowledgement choices require --listen".into());
+    let Some(listen) = listen else {
+        if max_wait.is_some() || acknowledge || no_acknowledge {
+            return Err("--max-wait and acknowledgement choices require --listen".into());
         }
         return Ok(None);
     };
-    let mode = match kind {
-        JoinListenKind::Once => {
-            if lifetime.is_some() {
-                return Err("--listen once requires --max-wait and forbids --for".into());
-            }
-            ThreadListenMode::Once {
-                max_wait_seconds: parse_duration_seconds(
-                    max_wait
-                        .as_deref()
-                        .ok_or_else(|| "--listen once requires --max-wait <duration>".to_owned())?,
-                    "--max-wait",
-                )?,
-            }
-        }
-        JoinListenKind::For => {
+    let mode = match listen.as_slice() {
+        [kind] if kind == "once" => ThreadListenMode::Once {
+            max_wait_seconds: parse_duration_seconds(
+                max_wait
+                    .as_deref()
+                    .ok_or_else(|| "--listen once requires --max-wait <duration>".to_owned())?,
+                "--max-wait",
+            )?,
+        },
+        [kind, lifetime] if kind == "for" => {
             if max_wait.is_some() {
-                return Err("--listen for requires --for and forbids --max-wait".into());
+                return Err("--listen for <duration> forbids --max-wait".into());
             }
             ThreadListenMode::Repeating {
-                lifetime_seconds: parse_duration_seconds(
-                    lifetime
-                        .as_deref()
-                        .ok_or_else(|| "--listen for requires --for <duration>".to_owned())?,
-                    "--for",
-                )?,
+                lifetime_seconds: parse_duration_seconds(lifetime, "--listen for")?,
             }
         }
+        [kind] if kind == "for" => return Err("--listen for requires <duration>".into()),
+        [kind, ..] if kind == "once" => {
+            return Err("--listen once requires --max-wait <duration>".into());
+        }
+        _ => return Err("--listen must be once or for <duration>".into()),
     };
     let acknowledge = match (acknowledge, no_acknowledge) {
         (true, false) => true,

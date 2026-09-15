@@ -112,6 +112,7 @@ pub enum BoardErrorDetails {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ParticipantRefusalDetails {
     pub root_message_id: MessageId,
+    pub missing_root_message_ids: Vec<MessageId>,
     pub actor: Identity,
     pub allowed_roles: Vec<ParticipantRole>,
     pub holder: Option<Identity>,
@@ -164,6 +165,15 @@ impl BoardError {
 
     #[must_use]
     pub fn participant_required(root_message_id: MessageId, actor: Identity) -> Self {
+        Self::participants_required(root_message_id.clone(), vec![root_message_id], actor)
+    }
+
+    #[must_use]
+    pub fn participants_required(
+        root_message_id: MessageId,
+        missing_root_message_ids: Vec<MessageId>,
+        actor: Identity,
+    ) -> Self {
         Self {
             kind: BoardFailureKind::ParticipantRequired,
             stage: BoardFailureStage::Admission,
@@ -172,6 +182,7 @@ impl BoardError {
             details: BoardErrorDetails::ParticipantRefusal {
                 refusal: Box::new(ParticipantRefusalDetails {
                     root_message_id,
+                    missing_root_message_ids,
                     actor,
                     allowed_roles: Self::all_roles(),
                     holder: None,
@@ -216,6 +227,7 @@ impl BoardError {
             details: BoardErrorDetails::ParticipantRefusal {
                 refusal: Box::new(ParticipantRefusalDetails {
                 root_message_id,
+                missing_root_message_ids: Vec::new(),
                 actor,
                 allowed_roles: vec![ParticipantRole::Orchestrator],
                 holder: Some(holder),
@@ -237,6 +249,7 @@ impl BoardError {
             details: BoardErrorDetails::ParticipantRefusal {
                 refusal: Box::new(ParticipantRefusalDetails {
                     root_message_id: refusal.root_message_id,
+                    missing_root_message_ids: Vec::new(),
                     actor: refusal.actor,
                     allowed_roles: Self::all_roles(),
                     holder: refusal.holder,

@@ -551,26 +551,17 @@ pub(super) struct ThreadJoinArguments {
     pub replace: Option<String>,
     #[arg(long)]
     pub note: Option<String>,
-    /// Start an existing process-owned Listen after the committed Join: once or for.
-    #[arg(long, value_enum)]
-    pub listen: Option<JoinListenKind>,
+    /// Start an existing process-owned Listen: once, or for a repeating duration.
+    #[arg(long, num_args = 1..=2, value_names = ["MODE", "DURATION"])]
+    pub listen: Option<Vec<String>>,
     #[arg(long)]
     pub max_wait: Option<String>,
-    #[arg(long = "for")]
-    pub lifetime: Option<String>,
     #[arg(long, conflicts_with = "no_acknowledge")]
     pub acknowledge: bool,
     #[arg(long, conflicts_with = "acknowledge")]
     pub no_acknowledge: bool,
     #[command(flatten)]
     pub common: CommonArguments,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-pub(super) enum JoinListenKind {
-    Once,
-    #[value(name = "for")]
-    For,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
