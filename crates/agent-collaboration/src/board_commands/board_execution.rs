@@ -332,7 +332,10 @@ fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine
     }
 }
 
-fn refusal_output(error: &BoardError, thread_create_text_file: Option<&std::path::Path>) -> Value {
+pub(super) fn refusal_output(
+    error: &BoardError,
+    thread_create_text_file: Option<&std::path::Path>,
+) -> Value {
     json!({
         "kind": "error",
         "error": {

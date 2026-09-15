@@ -209,7 +209,7 @@ fn write_batch_set(batch_set: &ThreadListenBatchSet) -> io::Result<()> {
 fn report_board_error(error: &BoardClientError) -> i32 {
     match error {
         BoardClientError::Rejected(error) => {
-            let value = json!({"kind":"error","error":error});
+            let value = super::board_execution::refusal_output(error, None);
             let _written = writeln!(io::stdout().lock(), "{value}");
             1
         }
