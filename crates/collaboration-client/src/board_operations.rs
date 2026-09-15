@@ -230,6 +230,43 @@ impl ControlClient {
     ) -> Result<ThreadListResult, BoardClientError> {
         self.board_call("board/threadList", request).await
     }
+    pub async fn board_thread_create(
+        &mut self,
+        request: ThreadCreateRequest,
+    ) -> Result<ThreadCreateResult, BoardClientError> {
+        let resource = ResourceIdentity::Message {
+            message_id: request.message_id.clone(),
+        };
+        self.board_mutation_call("board/threadCreate", request, resource)
+            .await
+    }
+    pub async fn board_thread_join(
+        &mut self,
+        request: ThreadJoinRequest,
+    ) -> Result<ThreadJoinResult, BoardClientError> {
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadJoin", request, resource)
+            .await
+    }
+    pub async fn board_thread_leave(
+        &mut self,
+        request: ThreadLeaveRequest,
+    ) -> Result<ThreadLeaveResult, BoardClientError> {
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadLeave", request, resource)
+            .await
+    }
+    pub async fn board_thread_participant_list(
+        &mut self,
+        request: ThreadParticipantListRequest,
+    ) -> Result<ThreadParticipantListResult, BoardClientError> {
+        self.board_call("board/threadParticipantList", request)
+            .await
+    }
     pub async fn board_thread_listen(
         &mut self,
         request: ThreadListenRequest,

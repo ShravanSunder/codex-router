@@ -1,4 +1,7 @@
-use crate::{BoardId, HumanId, Identity, MessageId, MessageText, ProjectId, ThreadState, TopicId};
+use crate::{
+    BoardId, HumanId, Identity, MessageId, MessageText, OrchestratorHolder, ProjectId, ThreadState,
+    TopicId,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -270,6 +273,7 @@ pub struct Message {
 pub struct Thread {
     pub root_message_id: MessageId,
     pub state: ThreadState,
+    pub orchestrator: Option<OrchestratorHolder>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]

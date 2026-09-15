@@ -133,6 +133,22 @@ pub fn control_schema_document(
         "board/threadList",
         &[],
     )?;
+    assembly.add_method::<message_board::ThreadCreateRequest, message_board::ThreadCreateResult>(
+        "board/threadCreate",
+        &[],
+    )?;
+    assembly.add_method::<message_board::ThreadJoinRequest, message_board::ThreadJoinResult>(
+        "board/threadJoin",
+        &[],
+    )?;
+    assembly.add_method::<message_board::ThreadLeaveRequest, message_board::ThreadLeaveResult>(
+        "board/threadLeave",
+        &[],
+    )?;
+    assembly.add_method::<
+        message_board::ThreadParticipantListRequest,
+        message_board::ThreadParticipantListResult,
+    >("board/threadParticipantList", &[])?;
     assembly.add_method::<message_board::ThreadListenRequest, message_board::ThreadListenResult>(
         "board/threadListen",
         &[],

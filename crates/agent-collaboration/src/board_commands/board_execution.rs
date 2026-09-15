@@ -1,4 +1,4 @@
-use super::board_preparation::{CommandContext, PreparedBoardCommand};
+use super::board_preparation::{self, CommandContext, PreparedBoardCommand};
 use collaboration_client::board::*;
 use collaboration_client::{BoardClientError, ClientError, ControlClient};
 use serde::Serialize;
@@ -7,7 +7,16 @@ use std::io::{self, Write};
 
 enum CommandExecutionError {
     ConnectionBeforeRequest(ClientError),
-    Request(BoardClientError),
+    Request {
+        error: BoardClientError,
+        thread_create_text_file: Option<std::path::PathBuf>,
+    },
+    InvalidUsage(String),
+}
+
+enum CommandExecutionResult {
+    Value(Value),
+    Exit(i32),
 }
 
 pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) -> i32 {
@@ -39,9 +48,73 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
         )
         .await
         .map_err(CommandExecutionError::ConnectionBeforeRequest)?;
-        let result = dispatch(&mut client, command)
-            .await
-            .map_err(CommandExecutionError::Request);
+        let mut command = command;
+        board_preparation::finalize_command(&mut command, &client)
+            .map_err(CommandExecutionError::InvalidUsage)?;
+        let result = match command {
+            PreparedBoardCommand::ThreadJoin(pending) => {
+                let board_preparation::PendingThreadJoin {
+                    request,
+                    actor,
+                    listen,
+                } = *pending;
+                if let Some(listen) = listen {
+                    let joined = client.board_thread_join(request).await.map_err(|error| {
+                        CommandExecutionError::Request {
+                            error,
+                            thread_create_text_file: None,
+                        }
+                    })?;
+                    let joined = serialize_result(joined).map_err(|error| {
+                        CommandExecutionError::Request {
+                            error,
+                            thread_create_text_file: None,
+                        }
+                    })?;
+                    if write_machine_result_and_flush(joined) != 0 {
+                        Ok(CommandExecutionResult::Exit(1))
+                    } else {
+                        Ok(CommandExecutionResult::Exit(
+                            super::board_thread_listen_execution::run_with_client(
+                                listen.request,
+                                &mut client,
+                            )
+                            .await,
+                        ))
+                    }
+                } else {
+                    dispatch(
+                        &mut client,
+                        PreparedBoardCommand::ThreadJoin(Box::new(
+                            board_preparation::PendingThreadJoin {
+                                request,
+                                actor,
+                                listen: None,
+                            },
+                        )),
+                    )
+                    .await
+                    .map(CommandExecutionResult::Value)
+                    .map_err(|error| CommandExecutionError::Request {
+                        error,
+                        thread_create_text_file: None,
+                    })
+                }
+            }
+            command => {
+                let thread_create_text_file = match &command {
+                    PreparedBoardCommand::MessagePost(pending) => pending.text_file.clone(),
+                    _ => None,
+                };
+                dispatch(&mut client, command)
+                    .await
+                    .map(CommandExecutionResult::Value)
+                    .map_err(|error| CommandExecutionError::Request {
+                        error,
+                        thread_create_text_file,
+                    })
+            }
+        };
         let _closed = client.close().await;
         result
     });
@@ -141,8 +214,8 @@ async fn dispatch(
         PreparedBoardCommand::TopicList(request) => {
             serialize_result(client.board_topic_list(request).await?)
         }
-        PreparedBoardCommand::MessagePost(request) => {
-            serialize_result(client.board_message_post(request).await?)
+        PreparedBoardCommand::MessagePost(pending) => {
+            serialize_result(client.board_message_post(pending.request).await?)
         }
         PreparedBoardCommand::MessageShow(request) => {
             serialize_result(client.board_message_show(request).await?)
@@ -167,6 +240,19 @@ async fn dispatch(
         }
         PreparedBoardCommand::ThreadList(request) => {
             serialize_result(client.board_thread_list(request).await?)
+        }
+        PreparedBoardCommand::ThreadCreate(pending) => {
+            serialize_result(client.board_thread_create(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadJoin(pending) => {
+            debug_assert!(pending.listen.is_none());
+            serialize_result(client.board_thread_join(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadLeave(pending) => {
+            serialize_result(client.board_thread_leave(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadParticipantList(request) => {
+            serialize_result(client.board_thread_participant_list(request).await?)
         }
         PreparedBoardCommand::ThreadListen(_) => {
             Err(ClientError::Protocol("Thread Listen must use streaming stdout execution").into())
@@ -194,16 +280,23 @@ fn serialize_result<TValue: Serialize>(value: TValue) -> Result<Value, BoardClie
         .map_err(|_| ClientError::Protocol("board result could not be rendered").into())
 }
 
-fn report(result: Result<Value, CommandExecutionError>, machine: bool) -> i32 {
+fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine: bool) -> i32 {
     match result {
-        Ok(result) => write_result(result, machine),
-        Err(CommandExecutionError::Request(BoardClientError::Rejected(error))) => {
+        Ok(CommandExecutionResult::Value(result)) => write_result(result, machine),
+        Ok(CommandExecutionResult::Exit(code)) => code,
+        Err(CommandExecutionError::Request {
+            error: BoardClientError::Rejected(error),
+            thread_create_text_file,
+        }) => {
             if machine {
-                write_json(&json!({"kind":"error","error":error}), 4)
+                write_json(
+                    &refusal_output(&error, thread_create_text_file.as_deref()),
+                    4,
+                )
             } else {
                 let mut stderr = io::stderr().lock();
                 let kind = wire_name(&error.kind);
-                let next_action = wire_name(&error.next_action);
+                let next_action = refusal_command(&error, thread_create_text_file.as_deref());
                 let _written = writeln!(
                     stderr,
                     "Error: {kind}\n{}\nNext action: {next_action}",
@@ -212,11 +305,18 @@ fn report(result: Result<Value, CommandExecutionError>, machine: bool) -> i32 {
                 4
             }
         }
-        Err(CommandExecutionError::Request(BoardClientError::OutcomeUnknown {
-            resource,
-            message,
-            next_action,
-        })) => report_uncertain_outcome(machine, &resource, message, next_action),
+        Err(CommandExecutionError::Request {
+            error:
+                BoardClientError::OutcomeUnknown {
+                    resource,
+                    message,
+                    next_action,
+                },
+            ..
+        }) => report_uncertain_outcome(machine, &resource, message, next_action),
+        Err(CommandExecutionError::InvalidUsage(message)) => {
+            crate::endpoint_commands::report_failure("invalidField", &message, 2, machine)
+        }
         Err(CommandExecutionError::ConnectionBeforeRequest(error)) => {
             crate::permission_diagnostic_reporting::report_permission_error(
                 &error,
@@ -225,10 +325,112 @@ fn report(result: Result<Value, CommandExecutionError>, machine: bool) -> i32 {
             )
             .unwrap_or_else(|| report_connection_failure(machine))
         }
-        Err(CommandExecutionError::Request(BoardClientError::Connection(_))) => {
-            report_connection_failure(machine)
-        }
+        Err(CommandExecutionError::Request {
+            error: BoardClientError::Connection(_),
+            ..
+        }) => report_connection_failure(machine),
     }
+}
+
+pub(super) fn refusal_output(
+    error: &BoardError,
+    thread_create_text_file: Option<&std::path::Path>,
+) -> Value {
+    json!({
+        "kind": "error",
+        "error": {
+            "kind": &error.kind,
+            "stage": &error.stage,
+            "message": &error.message,
+            "nextAction": &error.next_action,
+            "details": &error.details,
+            "correctiveCommand": refusal_command(error, thread_create_text_file),
+        },
+    })
+}
+
+fn refusal_command(
+    error: &BoardError,
+    thread_create_text_file: Option<&std::path::Path>,
+) -> String {
+    let actor = |identity: &Identity| {
+        serde_json::to_string(identity)
+            .map(|value| shell_single_quoted_argument(&value))
+            .unwrap_or_else(|_| "<actor>".to_owned())
+    };
+    match (&error.next_action, &error.details) {
+        (BoardNextAction::CreateThread, BoardErrorDetails::ThreadCreateRefusal { refusal }) => {
+            let text_file = thread_create_text_file
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<path>".to_owned());
+            format!(
+                "agent-collaboration board thread create --topic-id {} --actor {} --role <role> (--watch | --no-watch) --text-file {} --json",
+                refusal.topic_id.as_str(),
+                actor(&refusal.actor),
+                shell_single_quoted_argument(&text_file)
+            )
+        }
+        (BoardNextAction::JoinThread, BoardErrorDetails::ParticipantRefusal { refusal }) => {
+            format!(
+                "agent-collaboration board thread join --root-message-id {} --actor {} --role <role> (--watch | --no-watch) --json",
+                refusal.root_message_id.as_str(),
+                actor(&refusal.actor)
+            )
+        }
+        (
+            BoardNextAction::ReplaceOrchestrator,
+            BoardErrorDetails::ParticipantRefusal { refusal },
+        ) => format!(
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator --replace {} (--watch | --no-watch) --json",
+            refusal.root_message_id.as_str(),
+            actor(&refusal.actor),
+            refusal
+                .holder
+                .as_ref()
+                .map(actor)
+                .unwrap_or_else(|| "<current-orchestrator>".to_owned()),
+        ),
+        (
+            BoardNextAction::LeaveWithHandoverOrResolve,
+            BoardErrorDetails::ParticipantRefusal { refusal },
+        ) => format!(
+            "agent-collaboration board thread leave --root-message-id {} --actor {} (--to <joined-participant> | --resolve) --json",
+            refusal.root_message_id.as_str(),
+            actor(&refusal.actor)
+        ),
+        (
+            BoardNextAction::JoinHandoverTarget,
+            BoardErrorDetails::ParticipantRefusal { refusal },
+        ) => format!(
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role <role> (--watch | --no-watch) --json",
+            refusal.root_message_id.as_str(),
+            refusal
+                .target
+                .as_ref()
+                .map(actor)
+                .unwrap_or_else(|| "<handover-target>".to_owned()),
+        ),
+        (
+            BoardNextAction::InspectParticipants,
+            BoardErrorDetails::ParticipantRefusal { refusal },
+        ) => format!(
+            "agent-collaboration board thread participant list --root-message-id {} --json",
+            refusal.root_message_id.as_str()
+        ),
+        (
+            BoardNextAction::RepeatJoinWithoutReplace,
+            BoardErrorDetails::ParticipantRefusal { refusal },
+        ) => format!(
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator (--watch | --no-watch) --json",
+            refusal.root_message_id.as_str(),
+            actor(&refusal.actor)
+        ),
+        _ => wire_name(&error.next_action),
+    }
+}
+
+fn shell_single_quoted_argument(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn report_uncertain_outcome(
@@ -276,6 +478,16 @@ fn write_result(result: Value, machine: bool) -> i32 {
     }
 }
 
+fn write_machine_result_and_flush(result: Value) -> i32 {
+    let value = json!({"kind":"result","result":result});
+    let mut stdout = io::stdout().lock();
+    if writeln!(stdout, "{value}").is_ok() && stdout.flush().is_ok() {
+        0
+    } else {
+        3
+    }
+}
+
 fn report_connection_failure(machine: bool) -> i32 {
     let message =
         "The board service is unavailable. Check the selected service directory and retry.";
@@ -298,5 +510,125 @@ fn write_json(value: &Value, success_code: i32) -> i32 {
         success_code
     } else {
         3
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{refusal_command, refusal_output};
+    use collaboration_client::board::*;
+    use std::path::Path;
+
+    #[test]
+    fn actor_and_text_file_arguments_escape_apostrophes() {
+        let topic_id =
+            TopicId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned()).expect("topic ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("owner's".to_owned()).expect("human ID"),
+        };
+        let text = MessageText::try_from("root text".to_owned()).expect("message text");
+        let refusal = BoardError::session_topic_post(topic_id, actor, text);
+        let command = refusal_command(&refusal, Some(Path::new("/tmp/owner's message.txt")));
+
+        assert!(command.contains("--actor '{\"kind\":\"human\",\"humanId\":\"owner'\\''s\"}'"));
+        assert!(command.contains("--text-file '/tmp/owner'\\''s message.txt'"));
+        assert!(!command.contains("--text-file '<path>'"));
+    }
+
+    #[test]
+    fn holder_argument_escapes_apostrophes() {
+        let root_message_id =
+            MessageId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned())
+                .expect("message ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("requester".to_owned()).expect("human ID"),
+        };
+        let holder = Identity::Human {
+            human_id: HumanId::try_from("holder's".to_owned()).expect("human ID"),
+        };
+        let refusal = BoardError {
+            kind: BoardFailureKind::OrchestratorAlreadyExists,
+            stage: BoardFailureStage::Admission,
+            message: "holder exists".to_owned(),
+            next_action: BoardNextAction::ReplaceOrchestrator,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                    root_message_id,
+                    missing_root_message_ids: Vec::new(),
+                    actor,
+                    allowed_roles: Vec::new(),
+                    holder: Some(holder),
+                    holder_last_seen_activity: None,
+                    target: None,
+                    named_holder: None,
+                }),
+            },
+        };
+
+        let command = refusal_command(&refusal, None);
+
+        assert!(command.contains("--replace '{\"kind\":\"human\",\"humanId\":\"holder'\\''s\"}'"));
+    }
+
+    #[test]
+    fn handover_target_argument_escapes_apostrophes() {
+        let root_message_id =
+            MessageId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned())
+                .expect("message ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("orchestrator".to_owned()).expect("human ID"),
+        };
+        let target = Identity::Human {
+            human_id: HumanId::try_from("target's".to_owned()).expect("human ID"),
+        };
+        let refusal = BoardError {
+            kind: BoardFailureKind::HandoverTargetNotParticipant,
+            stage: BoardFailureStage::Admission,
+            message: "target must join".to_owned(),
+            next_action: BoardNextAction::JoinHandoverTarget,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                    root_message_id,
+                    missing_root_message_ids: Vec::new(),
+                    actor,
+                    allowed_roles: Vec::new(),
+                    holder: None,
+                    holder_last_seen_activity: None,
+                    target: Some(target),
+                    named_holder: None,
+                }),
+            },
+        };
+
+        let command = refusal_command(&refusal, None);
+
+        assert!(command.contains("--actor '{\"kind\":\"human\",\"humanId\":\"target'\\''s\"}'"));
+    }
+
+    #[test]
+    fn machine_refusal_serialization_includes_the_corrective_command() {
+        let topic_id =
+            TopicId::try_from("018f6f67-64d2-7a21-bf9a-8f193f987091".to_owned()).expect("topic ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+        };
+        let text = MessageText::try_from("root text".to_owned()).expect("message text");
+        let refusal = BoardError::session_topic_post(topic_id.clone(), actor, text);
+        let output = serde_json::from_str::<serde_json::Value>(
+            &serde_json::to_string(&refusal_output(
+                &refusal,
+                Some(Path::new("/tmp/root message.txt")),
+            ))
+            .expect("refusal JSON serializes"),
+        )
+        .expect("refusal JSON parses");
+
+        assert_eq!(output["kind"], "error");
+        assert_eq!(output["error"]["nextAction"], "createThread");
+        assert_eq!(
+            output["error"]["correctiveCommand"],
+            "agent-collaboration board thread create --topic-id 018f6f67-64d2-7a21-bf9a-8f193f987091 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role <role> (--watch | --no-watch) --text-file '/tmp/root message.txt' --json"
+        );
+        assert_eq!(output["error"]["details"]["topicId"], topic_id.as_str());
     }
 }

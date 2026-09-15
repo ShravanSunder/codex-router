@@ -7,7 +7,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 78);
+    assert_eq!(methods.len(), 82);
     for method in [
         "automation/configure",
         "automation/status",
@@ -49,6 +49,10 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "board/threadWait",
         "board/threadListenShow",
         "board/threadListenCancel",
+        "board/threadCreate",
+        "board/threadJoin",
+        "board/threadLeave",
+        "board/threadParticipantList",
         "control/initialize",
         "endpoint/list",
         "codex/sessionList",

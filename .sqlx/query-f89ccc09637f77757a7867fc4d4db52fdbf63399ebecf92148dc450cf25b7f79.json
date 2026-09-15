@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE board_threads SET state='resolved' WHERE root_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f89ccc09637f77757a7867fc4d4db52fdbf63399ebecf92148dc450cf25b7f79"
+}

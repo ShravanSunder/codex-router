@@ -1,7 +1,7 @@
 use collaboration_protocol::{control_error_is_valid, control_schema_document};
 use serde_json::{Value, json};
 
-const BOARD_METHODS: [&str; 33] = [
+const BOARD_METHODS: [&str; 37] = [
     "board/discoverySearch",
     "board/messageSearch",
     "board/projectCreate",
@@ -28,6 +28,10 @@ const BOARD_METHODS: [&str; 33] = [
     "board/threadWatch",
     "board/threadUnwatch",
     "board/threadList",
+    "board/threadCreate",
+    "board/threadJoin",
+    "board/threadLeave",
+    "board/threadParticipantList",
     "board/threadListen",
     "board/threadWait",
     "board/threadListenShow",

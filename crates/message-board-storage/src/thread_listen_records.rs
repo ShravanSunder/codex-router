@@ -1,6 +1,8 @@
 //! Transactional Thread listening storage; Delivered and Acknowledged positions remain separate.
 use crate::BoardStore;
 use crate::message_records::{activate_watch, activity_sequence, load_message, require_thread};
+use crate::participant_records::advance_participant_last_seen;
+use crate::participant_row_decoding::load_participant;
 use crate::storage_support::{
     current_activity_sequence, ensure_identity, invalid_record, storage_error,
     validate_stored_boundary,
@@ -117,9 +119,20 @@ impl BoardStore {
         };
 
         let mut selected_project: Option<ProjectId> = None;
-        let mut threads = Vec::with_capacity(roots.len());
+        let mut selected_threads = Vec::with_capacity(roots.len());
+        let mut missing_root_message_ids = Vec::new();
         for root_message_id in roots {
             let location = require_thread(&mut transaction, &root_message_id).await?;
+            if matches!(request.reader, Identity::Session { .. }) {
+                let participant =
+                    load_participant(&mut transaction, &request.reader, &root_message_id).await?;
+                if participant
+                    .as_ref()
+                    .is_none_or(|participant| !participant.is_open())
+                {
+                    missing_root_message_ids.push(root_message_id.clone());
+                }
+            }
             if selected_project
                 .as_ref()
                 .is_some_and(|project_id| *project_id != location.project_id)
@@ -130,6 +143,18 @@ impl BoardStore {
                 ));
             }
             selected_project.get_or_insert_with(|| location.project_id.clone());
+            selected_threads.push((root_message_id, location));
+        }
+        if let Some(root_message_id) = missing_root_message_ids.first().cloned() {
+            return Err(BoardError::participants_required(
+                root_message_id,
+                missing_root_message_ids,
+                request.reader.clone(),
+            ));
+        }
+
+        let mut threads = Vec::with_capacity(selected_threads.len());
+        for (root_message_id, location) in selected_threads {
             activate_watch(
                 &mut transaction,
                 &reader_key,
@@ -363,6 +388,13 @@ impl BoardStore {
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            advance_participant_last_seen(
+                &mut transaction,
+                &reader_key,
+                &batch.root_message_id,
+                delivered_value,
+            )
+            .await?;
         }
         transaction.commit().await.map_err(storage_error)?;
         Ok(batch_set)

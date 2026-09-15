@@ -5,6 +5,22 @@ use message_board_storage::BoardStore;
 use std::sync::Arc;
 mod board_control_support;
 
+fn maximum_escape_heavy_session(index: usize) -> Result<Identity, Box<dyn std::error::Error>> {
+    let prefix = format!("{index:04}");
+    Ok(Identity::Session {
+        session: SessionRef {
+            endpoint: SessionEndpointRef {
+                service_id: ServiceId::try_from("00000000-0000-4000-8000-000000000001".to_owned())?,
+                endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+            },
+            session_id: SessionId::try_from(format!(
+                "{prefix}{}",
+                "\u{1}".repeat(4_096 - prefix.len())
+            ))?,
+        },
+    })
+}
+
 #[tokio::test]
 async fn board_control_roundtrip_preserves_root_thread_and_actor()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -68,8 +84,8 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
             references: vec![].try_into()?,
         })
         .await?;
-    if !root.watch_status.watching {
-        return Err("root post did not activate watch".into());
+    if root.watch_status.watching {
+        return Err("topic post unexpectedly changed Watch state".into());
     }
     let reply = client
         .board_message_post(MessagePostRequest {
@@ -102,12 +118,12 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
         .page;
     if latest.read_mode != InboxReadMode::Latest
         || latest.ordering != MessageOrdering::NewestFirst
-        || latest.records.len() != 2
+        || latest.records.len() != 1
         || !matches!(
             latest.initialization,
             InboxInitializationStatus::NotApplicable
         )
-        || !matches!(&latest.records[0], InboxActivity::MessageCreated { message, .. } if message.message_id == reply.message.message_id)
+        || !matches!(&latest.records[0], InboxActivity::MessageCreated { message, .. } if message.message_id == root.message.message_id)
     {
         return Err(
             "scoped latest Control read lost mode, order, or watched-thread context".into(),
@@ -153,6 +169,129 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
         return Err("new thread was not unresolved".into());
     }
     drop(client);
+    task.await??;
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn control_thread_list_pages_escape_heavy_holders_without_skips_or_repeats()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "board-control-thread-list-frame-budget-{}.sqlite",
+        MessageId::generate().as_str()
+    ));
+    let mut seed = BoardStore::open(&path).await?;
+    let owner = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned())?,
+    };
+    let project_id = ProjectId::generate();
+    seed.create_project(ProjectCreateRequest {
+        project_id: project_id.clone(),
+        name: ResourceName::try_from("Project".to_owned())?,
+        description: Description::try_from(String::new())?,
+        actor: owner.clone(),
+        acting_for: None,
+    })
+    .await?;
+    let board_id = BoardId::generate();
+    seed.create_board(BoardCreateRequest {
+        board_id: board_id.clone(),
+        project_id: project_id.clone(),
+        name: ResourceName::try_from("Board".to_owned())?,
+        description: Description::try_from(String::new())?,
+        actor: owner.clone(),
+        acting_for: None,
+    })
+    .await?;
+    let topic_id = TopicId::generate();
+    seed.create_topic(TopicCreateRequest {
+        topic_id: topic_id.clone(),
+        board_id,
+        name: ResourceName::try_from("Topic".to_owned())?,
+        description: Description::try_from(String::new())?,
+        actor: owner.clone(),
+        acting_for: None,
+    })
+    .await?;
+    let mut expected_roots = Vec::new();
+    for index in 0..100 {
+        let created = seed
+            .create_thread(ThreadCreateRequest {
+                message_id: MessageId::generate(),
+                topic_id: topic_id.clone(),
+                actor: maximum_escape_heavy_session(index)?,
+                acting_for: None,
+                text: MessageText::try_from("Root".to_owned())?,
+                references: MessageReferences::try_from(Vec::new())?,
+                role: Some(ParticipantRole::Orchestrator),
+                watch: false,
+            })
+            .await?;
+        expected_roots.push(created.message.message_id);
+    }
+    expected_roots.sort();
+    seed.close().await?;
+
+    let store = Arc::new(tokio::sync::Mutex::new(BoardStore::open(&path).await?));
+    let identity = ServiceIdentity::new(
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        &format!("sha256:{}", "a".repeat(64)),
+    )
+    .map_err(std::io::Error::other)?
+    .with_board_store(store.clone());
+    let (socket, server) = tokio::net::UnixStream::pair()?;
+    let task = tokio::spawn(serve_control_connection(server, identity));
+    let mut client = ControlClient::initialize(socket, "thread-list-frame-budget", "1").await?;
+    let mut cursor = None;
+    let mut observed_roots = Vec::new();
+    loop {
+        let result = client
+            .board_thread_list(ThreadListRequest {
+                project_id: project_id.clone(),
+                reader: owner.clone(),
+                watched_only: false,
+                page: PageRequest {
+                    limit: PageLimit::try_from(100)?,
+                    cursor,
+                },
+            })
+            .await?;
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "thread-list-frame-budget",
+            "result": result,
+        });
+        if serde_json::to_vec(&response)?.len() >= collaboration_protocol::MAX_CONTROL_FRAME_BYTES {
+            return Err("Control Thread list exceeded its frame budget".into());
+        }
+        let result: ThreadListResult = serde_json::from_value(response["result"].clone())?;
+        if result
+            .page
+            .records
+            .iter()
+            .any(|thread| thread.orchestrator.is_none())
+        {
+            return Err("Control Thread list dropped a holder projection".into());
+        }
+        observed_roots.extend(
+            result
+                .page
+                .records
+                .into_iter()
+                .map(|thread| thread.root_message_id),
+        );
+        let Some(next_cursor) = result.page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    if observed_roots != expected_roots {
+        return Err("Control Thread list cursor traversal skipped or repeated a Thread".into());
+    }
+    client.close().await?;
     task.await??;
     drop(store);
     std::fs::remove_file(path)?;
@@ -591,4 +730,224 @@ fn rejected_error<TValue>(
         Err(error) => Err(error.into()),
         Ok(_) => Err("board operation unexpectedly succeeded".into()),
     }
+}
+
+#[tokio::test]
+async fn control_participant_operations_preserve_typed_state_and_authorization()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "board-control-participants-{}.sqlite",
+        MessageId::generate().as_str()
+    ));
+    let store = Arc::new(tokio::sync::Mutex::new(BoardStore::open(&path).await?));
+    let identity = ServiceIdentity::new(
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        &format!("sha256:{}", "a".repeat(64)),
+    )
+    .map_err(std::io::Error::other)?
+    .with_board_store(store.clone());
+    let (socket, server) = tokio::net::UnixStream::pair()?;
+    let task = tokio::spawn(serve_control_connection(server, identity.clone()));
+    let mut client = ControlClient::initialize(socket, "participant-control-test", "1").await?;
+    macro_rules! rejected_on_fresh_connection {
+        ($method:ident, $request:expr) => {{
+            let (socket, server) = tokio::net::UnixStream::pair()?;
+            let temporary_task = tokio::spawn(serve_control_connection(server, identity.clone()));
+            let mut temporary_client =
+                ControlClient::initialize(socket, "participant-rejection-test", "1").await?;
+            let result = temporary_client.$method($request).await;
+            drop(temporary_client);
+            temporary_task.await??;
+            rejected_error(result)?
+        }};
+    }
+    let owner = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned())?,
+    };
+    let session = |session_id: &str| -> Result<Identity, Box<dyn std::error::Error>> {
+        Ok(Identity::Session {
+            session: SessionRef {
+                endpoint: SessionEndpointRef {
+                    service_id: ServiceId::try_from(
+                        "00000000-0000-4000-8000-000000000001".to_owned(),
+                    )?,
+                    endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+                },
+                session_id: SessionId::try_from(session_id.to_owned())?,
+            },
+        })
+    };
+    let orchestrator = session("orchestrator")?;
+    let reviewer = session("reviewer")?;
+    let unjoined = session("unjoined")?;
+    let project_id = ProjectId::generate();
+    client
+        .board_project_create(ProjectCreateRequest {
+            project_id: project_id.clone(),
+            name: ResourceName::try_from("Project".to_owned())?,
+            description: Description::try_from(String::new())?,
+            actor: owner.clone(),
+            acting_for: None,
+        })
+        .await?;
+    let board_id = BoardId::generate();
+    client
+        .board_create(BoardCreateRequest {
+            board_id: board_id.clone(),
+            project_id,
+            name: ResourceName::try_from("Board".to_owned())?,
+            description: Description::try_from(String::new())?,
+            actor: owner.clone(),
+            acting_for: None,
+        })
+        .await?;
+    let topic_id = TopicId::generate();
+    client
+        .board_topic_create(TopicCreateRequest {
+            topic_id: topic_id.clone(),
+            board_id,
+            name: ResourceName::try_from("Topic".to_owned())?,
+            description: Description::try_from(String::new())?,
+            actor: owner.clone(),
+            acting_for: None,
+        })
+        .await?;
+
+    let created = client
+        .board_thread_create(ThreadCreateRequest {
+            message_id: MessageId::generate(),
+            topic_id,
+            actor: orchestrator.clone(),
+            acting_for: None,
+            text: MessageText::try_from("Root".to_owned())?,
+            references: MessageReferences::try_from(Vec::new())?,
+            role: Some(ParticipantRole::Orchestrator),
+            watch: true,
+        })
+        .await?;
+    let root_message_id = created.message.message_id.clone();
+    if created.orchestrator.as_ref().map(|holder| &holder.identity) != Some(&orchestrator) {
+        return Err("Control Thread Create did not return the Orchestrator holder".into());
+    }
+    let joined = client
+        .board_thread_join(ThreadJoinRequest {
+            root_message_id: root_message_id.clone(),
+            actor: reviewer.clone(),
+            role: ParticipantRole::Reviewer,
+            watch: true,
+            replace: None,
+            note: Some(ParticipantNote::try_from("Control reviewer".to_owned())?),
+        })
+        .await?;
+    if joined.participant.identity != reviewer || !joined.watch_status.watching {
+        return Err(
+            "Control Thread Join did not preserve participant identity and Watch choice".into(),
+        );
+    }
+    let listed = client
+        .board_thread_participant_list(ThreadParticipantListRequest {
+            root_message_id: root_message_id.clone(),
+            page: PageRequest::default(),
+        })
+        .await?;
+    if listed.page.records.len() != 2
+        || listed.orchestrator.as_ref().map(|holder| &holder.identity) != Some(&orchestrator)
+    {
+        return Err("Control participant list did not return both Participants and holder".into());
+    }
+
+    let unjoined_post = rejected_on_fresh_connection!(
+        board_message_post,
+        MessagePostRequest {
+            message_id: MessageId::generate(),
+            placement: Placement::Thread {
+                root_message_id: root_message_id.clone(),
+            },
+            actor: unjoined.clone(),
+            acting_for: None,
+            text: MessageText::try_from("Blocked".to_owned())?,
+            references: MessageReferences::try_from(Vec::new())?,
+        }
+    );
+    if unjoined_post.kind != BoardFailureKind::ParticipantRequired
+        || unjoined_post.next_action != BoardNextAction::JoinThread
+        || !matches!(
+            unjoined_post.details,
+            BoardErrorDetails::ParticipantRefusal { refusal }
+                if refusal.root_message_id == root_message_id && refusal.actor == unjoined
+        )
+    {
+        return Err("Control session refusal lost flattened Participant details".into());
+    }
+    let session_resolve = rejected_on_fresh_connection!(
+        board_thread_resolve,
+        ThreadResolveRequest {
+            root_message_id: root_message_id.clone(),
+            actor: reviewer.clone(),
+            acting_for: None,
+        }
+    );
+    if session_resolve.kind != BoardFailureKind::OrchestratorRequired
+        || session_resolve.next_action != BoardNextAction::InspectParticipants
+        || !matches!(
+            session_resolve.details,
+            BoardErrorDetails::ParticipantRefusal { refusal }
+                if refusal.root_message_id == root_message_id
+                    && refusal.actor == reviewer
+                    && refusal.holder == Some(orchestrator.clone())
+        )
+    {
+        return Err("Control Orchestrator refusal lost flattened holder details".into());
+    }
+    if client
+        .board_thread_participant_list(ThreadParticipantListRequest {
+            root_message_id: root_message_id.clone(),
+            page: PageRequest::default(),
+        })
+        .await?
+        .page
+        .records
+        .len()
+        != 2
+    {
+        return Err("Control refusal mutated Participant state".into());
+    }
+    client
+        .board_message_post(MessagePostRequest {
+            message_id: MessageId::generate(),
+            placement: Placement::Thread {
+                root_message_id: root_message_id.clone(),
+            },
+            actor: owner.clone(),
+            acting_for: None,
+            text: MessageText::try_from("Human is exempt".to_owned())?,
+            references: MessageReferences::try_from(Vec::new())?,
+        })
+        .await?;
+    let left = client
+        .board_thread_leave(ThreadLeaveRequest {
+            root_message_id: root_message_id.clone(),
+            actor: reviewer.clone(),
+            to: None,
+            resolve: false,
+        })
+        .await?;
+    if left.participant.closed_reason != Some(ParticipantClosedReason::Left)
+        || left.watch_status.watching
+    {
+        return Err("Control Thread Leave did not close the Participant and unwatch".into());
+    }
+    client
+        .board_thread_resolve(ThreadResolveRequest {
+            root_message_id,
+            actor: owner,
+            acting_for: None,
+        })
+        .await?;
+    client.close().await?;
+    task.await??;
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
 }

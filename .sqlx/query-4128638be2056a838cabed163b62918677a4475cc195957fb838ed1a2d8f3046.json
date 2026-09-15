@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_participants(reader_key,root_id,role,note,joined_at_activity,last_seen_activity,closed_at_activity,closed_reason,replaced_by) VALUES(?,?,?,?,?,?,NULL,NULL,NULL) ON CONFLICT(reader_key,root_id) DO UPDATE SET role=excluded.role, note=COALESCE(excluded.note,thread_participants.note), joined_at_activity=excluded.joined_at_activity,last_seen_activity=excluded.last_seen_activity, closed_at_activity=NULL,closed_reason=NULL,replaced_by=NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "4128638be2056a838cabed163b62918677a4475cc195957fb838ed1a2d8f3046"
+}

@@ -155,7 +155,9 @@ pub(super) async fn grade_discussion(
         })
         .await?;
     if watch.watch_status.is_none_or(|status| !status.watching) {
-        return Err("discussion operator's thread post did not persist its automatic watch".into());
+        return Err(
+            "discussion operator did not retain the explicit Watch created with its Thread".into(),
+        );
     }
     Ok(DiscussionResources {
         primary_root: primary_root.message_id,
@@ -192,6 +194,93 @@ pub(super) async fn grade_inbox(
         .await?;
     if !inbox.page.records.is_empty() {
         return Err("inbox operator left seeded watched-thread activity unacknowledged".into());
+    }
+    Ok(())
+}
+
+pub(super) async fn grade_participant_process(
+    proof: &mut ProofContext,
+    discussions: &DiscussionResources,
+    creator_identity: &Identity,
+    successor_identity: &Identity,
+) -> ProofResult<()> {
+    let participants = proof
+        .client
+        .board_thread_participant_list(ThreadParticipantListRequest {
+            root_message_id: discussions.primary_root.clone(),
+            page: PageRequest::default(),
+        })
+        .await?;
+    let creator = participants
+        .page
+        .records
+        .iter()
+        .find(|participant| participant.identity == *creator_identity)
+        .ok_or("Thread creator was not recorded as a Participant")?;
+    if creator.role != ParticipantRole::Orchestrator
+        || creator.closed_reason != Some(ParticipantClosedReason::Replaced)
+        || creator.replaced_by.as_ref() != Some(successor_identity)
+    {
+        return Err("Orchestrator Leave did not durably hand over to the joined successor".into());
+    }
+    let successor = participants
+        .page
+        .records
+        .iter()
+        .find(|participant| participant.identity == *successor_identity)
+        .ok_or("corrected Join did not create the successor Participant")?;
+    if successor.role != ParticipantRole::Orchestrator || !successor.is_open() {
+        return Err(
+            "handover did not promote the corrected Join participant to open Orchestrator".into(),
+        );
+    }
+    if participants
+        .orchestrator
+        .as_ref()
+        .map(|holder| &holder.identity)
+        != Some(successor_identity)
+    {
+        return Err(
+            "participant list did not project the handover successor as Orchestrator".into(),
+        );
+    }
+    let thread = proof
+        .client
+        .board_thread_show(ThreadShowRequest {
+            root_message_id: discussions.primary_root.clone(),
+            reader: Some(successor_identity.clone()),
+        })
+        .await?;
+    if thread
+        .thread
+        .orchestrator
+        .as_ref()
+        .map(|holder| &holder.identity)
+        != Some(successor_identity)
+    {
+        return Err("Thread show did not project the handover successor as Orchestrator".into());
+    }
+    if thread.watch_status.is_none_or(|status| !status.watching) {
+        return Err(
+            "corrected Join and later explicit Watch did not leave the successor watched".into(),
+        );
+    }
+    let messages = proof
+        .client
+        .board_message_list(MessageListRequest {
+            scope: MessageListScope::Thread {
+                root_message_id: discussions.primary_root.clone(),
+            },
+            selection: MessageSelection::Latest,
+            page: PageRequest::default(),
+        })
+        .await?
+        .page
+        .records;
+    if !messages.iter().any(|message| {
+        message.actor == *successor_identity && message.text.as_str().contains("checkpoint")
+    }) {
+        return Err("corrected Join participant did not post the required checkpoint".into());
     }
     Ok(())
 }

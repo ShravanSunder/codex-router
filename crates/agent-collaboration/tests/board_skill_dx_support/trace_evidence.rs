@@ -12,6 +12,16 @@ pub(super) struct OperatorTrace {
     turns: Vec<Value>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RefusalCorrectionTrace {
+    refusal: String,
+    next_action: String,
+    refusing_command: String,
+    next_command: Option<String>,
+    correction_outcome: String,
+}
+
 impl OperatorTrace {
     pub(super) fn new(role: &'static str, session: SessionRef, turns: Vec<Value>) -> Self {
         Self {
@@ -49,6 +59,14 @@ const REQUIRED_OPERATIONS: &[(&str, &str)] = &[
     ("board/threadWatch", " board thread watch "),
     ("board/threadUnwatch", " board thread unwatch "),
     ("board/threadList", " board thread list "),
+    ("board/threadCreate", " board thread create "),
+    ("board/threadJoin", " board thread join "),
+    ("board/threadLeave", " board thread leave "),
+    (
+        "board/threadParticipantList",
+        " board thread participant list ",
+    ),
+    ("board/threadListen", " board thread listen "),
     ("board/inboxFetch", " board inbox fetch "),
     ("board/inboxAcknowledge", " board inbox acknowledge "),
     ("board/inboxProjects", " board inbox projects "),
@@ -135,6 +153,72 @@ pub(super) fn require_complete_operation_coverage(
     Ok(coverage)
 }
 
+pub(super) fn require_refusal_corrections(
+    traces: &[OperatorTrace],
+) -> ProofResult<Vec<RefusalCorrectionTrace>> {
+    let expected_corrections = [
+        ("sessiontopicpost", "createthread", " board thread create "),
+        ("participantrequired", "jointhread", " board thread join "),
+        (
+            "orchestratorhandoverrequired",
+            "leavewithhandoverorresolve",
+            " board thread leave ",
+        ),
+    ];
+    let commands = command_items(traces);
+    let corrections = expected_corrections
+        .iter()
+        .map(|(refusal, next_action, expected_command)| {
+            let refusal_index = commands
+                .iter()
+                .position(|item| {
+                    let output = item.get("aggregatedOutput").map(all_strings).unwrap_or_default();
+                    output.contains(refusal) && output.contains(next_action)
+                })
+                .ok_or_else(|| format!("Luna trace omitted {refusal} refusal with {next_action}"))?;
+            let refusing_command = commands
+                .get(refusal_index)
+                .and_then(|item| first_board_invocation(item))
+                .ok_or_else(|| format!("{refusal} refusal had no board command trace"))?;
+            let next_item = commands
+                .iter()
+                .skip(refusal_index + 1)
+                .find(|item| first_board_invocation(item).is_some())
+                .ok_or_else(|| format!("{refusal} refusal had no subsequent board command"))?;
+            let next_command = first_board_invocation(next_item);
+            let corrected = next_command
+                .as_deref()
+                .is_some_and(|command| command.contains(expected_command))
+                && next_item.get("exitCode").and_then(Value::as_i64) == Some(0)
+                && !next_item
+                    .get("aggregatedOutput")
+                    .map(all_strings)
+                    .unwrap_or_default()
+                    .contains("nextaction");
+            let correction_outcome = if corrected {
+                "corrected".to_owned()
+            } else {
+                "failed".to_owned()
+            };
+            if !corrected {
+                return Err(format!(
+                    "{refusal} next action was not immediately corrected by a successful {} command",
+                    expected_command.trim()
+                )
+                .into());
+            }
+            Ok(RefusalCorrectionTrace {
+                refusal: (*refusal).to_owned(),
+                next_action: (*next_action).to_owned(),
+                refusing_command,
+                next_command,
+                correction_outcome,
+            })
+        })
+        .collect::<ProofResult<Vec<_>>>()?;
+    Ok(corrections)
+}
+
 pub(super) fn write_session_trace(
     root: &Path,
     traces: &[OperatorTrace],
@@ -148,10 +232,28 @@ pub(super) fn write_session_trace(
         .open(root.join("session-trace.json"))?;
     serde_json::to_writer_pretty(
         &mut file,
-        &json!({"operators":traces,"actualCommandCoverage":coverage}),
+        &json!({
+            "operators":traces,
+            "actualCommandCoverage":coverage,
+            "refusalCorrections":require_refusal_corrections(traces).unwrap_or_default(),
+        }),
     )?;
     writeln!(file)?;
     Ok(())
+}
+
+fn command_items(traces: &[OperatorTrace]) -> Vec<&Value> {
+    traces
+        .iter()
+        .flat_map(|trace| &trace.turns)
+        .filter_map(|turn| turn.get("items").and_then(Value::as_array))
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("commandExecution"))
+        .collect()
+}
+
+fn first_board_invocation(item: &Value) -> Option<String> {
+    executable_board_invocations(item).into_iter().next()
 }
 
 fn all_strings(value: &Value) -> String {

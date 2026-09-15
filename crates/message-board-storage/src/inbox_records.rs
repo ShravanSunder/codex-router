@@ -125,7 +125,7 @@ impl BoardStore {
                AND ((a.kind='mainMessageCreated' \
                  AND ((?='project' AND a.project_id=?) OR (?='board' AND a.board_id=?) OR (?='topic' AND a.topic_id=?)) \
                  AND (?=1 OR (prs.main_start IS NOT NULL AND a.activity_sequence>prs.main_start AND a.activity_sequence>COALESCE(tb.through_activity,0)))) \
-               OR (a.kind<>'mainMessageCreated' AND w.active=1 \
+               OR (a.kind IN ('threadMessageCreated','threadResolved','threadUnresolved') AND w.active=1 \
                  AND ((?=1 AND a.kind='threadMessageCreated') \
                    OR (?=0 AND a.activity_sequence>w.starts_after_activity AND a.activity_sequence>COALESCE(rb.through_activity,0))))) \
              ORDER BY CASE WHEN ?=1 THEN a.activity_sequence END DESC, CASE WHEN ?=0 THEN a.activity_sequence END ASC LIMIT ?",
@@ -441,7 +441,7 @@ async fn activity_belongs_to_scope(
 ) -> Result<bool, BoardError> {
     match scope {
         ReadScope::Topic { topic_id } => sqlx::query_scalar!("SELECT EXISTS(SELECT 1 FROM board_activity WHERE activity_sequence=? AND topic_id=? AND kind='mainMessageCreated')", sequence, topic_id.as_str()).fetch_one(&mut **transaction).await.map(|value| value != 0).map_err(storage_error),
-        ReadScope::Thread { root_message_id } => sqlx::query_scalar!("SELECT EXISTS(SELECT 1 FROM board_activity WHERE activity_sequence=? AND root_id=? AND kind<>'mainMessageCreated')", sequence, root_message_id.as_str()).fetch_one(&mut **transaction).await.map(|value| value != 0).map_err(storage_error),
+        ReadScope::Thread { root_message_id } => sqlx::query_scalar!("SELECT EXISTS(SELECT 1 FROM board_activity WHERE activity_sequence=? AND root_id=? AND kind IN ('threadMessageCreated','threadResolved','threadUnresolved'))", sequence, root_message_id.as_str()).fetch_one(&mut **transaction).await.map(|value| value != 0).map_err(storage_error),
     }
 }
 fn invalid_acknowledgement() -> BoardError {

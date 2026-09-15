@@ -137,7 +137,7 @@ pub(super) fn parse_identity(value: &str, flag: &str) -> Result<Identity, String
         .map_err(|_| format!("{flag} must be valid typed Identity JSON with kind session or human"))
 }
 
-fn parse_acting_for(value: &str) -> Result<ActingForIdentity, String> {
+pub(super) fn parse_acting_for(value: &str) -> Result<ActingForIdentity, String> {
     serde_json::from_str(value).map_err(|_| "--acting-for must be valid human identity JSON".into())
 }
 

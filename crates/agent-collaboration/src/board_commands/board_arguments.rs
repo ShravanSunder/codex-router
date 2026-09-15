@@ -105,6 +105,17 @@ pub(super) enum MessageCommand {
 
 #[derive(Subcommand)]
 pub(super) enum ThreadCommand {
+    /// Create a root Thread and optionally join it with an explicit Role.
+    Create(ThreadCreateArguments),
+    /// Join a Thread with an explicit Role and Watch choice.
+    Join(ThreadJoinArguments),
+    /// Leave a Thread, handing over or resolving when required by the current Role.
+    Leave(ThreadLeaveArguments),
+    /// List open and closed Participants for one Thread.
+    Participant {
+        #[command(subcommand)]
+        command: ThreadParticipantCommand,
+    },
     /// Show a root-message thread and optional reader watch status.
     Show(ThreadShowArguments),
     /// Mark a thread resolved.
@@ -119,6 +130,8 @@ pub(super) enum ThreadCommand {
     List(ThreadListArguments),
     /// Wait for Thread Activity. Delivery marks it seen; acknowledgement remains separate.
     Listen(ThreadListenArguments),
+    /// Wait once for watched or named Thread Activity and then exit.
+    Wait(ThreadWaitArguments),
 }
 
 #[derive(Subcommand)]
@@ -127,6 +140,12 @@ pub(super) enum ThreadListenControlCommand {
     Show(ThreadListenControlArguments),
     /// Cancel an active Repeating Listen.
     Cancel(ThreadListenControlArguments),
+}
+
+#[derive(Subcommand)]
+pub(super) enum ThreadParticipantCommand {
+    /// List open and closed Participants for one Thread.
+    List(ThreadParticipantListArguments),
 }
 
 #[derive(Subcommand)]
@@ -485,6 +504,102 @@ pub(super) struct ThreadMutationArguments {
 }
 
 #[derive(Args)]
+pub(super) struct ThreadCreateArguments {
+    /// Caller-chosen UUIDv7; generated and reported when omitted.
+    #[arg(long)]
+    pub message_id: Option<String>,
+    #[arg(long)]
+    pub topic_id: String,
+    /// Typed actor Identity JSON, or self for the current Codex or Claude Code session.
+    #[arg(long)]
+    pub actor: String,
+    #[arg(long)]
+    pub acting_for: Option<String>,
+    /// Participant Role. Required when the actor is a session.
+    #[arg(long, value_enum)]
+    pub role: Option<ParticipantRoleKind>,
+    /// Create a Watch for this actor.
+    #[arg(long, conflicts_with = "no_watch")]
+    pub watch: bool,
+    /// Do not create a Watch for this actor.
+    #[arg(long, conflicts_with = "watch")]
+    pub no_watch: bool,
+    /// Read root text from this file: 1 to 65536 UTF-8 bytes.
+    #[arg(long, value_name = "PATH")]
+    pub text_file: PathBuf,
+    #[arg(long)]
+    pub reference_message: Vec<String>,
+    #[arg(long)]
+    pub reference_thread: Vec<String>,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
+pub(super) struct ThreadJoinArguments {
+    #[arg(long)]
+    pub root_message_id: String,
+    /// Typed actor Identity JSON, or self for the current Codex or Claude Code session.
+    #[arg(long)]
+    pub actor: String,
+    #[arg(long, value_enum)]
+    pub role: ParticipantRoleKind,
+    #[arg(long, conflicts_with = "no_watch")]
+    pub watch: bool,
+    #[arg(long, conflicts_with = "watch")]
+    pub no_watch: bool,
+    /// Current Orchestrator identity to replace. Only valid with --role orchestrator.
+    #[arg(long)]
+    pub replace: Option<String>,
+    #[arg(long)]
+    pub note: Option<String>,
+    /// Start an existing process-owned Listen: once, or for a repeating duration.
+    #[arg(long, num_args = 1..=2, value_names = ["MODE", "DURATION"])]
+    pub listen: Option<Vec<String>>,
+    #[arg(long)]
+    pub max_wait: Option<String>,
+    #[arg(long, conflicts_with = "no_acknowledge")]
+    pub acknowledge: bool,
+    #[arg(long, conflicts_with = "acknowledge")]
+    pub no_acknowledge: bool,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum ParticipantRoleKind {
+    Orchestrator,
+    Advisor,
+    Reviewer,
+    Participant,
+}
+
+#[derive(Args)]
+pub(super) struct ThreadLeaveArguments {
+    #[arg(long)]
+    pub root_message_id: String,
+    /// Typed actor Identity JSON, or self for the current Codex or Claude Code session.
+    #[arg(long)]
+    pub actor: String,
+    #[arg(long)]
+    pub to: Option<String>,
+    #[arg(long, conflicts_with = "to")]
+    pub resolve: bool,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
+pub(super) struct ThreadParticipantListArguments {
+    #[arg(long)]
+    pub root_message_id: String,
+    #[command(flatten)]
+    pub page: PageArguments,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
 pub(super) struct ThreadListArguments {
     #[arg(long)]
     pub project_id: String,
@@ -529,6 +644,33 @@ pub(super) struct ThreadListenArguments {
     #[arg(long, conflicts_with = "acknowledge")]
     pub no_acknowledge: bool,
     /// Typed Reader Identity JSON.
+    #[arg(long)]
+    pub actor: Option<String>,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
+pub(super) struct ThreadWaitArguments {
+    /// Select every Thread with an active Watch for this Reader.
+    #[arg(long, conflicts_with = "root_message_id")]
+    pub watched: bool,
+    /// Select a named Thread. May be repeated.
+    #[arg(long)]
+    pub root_message_id: Vec<String>,
+    /// Maximum wait: integer followed by s, m, h, or d.
+    #[arg(long)]
+    pub max_wait: Option<String>,
+    /// Initialize the Delivered position for a first Wait from this Activity sequence.
+    #[arg(long = "from")]
+    pub from_activity_sequence: Option<u64>,
+    /// Advance each Thread's Acknowledged position after its Batch is written to stdout.
+    #[arg(long)]
+    pub acknowledge: bool,
+    /// Leave each emitted Batch's Acknowledged position unchanged.
+    #[arg(long, conflicts_with = "acknowledge")]
+    pub no_acknowledge: bool,
+    /// Typed Reader Identity JSON, or self for the current Codex or Claude Code session.
     #[arg(long)]
     pub actor: Option<String>,
     #[command(flatten)]

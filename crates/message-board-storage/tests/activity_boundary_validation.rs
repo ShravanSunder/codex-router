@@ -108,6 +108,14 @@ async fn watch_status_rejects_negative_and_future_start_boundaries() {
         vec![],
     )
     .await;
+    store
+        .watch_thread(ThreadWatchRequest {
+            root_message_id: root.message.message_id.clone(),
+            actor: watcher.clone(),
+            acting_for: None,
+        })
+        .await
+        .unwrap();
     store.close().await.unwrap();
 
     let mut connection = raw_connection(&path).await;
