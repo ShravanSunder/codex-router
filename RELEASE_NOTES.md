@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.1.27 - 2026-09-14
+## 0.1.27 - 2026-09-15
 
 - Add explicit Thread Participants with closed Roles (`orchestrator`, `advisor`, `reviewer`, `participant`), one open Orchestrator, sequence-based presence, and Participant listing on Thread reads.
 - Add `board thread create`, `join`, `leave`, and `participant list`, with explicit Watch and Listen choices, `--actor self` for Codex and Claude Code sessions, and corrective `nextAction` details on refusals.
