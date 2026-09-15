@@ -1,14 +1,15 @@
 //! Participant lifecycle, Orchestrator ownership, and Participant read models.
 use crate::BoardStore;
+use crate::board_topic_records::require_board;
 use crate::message_records::{activate_watch, load_watch_status, require_thread};
 use crate::participant_row_decoding::{
     StoredParticipantRow, decode_participant, load_orchestrator, load_participant,
     require_open_participant, role_name,
 };
 use crate::storage_support::{
-    BoardTransaction, allocate_activity_sequence, decode_cursor as decode_signed_cursor,
-    encode_cursor, ensure_identity, identity_key, invalid_cursor, invalid_record,
-    recompute_project_unread, storage_error,
+    BoardTransaction, allocate_activity_sequence, archived_board,
+    decode_cursor as decode_signed_cursor, encode_cursor, ensure_identity, identity_key,
+    invalid_cursor, invalid_record, recompute_project_unread, storage_error,
 };
 use message_board::*;
 use serde::{Deserialize, Serialize};
@@ -276,6 +277,14 @@ impl BoardStore {
             .await
             .map_err(storage_error)?;
         let location = require_thread(&mut transaction, &request.root_message_id).await?;
+        if request.resolve
+            && require_board(&mut transaction, &location.board_id)
+                .await?
+                .state
+                == BoardState::Archived
+        {
+            return Err(archived_board());
+        }
         let actor_key = ensure_identity(&mut transaction, &request.actor).await?;
         let participant =
             require_open_participant(&mut transaction, &request.actor, &request.root_message_id)
@@ -304,6 +313,16 @@ impl BoardStore {
                 "leave",
                 "a non-Orchestrator must omit to and resolve",
             ));
+        }
+        if request.resolve {
+            sqlx::query!(
+                "UPDATE thread_watches SET active=0 WHERE reader_key=? AND root_id=?",
+                actor_key,
+                request.root_message_id.as_str(),
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
         }
         let sequence = if request.resolve {
             resolve_in_transaction(&mut transaction, &location, &actor_key).await?
@@ -378,16 +397,18 @@ impl BoardStore {
             .map_err(storage_error)?;
             sequence
         };
-        sqlx::query!(
-            "UPDATE thread_watches SET active=0 WHERE reader_key=? AND root_id=?",
-            actor_key,
-            request.root_message_id.as_str(),
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(storage_error)?;
-        recompute_project_unread(&mut transaction, &actor_key, location.project_id.as_str())
-            .await?;
+        if !request.resolve {
+            sqlx::query!(
+                "UPDATE thread_watches SET active=0 WHERE reader_key=? AND root_id=?",
+                actor_key,
+                request.root_message_id.as_str(),
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+            recompute_project_unread(&mut transaction, &actor_key, location.project_id.as_str())
+                .await?;
+        }
         let participant =
             load_participant(&mut transaction, &request.actor, &request.root_message_id)
                 .await?
@@ -511,6 +532,20 @@ pub(crate) async fn resolve_in_transaction(
     .execute(&mut **transaction)
     .await
     .map_err(storage_error)?;
+    sqlx::query!(
+        "UPDATE project_reader_state SET has_unread=1 \
+         WHERE project_id=? AND reader_key<>? AND reader_key IN ( \
+           SELECT reader_key FROM thread_watches \
+           WHERE root_id=? AND active=1 AND starts_after_activity<?)",
+        location.project_id.as_str(),
+        actor_key,
+        location.root_message_id.as_str(),
+        sequence,
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    recompute_project_unread(transaction, actor_key, location.project_id.as_str()).await?;
     Ok(sequence)
 }
 

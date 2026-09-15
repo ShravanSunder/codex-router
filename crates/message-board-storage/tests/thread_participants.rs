@@ -33,6 +33,7 @@ struct Fixture {
     store: BoardStore,
     path: std::path::PathBuf,
     project_id: ProjectId,
+    board_id: BoardId,
     topic_id: TopicId,
 }
 
@@ -70,7 +71,7 @@ impl Fixture {
         store
             .create_topic(TopicCreateRequest {
                 topic_id: topic_id.clone(),
-                board_id,
+                board_id: board_id.clone(),
                 name: ResourceName::try_from("Topic".to_owned()).unwrap(),
                 description: Description::try_from("Participants".to_owned()).unwrap(),
                 actor: human("owner"),
@@ -82,6 +83,7 @@ impl Fixture {
             store,
             path,
             project_id,
+            board_id,
             topic_id,
         }
     }
@@ -980,4 +982,158 @@ async fn thread_list_rejects_corrupt_projected_orchestrator_records() {
     assert_eq!(failure.kind, BoardFailureKind::InvalidRecord);
     store.close().await.unwrap();
     std::fs::remove_file(fixture.path).unwrap();
+}
+
+#[tokio::test]
+async fn archived_leave_resolve_refuses_without_changing_participant_or_watch_state() {
+    let mut fixture = Fixture::open("archived-leave-resolve").await;
+    let orchestrator = session("archived-orchestrator");
+    let created = fixture
+        .create(
+            orchestrator.clone(),
+            Some(ParticipantRole::Orchestrator),
+            true,
+        )
+        .await;
+    let root_message_id = created.message.message_id;
+    let joined_at_activity = match created.creator_participation {
+        ThreadCreatorParticipation::Joined { participant } => participant.joined_at_activity,
+        ThreadCreatorParticipation::NotJoined => panic!("session creator must join"),
+    };
+    fixture
+        .store
+        .archive_board(BoardArchiveRequest {
+            board_id: fixture.board_id.clone(),
+            actor: human("archiver"),
+            acting_for: None,
+        })
+        .await
+        .unwrap();
+
+    let failure = fixture
+        .store
+        .leave_thread(ThreadLeaveRequest {
+            root_message_id: root_message_id.clone(),
+            actor: orchestrator.clone(),
+            to: None,
+            resolve: true,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failure.kind, BoardFailureKind::ArchivedBoard);
+    let thread = fixture
+        .store
+        .show_thread(ThreadShowRequest {
+            root_message_id: root_message_id.clone(),
+            reader: Some(orchestrator.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(thread.thread.state, ThreadState::Unresolved);
+    assert_eq!(thread.thread.orchestrator.unwrap().identity, orchestrator);
+    assert!(thread.watch_status.unwrap().watching);
+    let participants = fixture
+        .store
+        .list_thread_participants(ThreadParticipantListRequest {
+            root_message_id,
+            page: page(100),
+        })
+        .await
+        .unwrap()
+        .page
+        .records;
+    assert_eq!(participants.len(), 1);
+    assert!(participants[0].is_open());
+    assert_eq!(participants[0].joined_at_activity, joined_at_activity);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn leave_resolve_publishes_unread_to_another_active_watcher() {
+    let mut fixture = Fixture::open("leave-resolve-unread").await;
+    let orchestrator = session("resolving-orchestrator");
+    let root_message_id = fixture
+        .create(
+            orchestrator.clone(),
+            Some(ParticipantRole::Orchestrator),
+            false,
+        )
+        .await
+        .message
+        .message_id;
+    let watcher = human("clean-watcher");
+    fixture
+        .store
+        .watch_thread(ThreadWatchRequest {
+            root_message_id: root_message_id.clone(),
+            actor: watcher.clone(),
+            acting_for: None,
+        })
+        .await
+        .unwrap();
+    let before = fixture
+        .store
+        .list_inbox_projects(InboxProjectsRequest {
+            reader: watcher.clone(),
+            unread_only: false,
+            page: page(100),
+        })
+        .await
+        .unwrap()
+        .page
+        .records;
+    assert!(
+        !before
+            .iter()
+            .find(|summary| summary.project_id == fixture.project_id)
+            .unwrap()
+            .has_unread
+    );
+
+    fixture
+        .store
+        .leave_thread(ThreadLeaveRequest {
+            root_message_id: root_message_id.clone(),
+            actor: orchestrator,
+            to: None,
+            resolve: true,
+        })
+        .await
+        .unwrap();
+    let after = fixture
+        .store
+        .list_inbox_projects(InboxProjectsRequest {
+            reader: watcher.clone(),
+            unread_only: false,
+            page: page(100),
+        })
+        .await
+        .unwrap()
+        .page
+        .records;
+    assert!(
+        after
+            .iter()
+            .find(|summary| summary.project_id == fixture.project_id)
+            .unwrap()
+            .has_unread
+    );
+    let unread = fixture
+        .store
+        .fetch_inbox(InboxFetchRequest {
+            scope: InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: InboxReadMode::Unread,
+            reader: watcher,
+            page: page(100),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        unread.page.records.as_slice(),
+        [InboxActivity::ThreadStateChanged { root_message_id: unread_root, state: ThreadState::Resolved, .. }]
+            if *unread_root == root_message_id
+    ));
+    fixture.finish().await;
 }

@@ -385,20 +385,23 @@ async fn set_thread_state(
             sequence
         }
     };
-    sqlx::query!(
-        "UPDATE project_reader_state SET has_unread=1 \
-         WHERE project_id=? AND reader_key<>? AND reader_key IN ( \
-           SELECT reader_key FROM thread_watches \
-           WHERE root_id=? AND active=1 AND starts_after_activity<?)",
-        location.project_id.as_str(),
-        actor_key,
-        root.as_str(),
-        sequence,
-    )
-    .execute(&mut *transaction)
-    .await
-    .map_err(storage_error)?;
-    recompute_project_unread(&mut transaction, &actor_key, location.project_id.as_str()).await?;
+    if requested == ThreadState::Unresolved {
+        sqlx::query!(
+            "UPDATE project_reader_state SET has_unread=1 \
+             WHERE project_id=? AND reader_key<>? AND reader_key IN ( \
+               SELECT reader_key FROM thread_watches \
+               WHERE root_id=? AND active=1 AND starts_after_activity<?)",
+            location.project_id.as_str(),
+            actor_key,
+            root.as_str(),
+            sequence,
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        recompute_project_unread(&mut transaction, &actor_key, location.project_id.as_str())
+            .await?;
+    }
     let orchestrator = load_orchestrator(&mut transaction, root).await?;
     transaction.commit().await.map_err(storage_error)?;
     Ok((
