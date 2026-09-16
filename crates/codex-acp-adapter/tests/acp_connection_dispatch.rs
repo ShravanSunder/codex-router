@@ -122,6 +122,11 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                 continue;
             }
             if method == "thread/start" {
+                assert_eq!(request["params"]["model"], "gpt-5.6-sol");
+                assert_eq!(
+                    request["params"]["config"]["model_reasoning_effort"],
+                    "medium"
+                );
                 assert_eq!(
                     request["params"]["config"]["mcp_servers"]["notes"]["command"],
                     "/usr/bin/example"
@@ -133,7 +138,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","thread":{"id":"created-thread","cwd":"/work","turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"created-thread","cwd":"/work","turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();
@@ -179,7 +184,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
         (
             json!("new"),
             "session/new",
-            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}]}),
+            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium"}}}),
             "result",
         ),
         (

@@ -56,7 +56,7 @@ pub fn stored_thread_page_query(query: &StoredThreadQuery) -> QueryBuilder<Sqlit
     let mut builder = QueryBuilder::<Sqlite>::new(
         r#"
             SELECT
-                id, rollout_path, cwd, model_provider, model, source, thread_source, git_branch,
+                id, rollout_path, cwd, model_provider, model, reasoning_effort, source, thread_source, git_branch,
                 git_origin_url, name, title, preview, first_user_message,
                 created_at_ms, updated_at_ms, updated_at_ms AS recency_at_ms
             FROM threads INDEXED BY "#,
@@ -148,8 +148,8 @@ fn append_source_filter(builder: &mut QueryBuilder<Sqlite>, source: StoredThread
         StoredThreadSource::All => {}
         StoredThreadSource::Interactive => {
             builder.push(
-                " AND source IN ('cli', 'vscode') \
-                 AND (thread_source IS NULL OR thread_source NOT IN ('system', 'exec', 'app_server', 'subagent', 'guardian_review', 'memory_consolidation'))",
+                " AND (thread_source = 'user' OR (source IN ('cli', 'vscode') \
+                 AND (thread_source IS NULL OR thread_source NOT IN ('system', 'exec', 'app_server', 'subagent', 'guardian_review', 'memory_consolidation'))))",
             );
         }
         StoredThreadSource::Subagents => {

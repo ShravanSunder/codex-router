@@ -110,6 +110,8 @@ async fn worker_timeout_crash_child() -> TestResult<()> {
                     cwd: root.to_string_lossy().into_owned(),
                 },
                 execution_timeout_seconds: Some(1),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,
@@ -277,7 +279,7 @@ async fn recover(root: &Path) -> TestResult<()> {
     Ok(())
 }
 fn history(status: &str) -> Value {
-    json!({"thread":{"id":"recorded-thread","turns":[{"id":"unrelated-turn","status":"completed","items":[]},{"id":"recorded-turn","status":status,"items":[]}]}})
+    json!({"thread":{"id":"recorded-thread","model":"gpt-5.6-sol","reasoningEffort":"medium","turns":[{"id":"unrelated-turn","status":"completed","items":[]},{"id":"recorded-turn","status":status,"items":[]}]}})
 }
 async fn request_after_initialize(
     stream: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,

@@ -16,6 +16,12 @@ pub enum ConversationEvent {
     PermissionRequired(SessionRef),
     PromptResult { target: SessionRef, result: Value },
 }
+pub struct ConversationSessionRequest<'a> {
+    pub session: Option<&'a str>,
+    pub fork: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub effort: &'a str,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationEnd {
     Completed,
@@ -71,7 +77,7 @@ impl AcpConversation {
     }
     pub async fn open_session(
         &mut self,
-        session: Option<&str>,
+        request: ConversationSessionRequest<'_>,
         cwd: &Path,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<SessionRef, ClientError> {
@@ -84,7 +90,7 @@ impl AcpConversation {
         if !cwd.is_absolute() {
             return Err(ClientError::Protocol("ACP cwd must be absolute"));
         }
-        let target = if let Some(id) = session {
+        let target = if let Some(id) = request.session {
             if !self.load_supported {
                 return Err(ClientError::UnsupportedCapability("ACP session/load"));
             }
@@ -98,17 +104,25 @@ impl AcpConversation {
             self.target = Some(target.clone());
             self.request(
                 "session/load",
-                json!({"sessionId":id,"cwd":cwd,"mcpServers":[]}),
+                json!({"sessionId":id,"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":{"effort":request.effort}}}),
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
             .await?;
             target
         } else {
+            let mut router_metadata = serde_json::Map::from_iter([
+                ("model".to_owned(), json!(request.model)),
+                ("effort".to_owned(), json!(request.effort)),
+            ]);
+            if let Some(source_thread_id) = request.fork {
+                router_metadata.insert("forkThreadId".into(), json!(source_thread_id));
+            }
+            let params = json!({"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata}});
             let result = self
                 .request(
                     "session/new",
-                    json!({"cwd":cwd,"mcpServers":[]}),
+                    params,
                     "NewSessionRequest",
                     "NewSessionResponse",
                 )
@@ -139,6 +153,7 @@ impl AcpConversation {
     pub async fn prompt(
         &mut self,
         text: &str,
+        effort: &str,
         timeout: Duration,
         cancel: CancellationToken,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
@@ -157,7 +172,7 @@ impl AcpConversation {
         let id = self
             .submit(
                 "session/prompt",
-                json!({"sessionId":session,"prompt":[{"type":"text","text":text}]}),
+                json!({"sessionId":session,"prompt":[{"type":"text","text":text}],"_meta":{"codexRouter":{"effort":effort}}}),
                 "PromptRequest",
             )
             .await?;

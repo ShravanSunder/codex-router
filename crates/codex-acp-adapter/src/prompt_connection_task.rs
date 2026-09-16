@@ -44,7 +44,7 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
     }
     let mut catalog = match AcpSchemaCatalog::load() {
         Ok(catalog) => catalog,
-        Err(_) => {
+        Err(_error) => {
             return PromptTaskCompletion {
                 cancellation_barrier: None,
                 binding: Some(inputs.session),
@@ -73,14 +73,12 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
     };
     let mut pending = match pending {
         Ok(pending) => pending,
-        Err(_) => {
+        Err(error) => {
+            let message = error.to_string();
             return PromptTaskCompletion {
                 cancellation_barrier: None,
                 binding: None,
-                terminal: Some(failure(
-                    &inputs.request_id,
-                    "Native prompt could not be started",
-                )),
+                terminal: Some(failure(&inputs.request_id, &message)),
             };
         }
     };
@@ -110,10 +108,16 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
                 },
                 Ok(Some(PromptEvent::Terminal(frame)))=>return PromptTaskCompletion {
                 cancellation_barrier: None,binding:pending.into_session().ok(),terminal:Some(frame)},
-                Ok(Some(PromptEvent::NativeCallback(_)))|Err(_)=>{
+                Ok(Some(PromptEvent::NativeCallback(_)))=>{
                     let _cancel=pending.cancel().await;
                     return PromptTaskCompletion {
                 cancellation_barrier: None,binding:None,terminal:Some(failure(&inputs.request_id,"Unsupported native interaction or invalid update"))};
+                },
+                Err(error)=>{
+                    let message=error.to_string();
+                    let _cancel=pending.cancel().await;
+                    return PromptTaskCompletion {
+                cancellation_barrier: None,binding:None,terminal:Some(failure(&inputs.request_id,&message))};
                 },
                 Ok(Some(PromptEvent::NativeNotification(_))|None)=>{},
             }
@@ -124,5 +128,5 @@ fn cancelled_response(id: &Value, state: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"cancelled","_meta":{"codex-router/nativeInterruption":{"state":state}}}})
 }
 fn failure(id: &Value, message: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":message}})
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"Native prompt rejected","data":{"detail":message}}})
 }

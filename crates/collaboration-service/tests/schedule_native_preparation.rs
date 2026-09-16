@@ -101,9 +101,9 @@ async fn exercise_preparation(
             text: InstructionText::try_from("Check status".to_owned())?,
         })
         .await?;
-    let schedule=client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null}}))?).await?;
+    let schedule=client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}}))?).await?;
     if ownership_conflict {
-        let owner = client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null}}))?).await?;
+        let owner = client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}}))?).await?;
         store
             .lock()
             .await
@@ -171,11 +171,17 @@ async fn exercise_preparation(
                 if request.get("method").and_then(Value::as_str) != Some("thread/start")
                     || request.pointer("/params/cwd").and_then(Value::as_str)
                         != Some("/fresh-fixture")
+                    || request.pointer("/params/model").and_then(Value::as_str)
+                        != Some("gpt-5.6-sol")
+                    || request
+                        .pointer("/params/config/model_reasoning_effort")
+                        .and_then(Value::as_str)
+                        != Some("medium")
                 {
                     return Err("wrong preparation call or cwd".into());
                 }
                 if !lose_response {
-                    socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":"prepared-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-luna"}}).to_string().into())).await?;
+                    socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":"prepared-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-sol"}}).to_string().into())).await?;
                 }
             }
         }

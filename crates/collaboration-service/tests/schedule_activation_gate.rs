@@ -32,7 +32,7 @@ async fn enabled_schedule_requires_available_native_capabilities()
         })
         .await?;
     let request: ScheduleCreateRequest = serde_json::from_value(
-        json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":true,"destination":{"kind":"freshEachRun","endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"cwd":"/fixture"},"executionTimeoutSeconds":null}}),
+        json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":60},"enabled":true,"destination":{"kind":"freshEachRun","endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"cwd":"/fixture"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}}),
     )?;
     if client.create_schedule(request).await.is_ok() {
         return Err("enabled schedule admitted without native execution capabilities".into());

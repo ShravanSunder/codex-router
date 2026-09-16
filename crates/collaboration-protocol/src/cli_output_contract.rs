@@ -37,7 +37,12 @@ pub enum ObservationCloseReason {
 }
 
 #[derive(JsonSchema, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ConversationRecord {
     SessionReady {
         target: SessionRef,
@@ -52,6 +57,9 @@ pub enum ConversationRecord {
     },
     PromptResult {
         target: SessionRef,
+        effective_model: String,
+        effective_effort: String,
+        idle_seconds: u64,
         #[schemars(schema_with = "acp_result_schema")]
         result: Value,
     },

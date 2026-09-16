@@ -56,6 +56,8 @@ async fn exercise_input_validation(
                     cwd: root.to_string_lossy().into_owned(),
                 },
                 execution_timeout_seconds: None,
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::ImportedSummary {
                 text: "y".repeat(100_000),

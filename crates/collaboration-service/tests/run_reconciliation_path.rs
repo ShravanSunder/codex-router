@@ -80,6 +80,8 @@ async fn exercise(
                     cwd: "/isolated-fixture".into(),
                 },
                 execution_timeout_seconds: Some(120),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,
@@ -199,7 +201,7 @@ async fn exercise(
         {
             return Err("reconcile mutated native state or selected another target".into());
         }
-        socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":observed_thread,"turns":[{"id":observed_id,"status":status,"items":[]}]}}}).to_string().into())).await?;
+        socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":observed_thread,"model":"gpt-5.6-sol","reasoningEffort":"medium","turns":[{"id":observed_id,"status":status,"items":[]}]}}}).to_string().into())).await?;
         if let Some(Ok(message)) =
             tokio::time::timeout(Duration::from_secs(2), socket.next()).await?
             && !message.is_close()

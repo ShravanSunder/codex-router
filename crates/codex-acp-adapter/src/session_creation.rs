@@ -18,6 +18,11 @@ pub enum SessionSetupError {
     InvalidParameters,
     #[error("native session effective configuration differs from requested configuration")]
     ConfigurationMismatch,
+    #[error("requested model {requested} but native runtime reported {effective}")]
+    ModelMismatch {
+        requested: String,
+        effective: String,
+    },
     #[error("native session creation outcome unknown")]
     OutcomeUnknown,
     #[error("native session request rejected")]
@@ -34,6 +39,43 @@ pub struct AcpSessionBinding {
     configuration: Option<McpConfiguration>,
     pub(crate) connection: NativeProtocolConnection,
     pub(crate) schemas: Arc<NativePayloadSchemas>,
+}
+
+struct RouterModelChoice<'a> {
+    model: &'a str,
+    effort: &'a str,
+    fork_thread_id: Option<&'a str>,
+}
+
+fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionSetupError> {
+    let router = params
+        .pointer("/_meta/codexRouter")
+        .and_then(Value::as_object)
+        .ok_or(SessionSetupError::InvalidParameters)?;
+    let model = router
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_whitespace))
+        .ok_or(SessionSetupError::InvalidParameters)?;
+    let effort = router
+        .get("effort")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_whitespace))
+        .ok_or(SessionSetupError::InvalidParameters)?;
+    let fork_thread_id = router
+        .get("forkThreadId")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or(SessionSetupError::InvalidParameters)
+        })
+        .transpose()?;
+    Ok(RouterModelChoice {
+        model,
+        effort,
+        fork_thread_id,
+    })
 }
 pub struct SessionSetupInputs {
     pub connection: NativeProtocolConnection,
@@ -57,6 +99,7 @@ impl AcpSessionBinding {
             .get("cwd")
             .and_then(Value::as_str)
             .ok_or(SessionSetupError::InvalidParameters)?;
+        let choice = router_model_choice(&inputs.params)?;
         let expected_cwd = normalized_directory(cwd)?;
         let servers = inputs
             .params
@@ -78,21 +121,53 @@ impl AcpSessionBinding {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         };
-        let mut native = json!({"cwd":cwd,"experimentalRawEvents":false});
+        let mut native = json!({
+            "cwd":cwd,
+            "experimentalRawEvents":false,
+            "model":choice.model,
+            "allowProviderModelFallback":false,
+            "threadSource":"user",
+            "config":{"model_reasoning_effort":choice.effort}
+        });
         let fields = native
             .as_object_mut()
             .ok_or(SessionSetupError::InvalidParameters)?;
         if let Some(config) = configuration.native_overrides() {
-            fields.insert("config".into(), config);
+            let target = fields
+                .get_mut("config")
+                .and_then(Value::as_object_mut)
+                .ok_or(SessionSetupError::InvalidParameters)?;
+            let values = config
+                .as_object()
+                .ok_or(SessionSetupError::InvalidParameters)?;
+            target.extend(values.clone());
         }
         if !directories.is_empty() {
             fields.insert("runtimeWorkspaceRoots".into(), json!(directories));
         }
         let mut connection = inputs.connection;
+        let operation = if choice.fork_thread_id.is_some() {
+            NativeOperation::ForkThread
+        } else {
+            NativeOperation::StartThread
+        };
+        if let Some(fork_thread_id) = choice.fork_thread_id {
+            fields.insert("threadId".into(), json!(fork_thread_id));
+        }
         let result = connection
-            .request_validated(&inputs.schemas, NativeOperation::StartThread, native)
+            .request_validated(&inputs.schemas, operation, native)
             .await
             .map_err(map_native_failure)?;
+        if result.get("model").and_then(Value::as_str) != Some(choice.model) {
+            return Err(SessionSetupError::ModelMismatch {
+                requested: choice.model.to_owned(),
+                effective: result
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing>")
+                    .to_owned(),
+            });
+        }
         let effective_cwd = result
             .get("cwd")
             .and_then(Value::as_str)

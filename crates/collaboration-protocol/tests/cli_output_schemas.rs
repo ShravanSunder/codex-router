@@ -15,8 +15,8 @@ fn cli_catalog_covers_closed_envelopes_and_pinned_acp_variants() {
     );
     let conversation = validator("ConversationRecord");
     assert!(conversation.is_valid(&serde_json::json!({"kind":"sessionUpdate","target":target,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}})));
-    assert!(conversation.is_valid(&serde_json::json!({"kind":"promptResult","target":target,"result":{"stopReason":"cancelled"}})));
-    assert!(!conversation.is_valid(&serde_json::json!({"kind":"promptResult","target":target,"result":{"stopReason":"interrupted"}})));
+    assert!(conversation.is_valid(&serde_json::json!({"kind":"promptResult","target":target,"effectiveModel":"gpt-5.6-sol","effectiveEffort":"medium","idleSeconds":0,"result":{"stopReason":"cancelled"}})));
+    assert!(!conversation.is_valid(&serde_json::json!({"kind":"promptResult","target":target,"effectiveModel":"gpt-5.6-sol","effectiveEffort":"medium","idleSeconds":0,"result":{"stopReason":"interrupted"}})));
     assert!(!conversation.is_valid(&serde_json::json!({"kind":"sessionUpdate","target":target,"update":{"sessionUpdate":"invented"}})));
     assert!(conversation.is_valid(&serde_json::json!({"kind":"conversationError","target":null,"stage":"connect","effect":"notDispatched","message":"Unavailable"})));
     assert!(!conversation.is_valid(&serde_json::json!({"kind":"conversationError","stage":"connect","effect":"notDispatched","message":"Unavailable"})));

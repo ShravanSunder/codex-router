@@ -164,5 +164,16 @@ fn setup_error(id: Value, failure: &crate::SessionSetupError) -> Value {
     } else {
         -32603
     };
-    error(id, code, "Native session setup rejected")
+    match failure {
+        crate::SessionSetupError::ModelMismatch {
+            requested,
+            effective,
+        } => json!({
+            "jsonrpc":"2.0","id":id,
+            "error":{"code":code,"message":"Native session setup rejected","data":{
+                "kind":"modelMismatch","requested":requested,"effective":effective
+            }}
+        }),
+        _ => error(id, code, "Native session setup rejected"),
+    }
 }

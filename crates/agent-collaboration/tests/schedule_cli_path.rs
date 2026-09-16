@@ -28,7 +28,7 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
     std::fs::write(
         &definition,
         serde_json::to_vec(
-            &json!({"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null}),
+            &json!({"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}),
         )?,
     )?;
     let created = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))

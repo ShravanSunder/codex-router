@@ -44,7 +44,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
                     "initialize" => json!({}),
                     "turn/start" => json!({"turn":{"id":"target","status":"inProgress"}}),
                     _ => {
-                        json!({"cwd":"/work","thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
                     }
                 };
                 let reply = if *method == "turn/interrupt" {
@@ -102,7 +102,11 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
     let scenario = async {
         for (id, method, params) in [
             (1, "initialize", json!({"protocolVersion":1})),
-            (2, "session/new", json!({"cwd":"/work","mcpServers":[]})),
+            (
+                2,
+                "session/new",
+                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium"}}}),
+            ),
         ] {
             write
                 .write_all(
@@ -124,7 +128,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
             );
         }
         // Act: observe acceptance before cancelling so the exact interruption target is known.
-        let prompt = json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"work"}]});
+        let prompt = json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"work"}],"_meta":{"codexRouter":{"effort":"medium"}}});
         write
             .write_all(
                 format!(

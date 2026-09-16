@@ -68,11 +68,25 @@ pub(crate) async fn observe_worker(
     let observed = tokio::select! {
         biased;
         _ = retired.cancelled() => return Ok(false),
-        observed = tokio::time::timeout(std::time::Duration::from_secs(20), crate::scheduled_native_observation::read_turn(admission, target, turn_id)) => observed,
+        observed = tokio::time::timeout(std::time::Duration::from_secs(20), crate::scheduled_native_observation::read_turn_and_choice(admission, target, turn_id)) => observed,
     };
-    let Ok(Ok(Some(turn))) = observed else {
+    let Ok(Ok(Some(observed_turn))) = observed else {
         return Ok(false);
     };
+    let Some(inputs) = record.inputs.as_ref() else {
+        return Err(StorageError::InvalidRecord);
+    };
+    if observed_turn.effort.as_deref() != inputs.execution_configuration.effort.as_deref() {
+        return Err(StorageError::InvalidRecord);
+    }
+    if matches!(
+        inputs.execution_configuration.destination,
+        agent_automation::ExecutionDestination::FreshEachRun { .. }
+    ) && observed_turn.model.as_deref() != inputs.execution_configuration.model.as_deref()
+    {
+        return Err(StorageError::InvalidRecord);
+    }
+    let turn = observed_turn.turn;
     if retired.is_cancelled() {
         return Ok(false);
     }

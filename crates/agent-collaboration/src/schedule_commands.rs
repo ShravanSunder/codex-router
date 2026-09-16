@@ -382,7 +382,7 @@ fn prepare(command: ScheduleAction) -> Result<PreparedSchedule, String> {
 }
 fn read_definition(path: PathBuf) -> Result<ScheduleDefinition, String> {
     let text = read_document(path, "definition")?;
-    serde_json::from_str(&text).map_err(|_|"Definition must be closed ScheduleDefinition JSON with instructionId, timing, enabled, destination and nullable executionTimeoutSeconds; inspect the Control schema.".into())
+    serde_json::from_str(&text).map_err(|_|"Definition must be closed ScheduleDefinition JSON with instructionId, timing, enabled, destination, model, effort, and nullable executionTimeoutSeconds; inspect the Control schema.".into())
 }
 fn read_document(path: PathBuf, field: &str) -> Result<String, String> {
     let mut reader: Box<dyn Read> = if path.as_os_str() == "-" {

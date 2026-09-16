@@ -76,9 +76,10 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 .unwrap_or_else(|error| panic!("JSON: {error}"));
                 assert_eq!(request["method"], method);
                 let result = if method == "thread/start" {
-                    json!({"cwd":"/work","thread":{"id":"thread-a","cwd":"/work"}})
+                    json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work"}})
                 } else {
                     assert_eq!(request["params"]["input"][0]["text"], "hello");
+                    assert_eq!(request["params"]["effort"], "medium");
                     socket.send(Message::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"message-a","delta":"early output"}}).to_string().into())).await.unwrap_or_else(|error| panic!("early output: {error}"));
                     json!({"turn":{"id":"turn-a"}})
                 };
@@ -111,6 +112,19 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 json!({"id":9007199254740993_i64,"result":{"decision":"decline"}})
             );
             socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"completed"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("complete: {error}"));
+            let frame = socket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("thread read"))
+                .unwrap_or_else(|error| panic!("thread read frame: {error}"));
+            let request: Value = serde_json::from_str(
+                frame
+                    .to_text()
+                    .unwrap_or_else(|error| panic!("thread read text: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("thread read JSON: {error}"));
+            assert_eq!(request["method"], "thread/read");
+            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":"medium"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
         });
         let session = AcpSessionBinding::create(
             &mut catalog,
@@ -118,7 +132,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 connection,
                 schemas,
                 generation,
-                params: json!({"cwd":"/work","mcpServers":[]}),
+                params: json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium"}}}),
             },
         )
         .await
@@ -130,7 +144,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             registry
                 .insert(session)
                 .unwrap_or_else(|error| panic!("insert: {error}"));
-            let params = json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}]});
+            let params = json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}],"_meta":{"codexRouter":{"effort":"medium"}}});
             registry
                 .begin_prompt(&mut catalog, json!("acp-prompt"), params.clone())
                 .unwrap_or_else(|error| panic!("begin: {error}"));
@@ -159,7 +173,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 session,
                 &mut catalog,
                 json!("acp-prompt"),
-                &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}]}),
+                &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}],"_meta":{"codexRouter":{"effort":"medium"}}}),
             )
             .await
             .unwrap_or_else(|error| panic!("prompt: {error}"));

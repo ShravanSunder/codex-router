@@ -134,3 +134,77 @@ fn finite_control_groups_keep_json_for_missing_required_arguments() {
         assert_eq!(record["error"]["nextAction"], "correctRequest");
     }
 }
+
+#[test]
+fn conversation_model_choice_is_validated_before_service_discovery() {
+    let cases = [
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--new",
+                "--model",
+                "gpt-5.6-sol",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "--effort",
+        ),
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--new",
+                "--effort",
+                "medium",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "--model",
+        ),
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--session",
+                "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+                "--model",
+                "gpt-5.6-sol",
+                "--effort",
+                "medium",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "model is fixed for a thread; fork to change it",
+        ),
+    ];
+    for (arguments, expected) in cases {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(arguments)
+            .output()
+            .expect("CLI executes");
+        assert_eq!(output.status.code(), Some(2));
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON error");
+        assert!(
+            record["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected)),
+            "{record}"
+        );
+    }
+}

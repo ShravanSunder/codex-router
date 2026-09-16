@@ -51,7 +51,7 @@ fn page(id: &str, status: Value, cursor: Value) -> Value {
     json!({
         "endpoint":endpoint(),"generation":generation(),"observedAt":"2026-09-07T00:00:00Z",
         "sessions":[{"target":{"endpoint":endpoint(),"sessionId":id},"title":id,"workingDirectory":"/repo",
-            "observation":{"kind":"runtime","status":status,"turnId":null}}],"nextCursor":cursor
+            "observation":{"kind":"runtime","status":status,"turnId":null},"model":"gpt-5.6-sol","reasoningEffort":"medium","idleSeconds":0}],"nextCursor":cursor
     })
 }
 fn inspected(id: &str) -> Value {

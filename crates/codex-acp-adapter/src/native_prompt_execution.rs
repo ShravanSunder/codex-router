@@ -23,6 +23,11 @@ pub enum PromptExecutionError {
     Native(#[from] NativeConnectionError),
     #[error("native prompt projection failed")]
     Projection,
+    #[error("requested effort {requested} but native runtime reported {effective}")]
+    EffortMismatch {
+        requested: String,
+        effective: String,
+    },
 }
 pub struct PendingAcpPrompt {
     permissions: std::collections::BTreeMap<String, crate::PendingPermission>,
@@ -30,6 +35,7 @@ pub struct PendingAcpPrompt {
     detached: bool,
     session: AcpSessionBinding,
     settlement: PromptSettlement,
+    requested_effort: String,
 }
 impl PendingAcpPrompt {
     /// Consuming the binding prevents a second concurrent prompt on this mapping.
@@ -44,6 +50,11 @@ impl PendingAcpPrompt {
         }
         let translated = translate_prompt_content(catalog, params)
             .map_err(|_| PromptExecutionError::InvalidPrompt)?;
+        let effort = params
+            .pointer("/_meta/codexRouter/effort")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_whitespace))
+            .ok_or(PromptExecutionError::InvalidPrompt)?;
         if translated.session_id() != session.session_id {
             return Err(PromptExecutionError::InvalidPrompt);
         }
@@ -54,6 +65,7 @@ impl PendingAcpPrompt {
             session,
             settlement: PromptSettlement::new(request_id)
                 .map_err(|_| PromptExecutionError::InvalidPrompt)?,
+            requested_effort: effort.to_owned(),
         };
         pending
             .settlement
@@ -65,7 +77,7 @@ impl PendingAcpPrompt {
             .request_validated(
                 &pending.session.schemas,
                 NativeOperation::StartTurn,
-                json!({"threadId":pending.session.session_id,"input":translated.input()}),
+                json!({"threadId":pending.session.session_id,"input":translated.input(),"effort":effort}),
             )
             .await?;
         let turn_id = result
@@ -180,10 +192,53 @@ impl PendingAcpPrompt {
                 Some("failed") => NativePromptTerminal::Failed,
                 _ => return Err(PromptExecutionError::Projection),
             };
-            return Ok(self
+            let mut terminal = self
                 .settlement
-                .observe_terminal(turn.get("id").and_then(Value::as_str), status)
-                .map(PromptEvent::Terminal));
+                .observe_terminal(turn.get("id").and_then(Value::as_str), status);
+            if let Some(response) = terminal.as_mut() {
+                let read = self
+                    .session
+                    .connection
+                    .request_validated(
+                        &self.session.schemas,
+                        NativeOperation::ReadThread,
+                        json!({"threadId":self.session.session_id,"includeTurns":false}),
+                    )
+                    .await?;
+                let thread = read.get("thread").ok_or(PromptExecutionError::Projection)?;
+                let model = thread
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .ok_or(PromptExecutionError::Projection)?;
+                let effective_effort = thread
+                    .get("reasoningEffort")
+                    .and_then(Value::as_str)
+                    .ok_or(PromptExecutionError::Projection)?;
+                if effective_effort != self.requested_effort {
+                    return Err(PromptExecutionError::EffortMismatch {
+                        requested: self.requested_effort.clone(),
+                        effective: effective_effort.to_owned(),
+                    });
+                }
+                let result = response
+                    .get_mut("result")
+                    .and_then(Value::as_object_mut)
+                    .ok_or(PromptExecutionError::Projection)?;
+                let metadata = result
+                    .entry("_meta")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or(PromptExecutionError::Projection)?;
+                metadata.insert(
+                    "codexRouter".into(),
+                    json!({
+                        "effectiveModel": model,
+                        "effectiveEffort": effective_effort,
+                        "idleSeconds": 0
+                    }),
+                );
+            }
+            return Ok(terminal.map(PromptEvent::Terminal));
         }
         Ok(Some(PromptEvent::NativeNotification(message)))
     }

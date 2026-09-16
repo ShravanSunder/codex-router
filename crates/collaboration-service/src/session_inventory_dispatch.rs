@@ -166,6 +166,8 @@ async fn stored_page(
         let id: String = row.try_get("id").map_err(|_| ())?;
         let time: Option<i64> = row.try_get("recency_at_ms").map_err(|_| ())?;
         let cwd: String = row.try_get("cwd").map_err(|_| ())?;
+        let model: Option<String> = row.try_get("model").map_err(|_| ())?;
+        let reasoning_effort: Option<String> = row.try_get("reasoning_effort").map_err(|_| ())?;
         let title: Option<String> = row
             .try_get::<Option<String>, _>("name")
             .map_err(|_| ())?
@@ -174,7 +176,14 @@ async fn stored_page(
             .and_then(chrono::DateTime::from_timestamp_millis)
             .ok_or(())?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let session = json!({"target":{"endpoint":params.endpoint,"sessionId":id},"title":title.unwrap_or_default(),"workingDirectory":cwd,"observation":{"kind":"stored","updatedAt":updated}});
+        let idle_seconds = u64::try_from(
+            chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(time.ok_or(())?)
+                / 1000,
+        )
+        .unwrap_or(0);
+        let session = json!({"target":{"endpoint":params.endpoint,"sessionId":id},"title":title.unwrap_or_default(),"workingDirectory":cwd,"observation":{"kind":"stored","updatedAt":updated},"model":model,"reasoningEffort":reasoning_effort,"idleSeconds":idle_seconds});
         let row_bytes = serde_json::to_vec(&session)
             .map_err(|_| ())?
             .len()
@@ -248,7 +257,7 @@ async fn runtime_page(
         {
             continue;
         }
-        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"title":thread.get("name").and_then(Value::as_str).unwrap_or_default(),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":null}}));
+        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"title":thread.get("name").and_then(Value::as_str).unwrap_or_default(),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":null},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":0}));
     }
     let next = result
         .get("nextCursor")

@@ -18,7 +18,9 @@ mod observation_session;
 pub use observation_session::NativeObservation;
 
 mod acp_conversation;
-pub use acp_conversation::{AcpConversation, ConversationEnd, ConversationEvent};
+pub use acp_conversation::{
+    AcpConversation, ConversationEnd, ConversationEvent, ConversationSessionRequest,
+};
 mod acp_transport_connection;
 pub use acp_transport_connection::AcpTransportConnection;
 mod instruction_operations;

@@ -29,14 +29,16 @@ enum ConversationCommand {
 struct PromptArguments {
     #[arg(long)]
     endpoint: String,
-    #[arg(
-        long = "new",
-        required_unless_present = "session",
-        conflicts_with = "session"
-    )]
+    #[arg(long = "new", conflicts_with_all = ["session", "fork"])]
     new_session: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["new_session", "fork"])]
     session: Option<String>,
+    #[arg(long, conflicts_with_all = ["new_session", "session"])]
+    fork: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    effort: Option<String>,
     #[arg(long)]
     cwd: PathBuf,
     #[arg(
@@ -83,11 +85,20 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
         let mut stage="connect";
         let result=async{
             let mut client=AcpConversation::connect(&directory,endpoint).await?;
-            stage=if args.new_session{"new"}else{"load"};
+            stage=if args.new_session{"new"}else if args.fork.is_some(){"fork"}else{"load"};
             let mut emit=|event|emit_record(event,args.json);
-            target=Some(client.open_session(args.session.as_deref(),&args.cwd,&mut emit).await?);
+            target=Some(client.open_session(
+                collaboration_client::ConversationSessionRequest {
+                    session: args.session.as_deref(),
+                    fork: args.fork.as_deref(),
+                    model: args.model.as_deref(),
+                    effort: args.effort.as_deref().ok_or(ClientError::Protocol("--effort is required"))?,
+                },
+                &args.cwd,
+                &mut emit,
+            ).await?);
             stage="prompt";
-            client.prompt(&text,Duration::from_secs(args.timeout_seconds),cancel,&mut emit).await
+            client.prompt(&text,args.effort.as_deref().ok_or(ClientError::Protocol("--effort is required"))?,Duration::from_secs(args.timeout_seconds),cancel,&mut emit).await
         }.await;
         signal_task.abort();let _joined=signal_task.await;
         match result{
@@ -106,7 +117,13 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
                 }
                 let effect=if !matches!(error,ClientError::UnsupportedCapability(_)) && matches!(stage,"new"|"load"|"prompt"){"unknown"}else{"notDispatched"};
                 let exit=match &error{ClientError::UnsupportedCapability(_)=>2,ClientError::Rejected{..}=>4,_ if effect=="unknown"=>5,_=>3};
-                let record=json!({"kind":"conversationError","target":target,"stage":stage,"effect":effect,"message":"ACP conversation failed; no operation replayed"});
+                let message = match &error {
+                    ClientError::Rejected { data: Some(data), .. } => {
+                        format!("ACP conversation rejected: {data}; no operation replayed")
+                    }
+                    _ => "ACP conversation failed; no operation replayed".to_owned(),
+                };
+                let record=json!({"kind":"conversationError","target":target,"stage":stage,"effect":effect,"message":message});
                 let _printed=writeln!(io::stdout(),"{record}");exit
             }
         }
@@ -115,6 +132,26 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
 fn prepare(
     args: &PromptArguments,
 ) -> Result<(PathBuf, collaboration_client::protocol::EndpointId, String), String> {
+    let dispatch_count = usize::from(args.new_session)
+        + usize::from(args.session.is_some())
+        + usize::from(args.fork.is_some());
+    if dispatch_count != 1 {
+        return Err("Choose exactly one of --new, --session, or --fork".into());
+    }
+    let effort = args.effort.as_deref().ok_or("--effort is required")?;
+    validate_choice_value(effort, "--effort")?;
+    if args.session.is_some() && args.model.is_some() {
+        return Err(
+            "--model is invalid with --session: model is fixed for a thread; fork to change it"
+                .into(),
+        );
+    }
+    if args.new_session || args.fork.is_some() {
+        validate_choice_value(
+            args.model.as_deref().ok_or("--model is required")?,
+            "--model",
+        )?;
+    }
     if !args.cwd.is_absolute() {
         return Err("ACP cwd must be absolute".into());
     }
@@ -124,7 +161,7 @@ fn prepare(
         .clone()
         .try_into()
         .map_err(|_| "Invalid endpoint ID")?;
-    if let Some(session) = &args.session {
+    if let Some(session) = args.session.as_ref().or(args.fork.as_ref()) {
         let _: collaboration_client::protocol::SessionId = session
             .clone()
             .try_into()
@@ -153,6 +190,15 @@ fn prepare(
         .map_err(|_| "Invalid or oversized content")?;
     Ok((directory, endpoint, text))
 }
+
+fn validate_choice_value(value: &str, flag: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "{flag} requires a non-empty value without whitespace"
+        ));
+    }
+    Ok(())
+}
 fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientError> {
     let record = match event {
         ConversationEvent::SessionReady(target) => ConversationRecord::SessionReady { target },
@@ -163,7 +209,31 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
             ConversationRecord::PermissionRequired { target }
         }
         ConversationEvent::PromptResult { target, result } => {
-            ConversationRecord::PromptResult { target, result }
+            let effective_model = result
+                .pointer("/_meta/codexRouter/effectiveModel")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ClientError::Protocol(
+                    "effective model missing from prompt receipt",
+                ))?
+                .to_owned();
+            let effective_effort = result
+                .pointer("/_meta/codexRouter/effectiveEffort")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ClientError::Protocol(
+                    "effective effort missing from prompt receipt",
+                ))?
+                .to_owned();
+            let idle_seconds = result
+                .pointer("/_meta/codexRouter/idleSeconds")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            ConversationRecord::PromptResult {
+                target,
+                effective_model,
+                effective_effort,
+                idle_seconds,
+                result,
+            }
         }
     };
     let record = serde_json::to_value(record)

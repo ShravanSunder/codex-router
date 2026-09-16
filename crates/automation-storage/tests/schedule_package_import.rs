@@ -26,6 +26,8 @@ async fn import_preserves_uuid_requires_overwrite_and_rejects_instruction_collis
             enabled: false,
             destination: ExecutionDestination::Unprepared,
             execution_timeout_seconds: None,
+            model: Some("gpt-5.6-sol".into()),
+            effort: Some("medium".into()),
         },
         continuity: None,
     };

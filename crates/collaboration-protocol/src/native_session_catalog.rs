@@ -42,6 +42,11 @@ pub struct NativeSessionSummary {
     pub title: String,
     pub working_directory: NonEmptyText,
     pub observation: NativeSessionObservation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    pub idle_seconds: u64,
 }
 #[derive(JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

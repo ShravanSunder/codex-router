@@ -33,6 +33,8 @@ async fn known_preparation_rejection_finishes_but_unknown_effects_do_not()
                     cwd: "/private-fixture".into(),
                 },
                 execution_timeout_seconds: None,
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,
