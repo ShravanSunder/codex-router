@@ -76,7 +76,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 .unwrap_or_else(|error| panic!("JSON: {error}"));
                 assert_eq!(request["method"], method);
                 let result = if method == "thread/start" {
-                    json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work"}})
+                    json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","thread":{"id":"thread-a","cwd":"/work"}})
                 } else {
                     assert_eq!(request["params"]["input"][0]["text"], "hello");
                     assert_eq!(request["params"]["effort"], "medium");
@@ -109,7 +109,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             .unwrap_or_else(|error| panic!("reply JSON: {error}"));
             assert_eq!(
                 reply,
-                json!({"id":9007199254740993_i64,"result":{"decision":"decline"}})
+                json!({"id":9007199254740993_i64,"result":{"decision":"cancel"}})
             );
             socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"completed"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("complete: {error}"));
             let frame = socket
@@ -156,8 +156,6 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             let observed=tokio::time::timeout(std::time::Duration::from_secs(3),async {
                 let update=frames.recv().await.unwrap_or_else(||panic!("update"));
                 assert_eq!(update["params"]["update"]["content"]["text"],"early output");
-                let permission=frames.recv().await.unwrap_or_else(||panic!("permission"));
-                registry.permission_response(json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"native-decline"}}})).unwrap_or_else(|error|panic!("response: {error}"));
                 tokio::select! {
                     biased;
                     frame=frames.recv()=>panic!("terminal published before registry completion: {}", frame.is_some()),
@@ -194,27 +192,12 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 fixture.await.unwrap();
                 continue;
             }
-            let permission = prompt
+            let decision = prompt
                 .next_event(&mut catalog)
                 .await
-                .unwrap_or_else(|error| panic!("permission: {error}"));
-            let Some(PromptEvent::PermissionRequest(permission)) = permission else {
-                panic!("expected permission request");
-            };
-            let response = json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"native-decline"}}});
+                .unwrap_or_else(|error| panic!("decision: {error}"));
             assert!(
-                prompt
-                    .respond_permission(&mut catalog, &response)
-                    .await
-                    .unwrap_or_else(|error| panic!("permission response: {error}"))
-                    .is_none()
-            );
-            assert!(
-                prompt
-                    .respond_permission(&mut catalog, &response)
-                    .await
-                    .unwrap_or_else(|error| panic!("duplicate response: {error}"))
-                    .is_none()
+                matches!(decision, Some(PromptEvent::NativeNotification(value)) if value["kind"] == "approvalDecisionSubmitted")
             );
             let terminal = prompt
                 .next_event(&mut catalog)

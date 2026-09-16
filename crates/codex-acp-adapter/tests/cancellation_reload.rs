@@ -44,7 +44,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
                     "initialize" => json!({}),
                     "turn/start" => json!({"turn":{"id":"target","status":"inProgress"}}),
                     _ => {
-                        json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
                     }
                 };
                 let reply = if *method == "turn/interrupt" {
@@ -106,7 +106,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
             (
                 2,
                 "session/new",
-                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write"}}}),
+                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
             ),
         ] {
             write
