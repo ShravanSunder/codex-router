@@ -1,4 +1,3 @@
-
 use super::*;
 use collaboration_protocol::{CodexGeneration, EndpointId, EndpointRef};
 
