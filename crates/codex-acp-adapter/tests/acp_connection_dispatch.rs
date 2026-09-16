@@ -146,7 +146,12 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                 );
             }
             if method == "thread/resume" {
-                assert_eq!(request["params"], json!({"threadId":"created-thread"}));
+                assert_eq!(request["params"]["threadId"], "created-thread");
+                assert_eq!(request["params"]["permissions"], "router-workspace-write");
+                assert_eq!(
+                    request["params"]["config"]["default_permissions"],
+                    "router-workspace-write"
+                );
             }
             let result = if method == "initialize" {
                 json!({})
