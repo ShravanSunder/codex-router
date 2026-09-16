@@ -287,8 +287,9 @@ impl PendingAcpPrompt {
                     .get("approvalsReviewer")
                     .and_then(Value::as_str)
                     .ok_or(PromptExecutionError::Projection)?;
-                if effective_approval_policy != "on-request"
-                    || effective_approvals_reviewer != "auto_review"
+                if self.session.verifies_router_approval_configuration
+                    && (effective_approval_policy != "on-request"
+                        || effective_approvals_reviewer != "auto_review")
                 {
                     return Err(PromptExecutionError::ApprovalConfigurationMismatch);
                 }

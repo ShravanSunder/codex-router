@@ -47,6 +47,7 @@ pub struct AcpSessionBinding {
     pub(crate) connection: NativeProtocolConnection,
     pub(crate) schemas: Arc<NativePayloadSchemas>,
     pub(crate) requested_access: Option<String>,
+    pub(crate) verifies_router_approval_configuration: bool,
     pub(crate) approval_broker: std::sync::Arc<dyn crate::ApprovalBroker>,
 }
 
@@ -270,6 +271,7 @@ impl AcpSessionBinding {
             connection,
             schemas: inputs.schemas,
             requested_access: Some(choice.access.to_owned()),
+            verifies_router_approval_configuration: true,
             approval_broker: inputs.approval_broker,
         })
     }
@@ -324,6 +326,7 @@ impl AcpSessionBinding {
             connection: inputs.connection,
             schemas: inputs.schemas,
             requested_access: None,
+            verifies_router_approval_configuration: false,
             approval_broker: inputs.approval_broker,
         };
         let response = session
