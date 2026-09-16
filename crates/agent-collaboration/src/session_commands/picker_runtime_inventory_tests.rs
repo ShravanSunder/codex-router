@@ -56,9 +56,8 @@ fn page(id: &str, status: Value, cursor: Value) -> Value {
 }
 fn inspected(id: &str) -> Value {
     json!({"target":{"endpoint":endpoint(),"sessionId":id},"generation":generation(),
-    "effectiveAccess":"workspace-write",
-    "effectiveApprovalPolicy":"on-request",
-    "effectiveApprovalsReviewer":"auto_review",
+    "effectiveAccess":null,
+    "settingsObservation":{"kind":"unavailable","reason":"threadReadOmitsSettings"},
     "thread":{"id":id,"name":format!("Live {id}"),"cwd":"/repo","modelProvider":"debug-provider","createdAt":100,"updatedAt":200,
     "gitInfo":{"branch":"feature/live","originUrl":"https://example.invalid/repo.git"}}})
 }

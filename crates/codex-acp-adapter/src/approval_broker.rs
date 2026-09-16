@@ -9,6 +9,9 @@ pub struct ApprovalRoute {
     pub thread_id: String,
     pub created_by: SessionRef,
     pub approver: SessionRef,
+    pub access: String,
+    pub scratch_path: String,
+    pub root_message_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +47,11 @@ pub trait ApprovalBroker: Send + Sync {
     ) -> Pin<
         Box<dyn Future<Output = Result<BrokeredApprovalOutcome, ApprovalBrokerError>> + Send + '_>,
     >;
+
+    fn route(
+        &self,
+        thread_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ApprovalRoute>, ApprovalBrokerError>> + Send + '_>>;
 }
 
 pub struct RejectingApprovalBroker;
@@ -63,5 +71,13 @@ impl ApprovalBroker for RejectingApprovalBroker {
         Box<dyn Future<Output = Result<BrokeredApprovalOutcome, ApprovalBrokerError>> + Send + '_>,
     > {
         Box::pin(async { Ok(BrokeredApprovalOutcome::Cancelled) })
+    }
+
+    fn route(
+        &self,
+        _thread_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ApprovalRoute>, ApprovalBrokerError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(None) })
     }
 }

@@ -15,11 +15,10 @@ use tokio_tungstenite::{
 #[tokio::test]
 async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd() {
     for (creating, effective_cwd, effective_reviewer) in [
-        (true, "/work/project", "auto_review"),
         (true, "/work/project", "user"),
-        (true, "/wrong/project", "auto_review"),
-        (false, "/work/project", "auto_review"),
-        (false, "/wrong/project", "auto_review"),
+        (true, "/wrong/project", "user"),
+        (false, "/work/project", "user"),
+        (false, "/wrong/project", "user"),
     ] {
         let mut catalog =
             AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
@@ -84,9 +83,10 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 );
                 assert_eq!(request["params"]["allowProviderModelFallback"], false);
                 assert_eq!(request["params"]["threadSource"], "user");
-                assert_eq!(request["params"]["sandbox"], "read-only");
-                assert_eq!(request["params"]["approvalPolicy"], "on-request");
-                assert_eq!(request["params"]["approvalsReviewer"], "auto_review");
+                assert_eq!(request["params"]["permissions"], "router-write-restricted");
+                assert!(request["params"].get("sandbox").is_none());
+                assert!(request["params"].get("approvalPolicy").is_none());
+                assert!(request["params"].get("approvalsReviewer").is_none());
                 assert_eq!(
                     request["params"]["config"]["mcp_servers"]["notes"]["args"],
                     json!(["--stdio"])
@@ -104,7 +104,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                         connection,
                         schemas,
                         generation: generation.clone(),
-                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"read-only","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"write-restricted","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
                         approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
                     },
                 )
@@ -135,7 +135,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
         fixture
             .await
             .unwrap_or_else(|error| panic!("fixture: {error}"));
-        if effective_cwd == "/work/project" && (!creating || effective_reviewer == "auto_review") {
+        if effective_cwd == "/work/project" {
             let mut session = result.unwrap_or_else(|error| panic!("create: {error}"));
             assert_eq!(
                 session.new_session_result(),
@@ -166,11 +166,6 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
             assert!(matches!(
                 changed_settings,
                 Err(SessionSetupError::ConfigurationMismatch)
-            ));
-        } else if creating && effective_reviewer != "auto_review" {
-            assert!(matches!(
-                result,
-                Err(SessionSetupError::ApprovalConfigurationMismatch)
             ));
         } else {
             assert!(matches!(
@@ -240,9 +235,10 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
         );
         assert_eq!(request["params"]["allowProviderModelFallback"], false);
         assert_eq!(request["params"]["threadSource"], "user");
-        assert_eq!(request["params"]["sandbox"], "workspace-write");
-        assert_eq!(request["params"]["approvalPolicy"], "on-request");
-        assert_eq!(request["params"]["approvalsReviewer"], "auto_review");
+        assert_eq!(request["params"]["permissions"], "router-workspace-write");
+        assert!(request["params"].get("sandbox").is_none());
+        assert!(request["params"].get("approvalPolicy").is_none());
+        assert!(request["params"].get("approvalsReviewer").is_none());
         server
             .send(Message::Text(
                 json!({

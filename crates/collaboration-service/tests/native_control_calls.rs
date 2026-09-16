@@ -203,7 +203,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .inspect_session(&target)
         .await
         .unwrap_or_else(|error| panic!("inspect: {error}"));
-    assert_eq!(inspection.effective_access, "workspace-write");
+    assert_eq!(inspection.effective_access, None);
     let message = client
         .send_agent_message(collaboration_protocol::NativeSendParams {
             target: target.clone(),

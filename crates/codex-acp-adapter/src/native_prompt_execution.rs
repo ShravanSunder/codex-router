@@ -23,6 +23,8 @@ pub enum PromptExecutionError {
     Native(#[from] NativeConnectionError),
     #[error("native prompt projection failed")]
     Projection,
+    #[error("native prompt receipt projection failed at {0}")]
+    ReceiptProjection(&'static str),
     #[error("requested effort {requested} but native runtime reported {effective}")]
     EffortMismatch {
         requested: String,
@@ -33,8 +35,6 @@ pub enum PromptExecutionError {
         requested: String,
         effective: String,
     },
-    #[error("native thread approval configuration differs from requested configuration")]
-    ApprovalConfigurationMismatch,
 }
 pub struct PendingAcpPrompt {
     permissions: std::collections::BTreeMap<String, crate::PendingPermission>,
@@ -114,7 +114,9 @@ impl PendingAcpPrompt {
         };
         if !self.session.schemas.validates_server_message(&message) {
             self.detached = true;
-            return Err(PromptExecutionError::Projection);
+            return Err(PromptExecutionError::ReceiptProjection(
+                "serverMessageSchema",
+            ));
         }
         if message.get("id").is_some() && message.get("method").is_some() {
             if matches!(
@@ -202,7 +204,7 @@ impl PendingAcpPrompt {
                 },
                 &message,
             )
-            .map_err(|_| PromptExecutionError::Projection)?
+            .map_err(|_| PromptExecutionError::ReceiptProjection("assistantText"))?
         {
             return Ok(Some(PromptEvent::Update(update)));
         }
@@ -216,23 +218,25 @@ impl PendingAcpPrompt {
                 },
                 &message,
             )
-            .map_err(|_| PromptExecutionError::Projection)?
+            .map_err(|_| PromptExecutionError::ReceiptProjection("toolProgress"))?
         {
             return Ok(Some(PromptEvent::Update(update)));
         }
         if message.get("method").and_then(Value::as_str) == Some("turn/completed") {
             let params = message
                 .get("params")
-                .ok_or(PromptExecutionError::Projection)?;
+                .ok_or(PromptExecutionError::ReceiptProjection("terminalParams"))?;
             if params.get("threadId").and_then(Value::as_str) != Some(&self.session.session_id) {
                 return Ok(None);
             }
-            let turn = params.get("turn").ok_or(PromptExecutionError::Projection)?;
+            let turn = params
+                .get("turn")
+                .ok_or(PromptExecutionError::ReceiptProjection("terminalTurn"))?;
             let status = match turn.get("status").and_then(Value::as_str) {
                 Some("completed") => NativePromptTerminal::Completed,
                 Some("interrupted") => NativePromptTerminal::Interrupted,
                 Some("failed") => NativePromptTerminal::Failed,
-                _ => return Err(PromptExecutionError::Projection),
+                _ => return Err(PromptExecutionError::ReceiptProjection("terminalStatus")),
             };
             let mut terminal = self
                 .settlement
@@ -247,69 +251,42 @@ impl PendingAcpPrompt {
                         json!({"threadId":self.session.session_id,"includeTurns":false}),
                     )
                     .await?;
-                let thread = read.get("thread").ok_or(PromptExecutionError::Projection)?;
+                let thread = read
+                    .get("thread")
+                    .ok_or(PromptExecutionError::ReceiptProjection("thread"))?;
                 let model = thread
                     .get("model")
                     .and_then(Value::as_str)
-                    .ok_or(PromptExecutionError::Projection)?;
+                    .ok_or(PromptExecutionError::ReceiptProjection("model"))?;
                 let effective_effort = thread
                     .get("reasoningEffort")
                     .and_then(Value::as_str)
-                    .ok_or(PromptExecutionError::Projection)?;
-                let effective_access = thread
-                    .pointer("/sandbox/type")
-                    .and_then(Value::as_str)
-                    .and_then(|value| match value {
-                        "readOnly" => Some("read-only"),
-                        "workspaceWrite" => Some("workspace-write"),
-                        _ => None,
-                    })
-                    .ok_or(PromptExecutionError::Projection)?;
+                    .ok_or(PromptExecutionError::ReceiptProjection("effort"))?;
                 if effective_effort != self.requested_effort {
                     return Err(PromptExecutionError::EffortMismatch {
                         requested: self.requested_effort.clone(),
                         effective: effective_effort.to_owned(),
                     });
                 }
-                if let Some(requested_access) = self.session.requested_access.as_deref()
-                    && effective_access != requested_access
-                {
-                    return Err(PromptExecutionError::AccessMismatch {
-                        requested: requested_access.to_owned(),
-                        effective: effective_access.to_owned(),
-                    });
-                }
-                let effective_approval_policy = thread
-                    .get("approvalPolicy")
-                    .and_then(Value::as_str)
-                    .ok_or(PromptExecutionError::Projection)?;
-                let effective_approvals_reviewer = thread
-                    .get("approvalsReviewer")
-                    .and_then(Value::as_str)
-                    .ok_or(PromptExecutionError::Projection)?;
-                if self.session.verifies_router_approval_configuration
-                    && (effective_approval_policy != "on-request"
-                        || effective_approvals_reviewer != "auto_review")
-                {
-                    return Err(PromptExecutionError::ApprovalConfigurationMismatch);
-                }
                 let result = response
                     .get_mut("result")
                     .and_then(Value::as_object_mut)
-                    .ok_or(PromptExecutionError::Projection)?;
+                    .ok_or(PromptExecutionError::ReceiptProjection("result"))?;
+                if result.get("_meta").is_some_and(Value::is_null) {
+                    result.insert("_meta".into(), json!({}));
+                }
                 let metadata = result
                     .entry("_meta")
                     .or_insert_with(|| json!({}))
                     .as_object_mut()
-                    .ok_or(PromptExecutionError::Projection)?;
+                    .ok_or(PromptExecutionError::ReceiptProjection("metadata"))?;
                 metadata.insert(
                     "codexRouter".into(),
                     json!({
                         "effectiveModel": model,
                         "effectiveEffort": effective_effort,
-                        "effectiveAccess": effective_access,
-                        "effectiveApprovalPolicy": effective_approval_policy,
-                        "effectiveApprovalsReviewer": effective_approvals_reviewer,
+                        "effectiveAccess": self.session.requested_access,
+                        "settingsObservation": &self.session.settings_observation,
                         "idleSeconds": 0
                     }),
                 );

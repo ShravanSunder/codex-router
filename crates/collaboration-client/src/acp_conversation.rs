@@ -24,6 +24,7 @@ pub struct ConversationSessionRequest<'a> {
     pub access: Option<&'a str>,
     pub created_by: Option<&'a SessionRef>,
     pub approver: Option<&'a SessionRef>,
+    pub root_message_id: Option<&'a str>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationEnd {
@@ -36,6 +37,7 @@ pub struct AcpConversation {
     frame: Vec<u8>,
     schemas: AcpSchemaCatalog,
     endpoint: EndpointRef,
+    service_directory: std::path::PathBuf,
     target: Option<SessionRef>,
     session_ready: bool,
     next_id: u64,
@@ -63,6 +65,7 @@ impl AcpConversation {
             schemas: AcpSchemaCatalog::load()
                 .map_err(|_| ClientError::Protocol("ACP schema unavailable"))?,
             endpoint: transport.endpoint,
+            service_directory: directory.to_owned(),
             target: None,
             session_ready: false,
             next_id: 0,
@@ -125,6 +128,27 @@ impl AcpConversation {
                 ("createdBy".to_owned(), json!(request.created_by)),
                 ("approver".to_owned(), json!(request.approver)),
             ]);
+            let scratch_scope = request
+                .root_message_id
+                .map(str::to_owned)
+                .or_else(|| {
+                    request
+                        .created_by
+                        .map(|creator| String::from(creator.session_id.clone()))
+                })
+                .ok_or(ClientError::Protocol("scratch scope unavailable"))?;
+            let scratch_path = self
+                .service_directory
+                .parent()
+                .ok_or(ClientError::Protocol("service directory has no owner root"))?
+                .join("scratch")
+                .join(&scratch_scope);
+            std::fs::create_dir_all(cwd.join("tmp"))?;
+            std::fs::create_dir_all(cwd.join("docs/wip"))?;
+            std::fs::create_dir_all(&scratch_path)?;
+            router_metadata.insert("rootMessageId".into(), json!(request.root_message_id));
+            router_metadata.insert("scratchScope".into(), json!(scratch_scope));
+            router_metadata.insert("scratchPath".into(), json!(scratch_path));
             if let Some(source_thread_id) = request.fork {
                 router_metadata.insert("forkThreadId".into(), json!(source_thread_id));
             }

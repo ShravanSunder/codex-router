@@ -4,8 +4,12 @@ pub use cli_output_contract::{
     ConversationEffect, ConversationRecord, ConversationStage, FiniteCommandRecord,
     NativeObservationRecord, ObservationCloseReason,
 };
+mod access_contract;
 mod approval_contract;
 mod permission_diagnostic;
+pub use access_contract::{
+    RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
+};
 pub use approval_contract::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListParams,
     ApprovalListResult, ApprovalRequestRecord, ApprovalState,

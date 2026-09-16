@@ -128,8 +128,8 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                     request["params"]["config"]["model_reasoning_effort"],
                     "medium"
                 );
-                assert_eq!(request["params"]["approvalPolicy"], "on-request");
-                assert_eq!(request["params"]["approvalsReviewer"], "auto_review");
+                assert!(request["params"].get("approvalPolicy").is_none());
+                assert!(request["params"].get("approvalsReviewer").is_none());
                 assert_eq!(
                     request["params"]["config"]["mcp_servers"]["notes"]["command"],
                     "/usr/bin/example"

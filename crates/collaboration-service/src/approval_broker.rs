@@ -417,6 +417,20 @@ impl ApprovalBroker for ServiceApprovalBroker {
             }
         })
     }
+
+    fn route(
+        &self,
+        thread_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<ApprovalRoute>, ApprovalBrokerError>>
+                + Send
+                + '_,
+        >,
+    > {
+        let thread_id = thread_id.to_owned();
+        Box::pin(async move { Ok(self.routes.lock().await.get(&thread_id).cloned()) })
+    }
 }
 
 #[cfg(test)]

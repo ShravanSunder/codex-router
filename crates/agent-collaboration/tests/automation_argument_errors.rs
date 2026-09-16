@@ -249,7 +249,7 @@ fn conversation_model_choice_is_validated_before_service_discovery() {
                 "--effort",
                 "medium",
                 "--access",
-                "read-only",
+                "write-restricted",
                 "--text",
                 "hello",
                 "--json",

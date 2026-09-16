@@ -46,6 +46,9 @@ struct PromptArguments {
     /// Exact SessionRef JSON for the client approval authority. Defaults to this session.
     #[arg(long)]
     approver: Option<String>,
+    /// Board root message ID used to share owner-private scratch across sessions.
+    #[arg(long)]
+    root_message_id: Option<String>,
     #[arg(long)]
     cwd: PathBuf,
     #[arg(
@@ -65,13 +68,13 @@ struct PromptArguments {
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum ConversationAccess {
-    ReadOnly,
+    WriteRestricted,
     WorkspaceWrite,
 }
 impl ConversationAccess {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::ReadOnly => "read-only",
+            Self::WriteRestricted => "write-restricted",
             Self::WorkspaceWrite => "workspace-write",
         }
     }
@@ -129,6 +132,7 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
                     access: args.access.map(ConversationAccess::as_str),
                     created_by: creator.as_ref(),
                     approver: approver.as_ref(),
+                    root_message_id: args.root_message_id.as_deref(),
                 },
                 &args.cwd,
                 &mut emit,
@@ -187,12 +191,24 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     if args.fork.is_none() && !args.new_session && args.approver.is_some() {
         return Err("--approver is valid only with --new or --fork".into());
     }
+    if args.fork.is_none() && !args.new_session && args.root_message_id.is_some() {
+        return Err(
+            "--root-message-id is valid only with --new or --fork; resume retains its association"
+                .into(),
+        );
+    }
     if args.new_session || args.fork.is_some() {
         validate_choice_value(
             args.model.as_deref().ok_or("--model is required")?,
             "--model",
         )?;
         args.access.as_ref().ok_or("--access is required")?;
+        if let Some(root_message_id) = &args.root_message_id {
+            let _: collaboration_client::protocol::UuidIdentity = root_message_id
+                .clone()
+                .try_into()
+                .map_err(|_| "--root-message-id must be a canonical UUID")?;
+        }
     }
     if !args.cwd.is_absolute() {
         return Err("ACP cwd must be absolute".into());
@@ -313,32 +329,25 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
                 .unwrap_or(0);
             let effective_access = result
                 .pointer("/_meta/codexRouter/effectiveAccess")
-                .and_then(serde_json::Value::as_str)
-                .ok_or(ClientError::Protocol(
-                    "effective access missing from prompt receipt",
-                ))?
-                .to_owned();
-            let effective_approval_policy = result
-                .pointer("/_meta/codexRouter/effectiveApprovalPolicy")
-                .and_then(serde_json::Value::as_str)
-                .ok_or(ClientError::Protocol(
-                    "effective approval policy missing from prompt receipt",
-                ))?
-                .to_owned();
-            let effective_approvals_reviewer = result
-                .pointer("/_meta/codexRouter/effectiveApprovalsReviewer")
-                .and_then(serde_json::Value::as_str)
-                .ok_or(ClientError::Protocol(
-                    "effective approvals reviewer missing from prompt receipt",
-                ))?
-                .to_owned();
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| ClientError::Protocol("invalid effective access in prompt receipt"))?;
+            let settings_observation = serde_json::from_value(
+                result
+                    .pointer("/_meta/codexRouter/settingsObservation")
+                    .cloned()
+                    .ok_or(ClientError::Protocol(
+                        "settings observation missing from prompt receipt",
+                    ))?,
+            )
+            .map_err(|_| ClientError::Protocol("invalid settings observation in prompt receipt"))?;
             ConversationRecord::PromptResult {
                 target,
                 effective_model,
                 effective_effort,
                 effective_access,
-                effective_approval_policy,
-                effective_approvals_reviewer,
+                settings_observation: Box::new(settings_observation),
                 idle_seconds,
                 result,
             }

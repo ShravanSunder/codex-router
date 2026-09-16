@@ -3,7 +3,10 @@ use crate::{AcpSchemaCatalog, McpConfiguration};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
-use collaboration_protocol::CodexGeneration;
+use collaboration_protocol::{
+    CodexGeneration, RouterAccess, SettingsObservation, SettingsObservationSource,
+    SettingsUnavailableReason,
+};
 use serde_json::{Value, json};
 use std::{
     path::{Component, Path, PathBuf},
@@ -28,8 +31,6 @@ pub enum SessionSetupError {
         requested: String,
         effective: String,
     },
-    #[error("native session effective approval configuration differs from requested configuration")]
-    ApprovalConfigurationMismatch,
     #[error("native session creation outcome unknown")]
     OutcomeUnknown,
     #[error("native session request rejected")]
@@ -47,7 +48,8 @@ pub struct AcpSessionBinding {
     pub(crate) connection: NativeProtocolConnection,
     pub(crate) schemas: Arc<NativePayloadSchemas>,
     pub(crate) requested_access: Option<String>,
-    pub(crate) verifies_router_approval_configuration: bool,
+    pub(crate) settings_observation: SettingsObservation,
+    pub(crate) access_route: Option<crate::ApprovalRoute>,
     pub(crate) approval_broker: std::sync::Arc<dyn crate::ApprovalBroker>,
 }
 
@@ -58,6 +60,8 @@ struct RouterModelChoice<'a> {
     access: &'a str,
     created_by: collaboration_protocol::SessionRef,
     approver: collaboration_protocol::SessionRef,
+    scratch_path: &'a str,
+    root_message_id: Option<&'a str>,
 }
 
 fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionSetupError> {
@@ -87,7 +91,7 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
     let access = router
         .get("access")
         .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "read-only" | "workspace-write"))
+        .filter(|value| matches!(*value, "write-restricted" | "workspace-write"))
         .ok_or(SessionSetupError::InvalidParameters)?;
     let created_by = serde_json::from_value(
         router
@@ -103,6 +107,11 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
             .ok_or(SessionSetupError::InvalidParameters)?,
     )
     .map_err(|_| SessionSetupError::InvalidParameters)?;
+    let scratch_path = router
+        .get("scratchPath")
+        .and_then(Value::as_str)
+        .unwrap_or("/tmp");
+    let root_message_id = router.get("rootMessageId").and_then(Value::as_str);
     Ok(RouterModelChoice {
         model,
         effort,
@@ -110,6 +119,8 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
         access,
         created_by,
         approver,
+        scratch_path,
+        root_message_id,
     })
 }
 pub struct SessionSetupInputs {
@@ -163,14 +174,17 @@ impl AcpSessionBinding {
             "model":choice.model,
             "allowProviderModelFallback":false,
             "threadSource":"user",
-            "sandbox":choice.access,
-            "approvalPolicy":"on-request",
-            "approvalsReviewer":"auto_review",
             "config":{"model_reasoning_effort":choice.effort}
         });
         let fields = native
             .as_object_mut()
             .ok_or(SessionSetupError::InvalidParameters)?;
+        let profile = match choice.access {
+            "write-restricted" => "router-write-restricted",
+            "workspace-write" => "router-workspace-write",
+            _ => return Err(SessionSetupError::InvalidParameters),
+        };
+        fields.insert("permissions".into(), json!(profile));
         if let Some(config) = configuration.native_overrides() {
             let target = fields
                 .get_mut("config")
@@ -181,6 +195,27 @@ impl AcpSessionBinding {
                 .ok_or(SessionSetupError::InvalidParameters)?;
             target.extend(values.clone());
         }
+        let config = fields
+            .get_mut("config")
+            .and_then(Value::as_object_mut)
+            .ok_or(SessionSetupError::InvalidParameters)?;
+        config.insert("default_permissions".into(), json!(profile));
+        let mut filesystem = serde_json::Map::new();
+        filesystem.insert(choice.scratch_path.to_owned(), json!("write"));
+        if choice.access == "write-restricted" {
+            filesystem.insert(
+                expected_cwd.join("tmp").to_string_lossy().into_owned(),
+                json!("write"),
+            );
+            filesystem.insert(
+                expected_cwd.join("docs/wip").to_string_lossy().into_owned(),
+                json!("write"),
+            );
+        }
+        config.insert(format!("permissions.{profile}"), json!({
+            "extends": if choice.access == "write-restricted" { ":read-only" } else { ":workspace" },
+            "filesystem": filesystem
+        }));
         if !directories.is_empty() {
             fields.insert("runtimeWorkspaceRoots".into(), json!(directories));
         }
@@ -207,11 +242,15 @@ impl AcpSessionBinding {
                     .to_owned(),
             });
         }
-        if result.get("approvalPolicy").and_then(Value::as_str) != Some("on-request")
-            || result.get("approvalsReviewer").and_then(Value::as_str) != Some("auto_review")
-        {
-            return Err(SessionSetupError::ApprovalConfigurationMismatch);
-        }
+        let settings_observation = observe_settings(
+            &result,
+            if choice.fork_thread_id.is_some() {
+                SettingsObservationSource::ThreadFork
+            } else {
+                SettingsObservationSource::ThreadStart
+            },
+            Some(choice.access),
+        );
         let effective_cwd = result
             .get("cwd")
             .and_then(Value::as_str)
@@ -255,13 +294,17 @@ impl AcpSessionBinding {
             .filter(|id| !id.is_empty())
             .ok_or(SessionSetupError::OutcomeUnknown)?
             .to_owned();
+        let access_route = crate::ApprovalRoute {
+            thread_id: session_id.clone(),
+            created_by: choice.created_by,
+            approver: choice.approver,
+            access: choice.access.to_owned(),
+            scratch_path: choice.scratch_path.to_owned(),
+            root_message_id: choice.root_message_id.map(str::to_owned),
+        };
         inputs
             .approval_broker
-            .register_route(crate::ApprovalRoute {
-                thread_id: session_id.clone(),
-                created_by: choice.created_by,
-                approver: choice.approver,
-            })
+            .register_route(access_route.clone())
             .await
             .map_err(|_| SessionSetupError::ConfigurationMismatch)?;
         Ok(Self {
@@ -271,7 +314,8 @@ impl AcpSessionBinding {
             connection,
             schemas: inputs.schemas,
             requested_access: Some(choice.access.to_owned()),
-            verifies_router_approval_configuration: true,
+            settings_observation,
+            access_route: Some(access_route),
             approval_broker: inputs.approval_broker,
         })
     }
@@ -319,19 +363,32 @@ impl AcpSessionBinding {
             .filter(|id| !id.is_empty())
             .ok_or(SessionSetupError::InvalidParameters)?
             .to_owned();
+        let route = inputs
+            .approval_broker
+            .route(&session_id)
+            .await
+            .map_err(|_| SessionSetupError::Unavailable)?;
         let mut session = Self {
             session_id,
             generation: inputs.generation.clone(),
             configuration: None,
             connection: inputs.connection,
             schemas: inputs.schemas,
-            requested_access: None,
-            verifies_router_approval_configuration: false,
+            requested_access: route.as_ref().map(|route| route.access.clone()),
+            settings_observation: unavailable_settings(
+                SettingsUnavailableReason::NotObservedBeforeResume,
+            ),
+            access_route: route,
             approval_broker: inputs.approval_broker,
         };
         let response = session
             .resume_with_receipt(catalog, &inputs.generation, &inputs.params)
             .await?;
+        session.settings_observation = observe_settings(
+            &response,
+            SettingsObservationSource::ThreadResume,
+            session.requested_access.as_deref(),
+        );
         if barrier.is_some_and(|barrier| !barrier.resolved_by_resume(&response)) {
             return Err(SessionSetupError::CancellationUnresolved);
         }
@@ -377,7 +434,7 @@ impl AcpSessionBinding {
             .request_validated(
                 &self.schemas,
                 NativeOperation::ResumeThread,
-                json!({"threadId":session_id}),
+                resume_parameters(session_id, &requested_cwd, self.access_route.as_ref()),
             )
             .await
             .map_err(map_native_failure)?;
@@ -412,6 +469,75 @@ impl AcpSessionBinding {
     pub fn into_connection(self) -> (NativeProtocolConnection, Arc<NativePayloadSchemas>) {
         (self.connection, self.schemas)
     }
+}
+
+fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::ApprovalRoute>) -> Value {
+    let Some(route) = route else {
+        return json!({"threadId":session_id});
+    };
+    let profile = if route.access == "write-restricted" {
+        "router-write-restricted"
+    } else {
+        "router-workspace-write"
+    };
+    let mut filesystem = serde_json::Map::new();
+    filesystem.insert(route.scratch_path.clone(), json!("write"));
+    if route.access == "write-restricted" {
+        filesystem.insert(
+            cwd.join("tmp").to_string_lossy().into_owned(),
+            json!("write"),
+        );
+        filesystem.insert(
+            cwd.join("docs/wip").to_string_lossy().into_owned(),
+            json!("write"),
+        );
+    }
+    json!({
+        "threadId":session_id,
+        "permissions":profile,
+        "config":{
+            "default_permissions":profile,
+            format!("permissions.{profile}"):{
+                "extends":if route.access == "write-restricted" { ":read-only" } else { ":workspace" },
+                "filesystem":filesystem
+            }
+        }
+    })
+}
+
+fn observe_settings(
+    response: &Value,
+    source: SettingsObservationSource,
+    router_access: Option<&str>,
+) -> SettingsObservation {
+    let sandbox = response.get("sandbox").cloned();
+    let approval_policy = response.get("approvalPolicy").cloned();
+    let approvals_reviewer = response.get("approvalsReviewer").cloned();
+    let permission_profile = response.get("activePermissionProfile").cloned();
+    if sandbox.is_none()
+        && approval_policy.is_none()
+        && approvals_reviewer.is_none()
+        && permission_profile.is_none()
+    {
+        return unavailable_settings(SettingsUnavailableReason::NativeResponseOmittedSettings);
+    }
+    SettingsObservation::Observed {
+        source,
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        router_access: router_access.and_then(|access| match access {
+            "write-restricted" => Some(RouterAccess::WriteRestricted),
+            "workspace-write" => Some(RouterAccess::WorkspaceWrite),
+            _ => None,
+        }),
+        native_sandbox: sandbox,
+        permission_profile,
+        approval_policy,
+        approvals_reviewer,
+    }
+}
+
+fn unavailable_settings(reason: SettingsUnavailableReason) -> SettingsObservation {
+    SettingsObservation::Unavailable { reason }
 }
 fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
     let path = Path::new(value);

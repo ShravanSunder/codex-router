@@ -1,5 +1,5 @@
 //! CLI envelopes; operation payloads retain their Control/native/ACP contracts.
-use crate::{CodexGeneration, NonEmptyText, SessionRef};
+use crate::{CodexGeneration, NonEmptyText, RouterAccess, SessionRef, SettingsObservation};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -70,9 +70,8 @@ pub enum ConversationRecord {
         target: SessionRef,
         effective_model: String,
         effective_effort: String,
-        effective_access: String,
-        effective_approval_policy: String,
-        effective_approvals_reviewer: String,
+        effective_access: Option<RouterAccess>,
+        settings_observation: Box<SettingsObservation>,
         idle_seconds: u64,
         #[schemars(schema_with = "acp_result_schema")]
         result: Value,
