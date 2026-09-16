@@ -4,7 +4,12 @@ pub use cli_output_contract::{
     ConversationEffect, ConversationRecord, ConversationStage, FiniteCommandRecord,
     NativeObservationRecord, ObservationCloseReason,
 };
+mod approval_contract;
 mod permission_diagnostic;
+pub use approval_contract::{
+    ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListParams,
+    ApprovalListResult, ApprovalRequestRecord, ApprovalState,
+};
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
     PermissionDiagnosticStage,

@@ -124,7 +124,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             )
             .unwrap_or_else(|error| panic!("thread read JSON: {error}"));
             assert_eq!(request["method"], "thread/read");
-            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":"medium","sandbox":{"type":"workspaceWrite"}}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
+            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":"medium","sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
         });
         let session = AcpSessionBinding::create(
             &mut catalog,
@@ -132,7 +132,8 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 connection,
                 schemas,
                 generation,
-                params: json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write"}}}),
+                params: json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+                approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             },
         )
         .await

@@ -33,6 +33,8 @@ pub enum PromptExecutionError {
         requested: String,
         effective: String,
     },
+    #[error("native thread approval configuration differs from requested configuration")]
+    ApprovalConfigurationMismatch,
 }
 pub struct PendingAcpPrompt {
     permissions: std::collections::BTreeMap<String, crate::PendingPermission>,
@@ -150,8 +152,43 @@ impl PendingAcpPrompt {
                 )
                 .map_err(|_| PromptExecutionError::Projection)?;
                 let request = permission.request().clone();
-                self.permissions.insert(id, permission);
-                return Ok(Some(PromptEvent::PermissionRequest(request)));
+                let outcome = self
+                    .session
+                    .approval_broker
+                    .request(crate::BrokeredApprovalRequest {
+                        thread_id: self.session.session_id.clone(),
+                        generation: self.session.generation.clone(),
+                        request,
+                    })
+                    .await
+                    .map_err(|_| PromptExecutionError::Projection)?;
+                let outcome = match outcome {
+                    crate::BrokeredApprovalOutcome::Selected { option_id } => {
+                        json!({"outcome":"selected","optionId":option_id})
+                    }
+                    crate::BrokeredApprovalOutcome::Cancelled => json!({"outcome":"cancelled"}),
+                };
+                let response = json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}});
+                let reply = permission
+                    .resolve(catalog, &self.session.generation, &response)
+                    .map_err(|_| PromptExecutionError::Projection)?;
+                let native_id = reply
+                    .native_response
+                    .get("id")
+                    .ok_or(PromptExecutionError::Projection)?
+                    .clone();
+                let result = reply
+                    .native_response
+                    .get("result")
+                    .ok_or(PromptExecutionError::Projection)?
+                    .clone();
+                self.session
+                    .connection
+                    .submit_callback_response(native_id, result)
+                    .await?;
+                return Ok(Some(PromptEvent::NativeNotification(json!({
+                    "kind":"approvalDecisionSubmitted"
+                }))));
             }
             return Ok(Some(PromptEvent::NativeCallback(message)));
         }
@@ -242,6 +279,19 @@ impl PendingAcpPrompt {
                         effective: effective_access.to_owned(),
                     });
                 }
+                let effective_approval_policy = thread
+                    .get("approvalPolicy")
+                    .and_then(Value::as_str)
+                    .ok_or(PromptExecutionError::Projection)?;
+                let effective_approvals_reviewer = thread
+                    .get("approvalsReviewer")
+                    .and_then(Value::as_str)
+                    .ok_or(PromptExecutionError::Projection)?;
+                if effective_approval_policy != "on-request"
+                    || effective_approvals_reviewer != "auto_review"
+                {
+                    return Err(PromptExecutionError::ApprovalConfigurationMismatch);
+                }
                 let result = response
                     .get_mut("result")
                     .and_then(Value::as_object_mut)
@@ -257,6 +307,8 @@ impl PendingAcpPrompt {
                         "effectiveModel": model,
                         "effectiveEffort": effective_effort,
                         "effectiveAccess": effective_access,
+                        "effectiveApprovalPolicy": effective_approval_policy,
+                        "effectiveApprovalsReviewer": effective_approvals_reviewer,
                         "idleSeconds": 0
                     }),
                 );

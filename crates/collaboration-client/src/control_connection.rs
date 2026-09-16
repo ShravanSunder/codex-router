@@ -297,6 +297,43 @@ impl ControlClient {
         }
         Ok(result)
     }
+    pub async fn list_pending_approvals(
+        &mut self,
+        pending_only: bool,
+    ) -> Result<collaboration_protocol::ApprovalListResult, ClientError> {
+        let value = self
+            .connection
+            .call(
+                "approval/list",
+                json!(collaboration_protocol::ApprovalListParams {
+                    pending: pending_only
+                }),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid approval list"))
+    }
+
+    pub async fn decide_approval(
+        &mut self,
+        params: collaboration_protocol::ApprovalDecideParams,
+    ) -> Result<collaboration_protocol::ApprovalDecideResult, ClientError> {
+        let request_id = params.request_id.clone();
+        let value = self
+            .connection
+            .call("approval/decide", json!(params))
+            .await?;
+        let result: collaboration_protocol::ApprovalDecideResult = serde_json::from_value(value)
+            .map_err(|_| ClientError::Protocol("invalid approval decision receipt"))?;
+        if result.request_id != request_id
+            || result.state != collaboration_protocol::ApprovalState::Decided
+        {
+            self.connection.failed = true;
+            return Err(ClientError::Protocol(
+                "inconsistent approval decision receipt",
+            ));
+        }
+        Ok(result)
+    }
     pub async fn journal_status(&mut self) -> Result<crate::JournalStatus, ClientError> {
         let value = self
             .connection

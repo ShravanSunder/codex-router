@@ -14,11 +14,12 @@ use tokio_tungstenite::{
 
 #[tokio::test]
 async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd() {
-    for (creating, effective_cwd) in [
-        (true, "/work/project"),
-        (true, "/wrong/project"),
-        (false, "/work/project"),
-        (false, "/wrong/project"),
+    for (creating, effective_cwd, effective_reviewer) in [
+        (true, "/work/project", "auto_review"),
+        (true, "/work/project", "user"),
+        (true, "/wrong/project", "auto_review"),
+        (false, "/work/project", "auto_review"),
+        (false, "/wrong/project", "auto_review"),
     ] {
         let mut catalog =
             AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
@@ -84,7 +85,8 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 assert_eq!(request["params"]["allowProviderModelFallback"], false);
                 assert_eq!(request["params"]["threadSource"], "user");
                 assert_eq!(request["params"]["sandbox"], "read-only");
-                assert_eq!(request["params"]["approvalPolicy"], "never");
+                assert_eq!(request["params"]["approvalPolicy"], "on-request");
+                assert_eq!(request["params"]["approvalsReviewer"], "auto_review");
                 assert_eq!(
                     request["params"]["config"]["mcp_servers"]["notes"]["args"],
                     json!(["--stdio"])
@@ -93,7 +95,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 assert_eq!(request["method"], "thread/resume");
                 assert_eq!(request["params"], json!({"threadId":"new-thread"}));
             }
-            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","thread":{"id":"new-thread","cwd":effective_cwd,"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
+            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":effective_reviewer,"thread":{"id":"new-thread","cwd":effective_cwd,"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
         });
         let result = if creating {
             AcpSessionBinding::create(
@@ -102,7 +104,8 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                         connection,
                         schemas,
                         generation: generation.clone(),
-                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"read-only"}}}),
+                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"read-only","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+                        approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
                     },
                 )
                 .await
@@ -114,6 +117,9 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                     schemas,
                     generation: generation.clone(),
                     params: json!({"sessionId":"new-thread","cwd":"/work/project","mcpServers":[]}),
+                    approval_broker: std::sync::Arc::new(
+                        codex_acp_adapter::RejectingApprovalBroker,
+                    ),
                 },
             )
             .await
@@ -129,7 +135,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
         fixture
             .await
             .unwrap_or_else(|error| panic!("fixture: {error}"));
-        if effective_cwd == "/work/project" {
+        if effective_cwd == "/work/project" && (!creating || effective_reviewer == "auto_review") {
             let mut session = result.unwrap_or_else(|error| panic!("create: {error}"));
             assert_eq!(
                 session.new_session_result(),
@@ -160,6 +166,11 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
             assert!(matches!(
                 changed_settings,
                 Err(SessionSetupError::ConfigurationMismatch)
+            ));
+        } else if creating && effective_reviewer != "auto_review" {
+            assert!(matches!(
+                result,
+                Err(SessionSetupError::ApprovalConfigurationMismatch)
             ));
         } else {
             assert!(matches!(
@@ -230,7 +241,8 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
         assert_eq!(request["params"]["allowProviderModelFallback"], false);
         assert_eq!(request["params"]["threadSource"], "user");
         assert_eq!(request["params"]["sandbox"], "workspace-write");
-        assert_eq!(request["params"]["approvalPolicy"], "never");
+        assert_eq!(request["params"]["approvalPolicy"], "on-request");
+        assert_eq!(request["params"]["approvalsReviewer"], "auto_review");
         server
             .send(Message::Text(
                 json!({
@@ -238,6 +250,8 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                     "result": {
                         "cwd": "/work/project",
                         "model": "gpt-6-astra",
+                        "approvalPolicy": "on-request",
+                        "approvalsReviewer": "auto_review",
                         "thread": {
                             "id": "forked-thread",
                             "cwd": "/work/project",
@@ -266,10 +280,15 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                         "model": "gpt-6-astra",
                         "effort": "high",
                         "access": "workspace-write",
+                        "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
+                        "approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
                         "forkThreadId": "source-thread"
                     }
                 }
             }),
+            approval_broker: std::sync::Arc::new(
+                codex_acp_adapter::RejectingApprovalBroker,
+            ),
         },
     )
     .await

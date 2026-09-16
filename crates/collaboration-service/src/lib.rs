@@ -32,9 +32,11 @@ mod native_control_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
 mod agent_declaration;
+mod approval_broker;
 mod message_effect_state;
 mod native_message_dispatch;
 mod session_delivery_sink;
+pub use approval_broker::ServiceApprovalBroker;
 
 mod acp_channel_listener;
 pub use acp_channel_listener::AcpChannelListener;

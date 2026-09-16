@@ -21,6 +21,7 @@ pub struct AcpConnectionInputs {
     pub schemas: Arc<NativePayloadSchemas>,
     pub stored_sessions: Arc<dyn AcpStoredSessions>,
     pub retired: CancellationToken,
+    pub approval_broker: Arc<dyn crate::ApprovalBroker>,
 }
 pub async fn serve_acp_connection<TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: TStream,
@@ -119,7 +120,7 @@ async fn route_connection(
                         }
                     } else {None};
                     let cancellation_barrier=requested_session.as_ref().and_then(|session| sessions.cancellation_barrier(session));
-                    let setup=SetupTaskInputs { cancellation_barrier, known_session, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new };
+                    let setup=SetupTaskInputs { cancellation_barrier, known_session, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new, approval_broker:Arc::clone(&inputs.approval_broker) };
                     setup_requests.spawn(async move {
                         let outcome=run_session_setup(setup).await;
                         drop(frame);

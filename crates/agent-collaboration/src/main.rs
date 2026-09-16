@@ -67,6 +67,9 @@ fn main() {
     if arguments.first().is_some_and(|arg| arg == "conversation") {
         std::process::exit(agent_collaboration::run_conversation_command(arguments));
     }
+    if arguments.first().is_some_and(|arg| arg == "approval") {
+        std::process::exit(agent_collaboration::run_approval_command(arguments));
+    }
     if arguments.first().is_some_and(|arg| arg == "sessions") {
         std::process::exit(agent_collaboration::run_session_inventory_command(
             arguments,

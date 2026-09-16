@@ -305,10 +305,21 @@ fn success(success: NativeControlSuccess) -> Value {
         else {
             return failure(id, "outcomeUnknown", stage);
         };
+        let Some(effective_approval_policy) = thread.get("approvalPolicy").and_then(Value::as_str)
+        else {
+            return failure(id, "outcomeUnknown", stage);
+        };
+        let Some(effective_approvals_reviewer) =
+            thread.get("approvalsReviewer").and_then(Value::as_str)
+        else {
+            return failure(id, "outcomeUnknown", stage);
+        };
         json!(collaboration_protocol::NativeInspectResult {
             target,
             generation,
             effective_access: effective_access.to_owned(),
+            effective_approval_policy: effective_approval_policy.to_owned(),
+            effective_approvals_reviewer: effective_approvals_reviewer.to_owned(),
             thread: thread.clone()
         })
     } else {

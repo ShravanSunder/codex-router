@@ -149,13 +149,22 @@ impl CollaborationRuntime {
             service_epoch.clone(),
             inputs.backend_socket,
         )?;
+        let native_backend = collaboration_service::NativeControlBackend {
+            codex_home: inputs.codex_home.clone(),
+            endpoint,
+            gate: publication.admission_gate(),
+        };
+        let approval_broker = collaboration_service::ServiceApprovalBroker::load(
+            service_id.clone(),
+            identity.endpoint_directory(),
+            native_backend.clone(),
+            inputs.directory.join("approval-routes.json"),
+        )
+        .await;
         let identity = identity
-            .with_native_backend(collaboration_service::NativeControlBackend {
-                codex_home: inputs.codex_home.clone(),
-                endpoint,
-                gate: publication.admission_gate(),
-            })
+            .with_native_backend(native_backend)
             .map_err(io::Error::other)?;
+        let identity = identity.with_approval_broker(std::sync::Arc::clone(&approval_broker));
         let wake_worker = identity.wake_timing_worker();
         let schedule_worker = identity.schedule_timing_worker();
         let retention_worker = identity.automation_retention_worker();
@@ -175,6 +184,7 @@ impl CollaborationRuntime {
             &inputs.directory.join("codex-acp.sock"),
             publication.admission_gate(),
             stored,
+            approval_broker,
         )?
         .with_connection_budget(permits);
         let publication = publication.with_acp_listener()?;

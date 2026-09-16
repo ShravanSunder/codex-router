@@ -36,7 +36,9 @@ mod endpoint_commands;
 mod permission_diagnostic_reporting;
 pub use endpoint_commands::run_endpoint_command;
 mod address_book_commands;
+mod approval_commands;
 pub use address_book_commands::run_address_command;
+pub use approval_commands::run_approval_command;
 
 mod journal_read_commands;
 mod native_stdio_bridge;

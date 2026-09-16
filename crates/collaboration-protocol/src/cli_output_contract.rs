@@ -71,6 +71,8 @@ pub enum ConversationRecord {
         effective_model: String,
         effective_effort: String,
         effective_access: String,
+        effective_approval_policy: String,
+        effective_approvals_reviewer: String,
         idle_seconds: u64,
         #[schemars(schema_with = "acp_result_schema")]
         result: Value,

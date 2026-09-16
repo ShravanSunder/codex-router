@@ -28,6 +28,8 @@ pub enum SessionSetupError {
         requested: String,
         effective: String,
     },
+    #[error("native session effective approval configuration differs from requested configuration")]
+    ApprovalConfigurationMismatch,
     #[error("native session creation outcome unknown")]
     OutcomeUnknown,
     #[error("native session request rejected")]
@@ -45,6 +47,7 @@ pub struct AcpSessionBinding {
     pub(crate) connection: NativeProtocolConnection,
     pub(crate) schemas: Arc<NativePayloadSchemas>,
     pub(crate) requested_access: Option<String>,
+    pub(crate) approval_broker: std::sync::Arc<dyn crate::ApprovalBroker>,
 }
 
 struct RouterModelChoice<'a> {
@@ -52,6 +55,8 @@ struct RouterModelChoice<'a> {
     effort: &'a str,
     fork_thread_id: Option<&'a str>,
     access: &'a str,
+    created_by: collaboration_protocol::SessionRef,
+    approver: collaboration_protocol::SessionRef,
 }
 
 fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionSetupError> {
@@ -83,11 +88,27 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
         .and_then(Value::as_str)
         .filter(|value| matches!(*value, "read-only" | "workspace-write"))
         .ok_or(SessionSetupError::InvalidParameters)?;
+    let created_by = serde_json::from_value(
+        router
+            .get("createdBy")
+            .cloned()
+            .ok_or(SessionSetupError::InvalidParameters)?,
+    )
+    .map_err(|_| SessionSetupError::InvalidParameters)?;
+    let approver = serde_json::from_value(
+        router
+            .get("approver")
+            .cloned()
+            .ok_or(SessionSetupError::InvalidParameters)?,
+    )
+    .map_err(|_| SessionSetupError::InvalidParameters)?;
     Ok(RouterModelChoice {
         model,
         effort,
         fork_thread_id,
         access,
+        created_by,
+        approver,
     })
 }
 pub struct SessionSetupInputs {
@@ -95,6 +116,7 @@ pub struct SessionSetupInputs {
     pub schemas: Arc<NativePayloadSchemas>,
     pub generation: CodexGeneration,
     pub params: Value,
+    pub approval_broker: std::sync::Arc<dyn crate::ApprovalBroker>,
 }
 impl AcpSessionBinding {
     pub async fn create(
@@ -141,7 +163,8 @@ impl AcpSessionBinding {
             "allowProviderModelFallback":false,
             "threadSource":"user",
             "sandbox":choice.access,
-            "approvalPolicy":"never",
+            "approvalPolicy":"on-request",
+            "approvalsReviewer":"auto_review",
             "config":{"model_reasoning_effort":choice.effort}
         });
         let fields = native
@@ -182,6 +205,11 @@ impl AcpSessionBinding {
                     .unwrap_or("<missing>")
                     .to_owned(),
             });
+        }
+        if result.get("approvalPolicy").and_then(Value::as_str) != Some("on-request")
+            || result.get("approvalsReviewer").and_then(Value::as_str) != Some("auto_review")
+        {
+            return Err(SessionSetupError::ApprovalConfigurationMismatch);
         }
         let effective_cwd = result
             .get("cwd")
@@ -226,6 +254,15 @@ impl AcpSessionBinding {
             .filter(|id| !id.is_empty())
             .ok_or(SessionSetupError::OutcomeUnknown)?
             .to_owned();
+        inputs
+            .approval_broker
+            .register_route(crate::ApprovalRoute {
+                thread_id: session_id.clone(),
+                created_by: choice.created_by,
+                approver: choice.approver,
+            })
+            .await
+            .map_err(|_| SessionSetupError::ConfigurationMismatch)?;
         Ok(Self {
             session_id,
             generation: inputs.generation,
@@ -233,6 +270,7 @@ impl AcpSessionBinding {
             connection,
             schemas: inputs.schemas,
             requested_access: Some(choice.access.to_owned()),
+            approval_broker: inputs.approval_broker,
         })
     }
     #[must_use]
@@ -286,6 +324,7 @@ impl AcpSessionBinding {
             connection: inputs.connection,
             schemas: inputs.schemas,
             requested_access: None,
+            approval_broker: inputs.approval_broker,
         };
         let response = session
             .resume_with_receipt(catalog, &inputs.generation, &inputs.params)

@@ -37,6 +37,7 @@ async fn pending_catalog_does_not_block_connection_routing_or_shutdown() {
                 entered: entered.clone(),
                 release: tokio_util::sync::CancellationToken::new(),
             }),
+            approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));
@@ -167,6 +168,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             generation,
             schemas,
             stored_sessions: Arc::new(FixtureCatalog),
+            approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));

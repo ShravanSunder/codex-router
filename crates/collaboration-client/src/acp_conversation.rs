@@ -22,6 +22,8 @@ pub struct ConversationSessionRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: &'a str,
     pub access: Option<&'a str>,
+    pub created_by: Option<&'a SessionRef>,
+    pub approver: Option<&'a SessionRef>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationEnd {
@@ -120,6 +122,8 @@ impl AcpConversation {
                 ("model".to_owned(), json!(request.model)),
                 ("effort".to_owned(), json!(request.effort)),
                 ("access".to_owned(), json!(request.access)),
+                ("createdBy".to_owned(), json!(request.created_by)),
+                ("approver".to_owned(), json!(request.approver)),
             ]);
             if let Some(source_thread_id) = request.fork {
                 router_metadata.insert("forkThreadId".into(), json!(source_thread_id));

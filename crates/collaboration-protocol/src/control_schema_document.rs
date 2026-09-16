@@ -330,6 +330,23 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
+    assembly.add_method::<ApprovalListParams, ApprovalListResult>(
+        "approval/list",
+        &["unavailable", "overloaded"],
+    )?;
+    assembly.add_method::<ApprovalDecideParams, ApprovalDecideResult>(
+        "approval/decide",
+        &[
+            "approvalNotPending",
+            "wrongActor",
+            "selfDecision",
+            "decisionNotOffered",
+            "expired",
+            "oldGeneration",
+            "unavailable",
+            "overloaded",
+        ],
+    )?;
     assembly.add_method::<AddressListParams, AddressPage>(
         "addressBook/list",
         &[

@@ -43,6 +43,9 @@ struct PromptArguments {
     effort: Option<String>,
     #[arg(long)]
     access: Option<ConversationAccess>,
+    /// Exact SessionRef JSON for the client approval authority. Defaults to this session.
+    #[arg(long)]
+    approver: Option<String>,
     #[arg(long)]
     cwd: PathBuf,
     #[arg(
@@ -107,6 +110,12 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
                 conversation_target(&args).map_err(|_| ClientError::Protocol("invalid session target"))?.endpoint_id()
             };
             let mut client=AcpConversation::connect(&directory,endpoint).await?;
+            let creator = if args.new_session || args.fork.is_some() {
+                Some(current_session_ref(&client.endpoint().service_id).map_err(|_| ClientError::Protocol("current session identity unavailable"))?)
+            } else { None };
+            let approver = if let Some(value) = args.approver.as_deref() {
+                Some(serde_json::from_str::<collaboration_client::protocol::SessionRef>(value).map_err(|_| ClientError::Protocol("invalid --approver SessionRef"))?)
+            } else { creator.clone() };
             let selected = if args.new_session { None } else { Some(conversation_target(&args).map_err(|_| ClientError::Protocol("invalid session target"))?.resolve(&client.endpoint().service_id).map_err(|_| ClientError::Protocol("session target belongs to another service"))?) };
             let selected_id = selected.as_ref().map(|target| String::from(target.session_id.clone()));
             stage=if args.new_session{"new"}else if args.fork.is_some(){"fork"}else{"load"};
@@ -118,6 +127,8 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
                     model: args.model.as_deref(),
                     effort: args.effort.as_deref().ok_or(ClientError::Protocol("--effort is required"))?,
                     access: args.access.map(ConversationAccess::as_str),
+                    created_by: creator.as_ref(),
+                    approver: approver.as_ref(),
                 },
                 &args.cwd,
                 &mut emit,
@@ -173,6 +184,9 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     if args.fork.is_none() && !args.new_session && args.access.is_some() {
         return Err("--access is invalid with --session: access is fixed for a thread".into());
     }
+    if args.fork.is_none() && !args.new_session && args.approver.is_some() {
+        return Err("--approver is valid only with --new or --fork".into());
+    }
     if args.new_session || args.fork.is_some() {
         validate_choice_value(
             args.model.as_deref().ok_or("--model is required")?,
@@ -216,6 +230,32 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
         .try_into()
         .map_err(|_| "Invalid or oversized content")?;
     Ok((directory, text))
+}
+
+fn current_session_ref(
+    service_id: &collaboration_client::protocol::UuidIdentity,
+) -> Result<collaboration_client::protocol::SessionRef, String> {
+    let codex = std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let claude = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let (endpoint_id, session_id) = match (codex, claude) {
+        (Some(session_id), None) => ("codex-local", session_id),
+        (None, Some(session_id)) => ("claude-local", session_id),
+        _ => return Err("exactly one current session identity is required".into()),
+    };
+    Ok(collaboration_client::protocol::SessionRef {
+        endpoint: collaboration_client::protocol::EndpointRef {
+            service_id: service_id.clone(),
+            endpoint_id: endpoint_id
+                .to_owned()
+                .try_into()
+                .map_err(|_| "invalid endpoint")?,
+        },
+        session_id: session_id.try_into().map_err(|_| "invalid session")?,
+    })
 }
 
 fn conversation_target(
@@ -278,11 +318,27 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
                     "effective access missing from prompt receipt",
                 ))?
                 .to_owned();
+            let effective_approval_policy = result
+                .pointer("/_meta/codexRouter/effectiveApprovalPolicy")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ClientError::Protocol(
+                    "effective approval policy missing from prompt receipt",
+                ))?
+                .to_owned();
+            let effective_approvals_reviewer = result
+                .pointer("/_meta/codexRouter/effectiveApprovalsReviewer")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ClientError::Protocol(
+                    "effective approvals reviewer missing from prompt receipt",
+                ))?
+                .to_owned();
             ConversationRecord::PromptResult {
                 target,
                 effective_model,
                 effective_effort,
                 effective_access,
+                effective_approval_policy,
+                effective_approvals_reviewer,
                 idle_seconds,
                 result,
             }
