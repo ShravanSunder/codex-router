@@ -163,7 +163,7 @@ fn bound_native_thread_uses_exact_offline_schema_and_closed_control_result() {
     let id = "00000000-0000-4000-8000-000000000001";
     let mut response = json!({"jsonrpc":"2.0","id":"inspect-1","result":{
         "target":{"endpoint":{"serviceId":id,"endpointId":"codex-local"},"sessionId":"thread"},
-        "generation":{"serviceEpoch":id,"generation":1},"thread":{"id":"thread"}
+        "generation":{"serviceEpoch":id,"generation":1},"effectiveAccess":"workspace-write","thread":{"id":"thread"}
     }});
     assert!(validator.is_valid(&response));
     response["result"]["thread"]["id"] = json!(42);

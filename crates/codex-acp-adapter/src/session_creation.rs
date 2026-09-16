@@ -23,6 +23,11 @@ pub enum SessionSetupError {
         requested: String,
         effective: String,
     },
+    #[error("requested access {requested} but native runtime reported {effective}")]
+    AccessMismatch {
+        requested: String,
+        effective: String,
+    },
     #[error("native session creation outcome unknown")]
     OutcomeUnknown,
     #[error("native session request rejected")]
@@ -39,12 +44,14 @@ pub struct AcpSessionBinding {
     configuration: Option<McpConfiguration>,
     pub(crate) connection: NativeProtocolConnection,
     pub(crate) schemas: Arc<NativePayloadSchemas>,
+    pub(crate) requested_access: Option<String>,
 }
 
 struct RouterModelChoice<'a> {
     model: &'a str,
     effort: &'a str,
     fork_thread_id: Option<&'a str>,
+    access: &'a str,
 }
 
 fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionSetupError> {
@@ -71,10 +78,16 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
                 .ok_or(SessionSetupError::InvalidParameters)
         })
         .transpose()?;
+    let access = router
+        .get("access")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "read-only" | "workspace-write"))
+        .ok_or(SessionSetupError::InvalidParameters)?;
     Ok(RouterModelChoice {
         model,
         effort,
         fork_thread_id,
+        access,
     })
 }
 pub struct SessionSetupInputs {
@@ -127,6 +140,8 @@ impl AcpSessionBinding {
             "model":choice.model,
             "allowProviderModelFallback":false,
             "threadSource":"user",
+            "sandbox":choice.access,
+            "approvalPolicy":"never",
             "config":{"model_reasoning_effort":choice.effort}
         });
         let fields = native
@@ -217,6 +232,7 @@ impl AcpSessionBinding {
             configuration: Some(configuration),
             connection,
             schemas: inputs.schemas,
+            requested_access: Some(choice.access.to_owned()),
         })
     }
     #[must_use]
@@ -269,6 +285,7 @@ impl AcpSessionBinding {
             configuration: None,
             connection: inputs.connection,
             schemas: inputs.schemas,
+            requested_access: None,
         };
         let response = session
             .resume_with_receipt(catalog, &inputs.generation, &inputs.params)

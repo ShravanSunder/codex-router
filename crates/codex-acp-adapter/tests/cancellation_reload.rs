@@ -105,7 +105,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
             (
                 2,
                 "session/new",
-                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium"}}}),
+                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write"}}}),
             ),
         ] {
             write

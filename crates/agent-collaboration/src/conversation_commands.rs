@@ -1,5 +1,5 @@
 //! Unattended ACP conversation command using the reusable client and explicit cancellation.
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use collaboration_client::protocol::ConversationRecord;
 use collaboration_client::{AcpConversation, ClientError, ConversationEnd, ConversationEvent};
 use serde_json::json;
@@ -40,6 +40,8 @@ struct PromptArguments {
     #[arg(long)]
     effort: Option<String>,
     #[arg(long)]
+    access: Option<ConversationAccess>,
+    #[arg(long)]
     cwd: PathBuf,
     #[arg(
         long,
@@ -55,6 +57,19 @@ struct PromptArguments {
     timeout_seconds: u64,
     #[arg(long)]
     json: bool,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum ConversationAccess {
+    ReadOnly,
+    WorkspaceWrite,
+}
+impl ConversationAccess {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+        }
+    }
 }
 pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
     let parsed = match crate::automation_argument_feedback::parse_arguments::<ConversationArguments>(
@@ -93,6 +108,7 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
                     fork: args.fork.as_deref(),
                     model: args.model.as_deref(),
                     effort: args.effort.as_deref().ok_or(ClientError::Protocol("--effort is required"))?,
+                    access: args.access.map(ConversationAccess::as_str),
                 },
                 &args.cwd,
                 &mut emit,
@@ -146,11 +162,15 @@ fn prepare(
                 .into(),
         );
     }
+    if args.session.is_some() && args.access.is_some() {
+        return Err("--access is invalid with --session: access is fixed for a thread".into());
+    }
     if args.new_session || args.fork.is_some() {
         validate_choice_value(
             args.model.as_deref().ok_or("--model is required")?,
             "--model",
         )?;
+        args.access.as_ref().ok_or("--access is required")?;
     }
     if !args.cwd.is_absolute() {
         return Err("ACP cwd must be absolute".into());
@@ -227,10 +247,18 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
                 .pointer("/_meta/codexRouter/idleSeconds")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
+            let effective_access = result
+                .pointer("/_meta/codexRouter/effectiveAccess")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ClientError::Protocol(
+                    "effective access missing from prompt receipt",
+                ))?
+                .to_owned();
             ConversationRecord::PromptResult {
                 target,
                 effective_model,
                 effective_effort,
+                effective_access,
                 idle_seconds,
                 result,
             }

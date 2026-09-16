@@ -83,6 +83,8 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 );
                 assert_eq!(request["params"]["allowProviderModelFallback"], false);
                 assert_eq!(request["params"]["threadSource"], "user");
+                assert_eq!(request["params"]["sandbox"], "read-only");
+                assert_eq!(request["params"]["approvalPolicy"], "never");
                 assert_eq!(
                     request["params"]["config"]["mcp_servers"]["notes"]["args"],
                     json!(["--stdio"])
@@ -100,7 +102,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                         connection,
                         schemas,
                         generation: generation.clone(),
-                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium"}}}),
+                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"read-only"}}}),
                     },
                 )
                 .await
@@ -227,6 +229,8 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
         );
         assert_eq!(request["params"]["allowProviderModelFallback"], false);
         assert_eq!(request["params"]["threadSource"], "user");
+        assert_eq!(request["params"]["sandbox"], "workspace-write");
+        assert_eq!(request["params"]["approvalPolicy"], "never");
         server
             .send(Message::Text(
                 json!({
@@ -261,6 +265,7 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                     "codexRouter": {
                         "model": "gpt-6-astra",
                         "effort": "high",
+                        "access": "workspace-write",
                         "forkThreadId": "source-thread"
                     }
                 }

@@ -124,7 +124,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             )
             .unwrap_or_else(|error| panic!("thread read JSON: {error}"));
             assert_eq!(request["method"], "thread/read");
-            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":"medium"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
+            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":"medium","sandbox":{"type":"workspaceWrite"}}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
         });
         let session = AcpSessionBinding::create(
             &mut catalog,
@@ -132,7 +132,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 connection,
                 schemas,
                 generation,
-                params: json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium"}}}),
+                params: json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write"}}}),
             },
         )
         .await
@@ -220,7 +220,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 .await
                 .unwrap_or_else(|error| panic!("terminal: {error}"));
             assert!(
-                matches!(terminal,Some(PromptEvent::Terminal(value)) if value["id"]=="acp-prompt" && value["result"]["stopReason"]=="end_turn")
+                matches!(terminal,Some(PromptEvent::Terminal(value)) if value["id"]=="acp-prompt" && value["result"]["stopReason"]=="end_turn" && value["result"]["_meta"]["codexRouter"]["effectiveAccess"]=="workspace-write")
             );
             assert!(!prompt.blocks_next_prompt());
             assert!(prompt.cancel().await.is_none());

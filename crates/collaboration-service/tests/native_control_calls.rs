@@ -88,7 +88,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             (
                 "thread/read",
                 json!({"threadId":"proof-thread","includeTurns":false}),
-                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"}}}),
+                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"}}}),
             ),
             (
                 "turn/start",
@@ -157,7 +157,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                     let response = if expected_method == method {
                         result.clone()
                     } else if expected_method == "thread/read" {
-                        json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"}}})
+                        json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"}}})
                     } else {
                         json!({})
                     };
@@ -187,6 +187,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .inspect_session(&target)
         .await
         .unwrap_or_else(|error| panic!("inspect: {error}"));
+    assert_eq!(inspection.effective_access, "workspace-write");
     let message = client
         .send_agent_message(collaboration_protocol::NativeSendParams {
             target: target.clone(),

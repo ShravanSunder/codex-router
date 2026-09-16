@@ -174,6 +174,15 @@ fn setup_error(id: Value, failure: &crate::SessionSetupError) -> Value {
                 "kind":"modelMismatch","requested":requested,"effective":effective
             }}
         }),
+        crate::SessionSetupError::AccessMismatch {
+            requested,
+            effective,
+        } => json!({
+            "jsonrpc":"2.0","id":id,
+            "error":{"code":code,"message":"Native session setup rejected","data":{
+                "kind":"accessMismatch","requested":requested,"effective":effective
+            }}
+        }),
         _ => error(id, code, "Native session setup rejected"),
     }
 }

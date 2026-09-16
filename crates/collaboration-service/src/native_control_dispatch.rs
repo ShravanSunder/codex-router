@@ -180,9 +180,21 @@ fn success(success: NativeControlSuccess) -> Value {
         {
             return failure(id, "outcomeUnknown", stage);
         }
+        let Some(effective_access) = thread
+            .pointer("/sandbox/type")
+            .and_then(Value::as_str)
+            .and_then(|value| match value {
+                "readOnly" => Some("read-only"),
+                "workspaceWrite" => Some("workspace-write"),
+                _ => None,
+            })
+        else {
+            return failure(id, "outcomeUnknown", stage);
+        };
         json!(collaboration_protocol::NativeInspectResult {
             target,
             generation,
+            effective_access: effective_access.to_owned(),
             thread: thread.clone()
         })
     } else {

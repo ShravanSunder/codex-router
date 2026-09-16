@@ -59,6 +59,7 @@ pub enum ConversationRecord {
         target: SessionRef,
         effective_model: String,
         effective_effort: String,
+        effective_access: String,
         idle_seconds: u64,
         #[schemars(schema_with = "acp_result_schema")]
         result: Value,

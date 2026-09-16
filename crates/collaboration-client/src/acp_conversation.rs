@@ -21,6 +21,7 @@ pub struct ConversationSessionRequest<'a> {
     pub fork: Option<&'a str>,
     pub model: Option<&'a str>,
     pub effort: &'a str,
+    pub access: Option<&'a str>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationEnd {
@@ -114,6 +115,7 @@ impl AcpConversation {
             let mut router_metadata = serde_json::Map::from_iter([
                 ("model".to_owned(), json!(request.model)),
                 ("effort".to_owned(), json!(request.effort)),
+                ("access".to_owned(), json!(request.access)),
             ]);
             if let Some(source_thread_id) = request.fork {
                 router_metadata.insert("forkThreadId".into(), json!(source_thread_id));

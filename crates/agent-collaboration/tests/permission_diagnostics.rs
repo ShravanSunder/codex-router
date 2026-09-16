@@ -147,6 +147,8 @@ fn stream_and_raw_carrier_entrypoints_report_initial_permission_denial() {
             "gpt-5.6-sol",
             "--effort",
             "medium",
+            "--access",
+            "workspace-write",
             "--cwd",
             "/tmp",
             "--text",

@@ -28,6 +28,11 @@ pub enum PromptExecutionError {
         requested: String,
         effective: String,
     },
+    #[error("requested access {requested} but native runtime reported {effective}")]
+    AccessMismatch {
+        requested: String,
+        effective: String,
+    },
 }
 pub struct PendingAcpPrompt {
     permissions: std::collections::BTreeMap<String, crate::PendingPermission>,
@@ -214,10 +219,27 @@ impl PendingAcpPrompt {
                     .get("reasoningEffort")
                     .and_then(Value::as_str)
                     .ok_or(PromptExecutionError::Projection)?;
+                let effective_access = thread
+                    .pointer("/sandbox/type")
+                    .and_then(Value::as_str)
+                    .and_then(|value| match value {
+                        "readOnly" => Some("read-only"),
+                        "workspaceWrite" => Some("workspace-write"),
+                        _ => None,
+                    })
+                    .ok_or(PromptExecutionError::Projection)?;
                 if effective_effort != self.requested_effort {
                     return Err(PromptExecutionError::EffortMismatch {
                         requested: self.requested_effort.clone(),
                         effective: effective_effort.to_owned(),
+                    });
+                }
+                if let Some(requested_access) = self.session.requested_access.as_deref()
+                    && effective_access != requested_access
+                {
+                    return Err(PromptExecutionError::AccessMismatch {
+                        requested: requested_access.to_owned(),
+                        effective: effective_access.to_owned(),
                     });
                 }
                 let result = response
@@ -234,6 +256,7 @@ impl PendingAcpPrompt {
                     json!({
                         "effectiveModel": model,
                         "effectiveEffort": effective_effort,
+                        "effectiveAccess": effective_access,
                         "idleSeconds": 0
                     }),
                 );

@@ -15,6 +15,7 @@ pub struct NativeInspectParams {
 pub struct NativeInspectResult {
     pub target: SessionRef,
     pub generation: CodexGeneration,
+    pub effective_access: String,
     /// Validated against the advertised native Thread definition before publication.
     #[schemars(schema_with = "crate::native_schema_references::thread_schema")]
     pub thread: serde_json::Value,
