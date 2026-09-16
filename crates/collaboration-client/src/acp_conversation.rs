@@ -131,12 +131,7 @@ impl AcpConversation {
             let scratch_scope = request
                 .root_message_id
                 .map(str::to_owned)
-                .or_else(|| {
-                    request
-                        .created_by
-                        .map(|creator| String::from(creator.session_id.clone()))
-                })
-                .ok_or(ClientError::Protocol("scratch scope unavailable"))?;
+                .unwrap_or_else(session_scratch_scope);
             let scratch_path = self
                 .service_directory
                 .parent()
@@ -145,7 +140,7 @@ impl AcpConversation {
                 .join(&scratch_scope);
             std::fs::create_dir_all(cwd.join("tmp"))?;
             std::fs::create_dir_all(cwd.join("docs/wip"))?;
-            std::fs::create_dir_all(&scratch_path)?;
+            create_private_scratch(&scratch_path)?;
             router_metadata.insert("rootMessageId".into(), json!(request.root_message_id));
             router_metadata.insert("scratchScope".into(), json!(scratch_scope));
             router_metadata.insert("scratchPath".into(), json!(scratch_path));
@@ -419,5 +414,45 @@ impl AcpConversation {
                 return Ok(value);
             }
         }
+    }
+}
+
+fn create_private_scratch(path: &Path) -> Result<(), ClientError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700).create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(ClientError::Protocol(
+            "scratch directory is not owner-private",
+        ));
+    }
+    Ok(())
+}
+
+fn session_scratch_scope() -> String {
+    format!("session-{}", uuid::Uuid::now_v7())
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn session_scratch_scopes_are_unique_and_owner_private() {
+        let first = session_scratch_scope();
+        let second = session_scratch_scope();
+        assert_ne!(first, second);
+        let path = std::env::temp_dir()
+            .join("router-client-scratch")
+            .join(first);
+        assert!(create_private_scratch(&path).is_ok());
+        let metadata = std::fs::metadata(path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o077, 0);
     }
 }

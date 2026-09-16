@@ -160,7 +160,8 @@ impl CollaborationRuntime {
             native_backend.clone(),
             inputs.directory.join("approval-routes.json"),
         )
-        .await;
+        .await
+        .map_err(io::Error::other)?;
         let identity = identity
             .with_native_backend(native_backend)
             .map_err(io::Error::other)?;

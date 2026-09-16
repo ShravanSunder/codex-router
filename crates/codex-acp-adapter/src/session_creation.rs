@@ -9,6 +9,7 @@ use collaboration_protocol::{
 };
 use serde_json::{Value, json};
 use std::{
+    os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -57,7 +58,7 @@ struct RouterModelChoice<'a> {
     model: &'a str,
     effort: &'a str,
     fork_thread_id: Option<&'a str>,
-    access: &'a str,
+    access: RouterAccess,
     created_by: collaboration_protocol::SessionRef,
     approver: collaboration_protocol::SessionRef,
     scratch_path: &'a str,
@@ -88,11 +89,15 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
                 .ok_or(SessionSetupError::InvalidParameters)
         })
         .transpose()?;
-    let access = router
+    let access = match router
         .get("access")
         .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "write-restricted" | "workspace-write"))
-        .ok_or(SessionSetupError::InvalidParameters)?;
+        .ok_or(SessionSetupError::InvalidParameters)?
+    {
+        "write-restricted" => RouterAccess::WriteRestricted,
+        "workspace-write" => RouterAccess::WorkspaceWrite,
+        _ => return Err(SessionSetupError::InvalidParameters),
+    };
     let created_by = serde_json::from_value(
         router
             .get("createdBy")
@@ -110,8 +115,13 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
     let scratch_path = router
         .get("scratchPath")
         .and_then(Value::as_str)
-        .unwrap_or("/tmp");
+        .ok_or(SessionSetupError::InvalidParameters)?;
+    let scratch_scope = router
+        .get("scratchScope")
+        .and_then(Value::as_str)
+        .ok_or(SessionSetupError::InvalidParameters)?;
     let root_message_id = router.get("rootMessageId").and_then(Value::as_str);
+    validate_scratch(scratch_path, scratch_scope, root_message_id)?;
     Ok(RouterModelChoice {
         model,
         effort,
@@ -180,9 +190,8 @@ impl AcpSessionBinding {
             .as_object_mut()
             .ok_or(SessionSetupError::InvalidParameters)?;
         let profile = match choice.access {
-            "write-restricted" => "router-write-restricted",
-            "workspace-write" => "router-workspace-write",
-            _ => return Err(SessionSetupError::InvalidParameters),
+            RouterAccess::WriteRestricted => "router-write-restricted",
+            RouterAccess::WorkspaceWrite => "router-workspace-write",
         };
         fields.insert("permissions".into(), json!(profile));
         if let Some(config) = configuration.native_overrides() {
@@ -202,7 +211,7 @@ impl AcpSessionBinding {
         config.insert("default_permissions".into(), json!(profile));
         let mut filesystem = serde_json::Map::new();
         filesystem.insert(choice.scratch_path.to_owned(), json!("write"));
-        if choice.access == "write-restricted" {
+        if choice.access == RouterAccess::WriteRestricted {
             filesystem.insert(
                 expected_cwd.join("tmp").to_string_lossy().into_owned(),
                 json!("write"),
@@ -213,7 +222,7 @@ impl AcpSessionBinding {
             );
         }
         config.insert(format!("permissions.{profile}"), json!({
-            "extends": if choice.access == "write-restricted" { ":read-only" } else { ":workspace" },
+            "extends": if choice.access == RouterAccess::WriteRestricted { ":read-only" } else { ":workspace" },
             "filesystem": filesystem
         }));
         if !directories.is_empty() {
@@ -251,6 +260,13 @@ impl AcpSessionBinding {
             },
             Some(choice.access),
         );
+        validate_observed_settings(
+            &result,
+            choice.access,
+            &expected_cwd,
+            Path::new(choice.scratch_path),
+            profile,
+        )?;
         let effective_cwd = result
             .get("cwd")
             .and_then(Value::as_str)
@@ -298,7 +314,7 @@ impl AcpSessionBinding {
             thread_id: session_id.clone(),
             created_by: choice.created_by,
             approver: choice.approver,
-            access: choice.access.to_owned(),
+            access: choice.access,
             scratch_path: choice.scratch_path.to_owned(),
             root_message_id: choice.root_message_id.map(str::to_owned),
         };
@@ -313,7 +329,7 @@ impl AcpSessionBinding {
             configuration: Some(configuration),
             connection,
             schemas: inputs.schemas,
-            requested_access: Some(choice.access.to_owned()),
+            requested_access: Some(access_name(choice.access).to_owned()),
             settings_observation,
             access_route: Some(access_route),
             approval_broker: inputs.approval_broker,
@@ -374,7 +390,9 @@ impl AcpSessionBinding {
             configuration: None,
             connection: inputs.connection,
             schemas: inputs.schemas,
-            requested_access: route.as_ref().map(|route| route.access.clone()),
+            requested_access: route
+                .as_ref()
+                .map(|route| access_name(route.access).to_owned()),
             settings_observation: unavailable_settings(
                 SettingsUnavailableReason::NotObservedBeforeResume,
             ),
@@ -387,7 +405,7 @@ impl AcpSessionBinding {
         session.settings_observation = observe_settings(
             &response,
             SettingsObservationSource::ThreadResume,
-            session.requested_access.as_deref(),
+            session.access_route.as_ref().map(|route| route.access),
         );
         if barrier.is_some_and(|barrier| !barrier.resolved_by_resume(&response)) {
             return Err(SessionSetupError::CancellationUnresolved);
@@ -452,6 +470,16 @@ impl AcpSessionBinding {
                 return Err(SessionSetupError::ConfigurationMismatch);
             }
         }
+        if let Some(route) = self.access_route.as_ref() {
+            let profile = profile_name(route.access);
+            validate_observed_settings(
+                &result,
+                route.access,
+                &requested_cwd,
+                Path::new(&route.scratch_path),
+                profile,
+            )?;
+        }
         Ok(result)
     }
     /// Empty load configuration adds nothing; a nonempty load must match fresh-new evidence.
@@ -475,14 +503,10 @@ fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::Approva
     let Some(route) = route else {
         return json!({"threadId":session_id});
     };
-    let profile = if route.access == "write-restricted" {
-        "router-write-restricted"
-    } else {
-        "router-workspace-write"
-    };
+    let profile = profile_name(route.access);
     let mut filesystem = serde_json::Map::new();
     filesystem.insert(route.scratch_path.clone(), json!("write"));
-    if route.access == "write-restricted" {
+    if route.access == RouterAccess::WriteRestricted {
         filesystem.insert(
             cwd.join("tmp").to_string_lossy().into_owned(),
             json!("write"),
@@ -498,7 +522,7 @@ fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::Approva
         "config":{
             "default_permissions":profile,
             format!("permissions.{profile}"):{
-                "extends":if route.access == "write-restricted" { ":read-only" } else { ":workspace" },
+                "extends":if route.access == RouterAccess::WriteRestricted { ":read-only" } else { ":workspace" },
                 "filesystem":filesystem
             }
         }
@@ -508,7 +532,7 @@ fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::Approva
 fn observe_settings(
     response: &Value,
     source: SettingsObservationSource,
-    router_access: Option<&str>,
+    router_access: Option<RouterAccess>,
 ) -> SettingsObservation {
     let sandbox = response.get("sandbox").cloned();
     let approval_policy = response.get("approvalPolicy").cloned();
@@ -524,11 +548,7 @@ fn observe_settings(
     SettingsObservation::Observed {
         source,
         observed_at: chrono::Utc::now().to_rfc3339(),
-        router_access: router_access.and_then(|access| match access {
-            "write-restricted" => Some(RouterAccess::WriteRestricted),
-            "workspace-write" => Some(RouterAccess::WorkspaceWrite),
-            _ => None,
-        }),
+        router_access,
         native_sandbox: sandbox,
         permission_profile,
         approval_policy,
@@ -538,6 +558,105 @@ fn observe_settings(
 
 fn unavailable_settings(reason: SettingsUnavailableReason) -> SettingsObservation {
     SettingsObservation::Unavailable { reason }
+}
+
+const fn access_name(access: RouterAccess) -> &'static str {
+    match access {
+        RouterAccess::WriteRestricted => "write-restricted",
+        RouterAccess::WorkspaceWrite => "workspace-write",
+    }
+}
+
+const fn profile_name(access: RouterAccess) -> &'static str {
+    match access {
+        RouterAccess::WriteRestricted => "router-write-restricted",
+        RouterAccess::WorkspaceWrite => "router-workspace-write",
+    }
+}
+
+fn validate_scratch(
+    scratch_path: &str,
+    scratch_scope: &str,
+    root_message_id: Option<&str>,
+) -> Result<(), SessionSetupError> {
+    let scope_valid = if let Some(root) = root_message_id {
+        collaboration_protocol::UuidIdentity::try_from(root.to_owned()).is_ok()
+            && scratch_scope == root
+    } else {
+        scratch_scope
+            .strip_prefix("session-")
+            .is_some_and(|id| collaboration_protocol::UuidIdentity::try_from(id.to_owned()).is_ok())
+    };
+    let path = Path::new(scratch_path);
+    if !scope_valid
+        || !path.is_absolute()
+        || path.file_name().and_then(|name| name.to_str()) != Some(scratch_scope)
+        || path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            != Some("scratch")
+    {
+        return Err(SessionSetupError::InvalidParameters);
+    }
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| SessionSetupError::InvalidParameters)?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(SessionSetupError::InvalidParameters);
+    }
+    Ok(())
+}
+
+fn validate_observed_settings(
+    response: &Value,
+    access: RouterAccess,
+    cwd: &Path,
+    scratch: &Path,
+    profile: &str,
+) -> Result<(), SessionSetupError> {
+    let profile_id = response
+        .pointer("/activePermissionProfile/id")
+        .and_then(Value::as_str)
+        .ok_or(SessionSetupError::ConfigurationMismatch)?;
+    let roots = response
+        .pointer("/sandbox/writableRoots")
+        .and_then(Value::as_array)
+        .ok_or(SessionSetupError::ConfigurationMismatch)?;
+    let actual = roots
+        .iter()
+        .map(|root| {
+            root.as_str()
+                .map(str::to_owned)
+                .ok_or(SessionSetupError::ConfigurationMismatch)
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    let mut expected = std::collections::BTreeSet::from([scratch
+        .to_str()
+        .ok_or(SessionSetupError::ConfigurationMismatch)?
+        .to_owned()]);
+    match access {
+        RouterAccess::WriteRestricted => {
+            expected.insert(cwd.join("tmp").to_string_lossy().into_owned());
+            expected.insert(cwd.join("docs/wip").to_string_lossy().into_owned());
+        }
+        RouterAccess::WorkspaceWrite => {
+            expected.insert(
+                cwd.to_str()
+                    .ok_or(SessionSetupError::ConfigurationMismatch)?
+                    .to_owned(),
+            );
+        }
+    }
+    if profile_id != profile || actual != expected {
+        return Err(SessionSetupError::AccessMismatch {
+            requested: access_name(access).to_owned(),
+            effective: format!("profile={profile_id}, roots={actual:?}"),
+        });
+    }
+    Ok(())
 }
 fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
     let path = Path::new(value);
@@ -562,5 +681,67 @@ fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
         NativeConnectionError::InvalidInput => SessionSetupError::InvalidParameters,
         NativeConnectionError::Rejected { .. } => SessionSetupError::NativeRejected,
         _ => SessionSetupError::OutcomeUnknown,
+    }
+}
+
+#[cfg(test)]
+mod access_validation_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scratch_metadata_is_required_private_and_scope_bound() {
+        let scope = "session-00000000-0000-4000-8000-000000000099";
+        let path = std::env::temp_dir().join("scratch").join(scope);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(validate_scratch(path.to_str().unwrap(), scope, None).is_ok());
+        assert!(validate_scratch("/tmp", scope, None).is_err());
+        assert!(
+            validate_scratch(
+                path.to_str().unwrap(),
+                "session-00000000-0000-4000-8000-000000000098",
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_scratch(
+                path.to_str().unwrap(),
+                scope,
+                Some("00000000-0000-4000-8000-000000000099")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_setup_refuses_missing_or_incompatible_native_settings() {
+        let cwd = Path::new("/repo");
+        let scratch = Path::new("/owner/scratch/root");
+        assert!(
+            validate_observed_settings(
+                &json!({}),
+                RouterAccess::WriteRestricted,
+                cwd,
+                scratch,
+                "router-write-restricted"
+            )
+            .is_err()
+        );
+        let wrong = json!({
+            "activePermissionProfile":{"id":"router-write-restricted"},
+            "sandbox":{"writableRoots":["/owner/scratch/root","/repo/tmp"]}
+        });
+        assert!(
+            validate_observed_settings(
+                &wrong,
+                RouterAccess::WriteRestricted,
+                cwd,
+                scratch,
+                "router-write-restricted"
+            )
+            .is_err()
+        );
     }
 }

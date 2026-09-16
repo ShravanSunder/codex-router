@@ -12,8 +12,17 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::Role},
 };
 
+const TEST_SCRATCH: &str =
+    "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
+fn ensure_test_scratch() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(std::fs::create_dir_all(TEST_SCRATCH).is_ok());
+    assert!(std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).is_ok());
+}
+
 #[tokio::test]
 async fn prompt_buffers_early_output_and_settles_native_completion_once() {
+    ensure_test_scratch();
     for (use_task, malformed_callback) in [(false, false), (true, false), (false, true)] {
         let mut catalog =
             AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
@@ -76,7 +85,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 .unwrap_or_else(|error| panic!("JSON: {error}"));
                 assert_eq!(request["method"], method);
                 let result = if method == "thread/start" {
-                    json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","thread":{"id":"thread-a","cwd":"/work"}})
+                    json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work"]},"thread":{"id":"thread-a","cwd":"/work"}})
                 } else {
                     assert_eq!(request["params"]["input"][0]["text"], "hello");
                     assert_eq!(request["params"]["effort"], "medium");
@@ -132,7 +141,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 connection,
                 schemas,
                 generation,
-                params: json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+                params: json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
                 approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             },
         )

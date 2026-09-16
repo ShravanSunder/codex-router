@@ -38,21 +38,22 @@ impl ServiceApprovalBroker {
         endpoints: EndpointDirectory,
         backend: NativeControlBackend,
         routes_path: PathBuf,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, ApprovalBrokerError> {
         let routes = match tokio::fs::read(&routes_path).await {
             Ok(bytes) => serde_json::from_slice::<Vec<ApprovalRoute>>(&bytes)
-                .unwrap_or_default()
+                .map_err(|_| ApprovalBrokerError::Unavailable)?
                 .into_iter()
                 .map(|route| (route.thread_id.clone(), route))
                 .collect(),
-            Err(_) => BTreeMap::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(_) => return Err(ApprovalBrokerError::Unavailable),
         };
         let history_path = routes_path.with_file_name("approval-history.json");
         let history = match tokio::fs::read(&history_path).await {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
             Err(_) => Vec::new(),
         };
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             service_id,
             endpoints,
             backend,
@@ -61,7 +62,7 @@ impl ServiceApprovalBroker {
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             history_path,
             history: Arc::new(Mutex::new(history)),
-        })
+        }))
     }
 
     async fn persist_routes(&self) -> Result<(), ApprovalBrokerError> {

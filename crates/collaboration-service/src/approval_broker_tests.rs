@@ -52,7 +52,8 @@ async fn fixture_broker() -> (Arc<ServiceApprovalBroker>, CodexGeneration, PathB
         },
         directory.join("approval-routes.json"),
     )
-    .await;
+    .await
+    .unwrap_or_else(|error| panic!("broker: {error}"));
     (broker, generation, directory)
 }
 
@@ -186,4 +187,43 @@ async fn expired_and_old_generation_decisions_are_refused_with_terminal_history(
         broker.list(false).await.approvals[0].state,
         ApprovalState::Cancelled
     );
+}
+
+#[tokio::test]
+async fn malformed_persisted_routes_fail_closed() {
+    let service_id = crate::new_service_uuid().unwrap();
+    let generation: CodexGeneration = serde_json::from_value(json!({
+        "serviceEpoch": String::from(service_id.clone()), "generation": 1
+    }))
+    .unwrap();
+    let gate = crate::NativeGenerationGate::default();
+    gate.activate(
+        generation,
+        PathBuf::from("/tmp/approval-corrupt.sock"),
+        None,
+    )
+    .unwrap();
+    let endpoint = EndpointRef {
+        service_id: service_id.clone(),
+        endpoint_id: "codex-local".to_owned().try_into().unwrap(),
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "approval-corrupt-{}",
+        String::from(crate::new_service_uuid().unwrap())
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let routes = directory.join("approval-routes.json");
+    std::fs::write(&routes, br#"[{"threadId":"thread","access":"invalid"}]"#).unwrap();
+    let loaded = ServiceApprovalBroker::load(
+        service_id.clone(),
+        EndpointDirectory::new(service_id),
+        NativeControlBackend {
+            endpoint,
+            gate,
+            codex_home: directory,
+        },
+        routes,
+    )
+    .await;
+    assert!(matches!(loaded, Err(ApprovalBrokerError::Unavailable)));
 }

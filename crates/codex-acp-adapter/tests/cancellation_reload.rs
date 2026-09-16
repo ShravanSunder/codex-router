@@ -13,8 +13,17 @@ impl AcpStoredSessions for EmptyCatalog {
     }
 }
 
+const TEST_SCRATCH: &str =
+    "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
+fn ensure_test_scratch() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(std::fs::create_dir_all(TEST_SCRATCH).is_ok());
+    assert!(std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).is_ok());
+}
+
 #[tokio::test]
 async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after_idle_reload() {
+    ensure_test_scratch();
     // Arrange: one native turn rejects interruption; reload first sees it active, then idle.
     let socket = format!("/tmp/acp-cancel-reload-{}.sock", std::process::id());
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -44,7 +53,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
                     "initialize" => json!({}),
                     "turn/start" => json!({"turn":{"id":"target","status":"inProgress"}}),
                     _ => {
-                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work"]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
                     }
                 };
                 let reply = if *method == "turn/interrupt" {
@@ -106,7 +115,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
             (
                 2,
                 "session/new",
-                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
             ),
         ] {
             write

@@ -19,8 +19,17 @@ impl AcpStoredSessions for DelayedCatalog {
     }
 }
 
+const TEST_SCRATCH: &str =
+    "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
+fn ensure_test_scratch() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(std::fs::create_dir_all(TEST_SCRATCH).is_ok());
+    assert!(std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).is_ok());
+}
+
 #[tokio::test]
 async fn pending_catalog_does_not_block_connection_routing_or_shutdown() {
+    ensure_test_scratch();
     // Arrange: the catalog cannot complete until explicitly released.
     let entered = tokio_util::sync::CancellationToken::new();
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -91,6 +100,7 @@ impl AcpStoredSessions for FixtureCatalog {
 }
 #[tokio::test]
 async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_fixture() {
+    ensure_test_scratch();
     use futures_util::{SinkExt, StreamExt};
     let socket = std::path::PathBuf::from(format!("/tmp/acp-dispatch-{}.sock", std::process::id()));
     let listener = tokio::net::UnixListener::bind(&socket)
@@ -141,7 +151,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","thread":{"id":"created-thread","cwd":"/work","turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work"]},"thread":{"id":"created-thread","cwd":"/work","turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();
@@ -188,7 +198,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
         (
             json!("new"),
             "session/new",
-            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
             "result",
         ),
         (

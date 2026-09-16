@@ -12,8 +12,17 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::Role},
 };
 
+const TEST_SCRATCH: &str =
+    "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
+fn ensure_test_scratch() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(std::fs::create_dir_all(TEST_SCRATCH).is_ok());
+    assert!(std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).is_ok());
+}
+
 #[tokio::test]
 async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd() {
+    ensure_test_scratch();
     for (creating, effective_cwd, effective_reviewer) in [
         (true, "/work/project", "user"),
         (true, "/wrong/project", "user"),
@@ -95,7 +104,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 assert_eq!(request["method"], "thread/resume");
                 assert_eq!(request["params"], json!({"threadId":"new-thread"}));
             }
-            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":effective_reviewer,"thread":{"id":"new-thread","cwd":effective_cwd,"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
+            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":effective_reviewer,"activePermissionProfile":{"id":"router-write-restricted","extends":":read-only"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work/project/docs/wip","/work/project/tmp"]},"thread":{"id":"new-thread","cwd":effective_cwd,"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
         });
         let result = if creating {
             AcpSessionBinding::create(
@@ -104,7 +113,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                         connection,
                         schemas,
                         generation: generation.clone(),
-                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"write-restricted","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+                        params: json!({"cwd":"/work/project","mcpServers":[server_config],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"write-restricted","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
                         approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
                     },
                 )
@@ -178,6 +187,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
 
 #[tokio::test]
 async fn fork_session_sends_exact_model_choice_to_native_runtime() {
+    ensure_test_scratch();
     let mut catalog = AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
     let mut definitions = serde_json::Map::new();
     for name in [
@@ -248,6 +258,8 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                         "model": "gpt-6-astra",
                         "approvalPolicy": "on-request",
                         "approvalsReviewer": "auto_review",
+                        "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
+                        "sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work/project"]},
                         "thread": {
                             "id": "forked-thread",
                             "cwd": "/work/project",
@@ -276,6 +288,8 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                         "model": "gpt-6-astra",
                         "effort": "high",
                         "access": "workspace-write",
+                        "scratchScope":"session-00000000-0000-4000-8000-000000000099",
+                        "scratchPath":TEST_SCRATCH,
                         "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
                         "approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
                         "forkThreadId": "source-thread"
