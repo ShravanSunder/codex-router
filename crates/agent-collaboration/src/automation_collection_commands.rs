@@ -234,7 +234,7 @@ pub(crate) fn run_collection_command(
         return code;
     }
     let (record, code) = match result {
-        Ok(result) => (json!({"kind":"result","result":result}), 0),
+        Ok(result) => (crate::endpoint_commands::result_envelope(json!(result)), 0),
         Err(ReadCommandError::Inspection(error)) => (json!({"kind":"error","error":error}), 4),
         Err(ReadCommandError::Wake(error)) => (json!({"kind":"error","error":error}), 4),
         Err(ReadCommandError::Client(error)) => {

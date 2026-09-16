@@ -50,6 +50,11 @@ pub(super) enum PreparedBoardCommand {
     ThreadWatch(ThreadWatchRequest),
     ThreadUnwatch(ThreadUnwatchRequest),
     ThreadList(ThreadListRequest),
+    RepositoryThreadList {
+        repository: BoardRepositoryLocation,
+        reader: Option<Identity>,
+        page: PageRequest,
+    },
     ThreadCreate(Box<PendingThreadCreate>),
     ThreadJoin(Box<PendingThreadJoin>),
     ThreadLeave(PendingThreadLeave),
@@ -105,8 +110,9 @@ pub(super) fn finalize_actor(
 }
 
 fn self_identity(client: &ControlClient) -> Result<Identity, String> {
-    let codex = std::env::var_os("CODEX_THREAD_ID");
-    let claude = std::env::var_os("CLAUDE_CODE_SESSION_ID");
+    let nonempty = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+    let codex = nonempty("CODEX_THREAD_ID");
+    let claude = nonempty("CLAUDE_CODE_SESSION_ID");
     let (session_id, endpoint_id) = match (codex, claude) {
         (Some(_), Some(_)) => return Err("--actor self is ambiguous: set exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
         (None, None) => return Err("--actor self requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
@@ -135,11 +141,80 @@ fn self_identity(client: &ControlClient) -> Result<Identity, String> {
     })
 }
 
+fn finalize_identity(identity: &mut Identity, client: &ControlClient) -> Result<(), String> {
+    if identity
+        .as_human()
+        .is_some_and(|id| id.as_str() == "__agent_collaboration_self__")
+    {
+        *identity = self_identity(client)?;
+    }
+    Ok(())
+}
+
 pub(super) fn finalize_command(
     command: &mut PreparedBoardCommand,
     client: &ControlClient,
 ) -> Result<(), String> {
     match command {
+        PreparedBoardCommand::RepositoryAttach { actor, .. }
+        | PreparedBoardCommand::RepositoryDetach { actor, .. } => finalize_identity(actor, client)?,
+        PreparedBoardCommand::ProjectCreate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ProjectUpdate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::BoardCreate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::BoardUpdate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::BoardArchive(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::TopicCreate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::TopicUpdate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::MessagePost(pending) => {
+            finalize_identity(&mut pending.request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadShow(request) => {
+            if let Some(reader) = &mut request.reader {
+                finalize_identity(reader, client)?;
+            }
+        }
+        PreparedBoardCommand::ThreadResolve(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadUnresolve(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadWatch(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadUnwatch(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadList(request) => {
+            finalize_identity(&mut request.reader, client)?
+        }
+        PreparedBoardCommand::RepositoryThreadList {
+            reader: Some(reader),
+            ..
+        } => finalize_identity(reader, client)?,
+        PreparedBoardCommand::InboxFetch(request) => {
+            finalize_identity(&mut request.reader, client)?
+        }
+        PreparedBoardCommand::InboxAcknowledge(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::InboxProjects(request) => {
+            finalize_identity(&mut request.reader, client)?
+        }
         PreparedBoardCommand::ThreadCreate(pending) => {
             let actor = finalize_actor(&pending.actor, client)?;
             if matches!(actor, Identity::Session { .. }) && pending.request.role.is_none() {
@@ -516,12 +591,20 @@ fn prepare_thread(
             },
         ),
         ThreadCommand::List(arguments) => Ok((
-            PreparedBoardCommand::ThreadList(ThreadListRequest {
-                project_id: parse_uuid_v7(arguments.project_id, "--project-id")?,
-                reader: parse_identity(&arguments.reader, "--reader")?,
-                watched_only: arguments.watched_only,
-                page: prepare_page_request(arguments.page)?,
-            }),
+            match (arguments.project_id, arguments.repository_path) {
+                (Some(project_id), None) => PreparedBoardCommand::ThreadList(ThreadListRequest {
+                    project_id: parse_uuid_v7(project_id, "--project-id")?,
+                    reader: parse_identity(arguments.reader.as_deref().ok_or("--reader is required with --project-id")?, "--reader")?,
+                    watched_only: arguments.watched_only,
+                    page: prepare_page_request(arguments.page)?,
+                }),
+                (None, Some(path)) if !arguments.watched_only => PreparedBoardCommand::RepositoryThreadList {
+                    repository: BoardRepositoryLocation::discover(&path).map_err(|error| error.to_string())?,
+                    reader: arguments.reader.as_deref().map(|value| parse_identity(value, "--reader")).transpose()?,
+                    page: prepare_page_request(arguments.page)?,
+                },
+                _ => return Err("Choose exactly one of --project-id or --repository-path; --watched-only requires --project-id".into()),
+            },
             command_context(arguments.common),
         )),
         ThreadCommand::Listen(arguments) => prepare_thread_listen(arguments),

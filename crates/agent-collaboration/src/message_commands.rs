@@ -1,9 +1,7 @@
 //! Descriptive message submission through the public Rust client.
-use crate::message_input_arguments::{DeliveryChoice, SendArguments, prepare};
+use crate::message_input_arguments::{SendArguments, prepare};
 use clap::{Parser, Subcommand};
-use collaboration_client::protocol::{
-    ChannelDescription, MessageDelivery, NativeSendParams, NativeSendReceipt,
-};
+use collaboration_client::protocol::{ChannelDescription, NativeSendParams, NativeSendReceipt};
 use collaboration_client::{ClientError, ControlClient};
 use serde_json::{Value, json};
 use std::{
@@ -34,10 +32,10 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     let MessageCommand::Send(args) = parsed.command;
     let machine = args.json;
     let prepared = prepare(&args);
-    let (directory, target, content) = match prepared {
+    let (directory, prepared) = match prepared {
         Ok(value) => value,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidUsage", &message, 2, machine);
+            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
         }
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -59,6 +57,11 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
         let mut client =
             ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
                 .await?;
+        let saved = prepared
+            .resolve(&client.identity().service_id)
+            .map_err(|_| ClientError::Protocol("invalid session target"))?;
+        let target = saved.target;
+        let content = saved.content;
         let inventory = client.list_endpoints().await?;
         let generation = inventory
             .endpoints
@@ -97,11 +100,7 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
             target,
             generation,
             message: content,
-            delivery: match args.delivery {
-                DeliveryChoice::Auto => MessageDelivery::Auto,
-                DeliveryChoice::Queue => MessageDelivery::Queue,
-                DeliveryChoice::Steer => MessageDelivery::Steer,
-            },
+            delivery: saved.delivery,
             client_user_message_id: None,
         };
         submitted = true;
@@ -128,7 +127,7 @@ fn report(result: Result<NativeSendReceipt, ClientError>, machine: bool, submitt
         return code;
     }
     let (record, code) = match result {
-        Ok(receipt) => (json!({"kind":"result","result":receipt}), 0),
+        Ok(receipt) => (crate::endpoint_commands::result_envelope(json!(receipt)), 0),
         Err(ClientError::Rejected { code, data }) => {
             let kind = data
                 .as_ref()

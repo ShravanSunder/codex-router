@@ -468,9 +468,36 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
                 "pattern":"^[^\\u0000]+$", "x-maxUtf8Bytes":4096
             }),
         );
+        properties.insert(
+            "reason".to_owned(),
+            json!({"enum":["childThread","busy","notResumable","permissionDenied","unsupportedCapability","unknown"]}),
+        );
+        properties.insert(
+            "nextAction".to_owned(),
+            json!({"enum":["inspectTarget","useDeliverySteer","requestApproval","correctRequest","retryLater"]}),
+        );
+        properties.insert("nativeCode".to_owned(), json!({"type":"integer"}));
     }
-    let mut data = vec![json!({"type":"object","required":required,
-        "additionalProperties":false,"properties":properties})];
+    let mut method_data = json!({"type":"object","required":required,
+        "additionalProperties":false,"properties":properties});
+    if method == "codex/messageSend"
+        && let Some(fields) = method_data.as_object_mut()
+    {
+        fields.insert(
+            "allOf".to_owned(),
+            json!([
+                {
+                    "if":{"properties":{"kind":{"const":"nativeRejected"}},"required":["kind"]},
+                    "then":{"required":["reason","nextAction"]}
+                },
+                {
+                    "if":{"properties":{"reason":{"const":"unknown"}},"required":["reason"]},
+                    "then":{"required":["nativeCode"]}
+                }
+            ]),
+        );
+    }
+    let mut data = vec![method_data];
     if method.starts_with("wake/") || method.starts_with("delivery/") {
         data = vec![reference("wake-failure")];
     }

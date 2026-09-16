@@ -602,10 +602,13 @@ pub(super) struct ThreadParticipantListArguments {
 #[derive(Args)]
 pub(super) struct ThreadListArguments {
     #[arg(long)]
-    pub project_id: String,
-    /// Typed reader Identity JSON.
+    pub project_id: Option<String>,
+    /// Explicit repository path; lists matching threads across projects.
     #[arg(long)]
-    pub reader: String,
+    pub repository_path: Option<PathBuf>,
+    /// Optional typed reader Identity JSON or `self`; adds watch status.
+    #[arg(long)]
+    pub reader: Option<String>,
     #[arg(long)]
     pub watched_only: bool,
     #[command(flatten)]

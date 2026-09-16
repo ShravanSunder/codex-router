@@ -79,7 +79,7 @@ where
         let _closed = client.close().await;
         match result {
             Ok(result) => {
-                let value = json!({"kind":"result","result":result});
+                let value = crate::endpoint_commands::result_envelope(json!(result));
                 if writeln!(io::stdout().lock(), "{value}").is_ok() {
                     0
                 } else {

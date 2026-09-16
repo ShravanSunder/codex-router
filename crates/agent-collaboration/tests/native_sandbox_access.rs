@@ -84,7 +84,7 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
     }
     let response: serde_json::Value = serde_json::from_slice(&allowed.stdout)?;
     if response
-        .pointer("/result/endpoints")
+        .pointer("/result/page/endpoints")
         .and_then(serde_json::Value::as_array)
         .is_none()
     {

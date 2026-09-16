@@ -97,7 +97,7 @@ pub fn run_address_command(arguments: Vec<OsString>) -> i32 {
                 writeln!(
                     output,
                     "{}",
-                    serde_json::json!({"kind":"result","result":snapshot})
+                    crate::endpoint_commands::result_envelope(serde_json::json!(snapshot))
                 )
             } else {
                 (|| {

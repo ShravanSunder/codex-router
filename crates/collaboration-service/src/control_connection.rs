@@ -570,6 +570,7 @@ fn initialize(
         version: collaboration_protocol::ProtocolVersion { major: 1, minor: 0 },
         service_id: identity.service_id.clone(), service_epoch: identity.service_epoch.clone(),
         control_schema_digest: identity.schema_digest.clone(),
+        service_version: env!("CARGO_PKG_VERSION").to_owned(),
     }})
 }
 

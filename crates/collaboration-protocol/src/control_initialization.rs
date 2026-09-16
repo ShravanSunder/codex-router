@@ -31,6 +31,8 @@ pub struct ControlInitializationResult {
     pub service_id: UuidIdentity,
     pub service_epoch: UuidIdentity,
     pub control_schema_digest: SchemaDigest,
+    #[serde(default)]
+    pub service_version: String,
 }
 fn supported_version_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"object","properties":{"major":{"const":1},"minor":{"const":0}},"required":["major","minor"],"additionalProperties":false})

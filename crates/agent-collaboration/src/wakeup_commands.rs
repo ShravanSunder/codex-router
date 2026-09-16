@@ -1,10 +1,10 @@
 //! Agent-friendly wake creation and inspection through the public Rust SDK.
-use crate::message_input_arguments::{SendArguments, saved_message};
+use crate::message_input_arguments::{PreparedMessage, SendArguments, prepare as prepare_message};
 use crate::wakeup_timing_arguments::WakeTimingArguments;
 use clap::{Args, Parser, Subcommand};
 use collaboration_client::protocol::{
-    LocalMutationEvidence, LocalMutationState, OperationId, WakeMutationRequest, WakeSendRequest,
-    WakeShowRequest,
+    ExpiryRequest, LocalMutationEvidence, LocalMutationState, OperationId, TimingRequest,
+    WakeMutationRequest, WakeSendRequest, WakeShowRequest,
 };
 use collaboration_client::{ControlClient, WakeClientError};
 use serde_json::json;
@@ -82,10 +82,16 @@ enum LifecycleAction {
     Cancel,
 }
 enum PreparedWake {
-    Send(Box<WakeSendRequest>),
+    Send(Box<PendingWakeSend>),
     Show(WakeShowRequest),
     List(collaboration_client::protocol::AutomationPageRequest),
     Mutate(LifecycleAction, WakeMutationRequest),
+}
+struct PendingWakeSend {
+    operation_id: OperationId,
+    message: PreparedMessage,
+    timing: TimingRequest,
+    expiry: ExpiryRequest,
 }
 struct WakeInvocation {
     directory: PathBuf,
@@ -143,7 +149,24 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
         dispatched = true;
         let result = match invocation.request {
             PreparedWake::Send(request) => {
-                client.send_wakeup(*request).await.and_then(encode_result)
+                let request = *request;
+                let message = request
+                    .message
+                    .resolve(&client.identity().service_id)
+                    .map_err(|_| {
+                        WakeClientError::Connection(collaboration_client::ClientError::Protocol(
+                            "invalid session target",
+                        ))
+                    })?;
+                client
+                    .send_wakeup(WakeSendRequest {
+                        operation_id: request.operation_id,
+                        message,
+                        timing: request.timing,
+                        expiry: request.expiry,
+                    })
+                    .await
+                    .and_then(encode_result)
             }
             PreparedWake::Show(request) => {
                 client.read_wakeup(request).await.and_then(encode_result)
@@ -175,7 +198,9 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     }
     let (record, code) = match result {
         Ok(snapshot) => (
-            json!({"kind":"result","operationId":invocation.operation_id,"result":snapshot}),
+            crate::endpoint_commands::result_envelope(
+                json!({"operationId":invocation.operation_id,"result":snapshot}),
+            ),
             0,
         ),
         Err(WakeClientError::Rejected(error)) => {
@@ -200,7 +225,7 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     };
     let wait_id = if invocation.wait_until_first_fire && code == 0 {
         record
-            .pointer("/result/definition/wakeupId")
+            .pointer("/result/record/definition/wakeupId")
             .cloned()
             .and_then(|id| {
                 serde_json::from_value::<collaboration_client::protocol::WakeupId>(id).ok()
@@ -241,7 +266,7 @@ fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
             operation_id,
             wait_until_first_fire,
         } => {
-            let (directory, saved) = saved_message(&message)?;
+            let (directory, saved) = prepare_message(&message)?;
             let (timing, expiry) = timing.prepare()?;
             let id = operation_id.map_or_else(
                 || Ok(OperationId::generate()),
@@ -255,7 +280,7 @@ fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
                 wait_until_first_fire,
                 json: message.json,
                 operation_id: Some(id.clone()),
-                request: PreparedWake::Send(Box::new(WakeSendRequest {
+                request: PreparedWake::Send(Box::new(PendingWakeSend {
                     operation_id: id,
                     message: saved,
                     timing,

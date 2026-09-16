@@ -98,7 +98,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
     }
     let directory = match crate::endpoint_commands::resolve_directory(service_directory) {
         Ok(v) => v,
-        Err(e) => return crate::endpoint_commands::report_failure("invalidUsage", &e, 2, machine),
+        Err(e) => return crate::endpoint_commands::report_failure("invalidField", &e, 2, machine),
     };
     let endpoint = match endpoint.try_into() {
         Ok(v) => v,
@@ -178,7 +178,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
     });
     match result {
         Ok(result) => {
-            let record = json!({"kind":"result","result":result});
+            let record = crate::endpoint_commands::result_envelope(json!(result));
             let text = if machine {
                 record.to_string()
             } else {

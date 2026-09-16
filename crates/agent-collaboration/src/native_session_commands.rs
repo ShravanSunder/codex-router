@@ -1,8 +1,6 @@
 //! Human and agent entrypoints for public native inspection and exact interruption.
 use clap::{Args, Parser, Subcommand};
-use collaboration_client::protocol::{
-    ChannelDescription, EndpointAvailability, EndpointId, EndpointRef, SessionId, SessionRef,
-};
+use collaboration_client::protocol::{ChannelDescription, EndpointAvailability};
 use collaboration_client::{ClientError, ControlClient};
 use serde_json::{Value, json};
 use std::{
@@ -52,10 +50,8 @@ enum TurnOperation {
 }
 #[derive(Args)]
 struct TargetArguments {
-    #[arg(long)]
-    endpoint: String,
-    #[arg(long)]
-    session: String,
+    #[command(flatten)]
+    target: crate::session_target_arguments::SessionTargetArguments,
     #[arg(long)]
     service_directory: Option<PathBuf>,
     #[arg(long)]
@@ -90,10 +86,7 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
     let machine_output = target.json;
     let resolved = (|| {
         let directory = crate::endpoint_commands::resolve_directory(target.service_directory)?;
-        let endpoint =
-            EndpointId::try_from(target.endpoint).map_err(|_| "Invalid endpoint identifier")?;
-        let session =
-            SessionId::try_from(target.session).map_err(|_| "Invalid session identifier")?;
+        let target = target.target.parse()?;
         if let RequestedOperation::Interrupt(id) = &operation
             && collaboration_client::protocol::NonEmptyText::try_from(id.clone()).is_err()
         {
@@ -106,13 +99,13 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
         {
             return Err("--name requires 1 to 120 Unicode scalar values without surrounding whitespace or control characters".to_owned());
         }
-        Ok::<_, String>((directory, endpoint, session))
+        Ok::<_, String>((directory, target))
     })();
-    let (directory, endpoint, session_id) = match resolved {
+    let (directory, parsed_target) = match resolved {
         Ok(resolved) => resolved,
         Err(message) => {
             return crate::endpoint_commands::report_failure(
-                "invalidUsage",
+                "invalidField",
                 &message,
                 2,
                 machine_output,
@@ -138,13 +131,9 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
         let mut client =
             ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
                 .await?;
-        let target = SessionRef {
-            endpoint: EndpointRef {
-                service_id: client.identity().service_id.clone(),
-                endpoint_id: endpoint,
-            },
-            session_id,
-        };
+        let target = parsed_target
+            .resolve(&client.identity().service_id)
+            .map_err(|_| ClientError::Protocol("invalid session target"))?;
         let result = match operation {
             RequestedOperation::Inspect => json!(client.inspect_session(&target).await?),
             RequestedOperation::Rename(name) => {
@@ -189,7 +178,7 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
     match result {
         Ok(result) => {
             let result = if machine_output {
-                json!({"kind":"result","result":result}).to_string()
+                crate::endpoint_commands::result_envelope(json!(result)).to_string()
             } else {
                 serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| "Result encoding failed".into())

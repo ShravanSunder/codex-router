@@ -5,11 +5,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[derive(JsonSchema, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 #[schemars(rename = "FiniteCommandRecord")]
 pub enum FiniteCommandRecord<TResult, TError> {
-    Result { result: TResult },
-    Error { error: TError },
+    Result {
+        cli_version: String,
+        service_version: String,
+        result: TResult,
+    },
+    Error {
+        error: TError,
+    },
 }
 
 #[derive(JsonSchema, Serialize, Deserialize)]

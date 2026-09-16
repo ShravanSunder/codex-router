@@ -4,7 +4,7 @@ fn cli_catalog_covers_closed_envelopes_and_pinned_acp_variants() {
     let schemas = collaboration_protocol::protocol_type_schemas().unwrap();
     let validator = |name| jsonschema::validator_for(schemas.get(name).unwrap()).unwrap();
     let finite = validator("FiniteCommandRecord");
-    assert!(finite.is_valid(&serde_json::json!({"kind":"result","result":{"sessions":[]}})));
+    assert!(finite.is_valid(&serde_json::json!({"kind":"result","cliVersion":"0.1.27","serviceVersion":"0.1.27","result":{"page":{"records":[],"nextCursor":null}}})));
     assert!(!finite.is_valid(&serde_json::json!({"kind":"result","result":{},"unexpected":true})));
     let id = "00000000-0000-4000-8000-000000000001";
     let target = serde_json::json!({"endpoint":{"serviceId":id,"endpointId":"codex-local"},"sessionId":"thread"});

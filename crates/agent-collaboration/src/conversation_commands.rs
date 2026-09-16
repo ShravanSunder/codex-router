@@ -28,12 +28,14 @@ enum ConversationCommand {
 #[derive(Args)]
 struct PromptArguments {
     #[arg(long)]
-    endpoint: String,
-    #[arg(long = "new", conflicts_with_all = ["session", "fork"])]
+    endpoint: Option<String>,
+    #[arg(long, conflicts_with_all = ["session"])]
+    to: Option<String>,
+    #[arg(long = "new", conflicts_with_all = ["session", "fork", "to"])]
     new_session: bool,
-    #[arg(long, conflicts_with_all = ["new_session", "fork"])]
+    #[arg(long, conflicts_with_all = ["new_session", "fork", "to"])]
     session: Option<String>,
-    #[arg(long, conflicts_with_all = ["new_session", "session"])]
+    #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["new_session", "session"])]
     fork: Option<String>,
     #[arg(long)]
     model: Option<String>,
@@ -80,10 +82,10 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
     };
     let ConversationCommand::Prompt(args) = parsed.command;
     let prepared = prepare(&args);
-    let (directory, endpoint, text) = match prepared {
+    let (directory, text) = match prepared {
         Ok(v) => v,
         Err(e) => {
-            return crate::endpoint_commands::report_failure("invalidUsage", &e, 2, args.json);
+            return crate::endpoint_commands::report_failure("invalidField", &e, 2, args.json);
         }
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -99,13 +101,20 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
         let mut target=None;
         let mut stage="connect";
         let result=async{
+            let endpoint = if args.new_session {
+                args.endpoint.clone().ok_or(ClientError::Protocol("--endpoint is required with --new"))?.try_into().map_err(|_| ClientError::Protocol("invalid endpoint ID"))?
+            } else {
+                conversation_target(&args).map_err(|_| ClientError::Protocol("invalid session target"))?.endpoint_id()
+            };
             let mut client=AcpConversation::connect(&directory,endpoint).await?;
+            let selected = if args.new_session { None } else { Some(conversation_target(&args).map_err(|_| ClientError::Protocol("invalid session target"))?.resolve(&client.endpoint().service_id).map_err(|_| ClientError::Protocol("session target belongs to another service"))?) };
+            let selected_id = selected.as_ref().map(|target| String::from(target.session_id.clone()));
             stage=if args.new_session{"new"}else if args.fork.is_some(){"fork"}else{"load"};
             let mut emit=|event|emit_record(event,args.json);
             target=Some(client.open_session(
                 collaboration_client::ConversationSessionRequest {
-                    session: args.session.as_deref(),
-                    fork: args.fork.as_deref(),
+                    session: selected_id.as_deref().filter(|_| args.fork.is_none()),
+                    fork: selected_id.as_deref().filter(|_| args.fork.is_some()),
                     model: args.model.as_deref(),
                     effort: args.effort.as_deref().ok_or(ClientError::Protocol("--effort is required"))?,
                     access: args.access.map(ConversationAccess::as_str),
@@ -145,24 +154,23 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
         }
     })
 }
-fn prepare(
-    args: &PromptArguments,
-) -> Result<(PathBuf, collaboration_client::protocol::EndpointId, String), String> {
+fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     let dispatch_count = usize::from(args.new_session)
         + usize::from(args.session.is_some())
-        + usize::from(args.fork.is_some());
+        + usize::from(args.fork.as_ref().is_some_and(|value| !value.is_empty()))
+        + usize::from(args.to.is_some());
     if dispatch_count != 1 {
         return Err("Choose exactly one of --new, --session, or --fork".into());
     }
     let effort = args.effort.as_deref().ok_or("--effort is required")?;
     validate_choice_value(effort, "--effort")?;
-    if args.session.is_some() && args.model.is_some() {
+    if args.fork.is_none() && !args.new_session && args.model.is_some() {
         return Err(
             "--model is invalid with --session: model is fixed for a thread; fork to change it"
                 .into(),
         );
     }
-    if args.session.is_some() && args.access.is_some() {
+    if args.fork.is_none() && !args.new_session && args.access.is_some() {
         return Err("--access is invalid with --session: access is fixed for a thread".into());
     }
     if args.new_session || args.fork.is_some() {
@@ -176,16 +184,15 @@ fn prepare(
         return Err("ACP cwd must be absolute".into());
     }
     let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
-    let endpoint = args
-        .endpoint
-        .clone()
-        .try_into()
-        .map_err(|_| "Invalid endpoint ID")?;
-    if let Some(session) = args.session.as_ref().or(args.fork.as_ref()) {
-        let _: collaboration_client::protocol::SessionId = session
+    if args.new_session {
+        let _: collaboration_client::protocol::EndpointId = args
+            .endpoint
             .clone()
+            .ok_or("--endpoint is required with --new")?
             .try_into()
-            .map_err(|_| "Invalid session ID")?;
+            .map_err(|_| "Invalid endpoint ID")?;
+    } else {
+        let _ = conversation_target(args)?;
     }
     let text = if let Some(text) = &args.text {
         text.clone()
@@ -208,7 +215,24 @@ fn prepare(
         .clone()
         .try_into()
         .map_err(|_| "Invalid or oversized content")?;
-    Ok((directory, endpoint, text))
+    Ok((directory, text))
+}
+
+fn conversation_target(
+    args: &PromptArguments,
+) -> Result<crate::session_target_arguments::ParsedSessionTarget, String> {
+    let session = args.session.clone().or_else(|| {
+        args.fork
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .cloned()
+    });
+    crate::session_target_arguments::SessionTargetArguments {
+        to: args.to.clone(),
+        endpoint: args.endpoint.clone(),
+        session,
+    }
+    .parse()
 }
 
 fn validate_choice_value(value: &str, flag: &str) -> Result<(), String> {

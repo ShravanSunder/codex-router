@@ -7,6 +7,23 @@ mod control_connection;
 mod endpoint_notification_state;
 pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
 pub use control_connection::{ClientError, ControlClient};
+static OBSERVED_SERVICE_VERSION: std::sync::OnceLock<std::sync::Mutex<String>> =
+    std::sync::OnceLock::new();
+pub(crate) fn record_service_version(version: &str) {
+    if let Ok(mut stored) = OBSERVED_SERVICE_VERSION
+        .get_or_init(|| std::sync::Mutex::new(String::new()))
+        .lock()
+    {
+        *stored = version.to_owned();
+    }
+}
+#[must_use]
+pub fn observed_service_version() -> String {
+    OBSERVED_SERVICE_VERSION
+        .get()
+        .and_then(|value| value.lock().ok().map(|version| version.clone()))
+        .unwrap_or_default()
+}
 mod service_discovery;
 
 pub use collaboration_protocol::JournalStatus;

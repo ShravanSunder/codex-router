@@ -88,7 +88,7 @@ async fn executable_discovers_an_isolated_published_service() {
     let result: serde_json::Value =
         serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("JSON: {e}"));
     assert_eq!(result["kind"], "result");
-    assert_eq!(result["result"]["endpoints"], serde_json::json!([]));
+    assert_eq!(result["result"]["page"]["records"], serde_json::json!([]));
     assert!(output.stderr.is_empty());
     let endpoint = serde_json::from_value(serde_json::json!({
         "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
@@ -129,17 +129,20 @@ async fn executable_discovers_an_isolated_published_service() {
     let snapshot: serde_json::Value =
         serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("snapshot: {error}"));
     assert_eq!(
-        snapshot["result"]["entries"][0]["address"]["nativeThreadId"],
+        snapshot["result"]["page"]["records"][0]["address"]["nativeThreadId"],
         "remembered-thread"
     );
     assert_eq!(
-        snapshot["result"]["entries"][0]["lastStatus"],
+        snapshot["result"]["page"]["records"][0]["lastStatus"],
         serde_json::Value::Null
     );
-    assert_eq!(snapshot["result"]["coverage"]["state"], "initializing");
-    assert_eq!(snapshot["result"]["watermark"]["sequence"], 1);
+    assert_eq!(
+        snapshot["result"]["page"]["coverage"]["state"],
+        "initializing"
+    );
+    assert_eq!(snapshot["result"]["page"]["watermark"]["sequence"], 1);
     assert_eq!(snapshot["result"]["nextCursor"], serde_json::Value::Null);
-    let journal_id = snapshot["result"]["watermark"]["journalId"]
+    let journal_id = snapshot["result"]["page"]["watermark"]["journalId"]
         .as_str()
         .unwrap_or_else(|| panic!("journal ID"));
     let replay = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -167,10 +170,10 @@ async fn executable_discovers_an_isolated_published_service() {
     let replay: serde_json::Value = serde_json::from_slice(&replay.stdout)
         .unwrap_or_else(|error| panic!("journal JSON: {error}"));
     assert_eq!(
-        replay["result"]["records"][0]["change"]["kind"],
+        replay["result"]["page"]["records"][0]["change"]["kind"],
         "threadDiscovered"
     );
-    assert_eq!(replay["result"]["next"]["sequence"], 1);
+    assert_eq!(replay["result"]["page"]["next"]["sequence"], 1);
     let changed = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([
             "journal",

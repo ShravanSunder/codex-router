@@ -52,6 +52,7 @@ mod event_commands;
 pub use event_commands::run_event_command;
 
 mod session_inventory_commands;
+mod session_target_arguments;
 pub use session_inventory_commands::run_session_inventory_command;
 
 mod conversation_commands;

@@ -259,7 +259,9 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
     }
     let (record, code) = match result {
         Ok(result) => (
-            json!({"kind":"result","operationId":operation_id,"result":result}),
+            crate::endpoint_commands::result_envelope(
+                json!({"operationId":operation_id,"result":result}),
+            ),
             0,
         ),
         Err(ScheduleClientError::Rejected(error)) => {

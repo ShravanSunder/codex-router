@@ -241,6 +241,11 @@ async fn dispatch(
         PreparedBoardCommand::ThreadList(request) => {
             serialize_result(client.board_thread_list(request).await?)
         }
+        PreparedBoardCommand::RepositoryThreadList {
+            repository,
+            reader,
+            page,
+        } => repository_threads(client, repository, reader, page).await,
         PreparedBoardCommand::ThreadCreate(pending) => {
             serialize_result(client.board_thread_create(pending.request).await?)
         }
@@ -273,6 +278,104 @@ async fn dispatch(
             serialize_result(client.board_inbox_projects(request).await?)
         }
     }
+}
+
+async fn repository_threads(
+    client: &mut ControlClient,
+    repository: collaboration_client::BoardRepositoryLocation,
+    reader: Option<Identity>,
+    page: PageRequest,
+) -> Result<Value, BoardClientError> {
+    if page.cursor.is_some() {
+        return Err(BoardClientError::Connection(ClientError::Protocol(
+            "repository thread cursors are not yet valid",
+        )));
+    }
+    let repository = repository.for_client(client)?;
+    let projects = client
+        .board_project_list(ProjectListRequest {
+            repository: Some(repository),
+            page: PageRequest {
+                limit: 100_u32
+                    .try_into()
+                    .map_err(|_| ClientError::Protocol("page limit"))?,
+                cursor: None,
+            },
+        })
+        .await?;
+    let fallback_reader: Identity =
+        serde_json::from_value(json!({"kind":"human","humanId":"repository-thread-reader"}))
+            .map_err(|_| ClientError::Protocol("reader identity"))?;
+    let mut records = Vec::new();
+    for project in projects.page.records {
+        let threads = client
+            .board_thread_list(ThreadListRequest {
+                project_id: project.project_id.clone(),
+                reader: reader.clone().unwrap_or_else(|| fallback_reader.clone()),
+                watched_only: false,
+                page: PageRequest {
+                    limit: 100_u32
+                        .try_into()
+                        .map_err(|_| ClientError::Protocol("page limit"))?,
+                    cursor: None,
+                },
+            })
+            .await?;
+        for thread in threads.page.records {
+            let root = client
+                .board_message_show(MessageShowRequest {
+                    message_id: thread.root_message_id.clone(),
+                })
+                .await?
+                .message;
+            let board = client
+                .board_show(BoardShowRequest {
+                    board_id: root.board_id.clone(),
+                })
+                .await?
+                .board;
+            let latest = client
+                .board_message_list(MessageListRequest {
+                    scope: MessageListScope::Thread {
+                        root_message_id: thread.root_message_id.clone(),
+                    },
+                    selection: MessageSelection::Latest,
+                    page: PageRequest {
+                        limit: 1_u32
+                            .try_into()
+                            .map_err(|_| ClientError::Protocol("page limit"))?,
+                        cursor: None,
+                    },
+                })
+                .await?;
+            let last_activity = latest
+                .page
+                .records
+                .first()
+                .map(|message| message.activity_sequence)
+                .unwrap_or(root.activity_sequence);
+            let watch_status = if reader.is_some() {
+                client
+                    .board_thread_show(ThreadShowRequest {
+                        root_message_id: thread.root_message_id.clone(),
+                        reader: reader.clone(),
+                    })
+                    .await?
+                    .watch_status
+            } else {
+                None
+            };
+            records.push(json!({"projectId":project.project_id,"topicId":root.topic_id,"rootMessageId":thread.root_message_id,"title":root.text.as_str(),"orchestrator":thread.orchestrator,"lastActivity":last_activity,"watchStatus":watch_status,"boardId":board.board_id}));
+        }
+    }
+    records.sort_by(|left, right| {
+        right
+            .get("lastActivity")
+            .and_then(Value::as_u64)
+            .cmp(&left.get("lastActivity").and_then(Value::as_u64))
+    });
+    records.truncate(page.limit.get() as usize);
+    Ok(json!({"page":{"records":records,"nextCursor":null}}))
 }
 
 fn serialize_result<TValue: Serialize>(value: TValue) -> Result<Value, BoardClientError> {
@@ -466,7 +569,7 @@ fn wire_name<TValue: Serialize>(value: &TValue) -> String {
 
 fn write_result(result: Value, machine: bool) -> i32 {
     if machine {
-        write_json(&json!({"kind":"result","result":result}), 0)
+        write_json(&crate::endpoint_commands::result_envelope(result), 0)
     } else {
         let rendered =
             serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Output unavailable".into());
@@ -479,7 +582,7 @@ fn write_result(result: Value, machine: bool) -> i32 {
 }
 
 fn write_machine_result_and_flush(result: Value) -> i32 {
-    let value = json!({"kind":"result","result":result});
+    let value = crate::endpoint_commands::result_envelope(json!(result));
     let mut stdout = io::stdout().lock();
     if writeln!(stdout, "{value}").is_ok() && stdout.flush().is_ok() {
         0

@@ -90,7 +90,10 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
             "requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID",
         ),
         ("both", "is ambiguous"),
-        ("invalid", "contain a non-empty session ID"),
+        (
+            "invalid",
+            "requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID",
+        ),
     ] {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
         command
@@ -263,7 +266,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
             .next()
             .ok_or("Join-plus-Listen omitted the committed Join result")?,
     )?;
-    if join_result.pointer("/result/participant").is_none() {
+    if join_result.pointer("/result/record/participant").is_none() {
         return Err("Join-plus-Listen did not write the Join result before waiting".into());
     }
     let batch_line = output_lines

@@ -9,13 +9,20 @@ use std::borrow::Cow;
 pub struct MessageText(String);
 
 #[derive(Debug, thiserror::Error)]
-#[error("message text must be nonempty, NUL-free and within the Control frame limit")]
+#[error(
+    "message text must be nonempty, free of C0 controls other than newline and tab, and within the Control frame limit"
+)]
 pub struct MessageTextError;
 
 impl TryFrom<String> for MessageText {
     type Error = MessageTextError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.is_empty() || value.contains('\0') || value.len() > MAX_CONTROL_FRAME_BYTES {
+        if value.is_empty()
+            || value
+                .chars()
+                .any(|character| character <= '\u{001f}' && !matches!(character, '\n' | '\t'))
+            || value.len() > MAX_CONTROL_FRAME_BYTES
+        {
             Err(MessageTextError)
         } else {
             Ok(Self(value))
@@ -39,7 +46,7 @@ impl JsonSchema for MessageText {
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({"type":"string","minLength":1,"maxLength":1048576,
-            "pattern":"^[^\\u0000]+$","x-maxUtf8Bytes":1048576})
+            "pattern":"^[^\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F]+$","x-maxUtf8Bytes":1048576})
     }
 }
 
@@ -76,6 +83,20 @@ pub enum MessageInputKind {
 pub enum MessageRepresentation {
     DeclaredAgentText,
     HumanUserText,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MessageText;
+
+    #[test]
+    fn message_text_allows_layout_whitespace_and_rejects_other_c0_controls() {
+        assert!(MessageText::try_from("line one\n\tline two".to_owned()).is_ok());
+        for control in ['\0', '\u{0008}', '\u{000b}', '\u{001f}'] {
+            assert!(MessageText::try_from(format!("before{control}after")).is_err());
+        }
+        assert!(MessageText::try_from("before\u{007f}after".to_owned()).is_ok());
+    }
 }
 
 #[derive(JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -41,6 +41,7 @@ fn message_error_schema_requires_partial_effects() {
     let validator = jsonschema::validator_for(&schema).unwrap();
     let mut response = json!({"jsonrpc":"2.0","id":"send","error":{"code":-32050,"message":"Rejected","data":{
         "kind":"nativeRejected","stage":"start","message":"Rejected",
+        "reason":"childThread","nextAction":"inspectTarget",
         "effects":{"resume":"accepted","submission":"rejected"},"clientUserMessageId":"correlation"
     }}});
     // Act / Assert: preserve both effects; a message-only error cannot hide resume.
@@ -50,4 +51,13 @@ fn message_error_schema_requires_partial_effects() {
         .unwrap()
         .remove("effects");
     assert!(!validator.is_valid(&response));
+
+    let mut unknown = json!({"jsonrpc":"2.0","id":"send","error":{"code":-32050,"message":"Rejected","data":{
+        "kind":"nativeRejected","stage":"start","message":"Rejected",
+        "reason":"unknown","nextAction":"retryLater",
+        "effects":{"resume":"accepted","submission":"rejected"}
+    }}});
+    assert!(!validator.is_valid(&unknown));
+    unknown["error"]["data"]["nativeCode"] = json!(-32099);
+    assert!(validator.is_valid(&unknown));
 }

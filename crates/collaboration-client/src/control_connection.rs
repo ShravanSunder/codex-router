@@ -106,6 +106,7 @@ impl ControlClient {
         if identity.version.major != 1 || identity.version.minor != 0 {
             return Err(ClientError::Protocol("unsupported negotiated version"));
         }
+        crate::record_service_version(&identity.service_version);
         Ok(Self {
             connection,
             notification_state: EndpointNotificationState::new(&identity),

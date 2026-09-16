@@ -49,7 +49,7 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
     }
     let created: Value = serde_json::from_slice(&created.stdout)?;
     let id = created
-        .pointer("/result/scheduleId")
+        .pointer("/result/record/scheduleId")
         .and_then(Value::as_str)
         .ok_or("schedule identity missing")?;
     let read = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -70,8 +70,8 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
         return Err("schedule CLI inspection failed".into());
     }
     let read: Value = serde_json::from_slice(&read.stdout)?;
-    if read.pointer("/result/definition/enabled") != Some(&json!(false))
-        || read.pointer("/result/activeRunId") != Some(&Value::Null)
+    if read.pointer("/result/record/definition/enabled") != Some(&json!(false))
+        || read.pointer("/result/record/activeRunId") != Some(&Value::Null)
     {
         return Err("disabled schedule inspection invented active work".into());
     }
@@ -108,10 +108,10 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
         let imported: Value = serde_json::from_slice(&imported.stdout)?;
         if overwrite
             && (imported
-                .pointer("/result/scheduleId")
+                .pointer("/result/record/scheduleId")
                 .and_then(Value::as_str)
                 != Some(id)
-                || imported.pointer("/result/definition/enabled") != Some(&json!(false)))
+                || imported.pointer("/result/record/definition/enabled") != Some(&json!(false)))
         {
             return Err("CLI import changed identity or enabled the schedule".into());
         }
@@ -140,7 +140,7 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
         }
         let page: Value = serde_json::from_slice(&output.stdout)?;
         if page
-            .pointer("/result/records")
+            .pointer("/result/page/records")
             .and_then(Value::as_array)
             .map(Vec::len)
             != Some(count)
@@ -158,11 +158,11 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
     }
     let events: Value = serde_json::from_slice(&events.stdout)?;
     if events
-        .pointer("/result/records")
+        .pointer("/result/page/records")
         .and_then(Value::as_array)
         .is_none_or(Vec::is_empty)
         || events
-            .pointer("/result/earliestRetainedCursor")
+            .pointer("/result/page/earliestRetainedCursor")
             .and_then(Value::as_str)
             .is_none()
     {

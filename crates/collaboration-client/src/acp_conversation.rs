@@ -44,6 +44,10 @@ pub struct AcpConversation {
     failed: bool,
 }
 impl AcpConversation {
+    #[must_use]
+    pub fn endpoint(&self) -> &EndpointRef {
+        &self.endpoint
+    }
     pub async fn connect(directory: &Path, endpoint_id: EndpointId) -> Result<Self, ClientError> {
         let transport = AcpTransportConnection::connect(directory, endpoint_id).await?;
         if String::from(transport.schema_digest.clone())
