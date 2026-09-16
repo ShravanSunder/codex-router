@@ -633,15 +633,14 @@ fn validate_observed_settings(
                 .ok_or(SessionSetupError::ConfigurationMismatch)
         })
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    let temporary_writes_excluded = access != RouterAccess::WriteRestricted
-        || (response
-            .pointer("/sandbox/excludeTmpdirEnvVar")
-            .and_then(Value::as_bool)
-            == Some(true)
-            && response
-                .pointer("/sandbox/excludeSlashTmp")
-                .and_then(Value::as_bool)
-                == Some(true));
+    let exclude_tmpdir_env_var = response
+        .pointer("/sandbox/excludeTmpdirEnvVar")
+        .and_then(Value::as_bool);
+    let exclude_slash_tmp = response
+        .pointer("/sandbox/excludeSlashTmp")
+        .and_then(Value::as_bool);
+    let restricted_temporary_writes_excluded = access != RouterAccess::WriteRestricted
+        || (exclude_tmpdir_env_var == Some(true) && exclude_slash_tmp == Some(true));
     let mut expected = std::collections::BTreeSet::from([scratch
         .to_str()
         .ok_or(SessionSetupError::ConfigurationMismatch)?
@@ -651,20 +650,20 @@ fn validate_observed_settings(
             expected.insert(cwd.join("tmp").to_string_lossy().into_owned());
             expected.insert(cwd.join("docs/wip").to_string_lossy().into_owned());
         }
-        RouterAccess::WorkspaceWrite => {
-            expected.insert(
-                cwd.to_str()
-                    .ok_or(SessionSetupError::ConfigurationMismatch)?
-                    .to_owned(),
-            );
-        }
+        RouterAccess::WorkspaceWrite => {}
     }
-    if profile_id != profile || actual != expected || !temporary_writes_excluded {
+    if profile_id != profile || actual != expected || !restricted_temporary_writes_excluded {
+        let effective = match access {
+            RouterAccess::WriteRestricted => format!(
+                "profile={profile_id}, roots={actual:?}, excludeTmpdirEnvVar={exclude_tmpdir_env_var:?}, excludeSlashTmp={exclude_slash_tmp:?}"
+            ),
+            RouterAccess::WorkspaceWrite => {
+                format!("profile={profile_id}, roots={actual:?}")
+            }
+        };
         return Err(SessionSetupError::AccessMismatch {
             requested: access_name(access).to_owned(),
-            effective: format!(
-                "profile={profile_id}, roots={actual:?}, temporary_writes_excluded={temporary_writes_excluded}"
-            ),
+            effective,
         });
     }
     Ok(())
@@ -737,6 +736,34 @@ mod access_validation_tests {
                 cwd,
                 scratch,
                 "router-write-restricted"
+            )
+            .is_err()
+        );
+        let workspace_projection = json!({
+            "activePermissionProfile":{"id":"router-workspace-write"},
+            "sandbox":{"writableRoots":["/owner/scratch/root"]}
+        });
+        assert!(
+            validate_observed_settings(
+                &workspace_projection,
+                RouterAccess::WorkspaceWrite,
+                cwd,
+                scratch,
+                "router-workspace-write"
+            )
+            .is_ok()
+        );
+        let workspace_with_unexpected_root = json!({
+            "activePermissionProfile":{"id":"router-workspace-write"},
+            "sandbox":{"writableRoots":["/owner/scratch/root","/other/write-root"]}
+        });
+        assert!(
+            validate_observed_settings(
+                &workspace_with_unexpected_root,
+                RouterAccess::WorkspaceWrite,
+                cwd,
+                scratch,
+                "router-workspace-write"
             )
             .is_err()
         );

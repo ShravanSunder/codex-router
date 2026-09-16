@@ -259,7 +259,7 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                         "approvalPolicy": "on-request",
                         "approvalsReviewer": "auto_review",
                         "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                        "sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work/project"]},
+                        "sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},
                         "thread": {
                             "id": "forked-thread",
                             "cwd": "/work/project",
