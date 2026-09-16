@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reader_key,root_id,role,note,joined_at_activity,last_seen_activity,closed_at_activity,closed_reason,replaced_by FROM thread_participants WHERE root_id=? AND role='implementer' AND closed_at_activity IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "reader_key"
+          }
+        }
+      },
+      {
+        "name": "root_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "name": "note",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "note"
+          }
+        }
+      },
+      {
+        "name": "joined_at_activity",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "joined_at_activity"
+          }
+        }
+      },
+      {
+        "name": "last_seen_activity",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "last_seen_activity"
+          }
+        }
+      },
+      {
+        "name": "closed_at_activity",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "closed_at_activity"
+          }
+        }
+      },
+      {
+        "name": "closed_reason",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "closed_reason"
+          }
+        }
+      },
+      {
+        "name": "replaced_by",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "replaced_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "3ff0261ccb6991bb25f46f1eba1fbc89925262ddd83cad082f9d86e9149a2f96"
+}

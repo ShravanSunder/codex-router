@@ -197,24 +197,6 @@ fn participant_commands_refuse_omitted_semantic_choices_before_connection() {
             vec![
                 "board",
                 "thread",
-                "join",
-                "--root-message-id",
-                root,
-                "--actor",
-                HUMAN_ACTOR,
-                "--role",
-                "advisor",
-                "--watch",
-                "--listen",
-                "once",
-                "--json",
-            ],
-            "--max-wait",
-        ),
-        (
-            vec![
-                "board",
-                "thread",
                 "participant",
                 "list",
                 "--root-message-id",
@@ -254,7 +236,7 @@ fn join_listen_uses_the_specified_once_and_repeating_grammar() {
     ];
     for listen in [
         vec!["--listen", "once", "--max-wait", "1s", "--acknowledge"],
-        vec!["--listen", "for", "1s", "--no-acknowledge"],
+        vec!["--listen", "short", "--no-acknowledge"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
             .args(common)
@@ -269,7 +251,7 @@ fn join_listen_uses_the_specified_once_and_repeating_grammar() {
         .args(common)
         .args([
             "--listen",
-            "for",
+            "invalid",
             "--for",
             "1s",
             "--no-acknowledge",
@@ -355,22 +337,8 @@ fn thread_listen_requires_one_selection_one_mode_actor_and_json() {
 }
 
 #[test]
-fn thread_listen_requires_explicit_bound_and_acknowledgement_choice() {
+fn thread_listen_uses_fixed_bounds_and_requires_acknowledgement_choice() {
     for (arguments, expected) in [
-        (
-            vec![
-                "board",
-                "thread",
-                "listen",
-                "--watched",
-                "--once",
-                "--no-acknowledge",
-                "--actor",
-                HUMAN_ACTOR,
-                "--json",
-            ],
-            "--max-wait",
-        ),
         (
             vec![
                 "board",
@@ -385,6 +353,22 @@ fn thread_listen_requires_explicit_bound_and_acknowledgement_choice() {
                 "--json",
             ],
             "--acknowledge or --no-acknowledge",
+        ),
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--watched",
+                "--once",
+                "--max-wait",
+                "26m",
+                "--no-acknowledge",
+                "--actor",
+                HUMAN_ACTOR,
+                "--json",
+            ],
+            "may shorten but not exceed",
         ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -402,6 +386,107 @@ fn thread_listen_requires_explicit_bound_and_acknowledgement_choice() {
             "missing {expected}: {rendered}"
         );
     }
+}
+
+#[test]
+fn thread_listen_exposes_topic_fixed_lifetime_and_codex_only_session_delivery() {
+    let topic = "018f6f67-64d2-7a21-bf9a-8f193f987002";
+    for (arguments, expected) in [
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--topic-id",
+                topic,
+                "--lifetime",
+                "invalid",
+                "--actor",
+                HUMAN_ACTOR,
+                "--no-acknowledge",
+                "--json",
+            ],
+            "invalid value 'invalid'",
+        ),
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--topic-id",
+                topic,
+                "--lifetime",
+                "short",
+                "--for",
+                "26m",
+                "--actor",
+                HUMAN_ACTOR,
+                "--no-acknowledge",
+                "--json",
+            ],
+            "may shorten but not extend",
+        ),
+        (
+            vec![
+                "board",
+                "thread",
+                "listen",
+                "--topic-id",
+                topic,
+                "--lifetime",
+                "short",
+                "--deliver",
+                "session",
+                "--actor",
+                HUMAN_ACTOR,
+                "--no-acknowledge",
+                "--json",
+            ],
+            "requires the calling codex-local session identity",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            rendered.contains(expected),
+            "missing {expected}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn thread_watch_accepts_exactly_one_thread_or_topic_target() {
+    let topic = "018f6f67-64d2-7a21-bf9a-8f193f987002";
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "board",
+            "thread",
+            "watch",
+            "--topic-id",
+            topic,
+            "--actor",
+            HUMAN_ACTOR,
+            "--service-directory",
+            "/tmp/absent-topic-watch",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "watch", "--actor", HUMAN_ACTOR, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
 }
 
 #[test]

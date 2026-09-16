@@ -238,6 +238,12 @@ async fn dispatch(
         PreparedBoardCommand::ThreadUnwatch(request) => {
             serialize_result(client.board_thread_unwatch(request).await?)
         }
+        PreparedBoardCommand::TopicWatch(request) => {
+            serialize_result(client.board_topic_watch(request).await?)
+        }
+        PreparedBoardCommand::TopicUnwatch(request) => {
+            serialize_result(client.board_topic_unwatch(request).await?)
+        }
         PreparedBoardCommand::ThreadList(request) => {
             serialize_result(client.board_thread_list(request).await?)
         }
@@ -365,7 +371,7 @@ async fn repository_threads(
             } else {
                 None
             };
-            records.push(json!({"projectId":project.project_id,"topicId":root.topic_id,"rootMessageId":thread.root_message_id,"title":root.text.as_str(),"orchestrator":thread.orchestrator,"lastActivity":last_activity,"watchStatus":watch_status,"boardId":board.board_id}));
+            records.push(json!({"projectId":project.project_id,"topicId":root.topic_id,"rootMessageId":thread.root_message_id,"title":root.text.as_str(),"orchestrator":thread.orchestrator,"implementer":thread.implementer,"lastActivity":last_activity,"watchStatus":watch_status,"boardId":board.board_id}));
         }
     }
     records.sort_by(|left, right| {
@@ -492,6 +498,19 @@ fn refusal_command(
                 .as_ref()
                 .map(actor)
                 .unwrap_or_else(|| "<current-orchestrator>".to_owned()),
+        ),
+        (
+            BoardNextAction::ReplaceImplementer,
+            BoardErrorDetails::ParticipantRefusal { refusal },
+        ) => format!(
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role implementer --replace {} (--watch | --no-watch) --json",
+            refusal.root_message_id.as_str(),
+            actor(&refusal.actor),
+            refusal
+                .holder
+                .as_ref()
+                .map(actor)
+                .unwrap_or_else(|| "<current-implementer>".to_owned()),
         ),
         (
             BoardNextAction::LeaveWithHandoverOrResolve,

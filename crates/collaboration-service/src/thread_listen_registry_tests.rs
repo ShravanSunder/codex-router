@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use std::path::PathBuf;
+use tokio::sync::Mutex as TokioMutex;
 
 struct ListenFixture {
     path: PathBuf,
@@ -83,6 +84,7 @@ impl ListenFixture {
             mode,
             from_activity_sequence: None,
             acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
         };
         let context = self
             .store
@@ -127,7 +129,7 @@ async fn debounce_coalesces_a_burst_into_one_batch_set() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -144,7 +146,7 @@ async fn debounce_coalesces_a_burst_into_one_batch_set() {
     tokio::time::advance(std::time::Duration::from_secs(20)).await;
     fixture.reply("Second").await;
     tokio::task::yield_now().await;
-    tokio::time::advance(std::time::Duration::from_secs(29)).await;
+    tokio::time::advance(THREAD_LISTEN_DEBOUNCE - std::time::Duration::from_secs(1)).await;
     assert!(!wait.is_finished());
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     let result = wait.await.unwrap().unwrap();
@@ -160,7 +162,7 @@ async fn debounce_cap_emits_during_continuous_activity() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -175,11 +177,11 @@ async fn debounce_cap_emits_during_continuous_activity() {
     });
     tokio::task::yield_now().await;
     for index in 1..=4 {
-        tokio::time::advance(std::time::Duration::from_secs(25)).await;
+        tokio::time::advance(std::time::Duration::from_secs(4 * 60)).await;
         fixture.reply(&format!("Activity {index}")).await;
         tokio::task::yield_now().await;
     }
-    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    tokio::time::advance(std::time::Duration::from_secs(4 * 60)).await;
     let result = wait.await.unwrap().unwrap();
     assert_eq!(result.batch_set.unwrap().batches[0].messages.len(), 5);
     fixture.finish().await;
@@ -215,7 +217,7 @@ async fn timeout_advances_no_delivered_position() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -239,7 +241,7 @@ async fn cancel_ends_a_repeating_listen() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -268,7 +270,7 @@ async fn cancel_without_a_wait_releases_the_listen_registration() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -286,7 +288,7 @@ async fn dropped_wait_releases_the_listen_registration() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -342,7 +344,7 @@ async fn repeating_lifetime_is_preserved_between_waits_after_a_batch() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -383,7 +385,7 @@ async fn repeating_cancel_is_preserved_between_waits_after_a_batch() {
         .register(
             &registry,
             ThreadListenMode::Repeating {
-                lifetime_seconds: 300,
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
             },
         )
         .await;
@@ -436,6 +438,7 @@ async fn listen_admission_is_bounded_and_cancel_releases_capacity() {
         mode: mode.clone(),
         from_activity_sequence: None,
         acknowledge: false,
+        delivery: ThreadListenDelivery::Stdout,
     };
     let context = fixture
         .store
@@ -515,4 +518,89 @@ fn name(value: &str) -> ResourceName {
 
 fn description(value: &str) -> Description {
     Description::try_from(value.to_owned()).unwrap()
+}
+
+#[derive(Clone)]
+struct RecordingSink {
+    records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
+    reject_batches: bool,
+}
+
+impl BatchSink for RecordingSink {
+    fn deliver<'a>(
+        &'a self,
+        record: ListenDeliveryRecord,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if self.reject_batches && matches!(record, ListenDeliveryRecord::Batch(_)) {
+                return Err(BatchSinkFailure::Rejected {
+                    evidence: serde_json::json!({"kind":"nativeRejected","reason":"busy"}),
+                });
+            }
+            self.records.lock().await.push(record);
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_session_delivery_heartbeats_only_at_silent_marks_then_finalizes() {
+    let fixture = ListenFixture::create("session-heartbeat").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+    registry.spawn_session_delivery(
+        listen.listen_id,
+        Arc::clone(&fixture.store),
+        Arc::new(RecordingSink {
+            records: Arc::clone(&records),
+            reject_batches: false,
+        }),
+    );
+    tokio::task::yield_now().await;
+    for _ in 0..3 {
+        tokio::time::advance(THREAD_LISTEN_MARK).await;
+        tokio::task::yield_now().await;
+    }
+    let records = records.lock().await;
+    assert_eq!(records.len(), 3);
+    assert!(matches!(&records[0], ListenDeliveryRecord::Heartbeat(value) if value.mark == 1));
+    assert!(matches!(&records[1], ListenDeliveryRecord::Heartbeat(value) if value.mark == 2));
+    assert!(
+        matches!(&records[2], ListenDeliveryRecord::Finalization(value) if value.reason == ThreadListenEndReason::Lifetime)
+    );
+    drop(records);
+    fixture.finish().await;
+}
+
+#[test]
+fn three_consecutive_session_rejections_end_with_error_evidence() {
+    let mut count = 0_u8;
+    let mut evidence = serde_json::Value::Null;
+    assert!(!record_rejection(
+        &mut count,
+        &mut evidence,
+        serde_json::json!({"reason":"busy"})
+    ));
+    assert!(!record_rejection(
+        &mut count,
+        &mut evidence,
+        serde_json::json!({"reason":"busy"})
+    ));
+    assert!(record_rejection(
+        &mut count,
+        &mut evidence,
+        serde_json::json!({"reason":"childThread"})
+    ));
+    assert_eq!(count, 3);
+    assert_eq!(evidence["reason"], "childThread");
 }

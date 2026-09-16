@@ -4,9 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-pub const THREAD_LISTEN_DEBOUNCE: Duration = Duration::from_secs(30);
-pub const THREAD_LISTEN_DEBOUNCE_CAP: Duration = Duration::from_secs(120);
+pub const THREAD_LISTEN_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
+pub const THREAD_LISTEN_DEBOUNCE_CAP: Duration = Duration::from_secs(20 * 60);
 pub const THREAD_LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+pub const THREAD_LISTEN_MARK: Duration = Duration::from_secs(25 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -16,6 +17,35 @@ pub enum ThreadListenSelection {
     Roots {
         root_message_ids: Vec<MessageId>,
     },
+    #[serde(rename_all = "camelCase")]
+    Topic {
+        topic_id: crate::TopicId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadListenDelivery {
+    #[default]
+    Stdout,
+    Session,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadListenLifetime {
+    Short,
+    Long,
+}
+
+impl ThreadListenLifetime {
+    #[must_use]
+    pub const fn seconds(self) -> u64 {
+        match self {
+            Self::Short => 25 * 60,
+            Self::Long => 75 * 60,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -35,6 +65,8 @@ pub struct ThreadListenRequest {
     pub mode: ThreadListenMode,
     pub from_activity_sequence: Option<ActivitySequence>,
     pub acknowledge: bool,
+    #[serde(default)]
+    pub delivery: ThreadListenDelivery,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +74,8 @@ pub struct ThreadListenRequest {
 pub struct ThreadListenContext {
     pub reader: Identity,
     pub threads: Vec<ThreadListenThread>,
+    pub topic_ids: Vec<crate::TopicId>,
+    pub armed_after_sequence: ActivitySequence,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -74,6 +108,8 @@ pub struct ThreadListenBatchSet {
     pub kind: ThreadListenOutputKind,
     pub listen_id: ListenId,
     pub batches: Vec<ThreadBatch>,
+    #[serde(default)]
+    pub catch_up: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -101,12 +137,76 @@ pub struct ThreadListenEnd {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadListenHeartbeat {
+    pub kind: ThreadListenHeartbeatKind,
+    pub listen_id: ListenId,
+    pub last_sequence: Option<ActivitySequence>,
+    pub mark: u8,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadListenHeartbeatKind {
+    ListenHeartbeat,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadListenFinalization {
+    pub kind: ThreadListenFinalizationKind,
+    pub listen_id: ListenId,
+    pub reason: ThreadListenEndReason,
+    pub batches_delivered: u64,
+    pub first_sequence: Option<ActivitySequence>,
+    pub last_sequence: Option<ActivitySequence>,
+    pub catch_up: bool,
+    pub acknowledged: bool,
+    pub last_rejection: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadListenFinalizationKind {
+    ListenEnd,
+}
+
+#[derive(Clone, Debug)]
+pub enum ListenDeliveryRecord {
+    Batch(ThreadListenBatchSet),
+    Heartbeat(ThreadListenHeartbeat),
+    Finalization(ThreadListenFinalization),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchSinkFailure {
+    Rejected { evidence: serde_json::Value },
+    Unavailable,
+}
+
+pub trait BatchSink: Send + Sync {
+    fn deliver<'a>(
+        &'a self,
+        record: ListenDeliveryRecord,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
+    >;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadListenSnapshot {
     pub listen_id: ListenId,
     pub context: ThreadListenContext,
     pub mode: ThreadListenMode,
     pub acknowledge: bool,
     pub active: bool,
+    pub delivery: ThreadListenDelivery,
+    pub batches_delivered: u64,
+    pub first_sequence: Option<ActivitySequence>,
+    pub last_sequence: Option<ActivitySequence>,
+    pub catch_up: bool,
+    pub acknowledged: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]

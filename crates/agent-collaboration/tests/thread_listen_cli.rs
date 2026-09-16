@@ -209,7 +209,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         .args(["board", "thread", "join", "--root-message-id"])
         .arg(root_message.message_id.as_str())
         .args(["--actor", "self", "--role", "advisor", "--watch"])
-        .args(["--listen", "once", "--max-wait", "2m"])
+        .args(["--listen", "once", "--max-wait", "1s"])
         .arg("--acknowledge")
         .arg("--service-directory")
         .arg(&root)
@@ -272,8 +272,13 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
     let batch_line = output_lines
         .next()
         .ok_or("Join-plus-Listen omitted its Batch set")?;
-    if output_lines.next().is_some() {
-        return Err("Join-plus-Listen wrote an unexpected extra stdout record".into());
+    let finalization: ThreadListenFinalization = serde_json::from_str(
+        output_lines
+            .next()
+            .ok_or("Join-plus-Listen omitted its finalization")?,
+    )?;
+    if finalization.reason != ThreadListenEndReason::Emitted || output_lines.next().is_some() {
+        return Err("Join-plus-Listen wrote an invalid finalization sequence".into());
     }
     let batch_set: ThreadListenBatchSet = serde_json::from_str(batch_line)?;
     if batch_set.kind != ThreadListenOutputKind::BatchSet
@@ -310,14 +315,73 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         .kill_on_drop(true)
         .output()
         .await?;
-    if timeout.status.code() != Some(3) || !timeout.stdout.is_empty() {
+    let timeout_finalization: ThreadListenFinalization = serde_json::from_slice(&timeout.stdout)?;
+    if timeout.status.code() != Some(3)
+        || timeout_finalization.reason != ThreadListenEndReason::Timeout
+        || timeout_finalization.batches_delivered != 0
+    {
         return Err(format!(
-            "Re-armed Listen did not exit 3 silently: {:?} {}",
+            "Re-armed Listen did not exit 3 with timeout finalization: {:?} {}",
             timeout.status.code(),
             String::from_utf8_lossy(&timeout.stdout)
         )
         .into());
     }
+
+    let armed = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "listen", "--root-message-id"])
+        .arg(root_message.message_id.as_str())
+        .args([
+            "--lifetime",
+            "short",
+            "--deliver",
+            "session",
+            "--actor",
+            "self",
+            "--no-acknowledge",
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .env("CODEX_THREAD_ID", "thread-listen-self")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !armed.status.success() {
+        return Err(format!(
+            "session listen did not arm: {}",
+            String::from_utf8_lossy(&armed.stdout)
+        )
+        .into());
+    }
+    let armed: serde_json::Value = serde_json::from_slice(&armed.stdout)?;
+    let listen_id: ListenId = serde_json::from_value(
+        armed
+            .pointer("/result/record/listenId")
+            .cloned()
+            .ok_or("session listen omitted listenId")?,
+    )?;
+    client
+        .board_thread_listen_cancel(ThreadListenCancelRequest {
+            listen_id: listen_id.clone(),
+        })
+        .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if client
+                .board_thread_listen_show(ThreadListenShowRequest {
+                    listen_id: listen_id.clone(),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
 
     client.close().await?;
     stop.cancel();

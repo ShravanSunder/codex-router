@@ -5,6 +5,8 @@
 - Standardize finite collaboration CLI JSON results on `result.page.records` for lists, `result.record` for reads, and `result.record` plus `result.effects` for mutations. Remove the former top-level result fields `sessions`, `message`, and `thread`; every result now identifies its CLI and service versions.
 - Accept either `--to <SessionRef JSON>` or `--endpoint` plus `--session` across commands that target a session, resolve `self` consistently on board actor and reader flags, reject forbidden C0 bytes at text write boundaries, and expose reasoned native rejections.
 - Add repository-scoped board thread discovery across every project attached to an explicit repository path.
+- Add the unique `implementer` Thread seat and report both Orchestrator and Implementer holders on Thread and Participant reads.
+- Add Topic Watch and Topic Listen selection, including roots created after arming. Thread Listens now use fixed `short` and `long` lifetimes, a five-minute debounce with a twenty-minute cap, terminal finalization records, and Codex-only `--deliver session` background delivery with silent-mark heartbeats.
 
 ## 0.1.27 - 2026-09-15
 

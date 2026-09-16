@@ -34,6 +34,7 @@ pub use native_control_dispatch::NativeControlBackend;
 mod agent_declaration;
 mod message_effect_state;
 mod native_message_dispatch;
+mod session_delivery_sink;
 
 mod acp_channel_listener;
 pub use acp_channel_listener::AcpChannelListener;

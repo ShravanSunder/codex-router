@@ -113,6 +113,16 @@ async fn run(mut pending: PendingThreadListen, directory: std::path::PathBuf) ->
     };
     let request = match board_preparation::finalize_actor(&pending.actor, &client) {
         Ok(reader) => {
+            if pending.request.delivery == ThreadListenDelivery::Session
+                && !board_preparation::is_codex_session_identity(&reader)
+            {
+                return crate::endpoint_commands::report_failure(
+                    "invalidField",
+                    "--deliver session requires the calling codex-local session identity",
+                    2,
+                    true,
+                );
+            }
             pending.request.reader = reader;
             pending.request
         }
@@ -136,13 +146,22 @@ pub(super) async fn run_with_client(
     let request_timeout = Duration::from_secs(lifetime_seconds)
         .checked_add(Duration::from_secs(5))
         .unwrap_or(Duration::MAX);
-    let acknowledge = request.acknowledge;
+    let should_acknowledge = request.acknowledge;
     let reader = request.reader.clone();
+    let catch_up = request.from_activity_sequence.is_some();
+    let delivery = request.delivery;
     let listen = match client.board_thread_listen(request).await {
         Ok(result) => result.listen,
         Err(error) => return report_board_error(&error),
     };
+    if delivery == ThreadListenDelivery::Session {
+        return write_session_armed(&listen);
+    }
     let mut emitted = false;
+    let mut batches_delivered = 0_u64;
+    let mut first_sequence = None;
+    let mut last_sequence = None;
+    let mut acknowledged = false;
     loop {
         let result = match client
             .board_thread_wait(
@@ -154,14 +173,46 @@ pub(super) async fn run_with_client(
             .await
         {
             Ok(result) => result,
-            Err(error) => return report_board_error(&error),
+            Err(error) => {
+                let finalization = ThreadListenFinalization {
+                    kind: ThreadListenFinalizationKind::ListenEnd,
+                    listen_id: listen.listen_id.clone(),
+                    reason: ThreadListenEndReason::Error,
+                    batches_delivered,
+                    first_sequence,
+                    last_sequence,
+                    catch_up,
+                    acknowledged,
+                    last_rejection: None,
+                };
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "{}",
+                    serde_json::json!(finalization)
+                );
+                return report_board_error(&error);
+            }
         };
         if let Some(batch_set) = result.batch_set {
             if write_batch_set(&batch_set).is_err() {
                 return 1;
             }
             emitted = true;
-            if acknowledge {
+            batches_delivered += 1;
+            let batch_first = batch_set
+                .batches
+                .iter()
+                .flat_map(|batch| batch.messages.iter())
+                .map(|message| message.activity_sequence)
+                .min();
+            first_sequence = first_sequence.or(batch_first);
+            last_sequence = batch_set
+                .batches
+                .iter()
+                .map(|batch| batch.delivered_through)
+                .max()
+                .or(last_sequence);
+            if should_acknowledge {
                 for batch in &batch_set.batches {
                     if let Err(error) = client
                         .board_inbox_acknowledge(InboxAcknowledgeRequest {
@@ -174,14 +225,60 @@ pub(super) async fn run_with_client(
                         })
                         .await
                     {
+                        let finalization = ThreadListenFinalization {
+                            kind: ThreadListenFinalizationKind::ListenEnd,
+                            listen_id: listen.listen_id.clone(),
+                            reason: ThreadListenEndReason::Error,
+                            batches_delivered,
+                            first_sequence,
+                            last_sequence,
+                            catch_up,
+                            acknowledged: false,
+                            last_rejection: None,
+                        };
+                        let _ = writeln!(
+                            std::io::stdout().lock(),
+                            "{}",
+                            serde_json::json!(finalization)
+                        );
                         return report_board_error(&error);
                     }
                 }
+                acknowledged = true;
             }
         }
         if let Some(end) = result.end {
+            let finalization = ThreadListenFinalization {
+                kind: ThreadListenFinalizationKind::ListenEnd,
+                listen_id: end.listen_id.clone(),
+                reason: end.reason,
+                batches_delivered,
+                first_sequence,
+                last_sequence,
+                catch_up,
+                acknowledged,
+                last_rejection: None,
+            };
+            if writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::json!(finalization)
+            )
+            .is_err()
+            {
+                return 1;
+            }
             return thread_listen_exit_code(end.reason, emitted);
         }
+    }
+}
+
+fn write_session_armed(listen: &ThreadListenSnapshot) -> i32 {
+    let value = crate::endpoint_commands::result_envelope(serde_json::json!(listen));
+    if writeln!(std::io::stdout().lock(), "{value}").is_ok() {
+        0
+    } else {
+        1
     }
 }
 

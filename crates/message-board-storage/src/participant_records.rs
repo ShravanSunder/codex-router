@@ -3,8 +3,8 @@ use crate::BoardStore;
 use crate::board_topic_records::require_board;
 use crate::message_records::{activate_watch, load_watch_status, require_thread};
 use crate::participant_row_decoding::{
-    StoredParticipantRow, decode_participant, load_orchestrator, load_participant,
-    require_open_participant, role_name,
+    StoredParticipantRow, decode_participant, load_implementer, load_orchestrator,
+    load_participant, require_open_participant, role_name,
 };
 use crate::storage_support::{
     BoardTransaction, allocate_activity_sequence, archived_board,
@@ -108,22 +108,23 @@ async fn upsert_joined_participant(
     .await
     {
         Ok(_) => Ok(()),
-        Err(error) if role == ParticipantRole::Orchestrator && is_orchestrator_unique_error(&error) => {
+        Err(error) if role == ParticipantRole::Orchestrator && is_seat_unique_error(&error) => {
             let Some(holder) = load_orchestrator(transaction, root_message_id).await? else {
                 return Err(storage_error(error));
             };
-            Err(BoardError::orchestrator_already_exists(
-                root_message_id.clone(),
-                actor.clone(),
-                holder.identity,
-                holder.last_seen_activity,
-            ))
+            Err(BoardError::orchestrator_already_exists(root_message_id.clone(), actor.clone(), holder.identity, holder.last_seen_activity))
+        }
+        Err(error) if role == ParticipantRole::Implementer && is_seat_unique_error(&error) => {
+            let Some(holder) = load_implementer(transaction, root_message_id).await? else {
+                return Err(storage_error(error));
+            };
+            Err(BoardError::implementer_already_exists(root_message_id.clone(), actor.clone(), holder.identity, holder.last_seen_activity))
         }
         Err(error) => Err(storage_error(error)),
     }
 }
 
-fn is_orchestrator_unique_error(error: &sqlx::Error) -> bool {
+fn is_seat_unique_error(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(database_error)
         if database_error.code().as_deref() == Some("2067")
             && database_error.message() == "UNIQUE constraint failed: thread_participants.root_id")
@@ -137,7 +138,7 @@ impl BoardStore {
         if request.replace.as_ref() == Some(&request.actor) {
             return Err(BoardError::participant_refusal(ParticipantRefusal {
                 kind: BoardFailureKind::SelfReplace,
-                message: "Replace must name a different current Orchestrator.".to_owned(),
+                message: "Replace must name a different current seat holder.".to_owned(),
                 next_action: BoardNextAction::RepeatJoinWithoutReplace,
                 root_message_id: request.root_message_id,
                 actor: request.actor,
@@ -147,10 +148,15 @@ impl BoardStore {
                 named_holder: request.replace,
             }));
         }
-        if request.replace.is_some() && request.role != ParticipantRole::Orchestrator {
+        if request.replace.is_some()
+            && !matches!(
+                request.role,
+                ParticipantRole::Orchestrator | ParticipantRole::Implementer
+            )
+        {
             return Err(BoardError::invalid_field(
                 "replace",
-                "may be used only with Role orchestrator",
+                "may be used only with Role orchestrator or implementer",
             ));
         }
         let mut transaction = self
@@ -182,34 +188,58 @@ impl BoardStore {
                 named_holder: None,
             }));
         }
-        let holder = load_orchestrator(&mut transaction, &request.root_message_id).await?;
-        if request.role == ParticipantRole::Orchestrator {
+        let holder = match request.role {
+            ParticipantRole::Orchestrator => {
+                load_orchestrator(&mut transaction, &request.root_message_id)
+                    .await?
+                    .map(|holder| (holder.identity, holder.last_seen_activity))
+            }
+            ParticipantRole::Implementer => {
+                load_implementer(&mut transaction, &request.root_message_id)
+                    .await?
+                    .map(|holder| (holder.identity, holder.last_seen_activity))
+            }
+            _ => None,
+        };
+        if matches!(
+            request.role,
+            ParticipantRole::Orchestrator | ParticipantRole::Implementer
+        ) {
             match (&holder, &request.replace) {
-                (Some(holder), None) if holder.identity != request.actor => {
-                    return Err(BoardError::orchestrator_already_exists(
-                        request.root_message_id,
-                        request.actor,
-                        holder.identity.clone(),
-                        holder.last_seen_activity,
-                    ));
+                (Some((holder, last_seen)), None) if *holder != request.actor => {
+                    return Err(match request.role {
+                        ParticipantRole::Orchestrator => BoardError::orchestrator_already_exists(
+                            request.root_message_id,
+                            request.actor,
+                            holder.clone(),
+                            *last_seen,
+                        ),
+                        ParticipantRole::Implementer => BoardError::implementer_already_exists(
+                            request.root_message_id,
+                            request.actor,
+                            holder.clone(),
+                            *last_seen,
+                        ),
+                        _ => BoardError::invalid_field("role", "requires a unique seat"),
+                    });
                 }
-                (Some(holder), Some(named)) if holder.identity != *named => {
+                (Some((holder, last_seen)), Some(named)) if *holder != *named => {
                     return Err(BoardError::participant_refusal(ParticipantRefusal {
-                        kind: BoardFailureKind::StaleOrchestrator,
-                        message: "The named Orchestrator is stale. Inspect Participants and retry with the current holder.".to_owned(),
+                        kind: if request.role == ParticipantRole::Orchestrator { BoardFailureKind::StaleOrchestrator } else { BoardFailureKind::StaleImplementer },
+                        message: "The named seat holder is stale. Inspect Participants and retry with the current holder.".to_owned(),
                         next_action: BoardNextAction::InspectParticipants,
                         root_message_id: request.root_message_id,
                         actor: request.actor,
-                        holder: Some(holder.identity.clone()),
-                        holder_last_seen_activity: Some(holder.last_seen_activity),
+                        holder: Some(holder.clone()),
+                        holder_last_seen_activity: Some(*last_seen),
                         target: None,
                         named_holder: request.replace,
                     }));
                 }
                 (None, Some(_)) => {
                     return Err(BoardError::participant_refusal(ParticipantRefusal {
-                        kind: BoardFailureKind::StaleOrchestrator,
-                        message: "The named Orchestrator is stale because the Thread has no current Orchestrator.".to_owned(),
+                        kind: if request.role == ParticipantRole::Orchestrator { BoardFailureKind::StaleOrchestrator } else { BoardFailureKind::StaleImplementer },
+                        message: "The named seat holder is stale because the Thread has no current holder.".to_owned(),
                         next_action: BoardNextAction::InspectParticipants,
                         root_message_id: request.root_message_id,
                         actor: request.actor,
@@ -223,28 +253,31 @@ impl BoardStore {
             }
         }
         let kind = if request.replace.is_some() {
-            "orchestratorReplaced"
+            if request.role == ParticipantRole::Orchestrator {
+                "orchestratorReplaced"
+            } else {
+                "implementerReplaced"
+            }
         } else {
             "participantJoined"
         };
         let sequence =
             insert_lifecycle_activity(&mut transaction, &location, kind, &actor_key).await?;
-        if let Some(holder) = &holder
-            && request.replace.as_ref() == Some(&holder.identity)
+        if let Some((holder, _)) = &holder
+            && request.replace.as_ref() == Some(holder)
         {
-            let holder_key = identity_key(&holder.identity);
-            sqlx::query!(
-                "UPDATE thread_participants SET last_seen_activity=?,closed_at_activity=?,closed_reason='replaced',replaced_by=? \
-                 WHERE reader_key=? AND root_id=? AND role='orchestrator' AND closed_at_activity IS NULL",
-                sequence,
-                sequence,
-                actor_key,
-                holder_key,
-                request.root_message_id.as_str(),
-            )
-            .execute(&mut *transaction)
-            .await
-            .map_err(storage_error)?;
+            let holder_key = identity_key(holder);
+            match request.role {
+                ParticipantRole::Orchestrator => sqlx::query!(
+                    "UPDATE thread_participants SET last_seen_activity=?,closed_at_activity=?,closed_reason='replaced',replaced_by=? WHERE reader_key=? AND root_id=? AND role='orchestrator' AND closed_at_activity IS NULL",
+                    sequence, sequence, actor_key, holder_key, request.root_message_id.as_str(),
+                ).execute(&mut *transaction).await.map_err(storage_error)?,
+                ParticipantRole::Implementer => sqlx::query!(
+                    "UPDATE thread_participants SET last_seen_activity=?,closed_at_activity=?,closed_reason='replaced',replaced_by=? WHERE reader_key=? AND root_id=? AND role='implementer' AND closed_at_activity IS NULL",
+                    sequence, sequence, actor_key, holder_key, request.root_message_id.as_str(),
+                ).execute(&mut *transaction).await.map_err(storage_error)?,
+                _ => return Err(BoardError::invalid_field("replace", "requires a unique seat")),
+            };
         }
         upsert_joined_participant(
             &mut transaction,
@@ -270,6 +303,7 @@ impl BoardStore {
                 .await?
                 .ok_or_else(invalid_record)?;
         let orchestrator = load_orchestrator(&mut transaction, &request.root_message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.root_message_id).await?;
         let watch_status =
             load_watch_status(&mut transaction, &actor_key, &request.root_message_id).await?;
         transaction.commit().await.map_err(storage_error)?;
@@ -277,6 +311,7 @@ impl BoardStore {
         Ok(ThreadJoinResult {
             participant,
             orchestrator,
+            implementer,
             watch_status,
             outcome: "Participant joined the Thread.".to_owned(),
         })
@@ -435,6 +470,7 @@ impl BoardStore {
                 .await?
                 .ok_or_else(invalid_record)?;
         let orchestrator = load_orchestrator(&mut transaction, &request.root_message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.root_message_id).await?;
         let watch_status =
             load_watch_status(&mut transaction, &actor_key, &request.root_message_id).await?;
         let state = if request.resolve {
@@ -450,8 +486,10 @@ impl BoardStore {
                 root_message_id: request.root_message_id,
                 state,
                 orchestrator: orchestrator.clone(),
+                implementer: implementer.clone(),
             },
             orchestrator,
+            implementer,
             watch_status,
             outcome: format!("Participant left the Thread at Activity {sequence}."),
         })
@@ -518,6 +556,7 @@ impl BoardStore {
             })
             .transpose()?;
         let orchestrator = load_orchestrator(&mut transaction, &request.root_message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.root_message_id).await?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadParticipantListResult {
             page: Page {
@@ -525,6 +564,7 @@ impl BoardStore {
                 next_cursor,
             },
             orchestrator,
+            implementer,
         })
     }
 }
@@ -608,7 +648,7 @@ fn decode_participant_cursor(
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::is_orchestrator_unique_error;
+    use super::is_seat_unique_error;
     use sqlx::Connection;
 
     #[tokio::test]
@@ -633,13 +673,13 @@ mod tests {
             .execute(&mut connection)
             .await
             .unwrap_err();
-        assert!(is_orchestrator_unique_error(&orchestrator_conflict));
+        assert!(is_seat_unique_error(&orchestrator_conflict));
 
         let primary_key_conflict = sqlx::query("INSERT INTO thread_participants(reader_key,root_id,role,closed_at_activity) VALUES('first','root','participant',NULL)")
             .execute(&mut connection)
             .await
             .unwrap_err();
-        assert!(!is_orchestrator_unique_error(&primary_key_conflict));
+        assert!(!is_seat_unique_error(&primary_key_conflict));
         connection.close().await.unwrap();
     }
 }

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT threads.root_id FROM board_messages roots JOIN board_threads threads ON threads.root_id=roots.message_id WHERE roots.topic_id=? AND roots.root_id IS NULL ORDER BY threads.root_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_threads",
+            "name": "root_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5398f6093d49c0d40b70fdf114e512858de14b129604831de5f9299369f86a9a"
+}

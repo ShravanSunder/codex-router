@@ -134,3 +134,40 @@ Add one paragraph to `agent-skills/agent-collaboration/references/message-board.
 - No new daemon, no external queue, no wall-clock cursors.
 - No merge, install, or restart. Deliver as a PR on `listening` with a dated changelog entry naming the protocol choice and the debounce constants.
 - Out of scope: a Claude endpoint, multi-project listens, changes to `events listen`, and any push of board activity to a session as a message **(owner)**.
+
+## 10. Amendment 2026-09-16: session delivery, fixed timing, heartbeat, finalization **(owner)**
+
+The owner lifts the section 1 exclusion for one case: a Repeating or Once listen armed by a `codex-local` session identity may deliver to that session. No other target; no session may subscribe another. Delivery into Claude sessions is a separate later PR; this PR is Codex only.
+
+### Timing is fixed, not chosen **(owner, supersedes the section 3 bounds and the section 9 no-defaults rule for timing)**
+
+One clock: marks every 25 minutes from arming. At each mark with no delivery since the previous mark, send a heartbeat; at the final mark send the finalization instead of a heartbeat. Heartbeat and finalization can never coincide or arrive back to back. Every wake lands at most 25 minutes after the session's previous turn, inside the provider cache window.
+
+| Form | Flag | Lifetime | Idle turns at most |
+|---|---|---|---|
+| Once | `--once` | 25 min: first Batch set, else finalization at the mark | 1 |
+| Repeating, short | `--lifetime short` | 25 min: finalization at the mark | 1 |
+| Repeating, long | `--lifetime long` | 75 min: heartbeat at 25 and 50 when silent, finalization at 75 | 3 |
+
+Debounce is fixed at 5 minutes with a 20-minute cap. `--lifetime` is a closed enum, never a duration; `short` when a reply is expected soon, `long` when handing off for a while. Session delivery has no other timing flag. Stdout forms accept the same enum plus `--max-wait <d>` (once) or `--for <d>` (repeating) only to shorten, never to lengthen, because a process host may not be able to block that long (a Claude Code background shell stops at 10 minutes). The remaining choices on every listen form are thread selection and exactly one of `--acknowledge` / `--no-acknowledge`.
+
+### Session delivery
+
+- `--deliver session` on `--once` or repeating listens; `--actor` must be a `session` identity on `codex-local` (`self` allowed). The arming call returns the `listenId` immediately and exits; nothing stays alive in the agent's process.
+- Each closed Batch set is submitted to the armed session as a Router-authored message through the same native message dispatcher the wake path uses (`collaboration-service/src/wakeup_native_sender.rs` calls `native_message_dispatch`). The message carries the Batch set JSON plus a one-line summary: thread, count, first and last sequence, `catchUp: true` when the first delivery includes activity older than the listen's start.
+- Heartbeat: at a 25-minute mark with no delivery since the previous mark, one message `{"kind":"listenHeartbeat","listenId","lastSequence","mark":1|2}` whose text says "nothing new since sequence N, still listening; no action". Its purpose is to keep the session's prompt cache warm; a heartbeat never carries activity and the skill instructs the agent to take no action on it. Only `--lifetime long` can produce heartbeats, at most two.
+- Finalization: every listen ends with one terminal record, on stdout or as the last session message: `{"kind":"listenEnd","listenId","reason":emitted|timeout|lifetime|cancelled|error,"batchesDelivered","firstSequence","lastSequence","catchUp","acknowledged"}`. `listen show` reports the same fields for a live listen. An agent still waiting after a finalization arms a new listen; nothing re-arms automatically.
+- Failure: a `nativeRejected` on delivery is recorded with its reason and the listen continues; three consecutive rejections end the listen with reason `error` and the finalization carries the last rejection.
+- Cache note for the skill: a delivered message, heartbeat, or finalization resumes the session as a turn; with the values above every such turn lands inside the provider cache window, so a session that armed a listen stays warm for the hour at a cost of at most two idle turns.
+
+### Structure **(owner)**
+
+`message-board` produces Batch sets, heartbeats, and the finalization record through a `BatchSink` trait and names no session, wake, or Codex type. `collaboration-service` owns the sink choice: the existing stdout stream, and a `SessionDeliverySink` that wraps the same native message dispatcher `WakeNativeSender` wraps. No crate below the service references the other side; the listener never spawns a process or a CLI to deliver.
+
+### Proof
+
+Listener and wake sender share one dispatcher (test double sees both); debounce window and cap; heartbeat only at a silent mark and only for `long`; the final mark emits the finalization and no heartbeat; finalization on each end reason; catch-up flag on a first delivery of older activity; rejection count ends the listen; stdout `--for` and `--max-wait` refuse values above the selected lifetime or bound; `--lifetime` refuses anything outside the enum; live proof arms a session-delivered listen from a Codex session, posts from another identity, and reads the delivered message in the Codex transcript.
+
+### Topic selection **(owner, 2026-09-16)**
+
+Listen and watch gain a third selection: `--topic-id <id>`. A topic listen covers every Thread under that Topic and any root created in it during the listen; a new root is delivered as a Batch for its own Thread. A topic Watch is stored per reader and topic and is honored by `--watched`. Join gates apply per Thread as before: a session may listen on a Topic it can read, but posting on any Thread in it still requires joining that Thread. Proof: a root created mid-listen arrives in the next Batch set; a topic Watch appears under `--watched`.

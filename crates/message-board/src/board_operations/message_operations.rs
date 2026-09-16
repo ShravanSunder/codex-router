@@ -1,8 +1,8 @@
 use crate::{
-    ActingForIdentity, ActivitySequence, Identity, Message, MessageId, MessageListScope,
-    MessagePage, MessageReferences, MessageSelection, MessageText, OrchestratorHolder, Page,
-    PageRequest, Participant, ParticipantNote, ParticipantRole, Placement, ProjectId, Thread,
-    TopicId, WatchStatus,
+    ActingForIdentity, ActivitySequence, Identity, ImplementerHolder, Message, MessageId,
+    MessageListScope, MessagePage, MessageReferences, MessageSelection, MessageText,
+    OrchestratorHolder, Page, PageRequest, Participant, ParticipantNote, ParticipantRole,
+    Placement, ProjectId, Thread, TopicId, WatchStatus,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,13 @@ contract!(ThreadUnwatchResult {
     watch_status: WatchStatus,
     outcome: String
 });
+contract!(TopicWatchRequest { topic_id: TopicId, actor: Identity, acting_for: Option<ActingForIdentity> });
+contract!(TopicWatchResult {
+    topic_id: TopicId,
+    watching: bool,
+    starts_after_activity_sequence: Option<ActivitySequence>,
+    outcome: String
+});
 contract!(ThreadListRequest {
     project_id: ProjectId,
     reader: Identity,
@@ -93,6 +100,7 @@ contract!(ThreadCreateResult {
     message: Message,
     creator_participation: ThreadCreatorParticipation,
     orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>,
     watch_status: WatchStatus,
     outcome: String
 });
@@ -107,6 +115,7 @@ contract!(ThreadJoinRequest {
 contract!(ThreadJoinResult {
     participant: Participant,
     orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>,
     watch_status: WatchStatus,
     outcome: String
 });
@@ -120,6 +129,7 @@ contract!(ThreadLeaveResult {
     participant: Participant,
     thread: Thread,
     orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>,
     watch_status: WatchStatus,
     outcome: String
 });
@@ -129,5 +139,6 @@ contract!(ThreadParticipantListRequest {
 });
 contract!(ThreadParticipantListResult {
     page: Page<Participant>,
-    orchestrator: Option<OrchestratorHolder>
+    orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>
 });

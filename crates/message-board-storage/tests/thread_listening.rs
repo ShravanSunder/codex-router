@@ -94,6 +94,7 @@ impl ThreadListenFixture {
             },
             from_activity_sequence,
             acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
         }
     }
 
@@ -157,6 +158,7 @@ async fn watched_selection_groups_each_thread_and_named_selection_creates_a_watc
         },
         from_activity_sequence: None,
         acknowledge: false,
+        delivery: ThreadListenDelivery::Stdout,
     };
     let context = fixture.store.prepare_thread_listen(&watched).await.unwrap();
     let batch_set = fixture
@@ -185,6 +187,7 @@ async fn watched_selection_groups_each_thread_and_named_selection_creates_a_watc
         },
         from_activity_sequence: None,
         acknowledge: false,
+        delivery: ThreadListenDelivery::Stdout,
     };
     fixture.store.prepare_thread_listen(&named).await.unwrap();
     let watched = fixture
@@ -196,6 +199,71 @@ async fn watched_selection_groups_each_thread_and_named_selection_creates_a_watc
         .await
         .unwrap();
     assert!(watched.watch_status.unwrap().watching);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn topic_selection_delivers_roots_created_after_arming_and_topic_watch_feeds_watched() {
+    let mut fixture = ThreadListenFixture::create("topic-selection").await;
+    let request = ThreadListenRequest {
+        reader: fixture.reader.clone(),
+        selection: ThreadListenSelection::Topic {
+            topic_id: fixture.topic_id.clone(),
+        },
+        mode: ThreadListenMode::Once {
+            max_wait_seconds: ThreadListenLifetime::Short.seconds(),
+        },
+        from_activity_sequence: None,
+        acknowledge: false,
+        delivery: ThreadListenDelivery::Stdout,
+    };
+    let context = fixture.store.prepare_thread_listen(&request).await.unwrap();
+    let new_root = post(
+        &mut fixture.store,
+        Placement::Topic {
+            topic_id: fixture.topic_id.clone(),
+        },
+        actor("other"),
+        "New root",
+    )
+    .await
+    .message;
+    assert!(
+        fixture
+            .store
+            .thread_listen_has_activity(&context)
+            .await
+            .unwrap()
+    );
+    let batch = fixture
+        .store
+        .select_thread_listen_batch_set(ListenId::generate(), &context, usize::MAX)
+        .await
+        .unwrap();
+    assert!(!batch.catch_up);
+    assert!(batch.batches.iter().any(|record| {
+        record.root_message_id == new_root.message_id
+            && record
+                .messages
+                .iter()
+                .any(|message| message.message_id == new_root.message_id)
+    }));
+
+    let watched = fixture
+        .store
+        .prepare_thread_listen(&ThreadListenRequest {
+            reader: fixture.reader.clone(),
+            selection: ThreadListenSelection::Watched,
+            mode: ThreadListenMode::Once {
+                max_wait_seconds: ThreadListenLifetime::Short.seconds(),
+            },
+            from_activity_sequence: None,
+            acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
+        })
+        .await
+        .unwrap();
+    assert!(watched.topic_ids.contains(&fixture.topic_id));
     fixture.finish().await;
 }
 

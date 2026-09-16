@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT activity.message_id AS \"message_id!: String\" FROM board_activity activity WHERE ((activity.root_id=? AND activity.kind='threadMessageCreated') OR (activity.message_id=? AND activity.kind='mainMessageCreated')) AND activity.message_id IS NOT NULL AND activity.actor_key<>? AND activity.activity_sequence>? ORDER BY activity.activity_sequence ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "message_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "687f2cfe8bbd4b144b7c22f99a0987c2dc712d297859164be8abe1d10c37b3da"
+}

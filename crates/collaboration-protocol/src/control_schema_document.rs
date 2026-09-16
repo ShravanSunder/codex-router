@@ -129,6 +129,14 @@ pub fn control_schema_document(
             "board/threadUnwatch",
             &[],
         )?;
+    assembly.add_method::<message_board::TopicWatchRequest, message_board::TopicWatchResult>(
+        "board/topicWatch",
+        &[],
+    )?;
+    assembly.add_method::<message_board::TopicWatchRequest, message_board::TopicWatchResult>(
+        "board/topicUnwatch",
+        &[],
+    )?;
     assembly.add_method::<message_board::ThreadListRequest, message_board::ThreadListResult>(
         "board/threadList",
         &[],

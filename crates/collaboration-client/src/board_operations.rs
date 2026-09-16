@@ -224,6 +224,26 @@ impl ControlClient {
         self.board_mutation_call("board/threadUnwatch", request, resource)
             .await
     }
+    pub async fn board_topic_watch(
+        &mut self,
+        request: TopicWatchRequest,
+    ) -> Result<TopicWatchResult, BoardClientError> {
+        let resource = ResourceIdentity::Topic {
+            topic_id: request.topic_id.clone(),
+        };
+        self.board_mutation_call("board/topicWatch", request, resource)
+            .await
+    }
+    pub async fn board_topic_unwatch(
+        &mut self,
+        request: TopicWatchRequest,
+    ) -> Result<TopicWatchResult, BoardClientError> {
+        let resource = ResourceIdentity::Topic {
+            topic_id: request.topic_id.clone(),
+        };
+        self.board_mutation_call("board/topicUnwatch", request, resource)
+            .await
+    }
     pub async fn board_thread_list(
         &mut self,
         request: ThreadListRequest,
