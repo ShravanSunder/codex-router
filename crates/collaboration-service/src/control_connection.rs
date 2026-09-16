@@ -435,6 +435,7 @@ pub async fn serve_control_connection(
                     if matches!(
                         request.method.as_str(),
                         "codex/sessionInspect"
+                            | "codex/sessionRename"
                             | "codex/turnInterrupt"
                             | "codex/messageSend"
                             | "codex/sessionList"

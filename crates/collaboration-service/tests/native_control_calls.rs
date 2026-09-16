@@ -36,6 +36,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         "TurnSteer",
         "TurnInterrupt",
         "ThreadQueueAdd",
+        "ThreadNameSet",
     ] {
         definitions.insert(format!("{name}Params"), json!({"type":"object"}));
         definitions.insert(format!("{name}Response"), json!({"type":"object"}));
@@ -106,6 +107,11 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                 json!({"data":["proof-thread"],"nextCursor":null}),
             ),
             (
+                "thread/name/set",
+                json!({"threadId":"proof-thread","name":"🔎 Review"}),
+                json!({}),
+            ),
+            (
                 "turn/interrupt",
                 json!({"threadId":"proof-thread","turnId":"proof-turn"}),
                 json!({}),
@@ -122,9 +128,18 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                 vec!["initialize", "initialized", "thread/read", method]
             } else if method == "thread/loaded/list" {
                 vec!["initialize", "initialized", method, "thread/read"]
+            } else if method == "thread/name/set" {
+                vec![
+                    "initialize",
+                    "initialized",
+                    "thread/read",
+                    method,
+                    "thread/read",
+                ]
             } else {
                 vec!["initialize", "initialized", method]
             };
+            let mut rename_read_count = 0_u8;
             for expected_method in steps {
                 let frame = socket
                     .next()
@@ -157,7 +172,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                     let response = if expected_method == method {
                         result.clone()
                     } else if expected_method == "thread/read" {
-                        json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"}}})
+                        rename_read_count = rename_read_count.saturating_add(1);
+                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"}}})
                     } else {
                         json!({})
                     };
@@ -228,6 +244,9 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .list_sessions(collaboration_protocol::NativeSessionListParams {
             endpoint: target.endpoint.clone(),
             view: collaboration_protocol::NativeSessionView::Loaded,
+            scope: collaboration_protocol::NativeSessionScope::Any,
+            source: collaboration_protocol::NativeSessionSource::All,
+            query: None,
             page_size: 1,
             cursor: None,
         })
@@ -236,6 +255,15 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     assert_eq!(inventory.sessions.len(), 1);
     assert_eq!(inventory.sessions[0].target, target);
     assert_eq!(inventory.generation.as_ref(), Some(&generation));
+    let renamed = client
+        .rename_session(collaboration_protocol::NativeRenameParams {
+            target: target.clone(),
+            name: "🔎 Review".into(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("rename: {error}"));
+    assert_eq!(renamed.name, "🔎 Review");
+    assert_eq!(renamed.previous_name.as_deref(), Some("Old name"));
     let interruption = client
         .interrupt_turn(&target, &generation, "proof-turn")
         .await

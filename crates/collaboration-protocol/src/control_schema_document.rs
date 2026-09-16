@@ -281,6 +281,19 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
+    assembly.add_method::<NativeRenameParams, NativeRenameResult>(
+        "codex/sessionRename",
+        &[
+            "wrongService",
+            "endpointNotFound",
+            "unsupportedCapability",
+            "unavailable",
+            "nativeRejected",
+            "outcomeUnknown",
+            "overloaded",
+            "nameMismatch",
+        ],
+    )?;
     assembly.add_method::<NativeSendParams, NativeSendReceipt>(
         "codex/messageSend",
         &[

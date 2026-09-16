@@ -76,6 +76,9 @@ mod tests {
         let request = |cursor| NativeSessionListParams {
             endpoint: endpoint.clone(),
             view: NativeSessionView::Stored,
+            scope: collaboration_protocol::NativeSessionScope::Any,
+            source: collaboration_protocol::NativeSessionSource::All,
+            query: None,
             page_size: 100,
             cursor,
         };
@@ -140,8 +143,16 @@ mod tests {
             "page must shrink to its frame budget"
         );
         assert_eq!(second.sessions.len(), 1);
-        assert_eq!(first.sessions.first().unwrap().title, title);
-        assert_eq!(second.sessions.first().unwrap().title, title);
+        assert_eq!(
+            first.sessions.first().unwrap().name.as_deref(),
+            Some(title.as_str())
+        );
+        assert_eq!(
+            second.sessions.first().unwrap().name.as_deref(),
+            Some(title.as_str())
+        );
+        assert_eq!(first.sessions.first().unwrap().title, "PRIVATE_TITLE");
+        assert_eq!(second.sessions.first().unwrap().title, "PRIVATE_TITLE");
         assert!(second.next_cursor.is_none());
         assert!(
             addresses

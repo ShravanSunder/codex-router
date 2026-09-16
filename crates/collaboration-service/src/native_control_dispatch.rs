@@ -31,6 +31,9 @@ pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value 
     if request.method == "codex/messageSend" {
         return crate::native_message_dispatch::dispatch_message(request).await;
     }
+    if request.method == "codex/sessionRename" {
+        return dispatch_rename(request).await;
+    }
     let NativeControlRequest {
         method,
         params,
@@ -152,6 +155,117 @@ pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value 
         Err(NativeConnectionError::Unavailable) => failure(id, "unavailable", stage),
         Err(_) => failure(id, "outcomeUnknown", stage),
     }
+}
+
+async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
+    let Ok(params) =
+        serde_json::from_value::<collaboration_protocol::NativeRenameParams>(request.params)
+    else {
+        return invalid(request.id);
+    };
+    let scalar_count = params.name.chars().count();
+    if params.name.trim() != params.name
+        || !(1..=120).contains(&scalar_count)
+        || params.name.chars().any(char::is_control)
+    {
+        return invalid(request.id);
+    }
+    if &params.target.endpoint.service_id != request.service_id {
+        return failure(request.id, "wrongService", "rename");
+    }
+    let Some(endpoint) = request
+        .endpoints
+        .iter()
+        .find(|entry| entry.endpoint == params.target.endpoint)
+    else {
+        return failure(request.id, "endpointNotFound", "rename");
+    };
+    let Some((advertised_digest, advertised_generation)) =
+        endpoint.channels.iter().find_map(|channel| match channel {
+            collaboration_protocol::ChannelDescription::NativeCodex {
+                schema_digest,
+                generation,
+                ..
+            } => Some((schema_digest, generation)),
+            _ => None,
+        })
+    else {
+        return failure(request.id, "unsupportedCapability", "rename");
+    };
+    let Some(backend) = request
+        .backend
+        .filter(|backend| backend.endpoint == params.target.endpoint)
+    else {
+        return failure(request.id, "unsupportedCapability", "rename");
+    };
+    let Ok(admission) = backend.gate.acquire() else {
+        return failure(request.id, "unavailable", "rename");
+    };
+    let Some(schemas) = admission.schemas() else {
+        return failure(request.id, "unsupportedCapability", "rename");
+    };
+    if advertised_generation.as_ref() != Some(admission.generation())
+        || advertised_digest
+            .as_ref()
+            .map(|value| String::from(value.clone()))
+            .as_deref()
+            != Some(schemas.schema_digest())
+        || !schemas.supports_operation(NativeOperation::SetThreadName)
+    {
+        return failure(request.id, "unsupportedCapability", "rename");
+    }
+    let Ok(mut connection) = NativeProtocolConnection::connect(admission.backend_path()).await
+    else {
+        return failure(request.id, "unavailable", "rename");
+    };
+    let thread_id = String::from(params.target.session_id.clone());
+    let before = connection
+        .request_validated(
+            &schemas,
+            NativeOperation::ReadThread,
+            json!({"threadId":thread_id,"includeTurns":false}),
+        )
+        .await;
+    let Ok(before) = before else {
+        return failure(request.id, "nativeRejected", "rename");
+    };
+    let previous_name = before
+        .pointer("/thread/name")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if connection
+        .request_validated(
+            &schemas,
+            NativeOperation::SetThreadName,
+            json!({"threadId":thread_id,"name":params.name}),
+        )
+        .await
+        .is_err()
+    {
+        return failure(request.id, "nativeRejected", "rename");
+    }
+    let after = connection
+        .request_validated(
+            &schemas,
+            NativeOperation::ReadThread,
+            json!({"threadId":thread_id,"includeTurns":false}),
+        )
+        .await;
+    let Ok(after) = after else {
+        return failure(request.id, "outcomeUnknown", "rename");
+    };
+    let Some(name) = after.pointer("/thread/name").and_then(Value::as_str) else {
+        return failure(request.id, "outcomeUnknown", "rename");
+    };
+    if name != params.name {
+        return json!({"jsonrpc":"2.0","id":request.id,"error":{"code":-32050,"message":"Native session rename failed","data":{"kind":"nameMismatch","requested":params.name,"effective":name,"stage":"rename"}}});
+    }
+    let result = collaboration_protocol::NativeRenameResult {
+        target: params.target,
+        name: name.to_owned(),
+        previous_name,
+    };
+    json!({"jsonrpc":"2.0","id":request.id,"result":result})
 }
 
 struct NativeControlSuccess {

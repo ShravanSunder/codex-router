@@ -4,7 +4,14 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub enum StoredThreadRoot {
     Any,
+    Cwd(PathBuf),
     Checkout(PathBuf),
+    Repo {
+        live_roots: Vec<PathBuf>,
+        normalized_origin: Option<String>,
+        basename: String,
+        fallback_cwd: Option<PathBuf>,
+    },
 }
 #[derive(Clone, Debug)]
 pub enum StoredThreadProvider {
@@ -35,6 +42,7 @@ pub struct StoredThreadQuery {
     pub sort: StoredThreadSort,
     pub page_size: usize,
     pub cursor: Option<StoredThreadCursor>,
+    pub query: Option<String>,
 }
 pub fn stored_thread_page_query(query: &StoredThreadQuery) -> QueryBuilder<Sqlite> {
     let StoredThreadQuery {
@@ -44,6 +52,7 @@ pub fn stored_thread_page_query(query: &StoredThreadQuery) -> QueryBuilder<Sqlit
         sort,
         page_size,
         cursor,
+        query,
     } = query;
     let page_cursor = cursor.as_ref();
     let source = *source;
@@ -63,6 +72,15 @@ pub fn stored_thread_page_query(query: &StoredThreadQuery) -> QueryBuilder<Sqlit
     );
     builder.push(sort_index).push(" WHERE archived = 0");
     append_session_record_filters(&mut builder, root_filter, provider_filter, source);
+    if let Some(query) = query.as_deref() {
+        let pattern = format!("%{}%", escape_like(query));
+        builder
+            .push(" AND (name LIKE ")
+            .push_bind(pattern.clone())
+            .push(" ESCAPE '\\' COLLATE NOCASE OR title LIKE ")
+            .push_bind(pattern)
+            .push(" ESCAPE '\\' COLLATE NOCASE)");
+    }
     if let Some(cursor) = page_cursor {
         builder.push(" AND (").push(sort_column);
         if let Some(sort_value) = cursor.sort_value {
@@ -107,9 +125,67 @@ fn append_session_record_filters(
 fn append_root_filter(builder: &mut QueryBuilder<Sqlite>, root_filter: &StoredThreadRoot) {
     match root_filter {
         StoredThreadRoot::Any => {}
+        StoredThreadRoot::Cwd(cwd) => {
+            builder.push(" AND (");
+            for (index, value) in path_sql_values(cwd).into_iter().enumerate() {
+                if index > 0 {
+                    builder.push(" OR ");
+                }
+                builder.push("cwd = ").push_bind(value);
+            }
+            builder.push(")");
+        }
         StoredThreadRoot::Checkout(checkout_root) => {
             builder.push(" AND (");
             append_path_scope_filter(builder, checkout_root);
+            builder.push(")");
+        }
+        StoredThreadRoot::Repo {
+            live_roots,
+            normalized_origin,
+            basename,
+            fallback_cwd,
+        } => {
+            builder.push(" AND (");
+            let mut has_clause = false;
+            if let Some(cwd) = fallback_cwd {
+                for value in path_sql_values(cwd) {
+                    if has_clause {
+                        builder.push(" OR ");
+                    }
+                    builder.push("cwd = ").push_bind(value);
+                    has_clause = true;
+                }
+            } else {
+                if let Some(origin) = normalized_origin {
+                    builder.push("git_origin_url = ").push_bind(origin.clone());
+                    has_clause = true;
+                }
+                for root in live_roots {
+                    if has_clause {
+                        builder.push(" OR ");
+                    }
+                    append_path_scope_filter(builder, root);
+                    has_clause = true;
+                }
+                if !basename.is_empty() {
+                    if has_clause {
+                        builder.push(" OR ");
+                    }
+                    let escaped = escape_like(basename);
+                    builder
+                        .push("cwd LIKE ")
+                        .push_bind(format!("%/{escaped}"))
+                        .push(" ESCAPE '\\' OR cwd LIKE ")
+                        .push_bind(format!("%/{escaped}.%"))
+                        .push(" ESCAPE '\\' OR cwd LIKE ")
+                        .push_bind(format!("%/{escaped}-%"))
+                        .push(" ESCAPE '\\'");
+                }
+            }
+            if !has_clause && basename.is_empty() {
+                builder.push("0");
+            }
             builder.push(")");
         }
     }

@@ -252,6 +252,23 @@ impl ControlClient {
         }
         Ok(result)
     }
+    pub async fn rename_session(
+        &mut self,
+        params: collaboration_protocol::NativeRenameParams,
+    ) -> Result<collaboration_protocol::NativeRenameResult, ClientError> {
+        let target = params.target.clone();
+        let result = self
+            .connection
+            .call("codex/sessionRename", json!(params))
+            .await?;
+        let result: collaboration_protocol::NativeRenameResult = serde_json::from_value(result)
+            .map_err(|_| ClientError::Protocol("invalid rename result"))?;
+        if result.target != target {
+            self.connection.failed = true;
+            return Err(ClientError::Protocol("inconsistent rename result"));
+        }
+        Ok(result)
+    }
     pub async fn interrupt_turn(
         &mut self,
         target: &collaboration_protocol::SessionRef,

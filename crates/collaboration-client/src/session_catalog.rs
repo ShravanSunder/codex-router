@@ -15,7 +15,7 @@ pub use query::{
 };
 pub use records::StoredSessionRecord;
 pub use repository::{
-    RepositoryIdentity, discover_repository_identity, normalize_path,
+    RepositoryIdentity, checkout_root, discover_repository_identity, normalize_path,
     normalized_paths_resolve_to_same_location, path_identity_candidates,
     paths_resolve_to_same_location, repository_contains_session,
 };

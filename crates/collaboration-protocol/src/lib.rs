@@ -28,8 +28,8 @@ pub use native_control_contract::{
     NativeSendReceipt,
 };
 pub use native_session_catalog::{
-    NativeSessionListParams, NativeSessionListResult, NativeSessionObservation,
-    NativeSessionSummary, NativeSessionView,
+    NativeSessionListParams, NativeSessionListResult, NativeSessionObservation, NativeSessionScope,
+    NativeSessionSource, NativeSessionSummary, NativeSessionView,
 };
 mod control_initialization;
 mod endpoint_inventory;
@@ -43,7 +43,7 @@ pub use protocol_type_schemas::protocol_type_schemas;
 mod native_control_contract;
 pub use native_control_contract::{
     NativeInspectParams, NativeInspectResult, NativeInterruptKind, NativeInterruptParams,
-    NativeInterruptResult,
+    NativeInterruptResult, NativeRenameParams, NativeRenameResult,
 };
 mod endpoint_identity;
 pub use backend_generation::{CodexGeneration, GenerationNumber};

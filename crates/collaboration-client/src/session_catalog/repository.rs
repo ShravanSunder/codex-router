@@ -30,7 +30,7 @@ pub(super) fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-pub(super) fn checkout_root(current_dir: &Path) -> PathBuf {
+pub fn checkout_root(current_dir: &Path) -> PathBuf {
     find_worktree_root(current_dir).unwrap_or_else(|| normalize_path(current_dir))
 }
 

@@ -86,6 +86,7 @@ impl NativeStoredSessions {
             sort: StoredThreadSort::Updated,
             page_size: 100,
             cursor,
+            query: None,
         };
         let mut sessions = Vec::new();
         let mut exhausted = false;

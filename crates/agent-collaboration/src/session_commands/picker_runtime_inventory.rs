@@ -33,6 +33,9 @@ pub(super) async fn load_runtime_records(
             .list_sessions(NativeSessionListParams {
                 endpoint: endpoint.clone(),
                 view: NativeSessionView::Loaded,
+                scope: collaboration_client::protocol::NativeSessionScope::Any,
+                source: collaboration_client::protocol::NativeSessionSource::All,
+                query: None,
                 page_size: 100,
                 cursor,
             })

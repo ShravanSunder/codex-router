@@ -50,7 +50,7 @@ fn inventory() -> Value {
 fn page(id: &str, status: Value, cursor: Value) -> Value {
     json!({
         "endpoint":endpoint(),"generation":generation(),"observedAt":"2026-09-07T00:00:00Z",
-        "sessions":[{"target":{"endpoint":endpoint(),"sessionId":id},"title":id,"workingDirectory":"/repo",
+        "sessions":[{"target":{"endpoint":endpoint(),"sessionId":id},"name":null,"title":id,"source":"interactive","gitBranch":null,"workingDirectory":"/repo",
             "observation":{"kind":"runtime","status":status,"turnId":null},"model":"gpt-5.6-sol","reasoningEffort":"medium","idleSeconds":0}],"nextCursor":cursor
     })
 }

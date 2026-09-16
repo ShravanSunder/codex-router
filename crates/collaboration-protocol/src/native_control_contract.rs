@@ -22,6 +22,19 @@ pub struct NativeInspectResult {
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRenameParams {
+    pub target: SessionRef,
+    pub name: String,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRenameResult {
+    pub target: SessionRef,
+    pub name: String,
+    pub previous_name: Option<String>,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeInterruptParams {
     pub target: SessionRef,
     pub generation: CodexGeneration,

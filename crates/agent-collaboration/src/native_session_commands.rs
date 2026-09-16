@@ -32,6 +32,13 @@ enum NativeControlCommand {
 enum SessionOperation {
     /// Read native metadata without loading or resuming the thread.
     Inspect(TargetArguments),
+    /// Set the explicit persisted Codex thread name without resuming it.
+    Rename {
+        #[command(flatten)]
+        target: TargetArguments,
+        #[arg(long)]
+        name: String,
+    },
 }
 #[derive(Subcommand)]
 enum TurnOperation {
@@ -64,13 +71,21 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-    let (target, turn) = match parsed.command {
+    enum RequestedOperation {
+        Inspect,
+        Rename(String),
+        Interrupt(String),
+    }
+    let (target, operation) = match parsed.command {
         NativeControlCommand::Session {
             command: SessionOperation::Inspect(target),
-        } => (target, None),
+        } => (target, RequestedOperation::Inspect),
+        NativeControlCommand::Session {
+            command: SessionOperation::Rename { target, name },
+        } => (target, RequestedOperation::Rename(name)),
         NativeControlCommand::Turn {
             command: TurnOperation::Interrupt { target, turn },
-        } => (target, Some(turn)),
+        } => (target, RequestedOperation::Interrupt(turn)),
     };
     let machine_output = target.json;
     let resolved = (|| {
@@ -79,10 +94,17 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
             EndpointId::try_from(target.endpoint).map_err(|_| "Invalid endpoint identifier")?;
         let session =
             SessionId::try_from(target.session).map_err(|_| "Invalid session identifier")?;
-        if turn.as_ref().is_some_and(|id| {
-            collaboration_client::protocol::NonEmptyText::try_from(id.clone()).is_err()
-        }) {
+        if let RequestedOperation::Interrupt(id) = &operation
+            && collaboration_client::protocol::NonEmptyText::try_from(id.clone()).is_err()
+        {
             return Err("A nonempty exact turn ID is required".to_owned());
+        }
+        if let RequestedOperation::Rename(name) = &operation
+            && (name.trim() != name
+                || !(1..=120).contains(&name.chars().count())
+                || name.chars().any(char::is_control))
+        {
+            return Err("--name requires 1 to 120 Unicode scalar values without surrounding whitespace or control characters".to_owned());
         }
         Ok::<_, String>((directory, endpoint, session))
     })();
@@ -123,9 +145,20 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
             },
             session_id,
         };
-        let result = match turn {
-            None => json!(client.inspect_session(&target).await?),
-            Some(turn) => {
+        let result = match operation {
+            RequestedOperation::Inspect => json!(client.inspect_session(&target).await?),
+            RequestedOperation::Rename(name) => {
+                mutation_started = true;
+                json!(
+                    client
+                        .rename_session(collaboration_client::protocol::NativeRenameParams {
+                            target,
+                            name
+                        })
+                        .await?
+                )
+            }
+            RequestedOperation::Interrupt(turn) => {
                 let inventory = client.list_endpoints().await?;
                 let generation = inventory
                     .endpoints

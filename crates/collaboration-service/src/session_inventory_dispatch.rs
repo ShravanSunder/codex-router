@@ -6,7 +6,10 @@ use codex_native_integration::{
     StoredThreadProvider, StoredThreadQuery, StoredThreadRoot, StoredThreadSort,
     StoredThreadSource,
 };
-use collaboration_protocol::{CodexGeneration, NativeSessionListParams, NativeSessionView};
+use collaboration_protocol::{
+    CodexGeneration, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
+    NativeSessionView,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -21,12 +24,82 @@ struct InventoryCursor {
     native_cursor: Option<String>,
     stored_time: Option<i64>,
     stored_id: Option<String>,
+    scope: NativeSessionScope,
+    source: NativeSessionSource,
+    query: Option<String>,
 }
 fn failed(id: Value, kind: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Session inventory unavailable","data":{"kind":kind,"stage":"discovery","message":"Session inventory unavailable"}}})
 }
 fn invalid(id: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"Invalid session inventory parameters or cursor"}})
+}
+fn classify_source(source: Option<&str>, thread_source: Option<&str>) -> NativeSessionSource {
+    if matches!(
+        thread_source,
+        Some("subagent" | "guardian_review" | "memory_consolidation")
+    ) || source == Some("subagent")
+        || source.is_some_and(|value| value.contains("subagent"))
+    {
+        NativeSessionSource::Subagents
+    } else {
+        NativeSessionSource::Interactive
+    }
+}
+fn runtime_scope_matches(scope: &NativeSessionScope, thread: &Value) -> bool {
+    let Some(cwd) = thread.get("cwd").and_then(Value::as_str) else {
+        return false;
+    };
+    let candidate = std::path::Path::new(cwd);
+    let exact = |path: &std::path::Path| {
+        codex_native_integration::path_sql_values(candidate)
+            .iter()
+            .any(|value| codex_native_integration::path_sql_values(path).contains(value))
+    };
+    let child = |root: &std::path::Path| {
+        codex_native_integration::path_sql_values(candidate)
+            .iter()
+            .any(|candidate| {
+                codex_native_integration::path_sql_values(root)
+                    .iter()
+                    .any(|root| {
+                        candidate == root
+                            || candidate
+                                .strip_prefix(root)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                    })
+            })
+    };
+    match scope {
+        NativeSessionScope::Any => true,
+        NativeSessionScope::Cwd { path } => exact(path),
+        NativeSessionScope::Checkout { root } => child(root),
+        NativeSessionScope::Repo {
+            live_roots,
+            normalized_origin,
+            basename,
+            fallback_cwd,
+        } => {
+            if let Some(fallback) = fallback_cwd {
+                return exact(fallback);
+            }
+            let origin = thread.pointer("/gitInfo/originUrl").and_then(Value::as_str);
+            if let (Some(expected), Some(actual)) = (normalized_origin, origin) {
+                return message_board::normalize_git_origin_url(actual).as_ref() == Some(expected);
+            }
+            live_roots.iter().any(|root| child(root))
+                || (!basename.is_empty()
+                    && candidate
+                        .file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_some_and(|leaf| {
+                            leaf == basename
+                                || leaf.strip_prefix(basename).is_some_and(|suffix| {
+                                    suffix.starts_with('.') || suffix.starts_with('-')
+                                })
+                        }))
+        }
+    }
 }
 pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Value {
     let Ok(params) = serde_json::from_value::<NativeSessionListParams>(request.params) else {
@@ -63,8 +136,13 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
                 .decode(text)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<InventoryCursor>(&bytes).ok());
-            let Some(cursor) = decoded.filter(|c| c.endpoint == params.endpoint && c.view == view)
-            else {
+            let Some(cursor) = decoded.filter(|c| {
+                c.endpoint == params.endpoint
+                    && c.view == view
+                    && c.scope == params.scope
+                    && c.source == params.source
+                    && c.query == params.query
+            }) else {
                 return invalid(request.id);
             };
             Some(cursor)
@@ -142,9 +220,28 @@ async fn stored_page(
 ) -> Result<Value, ()> {
     let catalog = StoredThreadCatalog::open(home).await.map_err(|_| ())?;
     let query = StoredThreadQuery {
-        root: StoredThreadRoot::Any,
+        root: match &params.scope {
+            NativeSessionScope::Any => StoredThreadRoot::Any,
+            NativeSessionScope::Cwd { path } => StoredThreadRoot::Cwd(path.clone()),
+            NativeSessionScope::Checkout { root } => StoredThreadRoot::Checkout(root.clone()),
+            NativeSessionScope::Repo {
+                live_roots,
+                normalized_origin,
+                basename,
+                fallback_cwd,
+            } => StoredThreadRoot::Repo {
+                live_roots: live_roots.clone(),
+                normalized_origin: normalized_origin.clone(),
+                basename: basename.clone(),
+                fallback_cwd: fallback_cwd.clone(),
+            },
+        },
         provider: StoredThreadProvider::Any,
-        source: StoredThreadSource::All,
+        source: match params.source {
+            NativeSessionSource::All => StoredThreadSource::All,
+            NativeSessionSource::Interactive => StoredThreadSource::Interactive,
+            NativeSessionSource::Subagents => StoredThreadSource::Subagents,
+        },
         sort: StoredThreadSort::Updated,
         page_size: params.page_size as usize,
         cursor: cursor.and_then(|c| {
@@ -153,6 +250,7 @@ async fn stored_page(
                 session_id: id,
             })
         }),
+        query: params.query.clone(),
     };
     let rows = catalog.read_page(&query).await.map_err(|_| ())?;
     let mut has_more = rows.len() == params.page_size as usize;
@@ -168,10 +266,12 @@ async fn stored_page(
         let cwd: String = row.try_get("cwd").map_err(|_| ())?;
         let model: Option<String> = row.try_get("model").map_err(|_| ())?;
         let reasoning_effort: Option<String> = row.try_get("reasoning_effort").map_err(|_| ())?;
-        let title: Option<String> = row
-            .try_get::<Option<String>, _>("name")
-            .map_err(|_| ())?
-            .or(row.try_get("title").map_err(|_| ())?);
+        let name: Option<String> = row.try_get("name").map_err(|_| ())?;
+        let title: Option<String> = row.try_get("title").map_err(|_| ())?;
+        let git_branch: Option<String> = row.try_get("git_branch").map_err(|_| ())?;
+        let source_value: Option<String> = row.try_get("source").map_err(|_| ())?;
+        let thread_source: Option<String> = row.try_get("thread_source").map_err(|_| ())?;
+        let source = classify_source(source_value.as_deref(), thread_source.as_deref());
         let updated = time
             .and_then(chrono::DateTime::from_timestamp_millis)
             .ok_or(())?
@@ -183,7 +283,7 @@ async fn stored_page(
                 / 1000,
         )
         .unwrap_or(0);
-        let session = json!({"target":{"endpoint":params.endpoint,"sessionId":id},"title":title.unwrap_or_default(),"workingDirectory":cwd,"observation":{"kind":"stored","updatedAt":updated},"model":model,"reasoningEffort":reasoning_effort,"idleSeconds":idle_seconds});
+        let session = json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title.unwrap_or_default(),"source":source,"gitBranch":git_branch,"workingDirectory":cwd,"observation":{"kind":"stored","updatedAt":updated},"model":model,"reasoningEffort":reasoning_effort,"idleSeconds":idle_seconds});
         let row_bytes = serde_json::to_vec(&session)
             .map_err(|_| ())?
             .len()
@@ -204,6 +304,9 @@ async fn stored_page(
             native_cursor: None,
             stored_time: time,
             stored_id: Some(id),
+            scope: params.scope.clone(),
+            source: params.source,
+            query: params.query.clone(),
         });
     }
     catalog.close().await;
@@ -251,13 +354,36 @@ async fn runtime_page(
         if thread.get("id").and_then(Value::as_str) != Some(id) {
             return Err(());
         }
+        if !runtime_scope_matches(&params.scope, thread) {
+            continue;
+        }
         let status = thread.get("status").ok_or(())?;
         if matches!(params.view, NativeSessionView::Active)
             && status.get("type").and_then(Value::as_str) != Some("active")
         {
             continue;
         }
-        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"title":thread.get("name").and_then(Value::as_str).unwrap_or_default(),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":null},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":0}));
+        let name = thread.get("name").and_then(Value::as_str);
+        let title = thread
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let source = classify_source(
+            thread.get("source").and_then(Value::as_str),
+            thread.get("threadSource").and_then(Value::as_str),
+        );
+        if !matches!(params.source, NativeSessionSource::All)
+            && std::mem::discriminant(&source) != std::mem::discriminant(&params.source)
+        {
+            continue;
+        }
+        if let Some(query) = params.query.as_deref()
+            && !name.is_some_and(|value| value.to_lowercase().contains(&query.to_lowercase()))
+            && !title.to_lowercase().contains(&query.to_lowercase())
+        {
+            continue;
+        }
+        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":null},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":0}));
     }
     let next = result
         .get("nextCursor")
@@ -276,6 +402,9 @@ async fn runtime_page(
                 native_cursor: Some(value.into()),
                 stored_time: None,
                 stored_id: None,
+                scope: params.scope.clone(),
+                source: params.source,
+                query: params.query.clone(),
             })
         })
         .transpose()?;

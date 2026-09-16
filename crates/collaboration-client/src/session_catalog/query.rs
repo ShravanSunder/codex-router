@@ -315,6 +315,7 @@ fn native_session_record_query(
             sort_value: cursor.sort_value,
             session_id: cursor.session_id.clone(),
         }),
+        query: None,
     }
 }
 
