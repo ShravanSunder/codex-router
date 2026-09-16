@@ -89,7 +89,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             (
                 "thread/read",
                 json!({"threadId":"proof-thread","includeTurns":false}),
-                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"}}}),
+                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}),
             ),
             (
                 "turn/start",
@@ -173,7 +173,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                         result.clone()
                     } else if expected_method == "thread/read" {
                         rename_read_count = rename_read_count.saturating_add(1);
-                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"}}})
+                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
                     } else {
                         json!({})
                     };

@@ -128,6 +128,8 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                     request["params"]["config"]["model_reasoning_effort"],
                     "medium"
                 );
+                assert_eq!(request["params"]["approvalPolicy"], "on-request");
+                assert_eq!(request["params"]["approvalsReviewer"], "auto_review");
                 assert_eq!(
                     request["params"]["config"]["mcp_servers"]["notes"]["command"],
                     "/usr/bin/example"
@@ -139,7 +141,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"created-thread","cwd":"/work","turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","thread":{"id":"created-thread","cwd":"/work","turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();
@@ -186,7 +188,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
         (
             json!("new"),
             "session/new",
-            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write"}}}),
+            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
             "result",
         ),
         (
